@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+node_modules/
+.venv/
+playwright-report/
+test-results/
+harness/app.bundle.js
+artifacts/*.zip
+*.sqlite3*

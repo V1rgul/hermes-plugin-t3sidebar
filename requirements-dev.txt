@@ -1,0 +1,6 @@
+# The production companion uses Hermes's existing FastAPI/Pydantic environment.
+# These packages additionally support isolated backend and HTTP integration tests.
+fastapi==0.133.1
+pydantic==2.13.4
+httpx==0.28.1
+uvicorn==0.41.0
