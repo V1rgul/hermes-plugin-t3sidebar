@@ -18,5 +18,5 @@ export async function serveHarness(port = 0) {
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const server = await serveHarness(Number(process.env.PORT || 4173));
-  console.log(`Synthetic Session Flow harness: http://127.0.0.1:${server.address().port}`);
+  console.log(`Synthetic hermes-t3sidebar harness: http://127.0.0.1:${server.address().port}`);
 }

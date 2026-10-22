@@ -1,5 +1,7 @@
 # Review remediation
 
+> Historical report for the original Session Flow candidate, before the `hermes-t3sidebar` rename. Names, command outputs and hashes below are preserved evidence, not verification of the renamed bytes. See [rename-verification.md](rename-verification.md) for current results.
+
 ## Closed findings
 
 - Await `host.profileRoutes()` and fence asynchronous discovery with connection/profile/activation-epoch checks. List, open and new-chat reject both ordinary switches and ABA switches before dispatching anything into a changed scope.

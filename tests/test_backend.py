@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("hermes_dashboard_plugin_session_flow_test", ROOT / "dashboard/plugin_api.py")
+SPEC = importlib.util.spec_from_file_location("hermes_dashboard_plugin_hermes_t3sidebar_test", ROOT / "dashboard/plugin_api.py")
 assert SPEC is not None and SPEC.loader is not None
 backend = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = backend
@@ -29,9 +29,9 @@ SPEC.loader.exec_module(backend)
 
 class BackendTests(unittest.TestCase):
 	def setUp(self):
-		self.temp = tempfile.TemporaryDirectory(prefix="session-flow-tests-")
+		self.temp = tempfile.TemporaryDirectory(prefix="hermes-t3sidebar-tests-")
 		self.addCleanup(self.temp.cleanup)
-		self.path = Path(self.temp.name) / "plugin-data/session-flow/state.sqlite3"
+		self.path = Path(self.temp.name) / "plugin-data/hermes-t3sidebar/state.sqlite3"
 		self.now = 1800000000.25
 		self.app = self.make_app()
 		self.client = TestClient(self.app)
@@ -39,17 +39,17 @@ class BackendTests(unittest.TestCase):
 
 	def make_app(self):
 		app = FastAPI()
-		app.include_router(backend.create_router(self.path, lambda: self.now), prefix="/api/plugins/session-flow")
+		app.include_router(backend.create_router(self.path, lambda: self.now), prefix="/api/plugins/hermes-t3sidebar")
 		return app
 
 	def state(self):
-		response = self.client.get("/api/plugins/session-flow/state")
+		response = self.client.get("/api/plugins/hermes-t3sidebar/state")
 		self.assertEqual(response.status_code, 200, response.text)
 		self.assertEqual(response.headers["cache-control"], "no-store")
 		return response.json()
 
 	def act(self, action, session="durable-1", **kwargs):
-		response = self.client.post(f"/api/plugins/session-flow/sessions/{session}", json={"action": action, **kwargs})
+		response = self.client.post(f"/api/plugins/hermes-t3sidebar/sessions/{session}", json={"action": action, **kwargs})
 		self.assertEqual(response.status_code, 200, response.text)
 		self.assertEqual(response.headers["cache-control"], "no-store")
 		self.assertEqual(set(response.json()), {"version", "sessions"})
@@ -109,7 +109,7 @@ class BackendTests(unittest.TestCase):
 		self.assertEqual(self.state()["sessions"]["durable-1"]["state"], "snoozed")
 		self.now = wake
 		with TestClient(self.make_app()) as reopened:
-			response = reopened.get("/api/plugins/session-flow/state")
+			response = reopened.get("/api/plugins/hermes-t3sidebar/state")
 		self.assertEqual(response.status_code, 200)
 		active = response.json()["sessions"]["durable-1"]
 		self.assertEqual(active["state"], "active")
@@ -130,8 +130,8 @@ class BackendTests(unittest.TestCase):
 		self.act("snooze", "second", wake_at=self.now + 500)
 		expected = self.state()
 		with TestClient(self.make_app()) as reopened:
-			self.assertEqual(reopened.get("/api/plugins/session-flow/state").json(), expected)
-		self.assertEqual(backend.SessionFlowStore(self.path, lambda: self.now).state(), expected)
+			self.assertEqual(reopened.get("/api/plugins/hermes-t3sidebar/state").json(), expected)
+		self.assertEqual(backend.HermesT3SidebarStore(self.path, lambda: self.now).state(), expected)
 		with closing(sqlite3.connect(self.path)) as connection:
 			self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
 
@@ -148,14 +148,14 @@ class BackendTests(unittest.TestCase):
 		]
 		for body in bodies:
 			with self.subTest(body=body):
-				response = self.client.post("/api/plugins/session-flow/sessions/rejected", json=body)
+				response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/rejected", json=body)
 				self.assertEqual(response.status_code, 422, response.text)
 				self.assertEqual(self.state(), expected)
 
 	def test_nonfinite_and_huge_numbers_rejected_as_json_errors(self):
 		for value in ["NaN", "Infinity", "-Infinity", "1e9999", "9" * 400]:
 			with self.subTest(value=value):
-				response = self.client.post("/api/plugins/session-flow/sessions/invalid", content='{"action":"snooze","wake_at":' + value + '}', headers={"Content-Type": "application/json"})
+				response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/invalid", content='{"action":"snooze","wake_at":' + value + '}', headers={"Content-Type": "application/json"})
 				self.assertEqual(response.status_code, 422, response.text)
 				json.loads(response.text)
 		self.assertEqual(self.state()["sessions"], {})
@@ -163,7 +163,7 @@ class BackendTests(unittest.TestCase):
 	def test_bad_session_ids_rejected(self):
 		for session in ["bad%20id", "%00", ".", "x" * 257, "%27%3BDROP%20TABLE"]:
 			with self.subTest(session=session):
-				response = self.client.post(f"/api/plugins/session-flow/sessions/{session}", json={"action": "pin"})
+				response = self.client.post(f"/api/plugins/hermes-t3sidebar/sessions/{session}", json={"action": "pin"})
 				self.assertIn(response.status_code, (404, 405, 422))
 		self.assertEqual(self.state()["sessions"], {})
 		self.act("pin", "20261023_002913_f349b4")
@@ -177,13 +177,13 @@ class BackendTests(unittest.TestCase):
 	def test_parallel_first_requests_and_same_session_writes(self):
 		def update(index):
 			with TestClient(self.make_app()) as client:
-				return client.post(f"/api/plugins/session-flow/sessions/parallel-{index}", json={"action": "pin"}).status_code
+				return client.post(f"/api/plugins/hermes-t3sidebar/sessions/parallel-{index}", json={"action": "pin"}).status_code
 		with ThreadPoolExecutor(max_workers=12) as pool:
 			self.assertEqual(list(pool.map(update, range(48))), [200] * 48)
 		self.assertEqual(len(self.state()["sessions"]), 48)
 		def update_shared(action):
 			with TestClient(self.make_app()) as client:
-				return client.post("/api/plugins/session-flow/sessions/shared", json={"action": action}).status_code
+				return client.post("/api/plugins/hermes-t3sidebar/sessions/shared", json={"action": action}).status_code
 		with ThreadPoolExecutor(max_workers=12) as pool:
 			self.assertEqual(list(pool.map(update_shared, ["pin", "settle"] * 24)), [200] * 48)
 		shared = self.state()["sessions"]["shared"]
@@ -193,7 +193,7 @@ class BackendTests(unittest.TestCase):
 	def test_invalid_mutation_rolls_back_due_sweep(self):
 		self.act("snooze", wake_at=self.now + 1)
 		self.now += 2
-		response = self.client.post("/api/plugins/session-flow/sessions/rejected", json={"action": "snooze", "wake_at": self.now})
+		response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/rejected", json={"action": "snooze", "wake_at": self.now})
 		self.assertEqual(response.status_code, 422)
 		with closing(sqlite3.connect(self.path)) as connection:
 			self.assertEqual(connection.execute("SELECT state FROM session_metadata").fetchone()[0], "snoozed")
@@ -203,7 +203,7 @@ class BackendTests(unittest.TestCase):
 		# Production router, but replace the resolver so no live paths are used.
 		app = FastAPI()
 		app.include_router(backend.router)
-		other = Path(self.temp.name) / "other-profile/plugin-data/session-flow/state.sqlite3"
+		other = Path(self.temp.name) / "other-profile/plugin-data/hermes-t3sidebar/state.sqlite3"
 		with TestClient(app) as client, patch.object(backend, "default_state_path", return_value=self.path) as resolve:
 			self.assertEqual(client.post("/sessions/same", json={"action": "pin"}).status_code, 200)
 			resolve.return_value = other
@@ -246,7 +246,7 @@ class BackendTests(unittest.TestCase):
 
 	def test_packaging(self):
 		manifest = json.loads((ROOT / "dashboard/manifest.json").read_text())
-		self.assertEqual(manifest["name"], "session-flow")
+		self.assertEqual(manifest["name"], "hermes-t3sidebar")
 		self.assertEqual(manifest["api"], "plugin_api.py")
 		self.assertTrue(manifest["tab"]["hidden"])
 		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/runtime", "/sessions", "/sessions/{session_id}"})

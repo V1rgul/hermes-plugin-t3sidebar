@@ -1,4 +1,4 @@
-"""Session Flow's agent entry point; metadata routes live in dashboard/plugin_api.py."""
+"""hermes-t3sidebar's agent entry point; metadata routes live in dashboard/plugin_api.py."""
 
 
 def register(ctx):

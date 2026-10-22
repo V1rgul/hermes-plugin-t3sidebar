@@ -1,10 +1,12 @@
-# Session Flow acceptance contract
+# hermes-t3sidebar acceptance contract
 
 Source: user session `20261023_002913_f349b4`, followed by the implementation request and clarifications in the current conversation. The repository started empty with an unborn `main` branch, so review compares the complete tracked-plus-untracked file manifest against an empty baseline; no commit is required to create a review anchor.
 
 ## Requested product
 
 A Hermes Desktop plugin providing a sidebar usable instead of the native Sessions pane, as close as practical to the T3 Code sidebar’s functionality and layout. The explicit priorities are separate Working jobs, reversible recently Settled history, Snooze, and keeping project filtering independent of list layout. Use subagents proactively.
+
+The later rename request sets the current product/display name and plugin/package ID to exactly `hermes-t3sidebar`. Keep its backend namespace, metadata folder, settings and query keys aligned; preserve behavior and regenerate previews. No commit, push, repository rename, installation or deployment is authorized by this rename. Existing old-ID metadata is not automatically migrated; see the README’s rename boundary and `rename-verification.md` for current evidence.
 
 ## Local delivery gates
 

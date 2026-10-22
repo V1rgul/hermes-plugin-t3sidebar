@@ -59,13 +59,13 @@ export function reset() {
   epoch = 1; queryClient.clear(); calls.length = 0;
   for (const key of Object.keys(control)) delete control[key];
   Object.assign(control, { contributions: [], disposers: [], rows: [
-    { id: 'approval', title: 'Approval request', cwd: '/projects/session-flow', last_active: now() - 200 },
-    { id: 'design', title: 'Sidebar layout', cwd: '/projects/session-flow', git_branch: 'feature/sidebar', last_active: now() - 180 },
+    { id: 'approval', title: 'Approval request', cwd: '/projects/hermes-t3sidebar', last_active: now() - 200 },
+    { id: 'design', title: 'Sidebar layout', cwd: '/projects/hermes-t3sidebar', git_branch: 'feature/sidebar', last_active: now() - 180 },
     { id: 'readme', title: 'Release notes', cwd: '/projects/docs', last_active: now() - 1300, unread: true },
-    { id: 'tip', _lineage_root_id: 'root', _lineage_ids: ['root', 'old', 'tip'], title: 'Runtime classification', cwd: '/projects/session-flow', last_active: now() - 4 },
+    { id: 'tip', _lineage_root_id: 'root', _lineage_ids: ['root', 'old', 'tip'], title: 'Runtime classification', cwd: '/projects/hermes-t3sidebar', last_active: now() - 4 },
     { id: 'pinned', title: 'Hydraulic sizing', cwd: '/projects/hydraulics', last_active: now() - 300 },
     { id: 'snoozed', title: 'Review tomorrow', cwd: '/projects/docs', last_active: now() - 7200 },
-    { id: 'settled', title: 'SDK inventory', cwd: '/projects/session-flow', last_active: now() - 5000 }
+    { id: 'settled', title: 'SDK inventory', cwd: '/projects/hermes-t3sidebar', last_active: now() - 5000 }
   ], live: [{ id: 'runtime-approval', session_key: 'approval', status: 'waiting', last_active: now() - 200 },
     { id: 'runtime-worker', session_key: 'old', status: 'working', last_active: now() - 4 }],
     metadata: { version: 1, sessions: {

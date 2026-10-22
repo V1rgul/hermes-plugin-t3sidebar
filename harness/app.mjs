@@ -5,20 +5,20 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import plugin, { captureScope, scopeKey } from '../desktop/plugin.js';
 import * as mock from '../tests/sdk.mock.mjs';
 plugin.register(mock.ctx);
-window.sessionFlowHarness = mock;
+window.hermesT3SidebarHarness = mock;
 function Workspace() {
   const id = mock.useValue(mock.host.state.activeSessionId);
   const [backendMissing, setBackendMissing] = useState(false), [runtimeError, setRuntimeError] = useState(false);
   const refresh = () => void mock.queryClient.invalidateQueries({ queryKey: scopeKey(captureScope()) });
   return h('div', { className: 'harness-app' },
-    h('div', { className: 'harness-top' }, h('strong', null, 'Session Flow'), h('span', null, 'Development harness · SYNTHETIC fixtures · not a live Hermes connection')),
+    h('div', { className: 'harness-top' }, h('strong', null, 'hermes-t3sidebar'), h('span', null, 'Development harness · SYNTHETIC fixtures · not a live Hermes connection')),
     h('div', { className: 'harness-body' },
       h('div', { className: 'harness-sidebar' }, mock.control.contributions[0].render()),
       h('main', { className: 'harness-main' },
         h('div', { className: 'harness-tabs' }, id ? mock.control.rows.find(row => row.id === id)?.title || id : 'New session'),
         h('section', { className: 'harness-content' }, h('span', { className: 'harness-eyebrow' }, 'SYNTHETIC WORKSPACE'),
           h('h1', null, 'A quieter place to pick up your work.'),
-          h('p', null, 'The left pane renders the actual Session Flow plugin with React and React Query. The SDK adapter and session fixtures are test doubles; this is not verification inside Electron.'),
+          h('p', null, 'The left pane renders the actual hermes-t3sidebar plugin with React and React Query. The SDK adapter and session fixtures are test doubles; this is not verification inside Electron.'),
           h('p', null, 'Waiting for approval or an answer stays in Active. Working runs dim quietly below. Settle and snooze are reversible organization — never a stop, archive or hidden prompt.'),
           h('div', { className: 'harness-card' }, h('h2', null, 'Try the sidebar'),
             h('ul', null, h('li', null, 'Hover a row: settle, restore or open the action menu.'), h('li', null, 'Right-click: pin, settle-and-advance, snooze presets or a local date/time.'), h('li', null, 'Filter projects without creating a project tree. Toggle grouping separately.'), h('li', null, 'Use ↑/↓ to move between rows. Shift+F10 opens actions.'))),

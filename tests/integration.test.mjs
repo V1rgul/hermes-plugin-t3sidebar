@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { QueryClient } from '@tanstack/react-query';
-import { createController, buildSections } from '../desktop/plugin.js';
+import plugin, { createController, buildSections } from '../desktop/plugin.js';
 
 test('frontend controller interoperates with real FastAPI and persistent SQLite metadata', { timeout: 15000 }, async () => {
 	const child = spawn(process.env.PYTHON || 'python', [new URL('./backend_fixture.py', import.meta.url).pathname], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -17,7 +17,7 @@ test('frontend controller interoperates with real FastAPI and persistent SQLite 
 	const timeout = setTimeout(() => child.kill('SIGTERM'), 14000);
 	try {
 		const [line] = await once(lines, 'line');
-		const base = `http://127.0.0.1:${Number(line)}/api/plugins/session-flow`;
+		const base = `http://127.0.0.1:${Number(line)}/api/plugins/${plugin.id}`;
 		const rest = async (path, options = {}) => {
 			const response = await fetch(base + path, { method: options.method || 'GET', headers: { 'content-type': 'application/json' }, ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
 			const body = await response.json();

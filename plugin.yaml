@@ -1,4 +1,4 @@
-name: session-flow
+name: hermes-t3sidebar
 version: "0.1.0"
 requires_hermes: ">=0.21.0"
-description: Session Flow desktop sidebar with persistent settlement, snooze and pins.
+description: hermes-t3sidebar desktop sidebar with persistent settlement, snooze and pins.

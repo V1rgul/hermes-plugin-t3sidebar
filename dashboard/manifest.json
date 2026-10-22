@@ -1,7 +1,7 @@
 {
-	"name": "session-flow",
-	"label": "Session Flow",
-	"description": "Persistent settlement, snooze and pin metadata for the Session Flow desktop sidebar.",
+	"name": "hermes-t3sidebar",
+	"label": "hermes-t3sidebar",
+	"description": "Persistent settlement, snooze and pin metadata for the hermes-t3sidebar desktop sidebar.",
 	"version": "0.1.0",
 	"tab": { "hidden": true },
 	"api": "plugin_api.py"

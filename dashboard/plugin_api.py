@@ -1,6 +1,6 @@
-"""Session Flow metadata and narrowly scoped native read-only listings.
+"""hermes-t3sidebar metadata and narrowly scoped native read-only listings.
 
-The host mounts ``router`` in its authenticated /api/plugins/session-flow namespace.
+The host mounts ``router`` in its authenticated /api/plugins/hermes-t3sidebar namespace.
 This module is self-contained because Hermes loads it directly via importlib.
 """
 
@@ -70,10 +70,10 @@ def default_state_path() -> Path:
 	# with contextvars when dispatching to a profile's plugin namespace.
 	from hermes_constants import get_hermes_home
 
-	return get_hermes_home() / "plugin-data" / "session-flow" / "state.sqlite3"
+	return get_hermes_home() / "plugin-data" / "hermes-t3sidebar" / "state.sqlite3"
 
 
-class SessionFlowStore:
+class HermesT3SidebarStore:
 	"""Short-lived per-operation connections; SQLite serializes writers.
 
 	Every read/mutation and due-wakeup sweep shares one IMMEDIATE transaction.
@@ -235,7 +235,7 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 	api = APIRouter()
 
 	def store():
-		return SessionFlowStore(path if path is not None else default_state_path(), clock)
+		return HermesT3SidebarStore(path if path is not None else default_state_path(), clock)
 
 	def listing_profile(request, allowed=()):
 		if set(request.query_params) - set(allowed):

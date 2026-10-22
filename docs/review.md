@@ -1,5 +1,7 @@
 # Independent review of the initial candidate
 
+> Historical report for the original Session Flow candidate, before the `hermes-t3sidebar` rename. Names, command outputs and hashes below are preserved evidence, not verification of the renamed bytes. See [rename-verification.md](rename-verification.md) for current results.
+
 Review baseline: empty repository; all local source files are new and uncommitted. Review input was the integrated candidate before remediation, with `24` frontend tests, `16` backend tests and `13` Chromium checks passing. A subsequently added real HTTP integration test also passed. Passing those fixtures did not establish the real SDK contract.
 
 ## Standards and correctness

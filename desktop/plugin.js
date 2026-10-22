@@ -1,4 +1,4 @@
-// Session Flow — independent T3-inspired session browser; plain disk-plugin ESM.
+// hermes-t3sidebar — independent T3-inspired session browser; plain disk-plugin ESM.
 import * as sdk from '@hermes/plugin-sdk';
 import { createElement as h, useEffect, useRef, useState } from 'react';
 
@@ -22,7 +22,7 @@ export function relative(value, now = Date.now() / 1000) {
   const text = n < 60 ? 'now' : n < 3600 ? `${Math.floor(n / 60)}m` : n < 86400 ? `${Math.floor(n / 3600)}h` : `${Math.floor(n / 86400)}d`;
   return delta < -60 ? `in ${text}` : text;
 }
-export function scopeKey(scope) { return ['session-flow', scope.connectionId, scope.profile, scope.epoch]; }
+export function scopeKey(scope) { return ['hermes-t3sidebar', scope.connectionId, scope.profile, scope.epoch]; }
 export function sameScope(a, b) { return a.connectionId === b.connectionId && a.profile === b.profile && a.epoch === b.epoch; }
 export function captureScope() {
   return { connectionId: host.state.connectionId.get(), profile: host.state.profile.get() || 'default', epoch: gatewayActivationEpoch() };
@@ -33,10 +33,10 @@ export function currentRoute(scope, routes) {
   return route || null;
 }
 export function validState(value) {
-  if (value?.version !== 1 || !value.sessions || typeof value.sessions !== 'object' || Array.isArray(value.sessions)) throw new Error('Unsupported Session Flow backend response.');
+  if (value?.version !== 1 || !value.sessions || typeof value.sessions !== 'object' || Array.isArray(value.sessions)) throw new Error('Unsupported hermes-t3sidebar backend response.');
   for (const item of Object.values(value.sessions)) {
     if (!item || !['active', 'settled', 'snoozed'].includes(item.state) || typeof item.pinned !== 'boolean' ||
-      (item.state === 'snoozed' && !(Number.isFinite(item.wake_at) && item.wake_at > 0))) throw new Error('Invalid Session Flow metadata.');
+      (item.state === 'snoozed' && !(Number.isFinite(item.wake_at) && item.wake_at > 0))) throw new Error('Invalid hermes-t3sidebar metadata.');
   }
   return value;
 }
@@ -152,7 +152,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       return { sessions, has_more };
     },
     async metadata(scope) {
-      if (writing) throw new Error('Session Flow is saving a change.');
+      if (writing) throw new Error('hermes-t3sidebar is saving a change.');
       const ticket = generation;
       const value = await fenced(scope, () => ctx.rest('/state'));
       if (ticket !== generation) throw new Error('Superseded metadata read.');
@@ -160,7 +160,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     },
     async mutate(scope, id, payload) {
       check(scope);
-      if (writing) throw new Error('Another Session Flow change is still saving.');
+      if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
       writing = true; generation++;
       const key = [...scopeKey(scope), 'metadata'];
       try {
@@ -209,9 +209,9 @@ function IconButton({ label, name, glyph, ...props }) { return h(sdk.Button, { t
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
 function Settings() {
   return h('section', { style: { padding: 20, maxWidth: 650, color: 'var(--ui-text-secondary)' } },
-    h('h2', null, 'Session Flow'), h('p', null, 'A compact T3-style session browser for the active source and profile.'),
+    h('h2', null, 'hermes-t3sidebar'), h('p', null, 'A compact T3-style session browser for the active source and profile.'),
     h('p', null, 'Settle and snooze organize the list only. They do not archive, delete, stop, resume or send a prompt. Snoozes return when their chosen time passes; no agent is awakened.'),
-    h('p', null, 'Use normal layout controls to select Session Flow in the left pane or hide the native Sessions pane. Session Flow never modifies the core sidebar or conversation workspace.'),
+    h('p', null, 'Use normal layout controls to select hermes-t3sidebar in the left pane or hide the native Sessions pane. hermes-t3sidebar never modifies the core sidebar or conversation workspace.'),
     h('p', null, 'Project filtering changes this list only. New session uses Hermes’ native new-chat flow; the SDK does not expose a pre-send draft project selector.'),
     h('p', null, 'Keyboard: ↑/↓ or Home/End to focus rows; Enter to open; Shift+F10 for actions; Shift+Enter to settle and advance (when no approval is pending).'),
     h('p', null, 'Pins, settlement and snoozes belong to this plugin’s backend, not native archival or native pins. Missing backend: browsing remains available, organization is read-only.'));
@@ -264,7 +264,7 @@ function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus,
       h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { ref: trigger, label: `Actions for ${row.title || 'Untitled session'}`, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog' })),
       h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Session actions' }, h(RowActions, { row, scope, mutate, disabled, close: () => setMenuOpen(false) }))));
 }
-export function SessionFlow({ ctx, controller }) {
+export function HermesT3Sidebar({ ctx, controller }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
   useValue(host.state.gateway);
   useValue(activationEpoch);
@@ -295,7 +295,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const mutate = async (row, input, isUndo = false) => {
     try {
       controller.check(scope);
-      if (latest.current.disabled) throw new Error('Session Flow backend unavailable or another change is saving.');
+      if (latest.current.disabled) throw new Error('hermes-t3sidebar backend unavailable or another change is saving.');
       const { advance, ...payload } = input;
       const before = latest.current.metadata.sessions[row.key] || { state: 'active', pinned: false };
       setActionError('');
@@ -336,14 +336,14 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const count = rows.length;
   const total = sessions.data?.total || 0;
   const canExpand = !sessions.data?.capped && (limit === 0 ? sessions.data?.has_more : expanded.data?.has_more);
-  return h('aside', { className: 'sf', 'aria-label': 'Session Flow', onKeyDown: event => {
+  return h('aside', { className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); search.current?.focus(); }
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
   } }, h('style', null, CSS),
-    h('header', { className: 'sf-header' }, h('span', { className: 'sf-title' }, 'Session Flow'),
+    h('header', { className: 'sf-header' }, h('span', { className: 'sf-title' }, 'hermes-t3sidebar'),
       h(IconButton, { label: 'New session', name: 'SquarePen', glyph: '+', onClick: () => { try { Promise.resolve(controller.newChat(scope)).catch(error => setActionError(error.message)); } catch (error) { setActionError(error.message); } } }),
       h(IconButton, { label: 'Search sessions', name: 'Search', glyph: '⌕', onClick: () => search.current?.focus() }),
-      h(IconButton, { label: 'Session Flow settings', name: 'Settings2', glyph: '⚙', onClick: () => host.navigate('/settings?tab=plugins&plugin=session-flow') })),
+      h(IconButton, { label: 'hermes-t3sidebar settings', name: 'Settings2', glyph: '⚙', onClick: () => host.navigate('/settings?tab=plugins&plugin=hermes-t3sidebar') })),
     h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search sessions…', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) })),
     h('div', { className: 'sf-tools' }, h('select', { 'aria-label': 'Filter by project', value: project, onChange: event => setProject(event.target.value) }, h('option', { value: '*' }, 'All projects'), ...projects.map(cwd => h('option', { key: cwd, value: cwd }, cwd || 'No project'))),
       h(IconButton, { label: grouped ? 'Use flat list' : 'Group by project', name: grouped ? 'List' : 'FolderTree', glyph: '☷', 'aria-pressed': grouped, onClick: () => setGrouped(value => !value) }),
@@ -352,7 +352,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     sessions.isLoading ? h(Note, null, 'Loading sessions…') : null,
     sessions.isError ? h(Note, { error: true }, `Session list failed: ${sessions.error.message} `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     !runtimeKnown ? h(Note, { error: runtime.isError }, runtime.isError ? `Runtime status unavailable: ${runtime.error.message}. Sessions remain in Active with unknown status.` : 'Checking runtime status…') : null,
-    metadata.isError ? h(Note, { error: true }, `Session Flow backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback. `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
+    metadata.isError ? h(Note, { error: true }, `hermes-t3sidebar backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback. `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,
     h('div', { className: 'sf-scroll' }, ...SECTIONS.map(renderSection),
@@ -364,18 +364,18 @@ function ScopedSidebar({ ctx, controller, scope }) {
       h('div', { title: 'The SDK cannot target a native draft project. The project filter never changes new-session workspace.' }, 'New session uses native workspace selection.')));
 }
 export default {
-  id: 'session-flow', name: 'Session Flow', defaultEnabled: false,
+  id: 'hermes-t3sidebar', name: 'hermes-t3sidebar', defaultEnabled: false,
   register(ctx) {
     const controller = createController(ctx);
-    ctx.register({ id: 'sidebar', area: 'panes', title: 'Session Flow', order: 0,
-      data: { placement: 'left', width: '290px' }, render: () => h(SessionFlow, { ctx, controller }) });
-    ctx.registerSettingsPage({ id: 'settings', title: 'Session Flow', icon: 'list-tree', render: () => h(Settings) });
+    ctx.register({ id: 'sidebar', area: 'panes', title: 'hermes-t3sidebar', order: 0,
+      data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
+    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings) });
     const disposeEvent = ctx.onEvent('*', event => {
       activationEpoch.set(gatewayActivationEpoch());
       if (/^(session\.|gateway\.|approval\.|question\.|server_request\.|message\.complete)/.test(event.type || '')) {
         void queryClient.invalidateQueries({ queryKey: scopeKey(captureScope()) });
       }
     });
-    ctx.onDispose(() => { controller.dispose(); disposeEvent(); void queryClient.cancelQueries({ queryKey: ['session-flow'] }); queryClient.removeQueries({ queryKey: ['session-flow'] }); });
+    ctx.onDispose(() => { controller.dispose(); disposeEvent(); void queryClient.cancelQueries({ queryKey: ['hermes-t3sidebar'] }); queryClient.removeQueries({ queryKey: ['hermes-t3sidebar'] }); });
   }
 };

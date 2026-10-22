@@ -65,7 +65,7 @@ try {
   await page.getByText(/Runtime status unavailable/).waitFor();
   check('runtime failure explicitly unknown, settled kept Active', await page.locator('section[aria-label="Active"] [data-session-id="settled"]').count() === 1);
   await page.getByRole('button', { name: 'New session', exact: true }).click();
-  check('native-new API only, no hidden prompt', await page.evaluate(() => window.sessionFlowHarness.calls.some(call => call[0] === 'new')));
+  check('native-new API only, no hidden prompt', await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'new')));
   check('no browser page errors', errors.length === 0);
   console.log(`Browser smoke: ${checks.length} checks passed; screenshots artifacts/frontend.png and artifacts/actions.png`);
 } finally { await browser?.close(); server.close(); }

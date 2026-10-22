@@ -23,7 +23,7 @@ async function input(node, value) {
 async function mount() {
   controller = flow.createController(mock.ctx);
   root = createRoot($('#app'));
-  await act(async () => { root.render(React.createElement(QueryClientProvider, { client: mock.queryClient }, React.createElement(flow.SessionFlow, { ctx: mock.ctx, controller }))); });
+  await act(async () => { root.render(React.createElement(QueryClientProvider, { client: mock.queryClient }, React.createElement(flow.HermesT3Sidebar, { ctx: mock.ctx, controller }))); });
   await tick(); await tick();
 }
 afterEach(async () => { if (root) { await act(async () => root.unmount()); root = null; } controller?.dispose(); controller = null; mock.reset(); });
@@ -31,10 +31,15 @@ afterEach(async () => { if (root) { await act(async () => root.unmount()); root 
 test('only supported import specifiers; opt-in left-pane registration and disposal', async () => {
   const source = await readFile(new URL('../desktop/plugin.js', import.meta.url), 'utf8');
   assert.deepEqual([...source.matchAll(/from ['"]([^'"]+)['"]/g)].map(match => match[1]), ['@hermes/plugin-sdk', 'react']);
-  assert.equal(plugin.id, 'session-flow'); assert.equal(plugin.defaultEnabled, false);
+  assert.equal(plugin.id, 'hermes-t3sidebar'); assert.equal(plugin.name, plugin.id); assert.equal(plugin.defaultEnabled, false);
+  const [manifest, packageJson, lock, yaml] = await Promise.all(['../dashboard/manifest.json', '../package.json', '../package-lock.json', '../plugin.yaml'].map(path => readFile(new URL(path, import.meta.url), 'utf8')));
+  assert.equal(JSON.parse(manifest).name, plugin.id); assert.equal(JSON.parse(manifest).label, plugin.name);
+  assert.equal(JSON.parse(packageJson).name, plugin.id); assert.equal(JSON.parse(lock).name, plugin.id); assert.equal(JSON.parse(lock).packages[''].name, plugin.id);
+  assert.equal(yaml.split('\n')[0], `name: ${plugin.id}`);
   assert.doesNotMatch(source, /setInterval|document\.|window\.|localStorage|__reactFiber|restartGateway/);
   plugin.register(mock.ctx);
   assert.equal(mock.control.contributions[0].data.placement, 'left');
+  assert.equal(mock.control.contributions[0].title, plugin.name); assert.equal(mock.control.settings.title, plugin.name);
   assert.equal(mock.control.contributions[0].id, 'sidebar'); assert.equal(typeof mock.control.settings.render, 'function');
   mock.control.disposers.forEach(fn => fn()); assert.equal(mock.control.listener, null);
 });
@@ -89,6 +94,7 @@ test('relative timestamps and local future snooze validation', () => {
 
 test('scope keys separate same-profile sources and epochs; exact route required', () => {
   const a = { connectionId: 'a', profile: 'default', epoch: 1 }, b = { ...a, connectionId: 'b' };
+  assert.deepEqual(flow.scopeKey(a), [plugin.id, 'a', 'default', 1]);
   assert.notDeepEqual(flow.scopeKey(a), flow.scopeKey(b)); assert.equal(flow.sameScope(a, b), false);
   assert.equal(flow.sameScope(a, { ...a, epoch: 2 }), false);
   assert.throws(() => flow.currentRoute(a, [{ ...b, targetProfile: 'default' }]), /unavailable/);
@@ -137,6 +143,8 @@ function cloneState() { return JSON.parse(JSON.stringify(mock.control.metadata))
 
 test('React mounts all shelves, waiting above pins, dim working, native open/new', async () => {
   await mount(); assert.ok(row('approval')); assert.equal(row('approval').closest('section'), shelf('Active'));
+  assert.equal($('aside').getAttribute('aria-label'), plugin.name); assert.equal($('.sf-title').textContent, plugin.name);
+  await click(button(`${plugin.name} settings`)); assert.ok(mock.calls.some(c => c[0] === 'navigate' && c[1] === `/settings?tab=plugins&plugin=${plugin.id}`));
   assert.equal(row('root').dataset.working, 'true'); assert.equal(row('pinned').closest('section'), shelf('Pinned'));
   assert.equal(row('snoozed').closest('section'), shelf('Snoozed')); assert.equal(row('settled').closest('section'), shelf('Recently Settled'));
   await click(row('design').querySelector('.sf-open')); assert.ok(mock.calls.some(c => c[0] === 'open' && c[1] === 'design'));

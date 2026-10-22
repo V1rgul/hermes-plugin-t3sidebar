@@ -1,5 +1,7 @@
 # Independent candidate verification
 
+> Historical report for the original Session Flow candidate, before the `hermes-t3sidebar` rename. Names, command outputs and hashes below are preserved evidence, not verification of the renamed bytes. See [rename-verification.md](rename-verification.md) for current results.
+
 ## Verdict: FAIL — one bounded native-picker regression
 
 The reproduced review defects are closed. The new companion history reader nevertheless admits internal, non-conversation sessions excluded by the native Sessions picker. This is a regression in the replacement listing introduced by remediation, not a request for additional UI features.

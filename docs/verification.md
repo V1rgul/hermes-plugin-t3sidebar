@@ -1,5 +1,7 @@
 # Local verification evidence
 
+> Historical report for the original Session Flow candidate, before the `hermes-t3sidebar` rename. Names, command outputs and hashes below are preserved evidence, not verification of the renamed bytes. See [rename-verification.md](rename-verification.md) for current results.
+
 ## Executed final suite
 
 From the repository root:

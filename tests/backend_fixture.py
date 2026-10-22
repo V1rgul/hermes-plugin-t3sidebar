@@ -11,13 +11,13 @@ from fastapi import FastAPI
 import uvicorn
 
 root = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("session_flow_integration_backend", root / "dashboard/plugin_api.py")
+spec = importlib.util.spec_from_file_location("hermes_t3sidebar_integration_backend", root / "dashboard/plugin_api.py")
 assert spec is not None and spec.loader is not None
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
-with tempfile.TemporaryDirectory(prefix="session-flow-http-") as directory:
+with tempfile.TemporaryDirectory(prefix="hermes-t3sidebar-http-") as directory:
 	# Only this temporary native history is reachable by the native listing adapter.
 	db_path = Path(directory) / "native.sqlite3"
 	db = SessionDB(db_path)
@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix="session-flow-http-") as directory:
 		# Injected fixture; native active_list itself is exercised in test_native_contracts.
 		return {"sessions": [{"session_key": "recent-0", "status": "waiting"}]}
 	app = FastAPI()
-	app.include_router(module.create_router(Path(directory) / "state.sqlite3", profile_reader=lambda: "default", runtime_reader=runtime_reader), prefix="/api/plugins/session-flow")
+	app.include_router(module.create_router(Path(directory) / "state.sqlite3", profile_reader=lambda: "default", runtime_reader=runtime_reader), prefix="/api/plugins/hermes-t3sidebar")
 	with socket.socket() as listener:
 		listener.bind(("127.0.0.1", 0))
 		print(listener.getsockname()[1], flush=True)
