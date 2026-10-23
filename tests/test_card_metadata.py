@@ -87,6 +87,21 @@ class CardMetadata(unittest.TestCase):
 		self.assertEqual(rows["missing"]["total_tokens"], 12)
 		self.assertFalse((self.root / "projects.db").exists())
 
+	def test_card_message_count_preserves_empty_evidence_without_inventing_unknown_history(self):
+		with closing(SessionDB(self.db_path)) as db:
+			db.create_session("empty", "desktop")
+		before = self.db_path.read_bytes()
+		rows = self.sessions()
+		self.assertEqual(rows[0]["message_count"], 0)
+		self.assertEqual(self.db_path.read_bytes(), before)
+		projected = backend.card_rows(SimpleNamespace(), [
+			{"id": "populated", "message_count": 6, "system_prompt": "private"},
+			{"id": "unknown"},
+		])
+		self.assertEqual(projected[0]["message_count"], 6)
+		self.assertNotIn("system_prompt", projected[0])
+		self.assertNotIn("message_count", projected[1])
+
 	def test_duplicate_segments_are_counted_once_and_unknown_counts_stay_null(self):
 		db = SimpleNamespace(_get_session_rich_rows_batch=lambda ids, *, compact_rows: {"root": {"input_tokens": 3, "output_tokens": 4}, "tip": {"input_tokens": 5, "output_tokens": 6, "model_config": '{"provider":"tip"}'}})
 		rows = backend.card_rows(db, [{"id": "tip", "_lineage_ids": ["root", "tip", "root"]}, {"id": "missing", "model": "openai/not-evidence"}])
@@ -205,4 +220,4 @@ class CardMetadata(unittest.TestCase):
 			return {"sessions": [{"id": "human", "source": "cli"}, {"id": "job", "source": "cron"}]}
 		with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(object(), actor)), patch("gateway.session_active_list.active_list", active):
 			result = asyncio.run(backend.native_runtime(SimpleNamespace(state=SimpleNamespace()), "scratch-profile"))
-		self.assertEqual(result["sessions"], [{"id": "human", "source": "cli"}])
+		self.assertEqual(result["sessions"], [{"id": "human", "source": "cli", "running_subagents": None}])

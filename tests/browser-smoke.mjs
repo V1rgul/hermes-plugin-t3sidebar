@@ -41,6 +41,11 @@ try {
   check('search clear cross stays visible without hover or focus', await page.getByRole('button', { name: 'Clear search', exact: true }).isVisible() && await page.getByRole('button', { name: 'Clear search', exact: true }).evaluate(el => getComputedStyle(el).opacity === '1'));
   await page.getByRole('button', { name: 'Clear search', exact: true }).click();
   check('clear cross empties search and returns keyboard focus', await page.getByRole('searchbox').inputValue() === '' && await page.getByRole('searchbox').evaluate(el => el === document.activeElement));
+  await page.getByRole('searchbox').fill('Review tomorrow');
+  check('search preserves Snoozed fold and its matching count without false empty text', await page.locator('[data-section="snoozed"]').getAttribute('data-closed') === 'true' && await page.getByRole('button', { name: 'Snoozed (1)', exact: true }).getAttribute('aria-expanded') === 'false' && !await page.locator('[data-session-id="snoozed"]').isVisible() && !await page.getByText('No matching sessions', { exact: true }).count());
+  await page.getByRole('button', { name: 'Snoozed (1)', exact: true }).click();
+  check('matching Snoozed rows can still be opened manually during search', await page.locator('[data-session-id="snoozed"]').isVisible());
+  await page.getByRole('button', { name: 'Snoozed (1)', exact: true }).click();
   await page.getByRole('searchbox').fill('');
   await page.locator('[data-session-id="root"]').waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: 'Switch mock source', exact: true }).click();
@@ -157,9 +162,13 @@ try {
   if (!await context.count()) await design.click({ button: 'right' });
   await context.getByRole('button', { name: /^Filter by / }).click();
   check('row project shortcut filters without grouping or changing native workspace', !await page.locator('[data-session-id="readme"]').count() && await page.locator('[data-session-id="design"]').count() === 1 && !await page.locator('.sf-group').count());
+  check('active project filter replaces toolbar filter glyph with project icon', await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'true' && await page.getByRole('button', { name: 'Filter sessions', exact: true }).innerText() === '◇');
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
-  await page.getByRole('combobox', { name: 'Filter by project' }).selectOption('*');
-  await page.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  const filters = page.getByRole('dialog', { name: 'Session filters', exact: true });
+  check('one filter click exposes project choices directly without intermediate select', await filters.getByRole('button', { name: 'All projects', exact: true }).isVisible() && await filters.getByRole('button', { name: 'Filter by docs', exact: true }).isVisible() && !await filters.getByRole('combobox').count());
+  check('direct filter list identifies selected project', await filters.getByRole('button', { name: 'Filter by hermes-t3sidebar', exact: true }).getAttribute('aria-pressed') === 'true');
+  await filters.getByRole('button', { name: 'All projects', exact: true }).click();
+  check('All projects clears active icon and closes filter picker', !await filters.count() && await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'false');
   await design.hover(); await archive.click();
   await page.locator('section[aria-label="Archived"] [data-session-id="design"]').waitFor();
   check('archival and server-readback rendered', true);
@@ -181,11 +190,11 @@ try {
   check('no-match search never displays All caught up', !await page.getByText('All caught up', { exact: true }).count() && !await page.locator('.sf-row').count());
   await page.getByRole('searchbox').fill('');
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
-  await page.getByRole('combobox', { name: 'Filter by project' }).selectOption('/projects/docs');
+  await page.getByRole('button', { name: 'Filter by docs', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('[data-session-id="design"]'));
   check('project filtering remains available without grouping option', !await page.getByRole('button', { name: 'Group by project' }).count() && !await page.getByRole('button', { name: 'Use flat list' }).count() && !await page.locator('.sf-group').count());
-  await page.getByRole('combobox', { name: 'Filter by project' }).selectOption('*');
-  await page.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
+  await page.getByRole('button', { name: 'All projects', exact: true }).click();
   await page.getByRole('button', { name: 'Simulate missing backend' }).click();
   await page.getByText(/Read-only browsing/).waitFor();
   check('missing backend disables mutation but preserves browsing', await page.locator('[data-session-id="design"] [aria-label="Archive session"]').isDisabled());
@@ -214,19 +223,17 @@ try {
   check('native archival remains available after runtime recovers', true);
   check('no user-visible legacy settlement words', !await page.locator('body').innerText().then(text => /\bsettle(?:d)?\b/i.test(text)));
   await page.getByRole('button', { name: 'New session', exact: true }).click();
-  await page.getByRole('button', { name: 'New session in Home', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'New session in Synthetic Sidebar', exact: true }).waitFor();
   check('project picker has no Cancel button', !await page.getByRole('button', { name: 'Cancel', exact: true }).count());
   check('project picker icons have no filled background', await page.locator('.sf-project-choice .sf-project-icon').evaluateAll(icons => icons.length > 0 && icons.every(icon => getComputedStyle(icon).backgroundColor === 'rgba(0, 0, 0, 0)')));
-  check('new-session picker renders the Home glyph', await page.getByRole('button', { name: 'New session in Home', exact: true }).locator('[data-codicon="home"]').count() === 1);
+  check('new-session picker omits unsupported Home and its explanatory text', !await page.getByRole('button', { name: 'New session in Home', exact: true }).count() && !await page.getByText(/Home remains listed/).count());
   const projectChoice = page.getByRole('button', { name: 'New session in Synthetic Sidebar', exact: true });
   check('new-session picker renders the native project glyph, not its identifier', await projectChoice.locator('[data-codicon="tools"]').count() === 1 && await projectChoice.textContent() === 'Synthetic Sidebar');
   check('project picker aligns icon before project name', await projectChoice.evaluate(el => {
     const icon = el.querySelector('.sf-project-icon').getBoundingClientRect(), name = el.querySelector('.sf-project-name').getBoundingClientRect();
     return icon.right <= name.left && Math.abs(icon.top + icon.height / 2 - name.top - name.height / 2) < 2;
   }));
-  await page.getByRole('button', { name: 'New session in Home', exact: true }).click();
-  await page.getByText(/Home creation is unavailable:/).waitFor();
-  check('Home shown but unavailable without session creation', !await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'requestProfile' && call[2] === 'session.create')));
+  check('project picker does not create a session until a supported project is selected', !await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'requestProfile' && call[2] === 'session.create')));
   await page.getByRole('button', { name: 'New session in Synthetic Sidebar', exact: true }).click();
   await page.waitForFunction(() => window.hermesT3SidebarHarness.control.composerCwd === '/projects/hermes-t3sidebar');
   check('named project public create/open/cwd handoff; no hidden prompt', await page.evaluate(() => {
@@ -264,22 +271,70 @@ try {
   await page.getByRole('button', { name: 'Save rename', exact: true }).click();
   await design.locator('.sf-row-title').filter({ hasText: 'Renamed sidebar thread' }).waitFor();
   check('live-thread Rename saves and exact native title readback renders', await page.evaluate(() => window.hermesT3SidebarHarness.calls.filter(call => call[2] === 'session.title' && call[3].session_id === 'runtime-design').length === 2));
+  await page.mouse.move(1100, 850);
+  const focusedBackground = await design.evaluate(el => getComputedStyle(el).backgroundColor);
   await page.evaluate(async () => {
     const fixture = window.hermesT3SidebarHarness;
     fixture.control.drafts = { design: 'SYNTHETIC unsent composer text' };
     await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-drafts'] });
   });
   await page.waitForFunction(() => document.querySelector('[data-session-id="design"]')?.dataset.hasDraft === 'true');
+  check('focused session with composer text keeps its ordinary selected background', await design.evaluate(el => getComputedStyle(el).backgroundColor) === focusedBackground);
+  await page.locator('[data-session-id="readme"] .sf-open').click();
+  await page.waitForFunction(() => document.querySelector('[data-session-id="design"]')?.dataset.current === 'false');
   await page.mouse.move(1100, 850);
-  check('unsent composer text gives the card a dim orange background off hover', await design.evaluate(el => {
+  check('unfocused unsent composer text gives the card a dim orange background off hover', await design.evaluate(el => {
     const probe = document.createElement('span'); probe.style.backgroundColor = 'color-mix(in srgb,var(--ui-orange) 10%,transparent)'; el.append(probe);
     const expected = getComputedStyle(probe).backgroundColor, actual = getComputedStyle(el).backgroundColor; probe.remove();
     return actual === expected;
   }));
   check('draft query cache retains booleans, never composer text', await page.evaluate(() => window.hermesT3SidebarHarness.queryClient.getQueryCache().findAll({ queryKey: ['hermes-t3sidebar-drafts'] }).every(query => query.state.data === undefined || typeof query.state.data === 'boolean')));
+  await design.locator('.sf-open').click();
+  await page.mouse.move(1100, 850);
+  check('returning to a drafted session immediately removes orange while retaining draft presence', await design.getAttribute('data-has-draft') === 'true' && await design.evaluate(el => getComputedStyle(el).backgroundColor) === focusedBackground);
   await page.evaluate(() => { window.hermesT3SidebarHarness.control.drafts.design = ''; });
   await page.waitForFunction(() => document.querySelector('[data-session-id="design"]')?.dataset.hasDraft === 'false');
-  check('focused composer polling removes the tint after its text is cleared', true);
+  check('focused composer polling still tracks draft clearing without highlighting editor', true);
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.rows.push({ id: 'synthetic-new-empty', title: 'Untitled session', message_count: 0, preview: '', project: null, source: 'desktop' });
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  const empty = page.locator('[data-session-id="synthetic-new-empty"]');
+  await empty.waitFor();
+  check('confirmed new empty session shows New session without unavailable project or Untitled text', await empty.locator('.sf-row-title').textContent() === 'New session' && !/Project unavailable|Untitled session/i.test(await empty.innerText()) && await empty.locator('.sf-open').getAttribute('aria-label') === 'New session');
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.live.find(row => row.session_key === 'design').running_subagents = 2;
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  await page.locator('[data-section="working"] [data-session-id="design"]').waitFor();
+  check('idle parent with running subagents shows blue Working and stays dimmed', await design.getAttribute('data-working') === 'true' && await design.locator('.sf-status').textContent() === 'Working');
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.live.find(row => row.session_key === 'design').running_subagents = 0;
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  await page.locator('[data-section="active"] [data-session-id="design"]').waitFor();
+  check('last child completion returns idle parent to Ready without completion-event bookkeeping', await design.getAttribute('data-working') === 'false' && !await design.locator('.sf-status').count());
+  await empty.click({ button: 'right' });
+  await page.getByRole('button', { name: 'Delete session', exact: true }).click();
+  const deleteDialog = page.getByRole('dialog', { name: 'Delete session?', exact: true });
+  check('right-click Delete opens a destructive modal naming the empty session before any write', await deleteDialog.isVisible() && /New session.*cannot be undone/i.test(await deleteDialog.innerText()) && await deleteDialog.getByRole('button', { name: 'Delete', exact: true }).getAttribute('data-destructive') === 'true' && !await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[2] === 'session.mutate')));
+  await deleteDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  check('cancelling Delete preserves the empty session', await empty.isVisible() && !await deleteDialog.count());
+  await empty.click({ button: 'right' }); await page.getByRole('button', { name: 'Delete session', exact: true }).click();
+  await page.evaluate(() => { window.hermesT3SidebarHarness.control.dropDelete = true; });
+  await deleteDialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await deleteDialog.getByRole('alert').waitFor();
+  check('a dropped Delete leaves the modal open with its verification error', await empty.isVisible() && /still exists/i.test(await deleteDialog.innerText()));
+  await page.evaluate(() => { window.hermesT3SidebarHarness.control.dropDelete = false; });
+  await deleteDialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await empty.waitFor({ state: 'detached' }); await deleteDialog.waitFor({ state: 'detached' });
+  check('confirmed Delete removes the card only after exact absent readback', await page.evaluate(() => {
+    const fixture = window.hermesT3SidebarHarness;
+    return !fixture.control.rows.some(row => row.id === 'synthetic-new-empty') && fixture.calls.some(call => call[0] === 'rest' && call[1] === '/sessions/synthetic-new-empty/snapshot');
+  }));
   // Exercise the real Archived pagination control without expanding active history.
   await page.evaluate(() => window.hermesT3SidebarHarness.loadArchivePaginationFixtures());
   await page.locator('[data-session-id="synthetic-page-active-0"]').waitFor();

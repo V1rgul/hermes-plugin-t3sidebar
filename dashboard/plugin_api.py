@@ -207,6 +207,42 @@ def served_profile():
 	return profile
 
 
+def running_subagent_count(records):
+	"""Reduce a native, ownership-qualified live roster; missing status is not zero."""
+	if not isinstance(records, list) or any(not isinstance(row, dict) or not isinstance(row.get("status"), str) for row in records):
+		return None
+	return sum(row["status"] == "running" for row in records)
+
+
+def standalone_subagent_count(server, row, snapshot, db, home):
+	# Reuse ONLY the object admitted by the native exact-home snapshot. A runtime
+	# replacement/rebuild must not lend its parent's children to a stale row.
+	try:
+		from gateway.session_ancillary import subagent_records
+
+		session, parent = snapshot
+		with server._sessions_lock:
+			if (server._sessions.get(row["id"]) is not session or session.get("_finalized")
+				or parent is None or session.get("agent") is not parent
+				or getattr(parent, "session_id", None) != row["session_key"]
+				or Path(session.get("profile_home") or server._launch_home()).resolve() != home):
+				return None
+			owner_db = getattr(parent, "_session_db", None)
+			owner_path, expected_path = getattr(owner_db, "db_path", None), getattr(db, "db_path", None)
+			if (owner_path is None or expected_path is None
+				or Path(owner_path).resolve() != Path(expected_path).resolve()
+				or getattr(parent, "gateway_session_key", None) not in (None, row["id"])):
+				return None
+			# The qualified runtime id is the standalone route, the session_key is
+			# durable. Pass the actual parent's DB so native fallback identity and
+			# file-qualified compression-lineage ownership retain their semantics.
+			return running_subagent_count(subagent_records(parent, session_id=row["session_key"],
+				session_db=owner_db, route=row["id"], include_fallback_evicted=True))
+	except Exception:
+		# Older cores, stale objects and failed projections are unknown per row.
+		return None
+
+
 def standalone_runtime(request, profile, actor):
 	# Version-sensitive standalone seam: use ONLY this process's already-loaded
 	# server and the native exact-home snapshot, never import a fresh registry or
@@ -234,7 +270,7 @@ def standalone_runtime(request, profile, actor):
 	from hermes_cli.web_server_sessions import _open_session_db_for_profile
 	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
 
-	provenance = {}
+	provenance, parents = {}, {}
 
 	def profile_home(name):
 		resolved = server._profile_home(name)
@@ -242,8 +278,10 @@ def standalone_runtime(request, profile, actor):
 		return Path(server._launch_home()) if resolved is None else resolved
 
 	def live_item(sid, session, current):
+		parent = session.get("agent")
 		item = server._session_live_item(sid, session, current)
 		provenance[(item["id"], item["session_key"])] = session.get("source")
+		parents[(item["id"], item["session_key"])] = (session, parent)
 		return item
 
 	# Adapt only the native launch sentinel and capture source while the native helper maps its exact-home snapshot; never walk another registry.
@@ -270,6 +308,8 @@ def standalone_runtime(request, profile, actor):
 			item = {k: row[k] for k in ("id", "session_key", "status", "current", "last_active", "started_at", "message_count", "model", "title")}
 			# Native legacy previews may contain pending prompts. Runtime needs
 			# liveness/identity only; do not return that text or any extra fields.
+			item["running_subagents"] = standalone_subagent_count(server, row,
+				parents.get((row["id"], row["session_key"])), db, home)
 			visible.append({**item, "preview": "", "source": source.strip().lower()})
 		return {"sessions": visible}
 	finally:
@@ -283,19 +323,33 @@ async def native_runtime(request, profile):
 		raise HTTPException(503, "session_authority_unavailable")
 	from hermes_cli.web_server_sessions import _session_mutation_context
 	from gateway.session_active_list import active_list
-	from gateway.session_contract import Principal
+	from gateway.session_contract import Principal, SessionRef
 
 	authority, actor = _session_mutation_context(request, profile)
 	if authority is None:
 		return standalone_runtime(request, profile, actor)
 	reader = Principal(actor.subject, actor.profile_id, frozenset({"session:read"}), actor.transport_id)
-	value = await active_list(SimpleNamespace(authority=authority, actor=reader), None, {})
+	connection = SimpleNamespace(authority=authority, actor=reader)
+	value = await active_list(connection, None, {})
 	value["sessions"] = [row for row in value["sessions"] if row.get("source") != "cron"]
+	for row in value["sessions"]:
+		row["running_subagents"] = None
+		try:
+			from gateway.session_ancillary import read
+
+			projection = await read(connection, SessionRef(reader.profile_id, row["id"]),
+				{"session_id": row["id"], "profile": profile}, kind="subagents")
+			row["running_subagents"] = running_subagent_count(projection.get("subagents"))
+		except Exception:
+			# Unsupported worker projections, stale generations, missing seams or
+			# authority failures cannot turn unknown into idle or retain an old count.
+			# Cancellation (BaseException) still cancels the request.
+			pass
 	return value
 
 
 LIST_FIELDS = frozenset({"id", "source", "archived", "resolved_id", "title", "preview", "cwd", "git_branch", "git_repo_root",
-	"last_active", "started_at", "updated_at", "unread", "_lineage_root_id", "_lineage_ids"})
+	"last_active", "started_at", "updated_at", "message_count", "unread", "_lineage_root_id", "_lineage_ids"})
 
 
 def card_projects(db):
@@ -463,6 +517,20 @@ def native_archive(profile, session_id):
 		db.close()
 
 
+def native_delete_snapshot(profile, session_id):
+	"""Exact read-only CAS counters/absence; never resolve titles, prefixes or aliases."""
+	from hermes_cli.web_server_sessions import _open_session_db_for_profile
+
+	db = _open_session_db_for_profile(profile, read_only=True)
+	try:
+		row = db.get_session(session_id)
+		return {"session_id": session_id, "exists": row is not None,
+			"runtime_revision": row["runtime_revision"] if row else 0,
+			"runtime_generation": row["runtime_generation"] if row else None}
+	finally:
+		db.close()
+
+
 def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None) -> APIRouter:
 	"""Inject a temporary path and clock for tests; production accepts neither over HTTP."""
 	api = APIRouter()
@@ -528,6 +596,17 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise
 		except Exception as exc:
 			raise HTTPException(503, "native_archive_state_unavailable") from exc
+
+	@api.get("/sessions/{session_id}/snapshot")
+	def get_delete_snapshot(session_id: SessionId, request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		try:
+			profile = listing_profile(request)
+			return {**native_delete_snapshot(profile, session_id), "profile": profile}
+		except HTTPException:
+			raise
+		except Exception as exc:
+			raise HTTPException(503, "native_session_snapshot_unavailable") from exc
 
 	@api.get("/state", response_model=FlowState)
 	def get_state(response: Response):

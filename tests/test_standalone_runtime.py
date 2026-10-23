@@ -6,7 +6,7 @@ import tempfile
 from threading import RLock
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
@@ -18,6 +18,8 @@ import hermes_cli.web_server_sessions as native_sessions
 import tui_gateway.server as native_server
 import tui_gateway.server_requests as server_requests
 import tui_gateway.ws_legacy_fallback as legacy
+import gateway.session_ancillary as ancillary
+import tools.delegate_tool_registry as subagent_registry
 
 from test_backend import backend
 
@@ -113,6 +115,120 @@ class StandaloneRuntime(unittest.TestCase):
 		self.assertEqual(self.lookups, ["exact-profile", "other-profile"])
 		for home in self.homes.values():
 			self.assertEqual((home / "native.sqlite3").read_bytes(), before[home])
+
+	def attach_subagents(self):
+		# Real native ownership helper and descendant predicate; only records are synthetic.
+		db = SessionDB(self.current / "native.sqlite3", read_only=True)
+		self.addCleanup(db.close)
+		parent = self.registry["runtime-a"]["agent"]
+		parent._session_db = db
+		parent.gateway_session_key = "runtime-a"
+		self.children = {}
+		self.start_patch(patch.object(subagent_registry, "_active_subagents", self.children))
+		self.start_patch(patch.object(subagent_registry, "_active_subagents_lock", RLock()))
+		return parent, db
+
+	def child(self, name, parent, db, *, durable: str | None="collision", status="running", runtime="runtime-a"):
+		agent = SimpleNamespace(_delegate_parent_ref=lambda: parent, _session_db=db)
+		self.children[name] = {"subagent_id": name, "agent": agent, "status": status,
+			"owner_session_id": runtime, "owner_agent_session_id": durable,
+			"goal": "private-child-goal", "owner_transport": object()}
+		return agent
+
+	def runtime_row(self):
+		response = self.client.get("/runtime?profile=exact-profile")
+		self.assertEqual(response.status_code, 200, response.text)
+		self.assertNotIn("private-", response.text)
+		return response.json()["sessions"][0]
+
+	def test_idle_parent_counts_live_children_and_clears_after_last_child_finishes(self):
+		parent, db = self.attach_subagents()
+		self.registry["runtime-a"]["running"] = False
+		self.start_patch(patch.object(server_requests, "_open", {}))
+		self.child("one", parent, db)
+		self.child("nested", self.children["one"]["agent"], db)
+		self.child("completed", parent, db, status="completed")
+		self.child("cancelled", parent, db, status="cancelled")
+		before = (self.current / "native.sqlite3").read_bytes()
+		with patch.object(ancillary, "subagent_records", wraps=ancillary.subagent_records) as read:
+			self.assertEqual((self.runtime_row()["status"], self.runtime_row()["running_subagents"]), ("idle", 2))
+			self.assertIs(read.call_args.args[0], parent)
+			self.assertEqual(read.call_args.kwargs["session_id"], "collision")
+			self.assertEqual(read.call_args.kwargs["route"], "runtime-a")
+			self.assertIs(read.call_args.kwargs["session_db"], db)
+			self.children.pop("one")
+			self.assertEqual(self.runtime_row()["running_subagents"], 1)
+			self.children["nested"]["status"] = "completed"
+			self.assertEqual(self.runtime_row()["running_subagents"], 0)
+			self.children.clear()
+			self.assertEqual(self.runtime_row()["running_subagents"], 0)
+		self.assertEqual((self.current / "native.sqlite3").read_bytes(), before)
+
+	def test_reminted_runtime_uses_durable_owner_and_rejects_same_id_foreign_database(self):
+		parent, db = self.attach_subagents()
+		old_parent = SimpleNamespace(session_id="collision", _session_db=db, gateway_session_key="old-runtime")
+		self.child("owned", old_parent, db, runtime="old-runtime")
+		foreign_db = SimpleNamespace(db_path=self.homes["other-profile"] / "native.sqlite3")
+		foreign_parent = SimpleNamespace(session_id="collision", _session_db=foreign_db)
+		self.child("foreign", foreign_parent, foreign_db, runtime="runtime-a")
+		# Runtime-only ownership must never be confused with the durable owner id.
+		self.child("runtime-only", None, db, durable=None)
+		self.registry["runtime-reminted"] = self.registry.pop("runtime-a")
+		parent.gateway_session_key = "runtime-reminted"
+		row = self.runtime_row()
+		self.assertEqual(row["id"], "runtime-reminted")
+		self.assertEqual(row["running_subagents"], 1)
+
+	def test_fallback_evicted_ancestor_is_qualified_by_native_route_and_database(self):
+		parent, db = self.attach_subagents()
+		old = SimpleNamespace(session_id="collision", _session_db=db, _evicted_on_fallback="runtime-a")
+		self.child("fallback", old, db, durable=None)
+		wrong = SimpleNamespace(session_id="collision", _session_db=db, _evicted_on_fallback="other-runtime")
+		self.child("wrong-route", wrong, db, durable=None)
+		self.assertEqual(self.runtime_row()["running_subagents"], 1)
+
+	def test_unavailable_or_failed_subagent_projection_is_unknown_and_never_reuses_count(self):
+		parent, db = self.attach_subagents()
+		self.child("one", parent, db)
+		self.assertEqual(self.runtime_row()["running_subagents"], 1)
+		for helper in (None, Mock(side_effect=RuntimeError("projection unavailable")), Mock(return_value=None)):
+			with self.subTest(helper=helper), patch.object(ancillary, "subagent_records", helper):
+				self.assertIsNone(self.runtime_row()["running_subagents"])
+		parent_db = parent._session_db
+		del parent._session_db
+		self.assertIsNone(self.runtime_row()["running_subagents"])
+		parent._session_db = parent_db
+		# Standalone agents need not have a gateway route attribute: the native
+		# exact-home mapping supplies their runtime route. A conflicting one fails.
+		del parent.gateway_session_key
+		self.assertEqual(self.runtime_row()["running_subagents"], 1)
+		parent.gateway_session_key = "foreign-runtime"
+		self.assertIsNone(self.runtime_row()["running_subagents"])
+		parent.gateway_session_key = "runtime-a"
+		parent._session_db = SimpleNamespace(db_path=self.homes["other-profile"] / "native.sqlite3")
+		self.assertIsNone(self.runtime_row()["running_subagents"])
+		self.registry["runtime-a"]["agent"] = None
+		self.assertIsNone(self.runtime_row()["running_subagents"])
+
+	def test_snapshot_parent_replacement_cannot_lend_stale_subagent_count(self):
+		parent, db = self.attach_subagents()
+		self.child("one", parent, db)
+		read = legacy._own_profile_read
+		def replaced(*args):
+			result = read(*args)
+			self.registry["runtime-a"] = self.session("collision", self.current)
+			return result
+		with patch.object(legacy, "_own_profile_read", replaced):
+			self.assertIsNone(self.runtime_row()["running_subagents"])
+
+	def test_internal_sources_are_filtered_before_subagent_projection(self):
+		self.attach_subagents()
+		with closing(SessionDB(self.current / "native.sqlite3")) as db:
+			db.create_session("cron-job", "cron")
+		self.registry["runtime-cron"] = self.session("cron-job", self.current)
+		with patch.object(ancillary, "subagent_records", wraps=ancillary.subagent_records) as read:
+			self.runtime_row()
+			self.assertEqual(read.call_count, 1)
 
 	def test_real_launch_profile_none_sentinel_keeps_current_runtime_readable(self):
 		with patch.object(native_server, "_profile_home", NATIVE_PROFILE_HOME), patch.object(native_server, "_hermes_home", self.current), patch.object(native_server, "_canonical_profile_request", side_effect=lambda name: name), patch("hermes_cli.profiles.get_profile_dir", side_effect=lambda name: self.homes[name]):

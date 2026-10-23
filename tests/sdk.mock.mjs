@@ -1,5 +1,5 @@
 // TEST/HARNESS ONLY. All session data and backend responses are synthetic fixtures.
-import React, { createContext, useContext, useRef, useSyncExternalStore } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 export { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { QueryClient } from '@tanstack/react-query';
@@ -34,6 +34,30 @@ export const host = {
   async request(method, params) { calls.push([method, params]); if (method === 'session.active_list') { if (control.runtimeError) throw new Error('fixture runtime disconnected'); return { sessions: clone(control.live) }; } if (method === 'session.list') return { sessions: clone(control.extra || []).slice(0, params.limit) }; throw new Error(`Unexpected RPC ${method}`); },
   async requestProfile(route, method, params) {
     calls.push(['requestProfile', route, method, clone(params)]);
+    if (method === 'session.mutate' && params.operation === 'delete') {
+      if (control.deleteError) throw new Error('fixture delete unavailable');
+      const digest = JSON.stringify(params);
+      control.deleteReceipts ||= new Map();
+      let receipt = control.deleteReceipts.get(params.request_id);
+      if (receipt && receipt.digest !== digest) throw new Error('admission_conflict');
+      if (!receipt) {
+        const rows = [...control.rows, ...(control.extra || [])].filter(row => row.id === params.session_id || row._lineage_root_id === params.session_id || row._lineage_ids?.includes(params.session_id));
+        if (!rows.length) throw new Error('session_not_found');
+        if (params.expected_revision !== (rows[0].runtime_revision ?? 0) || params.expected_generation !== (rows[0].runtime_generation ?? 0)) throw new Error('stale_revision');
+        const deleted_ids = [...new Set(rows.flatMap(row => [row.id, row._lineage_root_id, ...(row._lineage_ids || [])]).filter(Boolean))];
+        if (control.live.some(row => deleted_ids.includes(row.session_key) && (row.status !== 'idle' || row.running_subagents > 0))) throw new Error('session_busy');
+        receipt = { digest, result: { session_id: params.session_id, operation: 'delete', revision: params.expected_revision + 1, execution_generation: params.expected_generation, deleted_ids } };
+        if (!control.dropDelete) {
+          control.rows = control.rows.filter(row => !deleted_ids.includes(row.id));
+          control.extra = (control.extra || []).filter(row => !deleted_ids.includes(row.id));
+          control.live = control.live.filter(row => !deleted_ids.includes(row.session_key));
+          control.deleteReceipts.set(params.request_id, receipt);
+        }
+      }
+      control.afterDelete?.();
+      if (control.deleteLostReply) { control.deleteLostReply = false; throw new Error('fixture reply lost after commit'); }
+      return clone(control.deleteResult || receipt.result);
+    }
     if (method === 'session.title') {
       const live = control.live.find(item => item.id === params.session_id);
       if (!live) throw new Error('fixture live runtime missing');
@@ -107,6 +131,13 @@ export const ctx = {
       const organized = !archives && offset === 0 ? history.filter(r => control.metadata.sessions[r._lineage_root_id || r.id]) : [];
       const sessions = [...new Map([...page, ...organized].map(r => [r.id, r])).values()];
       return { profile: (archives ? control.archivesProfile : control.sessionsProfile) || host.state.profile.get(), sessions: clone(sessions), offset, limit: 500, has_more: history.length > offset + 500 };
+    }
+    if (path.endsWith('/snapshot')) {
+      if (control.snapshotError) throw new Error('fixture snapshot unavailable');
+      const id = decodeURIComponent(path.slice('/sessions/'.length, -'/snapshot'.length));
+      const row = [...control.rows, ...(control.extra || [])].find(row => row.id === id || row._lineage_root_id === id || row._lineage_ids?.includes(id));
+      const value = { profile: host.state.profile.get(), session_id: id, exists: !!row, runtime_revision: row ? row.runtime_revision ?? 0 : 0, runtime_generation: row ? row.runtime_generation ?? 0 : null };
+      return { ...value, ...control.snapshotOverride };
     }
     if (path.endsWith('/archive')) {
       if (control.archiveReadError) throw new Error('fixture archive readback unavailable');
@@ -187,6 +218,23 @@ export function loadDenseFixtures() {
   queryClient.clear(); switchScope('synthetic-layout-source');
 }
 export function Button({ variant, size, children, ...props }) { return h('button', props, children); }
+// Public ConfirmDialog contract: cancel is inert, confirm awaits work, errors keep it open.
+// The harness omits only the native component's cosmetic success-close delay.
+export function ConfirmDialog({ open, onClose, onConfirm, title, description, confirmLabel, cancelLabel = 'Cancel', busyLabel, destructive }) {
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  useEffect(() => { if (open) { setBusy(false); setError(''); } }, [open]);
+  const run = async () => {
+    if (busy) return;
+    setBusy(true); setError('');
+    try { await onConfirm(); onClose(); } catch (err) { setError(err.message); } finally { setBusy(false); }
+  };
+  return open ? createPortal(h('div', { role: 'dialog', 'aria-modal': true, 'aria-label': title, className: 'mock-popover', style: { position: 'fixed', left: 310, top: 80 }, onKeyDown: event => {
+    if (event.key === 'Escape' && !busy) onClose();
+    if ((event.key === 'Enter' || event.key === ' ') && !busy) { event.preventDefault(); void run(); }
+  } }, h('h2', null, title), h('p', null, description), error ? h('div', { role: 'alert' }, error) : null,
+  h('button', { type: 'button', disabled: busy, onClick: onClose }, cancelLabel),
+  h('button', { type: 'button', disabled: busy, 'data-destructive': destructive, onClick: () => void run() }, busy ? busyLabel : confirmLabel)), document.body) : null;
+}
 // Test adapter for the public Codicon component; production uses Desktop's icon font.
 export function Codicon({ name, size, ...props }) {
   const path = { home: 'M3 11l9-8 9 8M5 10v11h14V10M10 21v-7h4v7', tools: 'M14 3a6 6 0 0 0-7 7L2 15l7 7 5-5a6 6 0 0 0 7-7l-4 4-5-5 4-4Z' }[name] || 'M3 5h6l2 3h10v12H3Z';
