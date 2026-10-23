@@ -307,6 +307,13 @@ def card_project(cwd, projects):
 	return {"id": target, "name": Path(target).name or target, "icon": None, "color": None, "cwd": target}
 
 
+def provider_name(value):
+	if not isinstance(value, str):
+		return None
+	value = value.strip().lower()
+	return value if value and value not in {"auto", "unknown", "default", "none"} else None
+
+
 def card_provider(config):
 	if isinstance(config, str):
 		try:
@@ -316,11 +323,31 @@ def card_provider(config):
 	if not isinstance(config, dict):
 		return None
 	provider = config.get("provider")
-	if isinstance(provider, str) and provider.strip():
-		return provider.strip()
+	if provider_name(provider):
+		return provider_name(provider)
 	runtime = config.get("gateway_runtime")
 	provider = runtime.get("provider") if isinstance(runtime, dict) else None
-	return provider.strip() if isinstance(provider, str) and provider.strip() else None
+	return provider_name(provider)
+
+
+def card_billing_providers(db, session_ids):
+	"""Read main-loop route evidence in bounded batches, never auxiliary model usage."""
+	connection = getattr(db, "_conn", None)
+	if not isinstance(connection, sqlite3.Connection):
+		return {}
+	ids, result = sorted(session_ids), {}
+	try:
+		for start in range(0, len(ids), 500):
+			batch = ids[start:start + 500]
+			placeholders = ",".join("?" for _ in batch)
+			rows = connection.execute(f"SELECT DISTINCT session_id, billing_provider FROM session_model_usage WHERE task = '' AND session_id IN ({placeholders})", batch)
+			for sid, value in rows:
+				if provider := provider_name(value):
+					result.setdefault(sid, set()).add(provider)
+	except sqlite3.Error:
+		# Older stores may have no task-attributed usage table; unknown is safer than a guess.
+		return {}
+	return result
 
 
 def card_rows(db, rows):
@@ -329,6 +356,7 @@ def card_rows(db, rows):
 	segment_ids = {sid for row in rows if row.get("_lineage_ids")
 		for sid in [row["id"], *row["_lineage_ids"]]}
 	segments = db._get_session_rich_rows_batch(segment_ids, compact_rows=True) if segment_ids else {}
+	billing = card_billing_providers(db, segment_ids | {row["id"] for row in rows})
 	projects = card_projects(db) if rows else []
 	result = []
 	for row in rows:
@@ -336,13 +364,19 @@ def card_rows(db, rows):
 		compressed = bool(row.get("_lineage_ids"))
 		tip = segments.get(row["id"], {}) if compressed else row
 		usage = [segments.get(sid, {}) for sid in chain] if compressed else [row]
+		provider = card_provider(tip.get("model_config"))
+		if provider is None:
+			candidates = set().union(*(billing.get(sid, set()) for sid in chain))
+			evidence = {name for segment in usage for name in (card_provider(segment.get("model_config")), provider_name(segment.get("billing_provider"))) if name}
+			if len(candidates) == 1 and evidence <= candidates:
+				provider = next(iter(candidates))
 		counts = {}
 		for key in ("input_tokens", "output_tokens"):
 			values = [segment.get(key) for segment in usage]
 			counts[key] = sum(values) if all(type(value) is int and value >= 0 for value in values) else None
 		item = {k: v for k, v in row.items() if k in LIST_FIELDS}
 		item["archived"] = bool(row.get("archived", False))
-		item.update(project=card_project(row.get("cwd"), projects), provider=card_provider(tip.get("model_config")),
+		item.update(project=card_project(row.get("cwd"), projects), provider=provider,
 			model=tip.get("model"), source=tip.get("source", row.get("source")), **counts)
 		item["total_tokens"] = counts["input_tokens"] + counts["output_tokens"] if all(value is not None for value in counts.values()) else None
 		result.append(item)

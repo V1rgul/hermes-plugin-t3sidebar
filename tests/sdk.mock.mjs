@@ -87,7 +87,7 @@ export const ctx = {
 export function reset() {
   epoch = 1; queryClient.clear(); calls.length = 0;
   for (const key of Object.keys(control)) delete control[key];
-  Object.assign(control, { projects: [{ id: 'p_fixture', label: 'Synthetic Sidebar', path: '/projects/hermes-t3sidebar', icon: '◇', repos: [{ path: '/projects/hermes-t3sidebar' }] }], contributions: [], disposers: [], rows: [
+  Object.assign(control, { projects: [{ id: 'p_fixture', label: 'Synthetic Sidebar', path: '/projects/hermes-t3sidebar', icon: 'tools', color: 'var(--ui-accent)', repos: [{ path: '/projects/hermes-t3sidebar' }] }], contributions: [], disposers: [], rows: [
     { id: 'approval', title: 'Approval request', cwd: '/projects/hermes-t3sidebar', last_active: now() - 200 },
     { id: 'design', title: 'Sidebar layout', cwd: '/projects/hermes-t3sidebar', git_branch: 'feature/sidebar', last_active: now() - 180 },
     { id: 'readme', title: 'Release notes', cwd: '/projects/docs', last_active: now() - 1300, unread: true },
@@ -133,6 +133,11 @@ export function loadDenseFixtures() {
   queryClient.clear(); switchScope('synthetic-layout-source');
 }
 export function Button({ variant, size, children, ...props }) { return h('button', props, children); }
+// Test adapter for the public Codicon component; production uses Desktop's icon font.
+export function Codicon({ name, size, ...props }) {
+  const path = { home: 'M3 11l9-8 9 8M5 10v11h14V10M10 21v-7h4v7', tools: 'M14 3a6 6 0 0 0-7 7L2 15l7 7 5-5a6 6 0 0 0 7-7l-4 4-5-5 4-4Z' }[name] || 'M3 5h6l2 3h10v12H3Z';
+  return h('svg', { ...props, 'data-codicon': name, 'aria-hidden': true, width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor' }, h('path', { d: path }));
+}
 const PopoverContext = createContext(null);
 export function Popover({ open, onOpenChange, children }) { const anchor = useRef(null); return h(PopoverContext.Provider, { value: { open, onOpenChange, anchor } }, children); }
 export function PopoverTrigger({ children }) { const value = useContext(PopoverContext); return React.cloneElement(children, { ref: node => { value.anchor.current = node; }, onClick: () => value.onOpenChange(!value.open), 'aria-expanded': value.open }); }
@@ -146,7 +151,7 @@ export const icons = Object.fromEntries(Object.entries({
   SquarePen: 'M12 5v14M5 12h14', Search: 'M21 21l-6-6M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0',
   Settings2: 'M4 7h16M4 17h16M8 4v6M16 14v6', List: 'M4 6h16M4 12h16M4 18h16', FolderTree: 'M4 4v16h16M4 12h10M14 9h6v6h-6',
   ListFilter: 'M4 5h16M7 12h10M10 19h4', ChevronDown: 'M6 9l6 6 6-6', ChevronRight: 'M9 6l6 6-6 6',
-  CircleHelp: 'M12 8v5M12 16v1M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0', LoaderCircle: 'M20 12a8 8 0 1 1-8-8',
+  HelpCircle: 'M12 8v5M12 16v1M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0', LoaderCircle: 'M20 12a8 8 0 1 1-8-8',
   Clock: 'M12 7v5l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
   AlarmClock: 'M12 8v5l3 2M3 3l3 3M21 3l-3 3M21 13a9 9 0 1 1-18 0 9 9 0 0 1 18 0',
   CircleCheck: 'M6 12l4 4 8-8M22 12a10 10 0 1 1-20 0', Pin: 'M9 3h6l-1 6 4 4H6l4-4-1-6M12 13v8',

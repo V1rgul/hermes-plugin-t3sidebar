@@ -245,7 +245,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const home = { id: '__no_project__', name: 'Home', path: null, isNoProject: true };
       const projects = value.projects.filter(p => p.id !== home.id && !p.isNoProject).flatMap(p => {
         const paths = [...new Set([p.path, ...(p.repos || []).map(repo => repo.path)].filter(path => typeof path === 'string' && path))];
-        return paths.map(path => ({ id: `${p.id}:${path}`, name: `${p.label || p.name || p.id}${paths.length > 1 ? ` · ${path}` : ''}`, path, isNoProject: false }));
+        return paths.map(path => ({ id: `${p.id}:${path}`, name: `${p.label || p.name || p.id}${paths.length > 1 ? ` · ${path}` : ''}`, path, icon: p.icon || null, color: p.color || null, isNoProject: false }));
       });
       return { projects: [home, ...projects] };
     },
@@ -291,12 +291,13 @@ const CSS = `
 .sf-section{display:flex;flex-direction:column;flex:0 1 auto;max-height:22%;min-height:24px;overflow:hidden}.sf-section[data-populated=true][data-closed=false]{min-height:calc(24px + var(--sf-body-min))}.sf-section[data-section=active]{flex:1 1 0;max-height:none;min-height:var(--sf-body-min)}.sf-section[data-section=pinned][data-populated=true],.sf-section[data-section=active][data-populated=true]{min-height:var(--sf-body-min)}
 .sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:24px;min-height:24px;padding:3px 6px;border:0;background:transparent;color:var(--ui-text-tertiary);font-size:11px;text-align:left}.sf-count{margin-left:auto;color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums}
 .sf-row{position:relative;height:56px;flex-shrink:0;padding:0 10px;border-radius:5px}.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
-.sf-row[data-working=true]{opacity:.55}.sf-row[data-working=true]:hover,.sf-row[data-working=true]:focus-within{opacity:1}
+.sf-row[data-dimmed=true]{opacity:.55}.sf-row[data-dimmed=true]:hover,.sf-row[data-dimmed=true]:focus-within{opacity:1}
 .sf-open{display:flex;flex-direction:column;justify-content:center;gap:5px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:var(--ui-bg-quaternary);flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:none;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{display:flex}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
 .sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
 .sf-undo{display:flex;align-items:center;gap:6px}.sf-undo span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
+.sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}
 `;
 // Monochrome brand paths: Simple Icons 15.20.0 (CC0), fetched from its pinned GitHub tag.
 const PROVIDER_PATHS = {
@@ -307,7 +308,13 @@ const PROVIDER_PATHS = {
 function providerMark(provider) {
   const slug = typeof provider === 'string' ? provider.toLowerCase() : '';
   const path = PROVIDER_PATHS[slug === 'openai-codex' ? 'openai' : slug === 'gemini' ? 'google' : slug];
-  return path ? h('svg', { viewBox: '0 0 24 24', fill: 'currentColor', 'aria-hidden': true, 'data-provider-mark': slug }, h('path', { d: path })) : icon('CircleHelp', '?');
+  return path ? h('svg', { viewBox: '0 0 24 24', fill: 'currentColor', 'aria-hidden': true, 'data-provider-mark': slug }, h('path', { d: path })) : icon('HelpCircle', '?');
+}
+function projectMark(project) {
+  const value = typeof project?.icon === 'string' ? project.icon.trim() : '';
+  if (value && !/^[a-z][a-z0-9-]*$/.test(value)) return value;
+  const name = value || (project?.is_home || project?.isNoProject ? 'home' : 'folder');
+  return sdk.Codicon ? h(sdk.Codicon, { name, size: 13 }) : icon(name === 'home' ? 'House' : 'Folder', '◇');
 }
 function icon(name, fallback) {
   const local = { Archive: 'M3 3h18v4H3zM5 7v14h14V7M10 11h4', ArchiveRestore: 'M3 3h18v4H3zM5 7v14h14V7M12 17v-7M9 13l3-3 3 3', FolderPlus: 'M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2M12 10v7M8.5 13.5h7', SquarePen: 'M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7M10 14l1-4 9-9 3 3-9 9-4 1', ListFilter: 'M4 6h16M7 12h10M10 18h4' }[name];
@@ -357,7 +364,7 @@ function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus,
     else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
-  return h('div', { className: 'sf-row', 'data-current': active, 'data-working': row.section === 'working', 'data-session-id': row.key,
+  return h('div', { className: 'sf-row', 'data-current': active, 'data-working': row.section === 'working', 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
     h('button', { type: 'button', className: 'sf-open', ref: rowRef, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${row.title || 'Untitled session'}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
@@ -365,7 +372,7 @@ function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus,
       title: [row.title, row.cwd, row.git_branch, row.status === 'waiting' ? 'Waiting for approval or answer' : row.status].filter(Boolean).join('\n') },
       h('span', { className: 'sf-card-meta' },
         h('span', { className: 'sf-project' },
-          h('span', { className: 'sf-project-icon', 'aria-hidden': true }, typeof row.project?.icon === 'string' && row.project.icon ? row.project.icon : icon(row.project?.is_home ? 'House' : 'Folder', '◇')),
+          h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: row.project?.color || undefined } }, projectMark(row.project)),
           row.meta.pinned ? h('span', { className: 'sf-pin', 'aria-label': 'Pinned' }, icon('Pin', '♧')) : null,
           h('span', { className: 'sf-project-name' }, row.project?.name || 'Project unavailable')),
         attention || row.status === 'unknown' || row.woke || row.unread ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': attention ? 'Waiting for approval or answer' : row.status === 'unknown' ? 'Status unknown' : row.woke ? 'Snooze ended' : 'Unread' }, attention ? 'Waiting' : row.status === 'unknown' ? '?' : row.woke ? 'Woke' : '•') : null,
@@ -410,7 +417,8 @@ export function ProjectPicker({ controller, scope, close }) {
     entries.length > 8 ? h('input', { type: 'search', 'aria-label': 'Search projects', placeholder: 'Search projects', value: query, onChange: event => setQuery(event.target.value) }) : null,
     projects.isLoading ? h('div', { role: 'status' }, 'Loading projects…') : null,
     projects.isError ? h('div', { role: 'alert' }, projects.error.message, h(sdk.Button, { onClick: () => projects.refetch() }, 'Retry projects')) : null,
-    ...entries.filter(project => project.name.toLowerCase().includes(query.toLowerCase())).map(project => h(sdk.Button, { key: project.id, type: 'button', variant: 'ghost', disabled: busy, 'aria-label': `New session in ${project.name}`, onClick: () => void select(project) }, project.name)),
+    ...entries.filter(project => project.name.toLowerCase().includes(query.toLowerCase())).map(project => h(sdk.Button, { key: project.id, type: 'button', variant: 'ghost', className: 'sf-project-choice', disabled: busy, 'aria-label': `New session in ${project.name}`, onClick: () => void select(project) },
+      h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: project.color || undefined } }, projectMark(project)), h('span', { className: 'sf-project-name' }, project.name))),
     busy ? h('div', { role: 'status' }, 'Creating session…') : null,
     error ? h('div', { role: 'alert' }, error) : null,
     h(sdk.Button, { type: 'button', variant: 'ghost', onClick: close }, 'Cancel'));

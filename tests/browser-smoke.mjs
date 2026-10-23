@@ -31,6 +31,16 @@ try {
   check('all five shelves rendered', await page.locator('.sf-section').count() === 5);
   check('waiting approval remains Ready despite archival and pin metadata', await page.locator('section[aria-label="Ready"] [data-session-id="approval"]').count() === 1);
   check('Working is visually dimmed', Number(await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity)) < 1);
+  await page.mouse.move(1100, 850);
+  const workingOpacity = await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity);
+  for (const id of ['snoozed', 'archived']) {
+    const card = page.locator(`[data-session-id="${id}"]`);
+    check(`${id} dimmed exactly like Working`, await card.evaluate(el => getComputedStyle(el).opacity) === workingOpacity);
+    await card.hover();
+    check(`${id} returns to full opacity on hover`, await card.evaluate(el => getComputedStyle(el).opacity) === '1');
+    await page.mouse.move(1100, 850);
+    check(`${id} dims again when pointer leaves`, await card.evaluate(el => getComputedStyle(el).opacity) === workingOpacity);
+  }
   check('external native archive has no plugin metadata; legacy completion remains Ready', await page.evaluate(() => !window.hermesT3SidebarHarness.control.metadata.sessions.archived) && await page.locator('section[aria-label="Archived"] [data-session-id="archived"]').count() === 1 && await page.locator('section[aria-label="Ready"] [data-session-id="legacy"]').count() === 1);
   await mkdir(screenshotDir, { recursive: true });
   const design = page.locator('[data-session-id="design"]');
@@ -112,6 +122,13 @@ try {
   check('no user-visible legacy settlement words', !await page.locator('body').innerText().then(text => /\bsettle(?:d)?\b/i.test(text)));
   await page.getByRole('button', { name: 'New session', exact: true }).click();
   await page.getByRole('button', { name: 'New session in Home', exact: true }).waitFor();
+  check('new-session picker renders the Home glyph', await page.getByRole('button', { name: 'New session in Home', exact: true }).locator('[data-codicon="home"]').count() === 1);
+  const projectChoice = page.getByRole('button', { name: 'New session in Synthetic Sidebar', exact: true });
+  check('new-session picker renders the native project glyph, not its identifier', await projectChoice.locator('[data-codicon="tools"]').count() === 1 && await projectChoice.textContent() === 'Synthetic Sidebar');
+  check('project picker aligns icon before project name', await projectChoice.evaluate(el => {
+    const icon = el.querySelector('.sf-project-icon').getBoundingClientRect(), name = el.querySelector('.sf-project-name').getBoundingClientRect();
+    return icon.right <= name.left && Math.abs(icon.top + icon.height / 2 - name.top - name.height / 2) < 2;
+  }));
   await page.getByRole('button', { name: 'New session in Home', exact: true }).click();
   await page.getByText(/Home creation is unavailable:/).waitFor();
   check('Home shown but unavailable without session creation', !await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'requestProfile' && call[2] === 'session.create')));

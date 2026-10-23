@@ -347,6 +347,23 @@ test('card metadata uses native project, provider and token totals without model
   assert.equal(flow.compactTokens({ total_tokens: null, input_tokens: null, output_tokens: null }), '—');
 });
 
+test('native project icon identifiers render as Codicons while emoji and pin order survive', async () => {
+  mock.control.rows[1].project.icon = 'tools';
+  mock.control.rows[1].project.color = '#123456';
+  mock.control.rows[2].project = { name: 'Home', is_home: true, icon: null };
+  await mount();
+  assert.ok(row('design').querySelector('.sf-project-icon [data-codicon="tools"]'));
+  assert.equal(row('design').querySelector('.sf-project-icon').textContent, '');
+  assert.ok(row('readme').querySelector('.sf-project-icon [data-codicon="home"]'));
+  assert.deepEqual([...row('pinned').querySelector('.sf-project').children].map(el => el.className), ['sf-project-icon', 'sf-pin', 'sf-project-name']);
+});
+
+test('Working, Snoozed and Archived share dimming but Ready attention does not', async () => {
+  await mount();
+  for (const id of ['root', 'snoozed', 'archived']) assert.equal(row(id).dataset.dimmed, 'true', id);
+  for (const id of ['approval', 'design', 'pinned']) assert.equal(row(id).dataset.dimmed, 'false', id);
+});
+
 test('missing project/provider/tokens remain neutral even when model resembles a provider', async () => {
   Object.assign(mock.control.rows[1], { project: null, provider: null, model: 'openai/gpt-fixture', total_tokens: null, input_tokens: null, output_tokens: null });
   await mount(); const card = row('design');
@@ -370,11 +387,23 @@ test('Pinned absent when empty while Ready and all secondary categories remain',
 });
 
 test('public native tree always includes synthetic Home and expands multiple folder paths', async () => {
-  mock.control.projects = [{ id: 'p_multi', label: 'Multi', path: null, repos: [{ path: '/fixture/one' }, { path: '/fixture/two' }] }];
+  mock.control.projects = [{ id: 'p_multi', label: 'Multi', path: null, icon: 'tools', color: '#123456', repos: [{ path: '/fixture/one' }, { path: '/fixture/two' }] }];
   controller = flow.createController(mock.ctx); const result = await controller.projects(flow.captureScope());
   assert.deepEqual(result.projects[0], { id: '__no_project__', name: 'Home', path: null, isNoProject: true });
   assert.deepEqual(result.projects.slice(1).map(p => p.path), ['/fixture/one', '/fixture/two']);
+  assert.ok(result.projects.slice(1).every(p => p.icon === 'tools' && p.color === '#123456'));
   assert.equal(mock.calls.find(c => c[0] === 'requestProfile')[2], 'projects.tree');
+});
+
+test('new-session picker renders native project icons and Home without printing identifiers', async () => {
+  mock.control.projects = [{ id: 'p_infra', label: 'Infra', path: '/fixture/infra', icon: 'tools', color: '#123456' }];
+  await mount(); await click(button('New session'));
+  const infra = button('New session in Infra'), home = button('New session in Home');
+  assert.ok(infra.querySelector('.sf-project-icon [data-codicon="tools"]'));
+  assert.ok(home.querySelector('.sf-project-icon [data-codicon="home"]'));
+  assert.equal(infra.textContent, 'Infra');
+  assert.equal(home.textContent, 'Home');
+  assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.create'), false);
 });
 
 test('project picker explicitly rejects Home without creating a session and Add project explains unavailable', async () => {

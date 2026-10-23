@@ -115,6 +115,50 @@ class CardMetadata(unittest.TestCase):
 		self.assertIsNone(rows[1]["input_tokens"])
 		self.assertIsNone(rows[1]["total_tokens"])
 
+	def test_missing_provider_recovers_only_unambiguous_main_loop_billing(self):
+		with closing(SessionDB(self.db_path)) as db:
+			for sid in ("recorded", "mixed", "empty", "automatic", "explicit"):
+				db.create_session(sid, "cli", model_config={"provider": "anthropic"} if sid == "explicit" else None)
+			for sid in ("recorded", "mixed", "explicit"):
+				db.update_token_counts(sid, input_tokens=5, output_tokens=2, model="fixture-main", billing_provider="openai-codex")
+			db.record_auxiliary_usage("recorded", "vision", model="fixture-vision", billing_provider="anthropic", input_tokens=3)
+			db.update_token_counts("mixed", input_tokens=5, output_tokens=2, model="fixture-switch", billing_provider="anthropic")
+			db.update_token_counts("automatic", input_tokens=5, model="fixture-auto", billing_provider="auto")
+		before = self.db_path.read_bytes()
+		rows = {row["id"]: row for row in self.sessions()}
+		self.assertEqual(rows["recorded"]["provider"], "openai-codex")
+		self.assertEqual(rows["explicit"]["provider"], "anthropic")
+		for sid in ("mixed", "empty", "automatic"):
+			self.assertIsNone(rows[sid]["provider"])
+		self.assertEqual(self.db_path.read_bytes(), before)
+
+	def test_billing_fallback_rejects_conflicting_lineage_configuration(self):
+		with closing(SessionDB(self.db_path)) as db:
+			for prefix, provider in (("consistent", "openai-codex"), ("conflict", "anthropic")):
+				db.create_session(prefix + "-root", "cli", model_config={"provider": provider})
+				db.end_session(prefix + "-root", "compression")
+				db.create_session(prefix + "-tip", "cli", parent_session_id=prefix + "-root")
+				db.update_token_counts(prefix + "-tip", input_tokens=7, output_tokens=3, model="fixture-tip", billing_provider="openai-codex")
+		rows = {row["id"]: row for row in self.sessions()}
+		self.assertEqual(rows["consistent-tip"]["provider"], "openai-codex")
+		self.assertIsNone(rows["conflict-tip"]["provider"])
+
+	def test_billing_fallback_is_one_read_batch_and_degrades_on_missing_usage_table(self):
+		with closing(SessionDB(self.db_path)) as db:
+			for sid in ("one", "two", "three"):
+				db.create_session(sid, "cli")
+				db.update_token_counts(sid, input_tokens=3, model="fixture", billing_provider="openai-codex")
+		with closing(SessionDB(self.db_path, read_only=True)) as db:
+			queries = []
+			assert db._conn is not None
+			db._conn.set_trace_callback(queries.append)
+			rows = backend.card_rows(db, db.list_sessions_rich(compact_rows=True))
+			self.assertTrue(all(row["provider"] == "openai-codex" for row in rows))
+			self.assertEqual(sum("FROM session_model_usage" in sql for sql in queries), 1)
+		with closing(sqlite3.connect(":memory:")) as connection:
+			rows = backend.card_rows(SimpleNamespace(_conn=connection), [{"id": "legacy", "model": "openai/not-evidence"}])
+			self.assertIsNone(rows[0]["provider"])
+
 	def test_provider_only_accepts_explicit_strings(self):
 		for config in (None, [], "null", "42", {"provider": 7}, {"gateway_runtime": []}):
 			with self.subTest(config=config):
