@@ -6,12 +6,13 @@ A T3 Code-inspired replacement session sidebar for Hermes Desktop. It opens exis
 
 - **Ready:** headerless conversations ready for your attention. Pending approvals and questions remain visible here rather than disappearing into a background shelf.
 - **Working:** running jobs separated from attention items and visually subdued, with blue Working text. An idle parent also remains Working while its authoritative runtime snapshot reports running subagents; waiting for user input still takes priority.
-- **Snoozed:** conversations put aside until a chosen time, with presets and a custom date/time.
+- **Snoozed:** conversations put aside until a chosen time, with four presets and a custom date/time. The fourth preset is next Monday at 08:00 in the Desktop client's local time; on Monday this means the following Monday. Calendar arithmetic preserves 08:00 across daylight-saving changes.
 - **Archived:** Hermes’s real archived sessions, including conversations archived outside this plugin. Archive and Unarchive use native session archival; history is retained. The shelf is ordered by last activity, not an invented archival timestamp.
 - Headerless Pinned cards above Ready, two-line session cards, search, project filtering and hover-only Snooze/Archive actions. Category bodies scroll independently while secondary headers remain visible.
 - Working, Snoozed and Archived headings show a parenthesized session count, a divider and a right-aligned chevron. Fold preferences persist locally through Desktop restarts, separately for each source and profile. Searching temporarily reveals matching Working rows, but never automatically unfolds Snoozed or Archived; their matching counts remain available for explicit expansion.
 - Project glyphs have transparent backgrounds in both cards and the new-session picker. The picker closes through the normal popover dismissal without a Cancel button. Searches with no loaded matches show “No matching sessions”, never “All caught up”.
-- Reverse archival directly through Archive/Unarchive; these actions do not add an Undo banner. Snooze, restore and pin actions retain Undo.
+- Reverse actions through ordinary controls: Archive/Unarchive, Pin/Unpin and Restore to Ready. No action creates an Undo toast or button; Delete retains its confirmation modal.
+- Menu buttons stay highlighted until their popover closes. Snooze also keeps its hover controls visible and its anchor stable when the pointer leaves the card.
 - The pane tab is named **t3sidebar**; the plugin ID and storage namespace remain `hermes-t3sidebar`.
 - Cards show green **Done** for backend unread, orange **Woke** after snooze expiry until the thread is opened/read, and purple **Input** for a question or approval awaiting attention. Each has a leading status icon and a bold title; Working remains blue. Project names, glyphs and ordinary ages have stronger contrast while provider/token metadata stays subdued.
 - Expanded Archives receives a larger share of list height. Categories animate open/closed without moving their headers into the scroll bodies; reduced-motion preferences disable these transitions.

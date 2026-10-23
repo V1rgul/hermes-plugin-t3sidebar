@@ -150,9 +150,12 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
 }
 export function snoozePresets(now = Date.now()) {
   const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(9, 0, 0, 0);
+  // Calendar arithmetic preserves local 08:00 across daylight-saving changes.
+  const monday = new Date(now); monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7)); monday.setHours(8, 0, 0, 0);
   return [{ label: 'In 1 hour', wake_at: Math.floor(now / 1000) + 3600 },
     { label: 'In 3 hours', wake_at: Math.floor(now / 1000) + 10800 },
-    { label: 'Tomorrow at 9:00', wake_at: Math.floor(tomorrow.getTime() / 1000) }];
+    { label: 'Tomorrow at 9:00', wake_at: Math.floor(tomorrow.getTime() / 1000) },
+    { label: 'Next Monday at 8:00', wake_at: Math.floor(monday.getTime() / 1000) }];
 }
 export function parseLocalWake(value, now = Date.now()) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) throw new Error('Choose a local date and time.');
@@ -161,11 +164,6 @@ export function parseLocalWake(value, now = Date.now()) {
   if (!Number.isFinite(wake) || date.getFullYear() !== year || date.getMonth() + 1 !== month || date.getDate() !== day || date.getHours() !== hour || date.getMinutes() !== minute) throw new Error('That local time does not exist.');
   if (wake <= now) throw new Error('Choose a future time.');
   return Math.floor(wake / 1000);
-}
-export function inverseAction(action, before = { state: 'active', pinned: false }) {
-  if (action === 'pin' || action === 'unpin') return { action: before.pinned ? 'pin' : 'unpin' };
-  if (before.state === 'snoozed' && before.wake_at > Date.now() / 1000) return { action: 'snooze', wake_at: before.wake_at };
-  return { action: before.state === 'settled' ? 'settle' : 'restore' };
 }
 export function verifyAction(state, id, payload) {
   const item = state.sessions[id];
@@ -490,7 +488,7 @@ const CSS = `
 .sf *{box-sizing:border-box}.sf button,.sf input,.sf select{font:inherit}.sf button{cursor:pointer}.sf button:disabled{cursor:default;opacity:.4}
 .sf button:focus-visible,.sf input:focus-visible,.sf select:focus-visible{outline:2px solid var(--ui-accent);outline-offset:-2px}
 .sf-header{padding:6px 12px;display:flex;align-items:center;gap:5px;height:40px;flex-shrink:0}.sf-icon{display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;width:27px;height:27px;padding:4px;border:0;border-radius:4px;color:var(--ui-text-tertiary);background:transparent}
-.sf-icon:hover,.sf-row:hover,.sf-row:focus-within,.sf-section-toggle:hover{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
+.sf-icon:hover,.sf-icon[aria-expanded=true],.sf-row:hover,.sf-row:focus-within,.sf-row[data-menu-open=true],.sf-section-toggle:hover{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
 .sf-search{display:flex;align-items:center;gap:8px;flex:1;min-width:0;color:var(--ui-text-tertiary)}.sf-search svg{flex-shrink:0;width:18px;height:18px}
 .sf-search input{width:100%;min-width:0;padding:0;border:0;background:transparent;color:var(--ui-text-primary);outline:none}
 .sf-search input::-webkit-search-cancel-button{-webkit-appearance:none}.sf-search .sf-clear{width:20px;height:20px;padding:2px;visibility:visible;opacity:1}
@@ -507,8 +505,9 @@ const CSS = `
 .sf-row[data-working=true] .sf-time{color:var(--ui-blue,#0053fd)}
 .sf-open{display:flex;flex-direction:column;justify-content:center;gap:5px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
 .sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
+.sf-row[data-menu-open=true] .sf-hover{visibility:visible;opacity:1}.sf-row[data-menu-open=true] .sf-provider,.sf-row[data-menu-open=true] .sf-token,.sf-row[data-menu-open=true] .sf-time{visibility:hidden}.sf-row[data-dimmed=true][data-menu-open=true]{opacity:1}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
-.sf-undo{display:flex;align-items:center;gap:6px}.sf-undo span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
+.sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}
 .sf-menu>div:not(.sf-menu-title),.sf-menu form{display:flex;flex-direction:column;gap:4px}
@@ -620,7 +619,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
     else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
-  return h('div', { className: 'sf-row', 'data-current': active, 'data-has-draft': draft.data === true && !draft.isError, 'data-working': row.section === 'working', 'data-unread': row.unread === true || row.woke || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
+  return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': draft.data === true && !draft.isError, 'data-working': row.section === 'working', 'data-unread': row.unread === true || row.woke || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
     h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${sessionTitle(row)}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
@@ -696,7 +695,7 @@ export function ProjectPicker({ controller, scope, close }) {
 function ScopedSidebar({ ctx, controller, scope }) {
   const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false), [deleteTarget, setDeleteTarget] = useState(null);
-  const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [undo, setUndo] = useState(null), [actionError, setActionError] = useState('');
+  const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [actionError, setActionError] = useState('');
   const preferenceKey = foldStorageKey(scope);
   useEffect(() => {
     try { ctx.storage.set(preferenceKey, collapsed); } catch (_) { /* Folding still works when persistence is unavailable. */ }
@@ -763,20 +762,15 @@ function ScopedSidebar({ ctx, controller, scope }) {
     });
   }, [activeId, activeOwner, metadata.data, metadata.isError, mutation.isPending, rows, controller, scope]);
   const refresh = () => { try { controller.check(scope); void client.invalidateQueries({ queryKey: key }); } catch (_) { /* old pane */ } };
-  const mutate = useCallback(async (row, input, isUndo = false) => {
+  const mutate = useCallback(async (row, input) => {
     try {
       controller.check(scope);
       if (latest.current.disabled) throw new Error('hermes-t3sidebar backend unavailable or another change is saving.');
       const { advance, ...payload } = input;
-      const native = payload.action === 'archive' || payload.action === 'unarchive';
-      if (native) setUndo(null);
-      const before = latest.current.metadata.sessions[row.key] || { state: 'active', pinned: false };
-      if (!isUndo && ['archive', 'snooze'].includes(payload.action) && row.status !== 'idle') throw new Error('Archive and snooze require confirmed idle status.');
+      if (['archive', 'snooze'].includes(payload.action) && row.status !== 'idle') throw new Error('Archive and snooze require confirmed idle status.');
       if (row._liveOnly) throw new Error('This session has no confirmed stored history yet.');
       setActionError('');
       await mutation.mutateAsync({ id: row.key, payload }); controller.check(scope);
-      if (!isUndo && !native) setUndo({ row, payload: inverseAction(payload.action, before), label: payload.action === 'snooze' ? 'Snoozed' : payload.action === 'restore' ? 'Restored' : payload.action === 'pin' ? 'Pinned' : 'Unpinned' });
-      else setUndo(null);
       if (advance) {
         const next = [...latest.current.sections.active, ...latest.current.sections.pinned].find(item => item.key !== row.key && latest.current.visible.some(visible => visible.key === item.key));
         if (next) await controller.open(scope, next); else await controller.newChat(scope);
@@ -857,11 +851,10 @@ function ScopedSidebar({ ctx, controller, scope }) {
       !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,
-    undo ? h('div', { className: 'sf-note sf-undo', role: 'status' }, h('span', null, `${undo.label} · ${sessionTitle(undo.row)}`), h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: latest.current.disabled, onClick: () => void mutate(undo.row, undo.payload, true) }, 'Undo'), h(IconButton, { label: 'Dismiss undo', name: 'X', glyph: '×', onClick: () => setUndo(null) })) : null,
     typeof sdk.ConfirmDialog === 'function' ? h(sdk.ConfirmDialog, { open: !!deleteTarget, onClose: () => setDeleteTarget(null),
       title: 'Delete session?', description: `Delete “${deleteTarget ? sessionTitle(deleteTarget) : ''}”? Stored history will be permanently removed. This cannot be undone.`,
       confirmLabel: 'Delete', busyLabel: 'Deleting…', doneLabel: 'Session deleted', destructive: true,
-      onConfirm: async () => { controller.check(scope); await controller.delete(scope, deleteTarget); controller.check(scope); setUndo(null); } }) : null);
+      onConfirm: async () => { controller.check(scope); await controller.delete(scope, deleteTarget); controller.check(scope); } }) : null);
 }
 export default {
   id: 'hermes-t3sidebar', name: 'hermes-t3sidebar', defaultEnabled: false,

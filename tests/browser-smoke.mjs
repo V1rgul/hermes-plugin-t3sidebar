@@ -22,7 +22,32 @@ const checks = [];
 const check = (label, condition) => { assert.ok(condition, label); checks.push(label); console.log(`PASS ${label}`); };
 try {
   browser = await chromium.launch({ executablePath: await executable(), headless: true, args: ['--no-sandbox'] });
-  const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+  const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1, timezoneId: 'Europe/Paris' });
+  const noUndo = async () => !await page.getByRole('button', { name: /^(?:Undo|Dismiss undo)$/, includeHidden: true }).count() && !await page.locator('.sf-undo').count();
+  const buttonStyle = locator => locator.evaluate(el => {
+    const style = getComputedStyle(el);
+    return { background: style.backgroundColor, color: style.color };
+  });
+  const checkPersistentTrigger = async (label, dialogLabel) => {
+    const trigger = page.getByRole('button', { name: label, exact: true });
+    await page.mouse.move(1100, 850);
+    const normal = await buttonStyle(trigger);
+    await trigger.hover();
+    const hovered = await buttonStyle(trigger);
+    check(`${label} hover uses a visible background and primary text`, hovered.background !== normal.background && await trigger.evaluate(el => {
+      const probe = document.createElement('span'); probe.style.color = 'var(--ui-text-primary)'; el.append(probe);
+      const primary = getComputedStyle(probe).color; probe.remove();
+      return getComputedStyle(el).color === primary;
+    }));
+    await trigger.click();
+    const dialog = page.getByRole('dialog', { name: dialogLabel, exact: true });
+    await dialog.waitFor();
+    await page.mouse.move(1100, 850);
+    check(`${label} retains hover background and primary text while its popover is open`, await trigger.getAttribute('aria-expanded') === 'true' && JSON.stringify(await buttonStyle(trigger)) === JSON.stringify(hovered));
+    await dialog.getByRole('button', { name: 'Close session actions', exact: true }).click();
+    await page.mouse.move(1100, 850);
+    check(`${label} returns to normal after closing its popover`, await trigger.getAttribute('aria-expanded') === 'false' && JSON.stringify(await buttonStyle(trigger)) === JSON.stringify(normal));
+  };
   await page.emulateMedia({ reducedMotion: 'reduce' });
   page.setDefaultTimeout(8000);
   page.on('pageerror', error => errors.push(error.message));
@@ -120,6 +145,9 @@ try {
   await design.hover();
   check('hover reveals clock Snooze and labeled Archive', await snooze.isVisible() && await archive.isVisible() && await archive.textContent() === 'Archive');
   await page.screenshot({ path: join(screenshotDir, 'hovered.png'), fullPage: true });
+  await snooze.hover();
+  const snoozeHoverStyle = await buttonStyle(snooze);
+  const rowHoverBackground = await design.evaluate(el => getComputedStyle(el).backgroundColor);
   await snooze.click();
   await page.getByRole('dialog', { name: 'Snooze session', exact: true }).waitFor();
   const snoozeDialog = page.getByRole('dialog', { name: 'Snooze session', exact: true });
@@ -130,22 +158,57 @@ try {
   const anchorAfter = await snoozeAnchor.evaluate(el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; });
   check('open Snooze retains its measurable anchor after pointer leaves sidebar', JSON.stringify(anchorAfter) === JSON.stringify(anchorBefore) && anchorAfter.width > 0 && anchorAfter.height > 0);
   check('open Snooze stays positioned after pointer leaves sidebar', JSON.stringify(await snoozeDialog.boundingBox()) === JSON.stringify(menuBefore));
-  check('open Snooze does not force off-hover card buttons visible', !await snooze.isVisible() && !await archive.isVisible());
+  check('open Snooze keeps card actions visible and trigger highlighted after pointer leaves', await snooze.isVisible() && await archive.isVisible() && await snooze.getAttribute('aria-expanded') === 'true' && JSON.stringify(await buttonStyle(snooze)) === JSON.stringify(snoozeHoverStyle) && await design.locator('.sf-hover').evaluate(el => getComputedStyle(el).opacity === '1'));
+  check('open Snooze retains row highlight and hides metadata after pointer leaves', await design.getAttribute('data-menu-open') === 'true' && await design.evaluate(el => getComputedStyle(el).backgroundColor) === rowHoverBackground && await design.locator('.sf-provider,.sf-token,.sf-time').evaluateAll(els => els.every(el => getComputedStyle(el).visibility === 'hidden')));
   await design.hover();
   check('Snooze does not jump when pointer re-enters sidebar', JSON.stringify(await snoozeDialog.boundingBox()) === JSON.stringify(menuBefore));
+  await snoozeDialog.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  await page.mouse.move(1100, 850);
+  check('closing Snooze clears row and trigger open state and hides actions', await design.getAttribute('data-menu-open') === 'false' && await snoozeAnchor.getAttribute('aria-expanded') === 'false' && !await snooze.isVisible() && !await archive.isVisible() && await design.locator('.sf-provider,.sf-token,.sf-time').evaluateAll(els => els.every(el => getComputedStyle(el).visibility === 'visible')));
+  await design.hover(); await snooze.click();
   check('Snooze menu omits redundant history/agent footer', !await snoozeDialog.innerText().then(text => /History kept|never stops the agent/i.test(text)));
   check('Snooze menu omits bottom chosen-time text button', !await snoozeDialog.getByRole('button', { name: 'Snooze until chosen time', exact: true }).count());
   await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
-  check('hover Snooze saves the selected time', true);
-  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  check('hover Snooze saves the selected time without any Undo toast', await noUndo());
+  await design.click({ button: 'right' });
+  await page.getByRole('button', { name: 'Restore to Ready', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
+  check('context Restore returns the snoozed session to Ready without any Undo toast', await noUndo());
+  await design.click({ button: 'right' });
+  await page.getByRole('button', { name: 'Pin', exact: true }).click();
+  await page.locator('section[aria-label="Pinned"] [data-session-id="design"]').waitFor();
+  check('Pin moves the session to Pinned without any Undo toast', await noUndo());
+  await design.click({ button: 'right' });
+  await page.getByRole('button', { name: 'Unpin', exact: true }).click();
+  await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
+  check('Unpin returns the session to Ready without any Undo toast', await noUndo());
+  await design.hover(); await snooze.click();
+  check('Next Monday at 8:00 is the fourth Snooze preset', (await snoozeDialog.getByRole('button', { name: /^Snooze · / }).allTextContents()).length === 4 && await snoozeDialog.getByRole('button', { name: /^Snooze · / }).nth(3).textContent() === 'Snooze · Next Monday at 8:00');
+  const expectedMonday = await page.evaluate(() => {
+    const monday = new Date();
+    monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7));
+    monday.setHours(8, 0, 0, 0);
+    return monday.getTime() / 1000;
+  });
+  const mondayCallStart = await page.evaluate(() => window.hermesT3SidebarHarness.calls.length);
+  await snoozeDialog.getByRole('button', { name: 'Snooze · Next Monday at 8:00', exact: true }).click();
+  await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
+  check('fourth Snooze preset sends next calendar Monday 08:00 in client local time and lands in Snoozed without a toast', await page.evaluate(({ expectedMonday, mondayCallStart }) => {
+    const fixture = window.hermesT3SidebarHarness;
+    return fixture.calls.slice(mondayCallStart).some(call => call[0] === 'rest' && call[1] === '/sessions/design' && call[2]?.body?.action === 'snooze' && call[2].body.wake_at === expectedMonday) && fixture.control.metadata.sessions.design.wake_at === expectedMonday;
+  }, { expectedMonday, mondayCallStart }) && await noUndo());
+  await design.click({ button: 'right' });
+  await page.getByRole('button', { name: 'Restore to Ready', exact: true }).click();
+  await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
+  check('restoring the Monday snooze has no Undo toast', await noUndo());
   await design.hover();
   await archive.click();
   await page.locator('section[aria-label="Archived"] [data-session-id="design"]').waitFor();
-  check('hover Archive saves without a redundant Undo banner', !await page.getByRole('button', { name: 'Undo', exact: true }).count());
+  check('hover Archive saves without a redundant Undo banner', await noUndo());
   await design.hover(); await design.getByRole('button', { name: 'Unarchive session', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
+  check('hover Unarchive restores Ready without an Undo banner', await noUndo());
   await page.mouse.move(1100, 850);
   check('buttons hide again after pointer leaves', !await snooze.isVisible() && !await archive.isVisible());
   await page.screenshot({ path: join(screenshotDir, 'frontend.png'), fullPage: true });
@@ -154,6 +217,8 @@ try {
   check('actions popover is visible outside sidebar scroll clipping', await page.getByRole('dialog').evaluate(el => { const rect = el.getBoundingClientRect(); return rect.width > 180 && rect.right <= innerWidth && rect.bottom <= innerHeight && el.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + 30)); }));
   await page.screenshot({ path: join(screenshotDir, 'actions.png'), fullPage: true });
   const context = page.getByRole('dialog', { name: 'Session actions', exact: true });
+  await page.mouse.move(1100, 850);
+  check('open row context menu retains row highlight, actions and hidden metadata off hover', await design.getAttribute('data-menu-open') === 'true' && await design.evaluate(el => getComputedStyle(el).backgroundColor) === rowHoverBackground && await snooze.isVisible() && await archive.isVisible() && await design.locator('.sf-provider,.sf-token,.sf-time').evaluateAll(els => els.every(el => getComputedStyle(el).visibility === 'hidden')));
   check('context menu omits archive and snooze actions', !await context.getByRole('button', { name: /^(?:Unarchive|Archive|Snooze)/ }).count());
   check('context menu offers Rename, Copy session ID and row project filter', await context.getByRole('button', { name: 'Rename', exact: true }).count() === 1 && await context.getByRole('button', { name: 'Copy session ID', exact: true }).count() === 1 && await context.getByRole('button', { name: /^Filter by / }).count() === 1);
   check('stored-only Rename is disabled with an explanation', await context.getByRole('button', { name: 'Rename', exact: true }).isDisabled() && /live|runtime/i.test(await context.innerText()));
@@ -163,6 +228,7 @@ try {
   await context.getByRole('button', { name: /^Filter by / }).click();
   check('row project shortcut filters without grouping or changing native workspace', !await page.locator('[data-session-id="readme"]').count() && await page.locator('[data-session-id="design"]').count() === 1 && !await page.locator('.sf-group').count());
   check('active project filter replaces toolbar filter glyph with project icon', await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'true' && await page.getByRole('button', { name: 'Filter sessions', exact: true }).innerText() === '◇');
+  await checkPersistentTrigger('Filter sessions', 'Session filters');
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   const filters = page.getByRole('dialog', { name: 'Session filters', exact: true });
   check('one filter click exposes project choices directly without intermediate select', await filters.getByRole('button', { name: 'All projects', exact: true }).isVisible() && await filters.getByRole('button', { name: 'Filter by docs', exact: true }).isVisible() && !await filters.getByRole('combobox').count());
@@ -171,17 +237,18 @@ try {
   check('All projects clears active icon and closes filter picker', !await filters.count() && await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'false');
   await design.hover(); await archive.click();
   await page.locator('section[aria-label="Archived"] [data-session-id="design"]').waitFor();
-  check('archival and server-readback rendered', true);
+  check('archival and server-readback rendered without an Undo toast', await noUndo());
   await design.hover(); await design.getByRole('button', { name: 'Unarchive session', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
-  check('Archived list Unarchive restores Ready without an Undo banner', !await page.getByRole('button', { name: 'Undo', exact: true }).count());
+  check('Archived list Unarchive restores Ready without an Undo banner', await noUndo());
   await design.hover(); await snooze.click();
   await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
-  check('direct Snooze control and context Restore remain available', true);
+  check('direct Snooze control remains available without an Undo toast', await noUndo());
   await page.locator('[data-session-id="design"]').click({ button: 'right' });
   await page.getByRole('button', { name: 'Restore to Ready', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
+  check('context Restore remains available without an Undo toast', await noUndo());
   await page.getByRole('searchbox').fill('release');
   await page.waitForFunction(() => !document.querySelector('[data-session-id="design"]'));
   check('search filters real React rows', await page.locator('[data-session-id="readme"]').count() === 1);
@@ -200,11 +267,11 @@ try {
   check('missing backend disables mutation but preserves browsing', await page.locator('[data-session-id="design"] [aria-label="Archive session"]').isDisabled());
   await page.getByRole('button', { name: 'Restore mock backend' }).click();
   await page.locator('[data-session-id="design"] [aria-label="Archive session"]').waitFor({ state: 'attached' });
-  if (await page.getByRole('button', { name: 'Dismiss undo', exact: true }).count()) await page.getByRole('button', { name: 'Dismiss undo', exact: true }).click();
+
   await page.evaluate(() => { window.hermesT3SidebarHarness.control.dropArchiveWrite = true; });
   await design.hover(); await archive.click();
   await page.getByRole('alert').filter({ hasText: 'did not confirm this native archive change' }).waitFor();
-  check('dropped native write stays Ready, reports failed readback, and creates no Undo', await page.locator('section[aria-label="Ready"] [data-session-id="design"]').count() === 1 && !await page.getByRole('button', { name: 'Undo', exact: true }).count());
+  check('dropped native write stays Ready, reports failed readback, and creates no Undo', await page.locator('section[aria-label="Ready"] [data-session-id="design"]').count() === 1 && await noUndo());
   await page.evaluate(() => { window.hermesT3SidebarHarness.control.dropArchiveWrite = false; });
   await page.getByRole('button', { name: 'Simulate runtime failure' }).click();
   await page.getByText(/Runtime status unavailable/).waitFor();
@@ -213,15 +280,16 @@ try {
   check('native archived Unarchive remains enabled during runtime outage; Snooze absent', !await page.locator('[data-session-id="archived"] [aria-label="Unarchive session"]').isDisabled() && !await page.locator('[data-session-id="archived"] [aria-label="Snooze session"]').count());
   await page.locator('[data-session-id="archived"] [aria-label="Unarchive session"]').click();
   await page.locator('section[aria-label="Ready"] [data-session-id="archived"]').waitFor();
-  check('Unarchive during runtime outage has no Undo banner', !await page.getByRole('button', { name: 'Undo', exact: true }).count());
+  check('Unarchive during runtime outage has no Undo banner', await noUndo());
   await page.getByRole('button', { name: 'Restore runtime status', exact: true }).click();
   await page.locator('[data-session-id="archived"] [aria-label="Archive session"]').waitFor({ state: 'attached' });
   await page.waitForFunction(() => !document.querySelector('[data-session-id="archived"] [aria-label="Archive session"]').disabled);
   await page.locator('[data-session-id="archived"]').hover();
   await page.locator('[data-session-id="archived"] [aria-label="Archive session"]').click();
   await page.locator('section[aria-label="Archived"] [data-session-id="archived"]').waitFor();
-  check('native archival remains available after runtime recovers', true);
+  check('native archival remains available after runtime recovers without an Undo toast', await noUndo());
   check('no user-visible legacy settlement words', !await page.locator('body').innerText().then(text => /\bsettle(?:d)?\b/i.test(text)));
+  await checkPersistentTrigger('New session', 'New session project');
   await page.getByRole('button', { name: 'New session', exact: true }).click();
   await page.getByRole('button', { name: 'New session in Synthetic Sidebar', exact: true }).waitFor();
   check('project picker has no Cancel button', !await page.getByRole('button', { name: 'Cancel', exact: true }).count());
@@ -257,7 +325,7 @@ try {
   }));
   await design.locator('.sf-open').click();
   await design.locator('.sf-status[data-status="woke"]').waitFor({ state: 'detached' });
-  check('reading acknowledges exact wake marker without a new Undo banner', await page.evaluate(() => window.hermesT3SidebarHarness.control.metadata.sessions.design.woke_at === null) && !await page.getByRole('button', { name: 'Undo', exact: true }).count());
+  check('reading acknowledges exact wake marker without a new Undo banner', await page.evaluate(() => window.hermesT3SidebarHarness.control.metadata.sessions.design.woke_at === null) && await noUndo());
   const ageBeforeReopen = await design.locator('.sf-time').textContent();
   await design.locator('.sf-open').click();
   check('opening a thread does not replace its conversation age with runtime resume time', await design.locator('.sf-time').textContent() === ageBeforeReopen && ageBeforeReopen !== 'now');
@@ -347,7 +415,7 @@ try {
   await page.locator('section[aria-label="Ready"] [data-session-id="synthetic-page-archive-500"]').waitFor();
   await oldArchive.hover(); await oldArchive.getByRole('button', { name: 'Archive session', exact: true }).click();
   await page.locator('section[aria-label="Archived"] [data-session-id="synthetic-page-archive-500"]').waitFor();
-  check('501st archive Unarchive and rearchive re-read both shelves without banners', !await page.getByRole('button', { name: 'Undo', exact: true }).count());
+  check('501st archive Unarchive and rearchive re-read both shelves without banners', await noUndo());
   // Reset into large labeled synthetic data, never a live history.
   await page.evaluate(() => window.hermesT3SidebarHarness.loadDenseFixtures());
   await page.locator('[data-session-id="synthetic-active-000"]').waitFor();
@@ -438,10 +506,9 @@ try {
   }
   await page.evaluate(() => window.hermesT3SidebarHarness.loadDenseFixtures());
   await page.waitForFunction(() => document.querySelector('[data-section="working"]')?.querySelectorAll('.sf-row').length === 20);
-  // Banners consume real pane height: category headers must survive that reduction.
-  for (const banner of ['none', 'undo', 'undo-error']) {
-    const withUndo = banner !== 'none';
-    if (banner === 'undo-error') {
+  // Errors consume real pane height: category headers must survive that reduction.
+  for (const banner of ['none', 'error']) {
+    if (banner === 'error') {
       await page.evaluate(() => { window.hermesT3SidebarHarness.control.archiveError = true; });
       const card = page.locator('[data-session-id="synthetic-active-001"]');
       await card.hover();
@@ -449,15 +516,7 @@ try {
       await page.getByRole('alert').filter({ hasText: 'fixture archive RPC unavailable' }).waitFor();
       await page.evaluate(() => { window.hermesT3SidebarHarness.control.archiveError = false; });
     }
-    if (banner === 'undo') {
-      await page.locator('.harness-sidebar').evaluate(el => { el.style.height = '400px'; });
-      await page.locator('.sf-section-body').evaluateAll(els => els.forEach(el => { el.scrollTop = 0; }));
-      const card = page.locator('[data-session-id="synthetic-active-000"]');
-      await card.hover();
-      await card.getByRole('button', { name: 'Snooze session', exact: true }).click();
-      await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
-      await page.getByRole('button', { name: 'Undo', exact: true }).waitFor();
-    }
+
     for (const height of [300, 350, 400]) {
       await page.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
       const geometry = await page.locator('.sf-scroll').evaluate(list => {
@@ -474,10 +533,11 @@ try {
           })
         };
       });
-      check(`${height}px${withUndo ? ' with Undo' : ''}${banner === 'undo-error' ? ' and error' : ''}: headers and complete scroll bodies fit without outer clipping`, geometry.fits && geometry.headers && geometry.bodies);
-      if (height === 300 && banner === 'undo-error') await page.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, 'short-300-undo-error.png') });
+      check(`${height}px${banner === 'error' ? ' with error' : ''}: headers and complete scroll bodies fit without outer clipping`, geometry.fits && geometry.headers && geometry.bodies);
+      check(`${height}px ${banner}: no Undo or dismiss-Undo controls`, await noUndo());
+      if (height === 300 && banner === 'error') await page.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, 'short-300-error.png') });
     }
   }
   check('no browser page errors', errors.length === 0);
-  console.log(`Browser smoke: ${checks.length} checks passed; screenshots ${screenshotDir}/{frontend,hovered,actions,dense-400,dense-650,short-300-undo-error}.png`);
+  console.log(`Browser smoke: ${checks.length} checks passed; screenshots ${screenshotDir}/{frontend,hovered,actions,dense-400,dense-650,short-300-error}.png`);
 } finally { await browser?.close(); server.close(); }

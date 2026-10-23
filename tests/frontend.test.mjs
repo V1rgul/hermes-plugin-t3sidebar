@@ -170,7 +170,7 @@ test('relative timestamps and local future snooze validation', () => {
   assert.throws(() => flow.parseLocalWake('2029-02-30T12:00', 0), /does not exist/);
   assert.throws(() => flow.parseLocalWake('2020-01-01T12:00'), /future/);
   assert.throws(() => flow.parseLocalWake('invalid'), /Choose/);
-  const presets = flow.snoozePresets(new Date('2026-10-23T17:00:00').getTime()); assert.equal(presets.length, 3);
+  const presets = flow.snoozePresets(new Date('2026-10-23T17:00:00').getTime()); assert.equal(presets.length, 4);
   assert.equal(new Date(presets[2].wake_at * 1000).getHours(), 9);
 });
 
@@ -329,9 +329,49 @@ test('card Snooze opens time choices and confirms organization without opening t
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
   assert.equal($('[role=dialog]'), null);
   assert.equal(mock.calls.some(call => call[0] === 'open'), false);
-  await click(button('Undo'));
+  assert.equal(button('Undo'), undefined); assert.equal($('.sf-undo'), null);
+  await click(button('Actions for Sidebar layout')); await click(button('Restore to Ready'));
   assert.equal(row('design').closest('section'), shelf('Ready'));
   assert.equal(row('approval').querySelector('[aria-label="Snooze session"]').disabled, true);
+});
+
+test('fourth snooze option persists next Monday at 08:00 without a toast or opening a session', async () => {
+  await mount();
+  const wake = flow.snoozePresets()[3].wake_at;
+  await click(row('design').querySelector('[aria-label="Snooze session"]'));
+  assert.deepEqual([...$('[role=dialog]').querySelectorAll('button')].filter(node => node.textContent.startsWith('Snooze · ')).map(node => node.textContent),
+    ['Snooze · In 1 hour', 'Snooze · In 3 hours', 'Snooze · Tomorrow at 9:00', 'Snooze · Next Monday at 8:00']);
+  await click(button('Snooze · Next Monday at 8:00'));
+  assert.equal(mock.control.metadata.sessions.design.wake_at, wake);
+  assert.equal(row('design').closest('section'), shelf('Snoozed'));
+  assert.equal($('[role=dialog]'), null); assert.equal($('.sf-undo'), null);
+  assert.equal(button('Undo'), undefined); assert.equal(button('Dismiss undo'), undefined);
+  assert.equal(mock.calls.some(call => call[0] === 'open'), false);
+});
+
+test('menu triggers and their owning card retain open state until dismissal or successful action', async () => {
+  await mount();
+  for (const label of ['Filter sessions', 'New session']) {
+    const trigger = button(label);
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+    await click(trigger); assert.equal(trigger.getAttribute('aria-expanded'), 'true');
+    await act(async () => $('[role=dialog]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    assert.equal(trigger.getAttribute('aria-expanded'), 'false');
+  }
+  const trigger = row('design').querySelector('[aria-label="Snooze session"]');
+  await click(trigger);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'true'); assert.equal(row('design').dataset.menuOpen, 'true');
+  mock.control.dropWrite = true;
+  await click(button('Snooze · In 1 hour'));
+  assert.match($('[role=alert]').textContent, /did not confirm/);
+  assert.equal(trigger.getAttribute('aria-expanded'), 'true'); assert.equal(row('design').dataset.menuOpen, 'true');
+  mock.control.dropWrite = false;
+  await click(button('Close session actions'));
+  assert.equal(trigger.getAttribute('aria-expanded'), 'false'); assert.equal(row('design').dataset.menuOpen, 'false');
+  await click(button('Actions for Sidebar layout'));
+  assert.equal(row('design').dataset.menuOpen, 'true');
+  await click(button('Pin'));
+  assert.equal(row('design').dataset.menuOpen, 'false');
 });
 
 test('React archives and unarchives without Undo; archive-and-advance opens next', async () => {
@@ -441,7 +481,8 @@ test('confirmed empty cards use New session consistently and retain genuine proj
   }
   await click(fresh.querySelector('[aria-label="Actions for New session"]'));
   assert.equal($('[role=dialog] .sf-menu-title').textContent, 'New session');
-  await click(button('Pin')); assert.match($('.sf-undo').textContent, /Pinned · New session/);
+  await click(button('Pin')); assert.equal(row('empty').closest('section'), shelf('Pinned'));
+  assert.equal($('.sf-undo'), null); assert.equal(button('Undo'), undefined);
   Object.assign(mock.control.rows[0], { message_count: 1, title: 'First task', preview: 'A real message' }); await refresh();
   assert.equal(row('empty').querySelector('.sf-row-title').textContent, 'First task');
 });
@@ -494,8 +535,8 @@ test('scope change after POST prevents wrong-source readback or cache publicatio
   assert.deepEqual(paths, ['/sessions/design']); assert.equal(mock.queryClient.getQueryData([...flow.scopeKey(original), 'metadata']), undefined);
 });
 
-test('React route switch clears undo and scoped metadata; no cross-source cache collision', async () => {
-  await mount(); await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Snooze · In 1 hour')); assert.ok(button('Undo'));
+test('React route switch resets scoped metadata without Undo or cross-source cache collision', async () => {
+  await mount(); await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Snooze · In 1 hour')); assert.equal(button('Undo'), undefined);
   await act(async () => { mock.control.metadata = { version: 1, sessions: {} }; mock.switchScope('source-b', 'default'); }); await tick(); await tick();
   assert.equal(button('Undo'), undefined); assert.equal(row('design').closest('section'), shelf('Ready'));
   const keys = mock.queryClient.getQueryCache().getAll().map(q => q.queryKey); assert.ok(keys.some(key => key[1] === 'source-b'));
@@ -884,16 +925,16 @@ test('backend unread shows Done and clears on successful native open; Input and 
   assert.equal(row('readme').dataset.unread, 'false');
 });
 
-test('Woke survives remount until read, while pin Undo remains available after acknowledgment', async () => {
+test('Woke survives remount until read; pin and acknowledgment create no Undo', async () => {
   const wake = Math.floor(Date.now() / 1000) - 60;
   mock.control.metadata.sessions.readme = { state: 'active', pinned: false, woke_at: wake, updated_at: wake };
   await mount(); assert.equal(row('readme').querySelector('.sf-status').dataset.status, 'woke');
   await remount(); assert.equal(row('readme').querySelector('.sf-status').dataset.status, 'woke');
-  await click(button('Actions for Sidebar layout')); await click(button('Pin')); assert.ok(button('Undo'));
+  await click(button('Actions for Sidebar layout')); await click(button('Pin')); assert.equal(button('Undo'), undefined);
   await click(row('readme').querySelector('.sf-open'));
   assert.equal(mock.control.metadata.sessions.readme.woke_at, null);
   assert.equal(row('readme').querySelector('.sf-status'), null);
-  assert.ok(button('Undo'));
+  assert.equal(button('Undo'), undefined); assert.equal($('.sf-undo'), null);
   assert.equal(mock.calls.filter(call => call[0] === 'rest' && call[2]?.body?.action === 'ack_wake').length, 1);
 });
 
@@ -1253,35 +1294,35 @@ test('shared actions omit obsolete footer; picker omits Cancel; hidden card cont
   await click(button('New session')); assert.equal(button('Cancel'), undefined);
 });
 
-test('archive and unarchive clear previous pin Undo even when native readback fails', async () => {
+test('pin, archive and unarchive create no Undo even when native readback fails', async () => {
   await mount();
   for (const id of ['design', 'archived']) {
     await click(button('Actions for Sidebar layout')); await click(button(mock.control.metadata.sessions.design?.pinned ? 'Unpin' : 'Pin'));
-    assert.ok(button('Undo'));
+    assert.equal(button('Undo'), undefined);
     await click(row(id).querySelector(`[aria-label="${id === 'design' ? 'Archive' : 'Unarchive'} session"]`));
     assert.equal(button('Undo'), undefined);
   }
-  await click(button('Actions for Sidebar layout')); await click(button('Pin')); assert.ok(button('Undo'));
+  await click(button('Actions for Sidebar layout')); await click(button('Pin')); assert.equal(button('Undo'), undefined);
   mock.control.archiveReadError = true;
   await click(row('design').querySelector('[aria-label="Unarchive session"]'));
   assert.equal(button('Undo'), undefined); assert.match($('[role=alert]').textContent, /unavailable/);
 });
 
-test('pin and Restore retain exact Undo behavior; archiving clears a stale snooze Undo', async () => {
+test('pin, snooze and restore are reversed through ordinary actions without any Undo UI', async () => {
   await mount();
+  const noUndo = () => { assert.equal(button('Undo'), undefined); assert.equal(button('Dismiss undo'), undefined); assert.equal($('.sf-undo'), null); };
   await click(button('Actions for Sidebar layout')); await click(button('Pin'));
-  assert.equal(row('design').closest('section'), shelf('Pinned'));
-  await click(button('Undo')); assert.equal(row('design').closest('section'), shelf('Ready'));
+  assert.equal(row('design').closest('section'), shelf('Pinned')); noUndo();
+  await click(button('Actions for Sidebar layout')); await click(button('Unpin'));
+  assert.equal(row('design').closest('section'), shelf('Ready')); noUndo();
   await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Snooze · In 1 hour'));
-  const wake = mock.control.metadata.sessions.design.wake_at;
+  assert.equal(row('design').closest('section'), shelf('Snoozed')); noUndo();
   await click(button('Actions for Sidebar layout')); await click(button('Restore to Ready'));
-  assert.equal(row('design').closest('section'), shelf('Ready'));
-  await click(button('Undo')); assert.equal(row('design').closest('section'), shelf('Snoozed'));
-  assert.equal(mock.control.metadata.sessions.design.wake_at, wake);
+  assert.equal(row('design').closest('section'), shelf('Ready')); noUndo();
   await click(row('readme').querySelector('[aria-label="Snooze session"]')); await click(button('Snooze · In 1 hour'));
-  assert.ok(button('Undo'));
+  assert.equal(row('readme').closest('section'), shelf('Snoozed')); noUndo();
   await click(row('readme').querySelector('[aria-label="Archive session"]'));
-  assert.equal(button('Undo'), undefined);
+  assert.equal(row('readme').closest('section'), shelf('Archived')); noUndo();
 });
 
 test('unfiltered empty Ready keeps catch-up while a no-match project filter suppresses it', async () => {
