@@ -20,6 +20,7 @@ async function click(node) { assert.ok(node, 'button exists'); await act(async (
 async function input(node, value) {
   await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(node, value); node.dispatchEvent(new Event('input', { bubbles: true })); }); await tick();
 }
+async function refresh() { if (!button('Refresh sessions')) await click(button('Filter sessions')); await click(button('Refresh sessions')); }
 async function mount() {
   controller = flow.createController(mock.ctx);
   root = createRoot($('#app'));
@@ -141,36 +142,51 @@ test('old in-flight metadata cannot overwrite mutation; concurrent writers rejec
 });
 function cloneState() { return JSON.parse(JSON.stringify(mock.control.metadata)); }
 
-test('React mounts all shelves, waiting above pins, dim working, native open/new', async () => {
+test('React mounts headerless Ready and Pinned, waiting stays Ready, dim working and native open', async () => {
   await mount(); assert.ok(row('approval')); assert.equal(row('approval').closest('section'), shelf('Active'));
-  assert.equal($('aside').getAttribute('aria-label'), plugin.name); assert.equal($('.sf-title').textContent, plugin.name);
-  await click(button(`${plugin.name} settings`)); assert.ok(mock.calls.some(c => c[0] === 'navigate' && c[1] === `/settings?tab=plugins&plugin=${plugin.id}`));
+  assert.equal($('aside').getAttribute('aria-label'), plugin.name); assert.equal($('.sf-title'), null); assert.equal(shelf('Active').querySelector('.sf-section-toggle'), null); assert.equal(shelf('Pinned').querySelector('.sf-section-toggle'), null);
+  assert.equal($('.sf-scroll').firstElementChild, shelf('Pinned'));
   assert.equal(row('root').dataset.working, 'true'); assert.equal(row('pinned').closest('section'), shelf('Pinned'));
-  assert.equal(row('snoozed').closest('section'), shelf('Snoozed')); assert.equal(row('settled').closest('section'), shelf('Recently Settled'));
+  assert.equal(row('snoozed').closest('section'), shelf('Snoozed')); assert.equal(row('settled').closest('section'), shelf('Settled'));
   await click(row('design').querySelector('.sf-open')); assert.ok(mock.calls.some(c => c[0] === 'open' && c[1] === 'design'));
-  await click(button('New session')); assert.ok(mock.calls.some(c => c[0] === 'new'));
-  assert.match(document.body.textContent, /native workspace selection/);
+  await click(button('New session')); assert.ok(button('New session in Home'));
+  assert.equal(mock.calls.some(c => c[0] === 'new'), false); assert.doesNotMatch(document.body.textContent, /native workspace selection/);
 });
 
-test('React search, project filter, grouping, compact detail and keyboard navigation', async () => {
+test('React search, project filter, optional local grouping and keyboard navigation', async () => {
   await mount(); await input($('input[type=search]'), 'Sidebar'); assert.ok(row('design')); assert.equal(row('readme'), null);
   await input($('input[type=search]'), '');
+  if (!$('select')) await click(button('Filter sessions'));
   await act(async () => { $('select').value = '/projects/docs'; $('select').dispatchEvent(new Event('change', { bubbles: true })); }); await tick();
   assert.ok(row('readme')); assert.equal(row('design'), null);
   await click(button('Group by project')); assert.ok($('.sf-group'));
   await click(button('Use flat list')); assert.equal($('.sf-group'), null);
-  await click(button('Show project details')); assert.ok($('.sf-row-detail'));
+  assert.equal(button('Show project details'), undefined); assert.equal($('.sf-row-detail'), null);
   const first = row('readme').querySelector('.sf-open'); first.focus();
   await act(async () => first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
   assert.equal(document.activeElement, row('snoozed').querySelector('.sf-open'));
 });
 
+test('card Snooze opens time choices and confirms organization without opening the session', async () => {
+  await mount();
+  await click(row('design').querySelector('[aria-label="Snooze session"]'));
+  assert.equal($('[role=dialog]').getAttribute('aria-label'), 'Snooze session');
+  assert.equal($('[role=dialog]').textContent.includes('Settle'), false);
+  await click(button('Snooze · In 1 hour'));
+  assert.equal(row('design').closest('section'), shelf('Snoozed'));
+  assert.equal($('[role=dialog]'), null);
+  assert.equal(mock.calls.some(call => call[0] === 'open'), false);
+  await click(button('Undo'));
+  assert.equal(row('design').closest('section'), shelf('Active'));
+  assert.equal(row('approval').querySelector('[aria-label="Snooze session"]').disabled, true);
+});
+
 test('React settles and restores with Undo and readback, and settle-and-advance opens next', async () => {
   await mount(); await click(row('design').querySelector('[aria-label="Settle session"]'));
-  assert.equal(row('design').closest('section'), shelf('Recently Settled')); assert.ok(button('Undo'));
+  assert.equal(row('design').closest('section'), shelf('Settled')); assert.ok(button('Undo'));
   await click(button('Undo')); assert.equal(row('design').closest('section'), shelf('Active'));
   await click(button('Actions for Sidebar layout')); await click(button('Settle and advance'));
-  assert.equal(row('design').closest('section'), shelf('Recently Settled'));
+  assert.equal(row('design').closest('section'), shelf('Settled'));
   assert.ok(mock.calls.some(c => c[0] === 'open' && c[1] === 'approval'));
 });
 
@@ -185,11 +201,13 @@ test('React context menu snooze preset and custom validation, Restore', async ()
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
 });
 
-test('React waiting cannot collapse away or be settled; all sections collapse otherwise', async () => {
-  await mount(); await click(button('Active (3)')); assert.ok(row('approval'));
+test('React waiting stays in headerless Ready and cannot be settled; secondary sections collapse', async () => {
+  await mount(); assert.equal(button('Active (3)'), undefined); assert.ok(row('approval'));
   assert.equal(row('approval').querySelector('[aria-label="Restore session"]').disabled, false);
-  await click(button('Actions for Approval request')); assert.equal(button('Settle').disabled, true); assert.equal(button('Snooze · In 1 hour').disabled, true);
-  await click(button('Close session actions')); await click(button('Recently Settled (1)')); assert.equal(row('settled'), null);
+  await click(button('Actions for Approval request'));
+  assert.equal([...$('[role=dialog]').querySelectorAll('button')].find(node => node.textContent === 'Settle').disabled, true);
+  assert.equal(button('Snooze · In 1 hour').disabled, true);
+  await click(button('Close session actions')); await click(button('Settled (1)')); assert.equal(row('settled'), null);
 });
 
 test('React runtime failure shows unknown and keeps settled rows in Active', async () => {
@@ -202,7 +220,7 @@ test('React missing backend is read-only without local fallback; list errors vis
   mock.control.backendMissing = true; await mount(); assert.match(document.body.textContent, /Read-only browsing/);
   assert.equal(row('design').querySelector('[aria-label="Settle session"]').disabled, true);
   await click(row('design').querySelector('.sf-open')); assert.ok(mock.calls.some(c => c[0] === 'open'));
-  mock.control.listError = true; await click(button('Refresh sessions')); assert.match(document.body.textContent, /Session list failed/);
+  mock.control.listError = true; await refresh(); assert.match(document.body.textContent, /Session list failed/);
 });
 
 test('React older browsing uses bounded rich companion pages, never legacy RPC', async () => {
@@ -278,7 +296,7 @@ test('focused stored tile identity, not runtime id, selects row only for matchin
 });
 
 test('search reveals collapsed shelf hits and preserves collapsed preference on clearing', async () => {
-  await mount(); await click(button('Recently Settled (1)')); assert.equal(row('settled'), null);
+  await mount(); await click(button('Settled (1)')); assert.equal(row('settled'), null);
   await input($('input[type=search]'), 'SDK inventory'); assert.ok(row('settled'));
   assert.doesNotMatch(document.body.textContent, /No matching sessions/);
   await input($('input[type=search]'), ''); assert.equal(row('settled'), null);
@@ -290,15 +308,110 @@ test('501st organized session survives remount and keeps rich project filtering 
   await mount(); await click(button('Browse older sessions'));
   await click(row('old-root').querySelector('[aria-label="Settle session"]'));
   await act(async () => root.unmount()); root = null; controller.dispose(); mock.queryClient.clear();
-  await mount(); assert.equal(row('old-root').closest('section'), shelf('Recently Settled'));
+  await mount(); assert.equal(row('old-root').closest('section'), shelf('Settled'));
   mock.control.metadata.sessions['old-root'] = { state: 'snoozed', pinned: false, wake_at: 1, settled_at: null, updated_at: 1 };
-  await click(button('Refresh sessions')); assert.equal(row('old-root').closest('section'), shelf('Active'));
+  await refresh(); assert.equal(row('old-root').closest('section'), shelf('Active'));
+  if (!$('select')) await click(button('Filter sessions'));
   await act(async () => { $('select').value = '/old-project'; $('select').dispatchEvent(new Event('change', { bubbles: true })); }); await tick();
   assert.ok(row('old-root')); assert.equal(all('.sf-row').length, 1);
+});
+
+test('SDK fallback below the limit reports loaded and available counts, not a cap', async () => {
+  mock.control.sessionsMissing = true; mock.control.total = 270; await mount();
+  assert.ok(row('design'));
+  assert.match(document.body.textContent, /Read-only SDK browsing: \d+ loaded of 270 available/);
+  assert.doesNotMatch(document.body.textContent, /capped at/);
+  assert.equal(button('Browse older sessions'), undefined);
 });
 
 test('SDK fallback keeps 500 rich rows and discloses unavailable older organized recovery', async () => {
   mock.control.sessionsMissing = true; mock.control.total = 900; await mount();
   assert.ok(row('design')); assert.match(document.body.textContent, /capped at 500 of 900/);
   assert.equal(button('Browse older sessions'), undefined);
+});
+
+
+test('card metadata uses native project, provider and token totals without model inference', async () => {
+  mock.control.rows[1].project.icon = '⚙';
+  await mount();
+  const card = row('design');
+  assert.equal(card.querySelector('.sf-project-icon').textContent, '⚙');
+  assert.equal(card.querySelector('.sf-project-name').textContent, 'hermes-t3sidebar');
+  assert.equal(card.querySelector('.sf-token').textContent, '1.5K');
+  assert.ok(card.querySelector('[data-provider-mark="openai-codex"]'));
+  assert.deepEqual([...row('pinned').querySelector('.sf-project').children].map(el => el.className), ['sf-project-icon', 'sf-pin', 'sf-project-name']);
+  assert.equal(flow.compactTokens({ input_tokens: 1000, output_tokens: 250 }), '1.3K');
+  assert.equal(flow.compactTokens({ total_tokens: 0 }), '0');
+  assert.equal(flow.compactTokens({ total_tokens: null, input_tokens: null, output_tokens: null }), '—');
+});
+
+test('missing project/provider/tokens remain neutral even when model resembles a provider', async () => {
+  Object.assign(mock.control.rows[1], { project: null, provider: null, model: 'openai/gpt-fixture', total_tokens: null, input_tokens: null, output_tokens: null });
+  await mount(); const card = row('design');
+  assert.equal(card.querySelector('.sf-project-name').textContent, 'Project unavailable');
+  assert.equal(card.querySelector('.sf-provider').getAttribute('aria-label'), 'Provider unavailable');
+  assert.equal(card.querySelector('.sf-token').textContent, '—');
+  assert.equal(card.querySelector('[data-provider-mark]'), null);
+});
+
+test('cron excluded from recent, extra, organized, runtime and SDK fallback rows', async () => {
+  const cron = { id: 'cron-fixture', title: 'Do not display', source: 'cron' };
+  assert.deepEqual(flow.mergeRows([cron], [{ ...cron, id: 'extra' }], [{ ...cron, session_key: 'live' }]), []);
+  assert.deepEqual(Object.values(flow.buildSections([cron], { sessions: { 'cron-fixture': { state: 'settled', pinned: true } } }, [])).flat(), []);
+  mock.control.rows.push(cron); mock.control.sessionsMissing = true; await mount(); assert.equal(row('cron-fixture'), null);
+});
+
+test('Pinned absent when empty while Ready and all secondary categories remain', async () => {
+  mock.control.metadata.sessions.pinned.pinned = false; await mount();
+  assert.equal(shelf('Pinned'), null);
+  for (const name of ['Active', 'Working', 'Snoozed', 'Settled']) assert.ok(shelf(name));
+});
+
+test('public native tree always includes synthetic Home and expands multiple folder paths', async () => {
+  mock.control.projects = [{ id: 'p_multi', label: 'Multi', path: null, repos: [{ path: '/fixture/one' }, { path: '/fixture/two' }] }];
+  controller = flow.createController(mock.ctx); const result = await controller.projects(flow.captureScope());
+  assert.deepEqual(result.projects[0], { id: '__no_project__', name: 'Home', path: null, isNoProject: true });
+  assert.deepEqual(result.projects.slice(1).map(p => p.path), ['/fixture/one', '/fixture/two']);
+  assert.equal(mock.calls.find(c => c[0] === 'requestProfile')[2], 'projects.tree');
+});
+
+test('project picker explicitly rejects Home without creating a session and Add project explains unavailable', async () => {
+  await mount(); await click(button('New session')); await click(button('New session in Home'));
+  assert.match(document.body.textContent, /Home creation is unavailable/);
+  assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.create'), false);
+  await click(button('Cancel')); await click(button('Add project'));
+  assert.match(document.body.textContent, /Adding projects is unavailable/);
+});
+
+test('named project uses real route create/open/cwd contract and stable key, not native newChat or a prompt', async () => {
+  await mount(); await click(button('New session')); await click(button('New session in Synthetic Sidebar'));
+  const create = mock.calls.find(c => c[0] === 'requestProfile' && c[2] === 'session.create');
+  assert.equal(create[1].connectionId, 'source-a');
+  assert.deepEqual({ ...create[3], idempotency_key: 'stable' }, { source: 'desktop', cwd: '/projects/hermes-t3sidebar', cwd_explicit: true, close_on_disconnect: false, idempotency_key: 'stable' });
+  const open = mock.calls.find(c => c[0] === 'open'); assert.equal(open[1], 'fixture-created');
+  assert.equal(open[2].awaitHydration, true); assert.equal(open[2].expectHistory, false);
+  assert.equal(mock.control.composerCwd, '/projects/hermes-t3sidebar');
+  assert.equal(mock.calls.some(c => c[0] === 'new' || /prompt/.test(c[2] || '')), false);
+});
+
+test('project creation never sends final cwd setter after selection or source drift', async () => {
+  for (const drift of ['stored', 'owner', 'scope']) {
+    mock.reset(); controller = flow.createController(mock.ctx); const scope = flow.captureScope();
+    mock.control.afterOpen = () => {
+      if (drift === 'stored') mock.host.state.focusedStoredSessionId.set('user-navigated-away');
+      if (drift === 'owner') mock.host.state.focusedSessionOwner.set({ connectionId: 'foreign', profile: 'default' });
+      if (drift === 'scope') mock.switchScope();
+    };
+    await assert.rejects(controller.newChat(scope, { id: 'fixture', path: '/fixture/project' }, 'stable-key'), /cancelled|Source\/profile changed/);
+    assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.cwd.set'), false);
+    controller.dispose();
+  }
+});
+
+test('picker retry keeps the same idempotency key after failed create', async () => {
+  mock.control.createError = true; await mount(); await click(button('New session'));
+  await click(button('New session in Synthetic Sidebar')); mock.control.createError = false;
+  await click(button('New session in Synthetic Sidebar'));
+  const creates = mock.calls.filter(c => c[0] === 'requestProfile' && c[2] === 'session.create');
+  assert.equal(creates.length, 2); assert.equal(creates[0][3].idempotency_key, creates[1][3].idempotency_key);
 });

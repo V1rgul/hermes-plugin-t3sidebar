@@ -26,6 +26,6 @@ function Workspace() {
             h('button', { onClick: () => { mock.control.backendMissing = !backendMissing; setBackendMissing(!backendMissing); refresh(); } }, backendMissing ? 'Restore mock backend' : 'Simulate missing backend'),
             h('button', { onClick: () => { mock.control.runtimeError = !runtimeError; setRuntimeError(!runtimeError); refresh(); } }, runtimeError ? 'Restore runtime status' : 'Simulate runtime failure'),
             h('button', { onClick: () => { mock.switchScope(mock.host.state.connectionId.get() === 'source-a' ? 'source-b' : 'source-a'); } }, 'Switch mock source')),
-          h('p', { className: 'harness-footnote' }, 'New session calls host.newChat only. The SDK has no pre-send draft project setter. Actual backend deployment and native conversation rendering remain separate integration checks.')))));
+          h('p', { className: 'harness-footnote' }, 'The picker tests public profile-routed create/open/cwd handoff with synthetic responses. Home creation is explicitly unavailable; no hidden prompt is sent. Actual backend deployment and native conversation rendering remain separate integration checks.')))));
 }
 createRoot(document.getElementById('root')).render(h(QueryClientProvider, { client: mock.queryClient }, h(Workspace)));

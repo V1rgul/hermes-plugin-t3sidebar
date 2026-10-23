@@ -19,7 +19,11 @@ test('frontend controller interoperates with real FastAPI and persistent SQLite 
 		const [line] = await once(lines, 'line');
 		const base = `http://127.0.0.1:${Number(line)}/api/plugins/${plugin.id}`;
 		const rest = async (path, options = {}) => {
-			const response = await fetch(base + path, { method: options.method || 'GET', headers: { 'content-type': 'application/json' }, ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
+			const url = new URL(base + path);
+			// Desktop's profileScoped -> pathWithProfileScope injects this even
+			// when the plugin itself supplies only /runtime or /sessions.
+			url.searchParams.set('profile', 'default');
+			const response = await fetch(url, { method: options.method || 'GET', headers: { 'content-type': 'application/json' }, ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
 			const body = await response.json();
 			if (!response.ok) throw new Error(`${response.status}: ${JSON.stringify(body)}`);
 			return body;

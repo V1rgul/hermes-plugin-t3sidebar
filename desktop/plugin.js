@@ -3,8 +3,8 @@ import * as sdk from '@hermes/plugin-sdk';
 import { createElement as h, useEffect, useRef, useState } from 'react';
 
 const { host, useValue, useQuery, useMutation, useQueryClient, queryClient, gatewayActivationEpoch } = sdk;
-export const SECTIONS = ['active', 'pinned', 'working', 'snoozed', 'settled'];
-const LABELS = { active: 'Active', pinned: 'Pinned', working: 'Working', snoozed: 'Snoozed', settled: 'Recently Settled' };
+export const SECTIONS = ['pinned', 'active', 'working', 'snoozed', 'settled'];
+const LABELS = { active: 'Active', pinned: 'Pinned', working: 'Working', snoozed: 'Snoozed', settled: 'Settled' };
 const EMPTY_STATE = { version: 1, sessions: {} };
 const activationEpoch = sdk.atom(gatewayActivationEpoch());
 export const durableId = row => row._lineage_root_id || row.id;
@@ -40,17 +40,23 @@ export function validState(value) {
   }
   return value;
 }
+export const visibleSource = row => !['cron', 'tool', 'oneshot', 'kanban'].includes(String(row.source || '').toLowerCase());
+export function compactTokens(row) {
+  const valid = value => Number.isFinite(value) && value >= 0;
+  const total = valid(row.total_tokens) ? row.total_tokens : valid(row.input_tokens) && valid(row.output_tokens) ? row.input_tokens + row.output_tokens : null;
+  return total === null ? '—' : Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(total);
+}
 export function mergeRows(rich, extra = [], live = [], extraRich = false) {
   const rows = new Map();
   for (const row of [...extra.map(r => ({ ...r, _limited: !extraRich })), ...rich.map(r => ({ ...r, _limited: false }))]) {
     const key = durableId(row), previous = rows.get(key);
-    if (!key) continue;
+    if (!key || !visibleSource(row)) continue;
     rows.set(key, { ...previous, ...row, _lineage_ids: [...new Set([...(previous ? aliases(previous) : []), ...aliases(row)])] });
   }
   const known = new Set([...rows.values()].flatMap(aliases));
   for (const item of live) {
-    if (!item.session_key || known.has(item.session_key)) continue;
-    const row = { id: item.session_key, title: item.title, last_active: item.last_active, _limited: true, _liveOnly: true };
+    if (!visibleSource(item) || !item.session_key || known.has(item.session_key)) continue;
+    const row = { ...item, id: item.session_key, _limited: true, _liveOnly: true };
     rows.set(row.id, row); known.add(row.id);
   }
   return [...rows.values()];
@@ -58,6 +64,7 @@ export function mergeRows(rich, extra = [], live = [], extraRich = false) {
 export function buildSections(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown = true, query = '', project = '*' } = {}) {
   const result = Object.fromEntries(SECTIONS.map(section => [section, []]));
   for (const row of rows) {
+    if (!visibleSource(row)) continue;
     const meta = metadata.sessions[durableId(row)] || { state: 'active', pinned: false };
     const ids = new Set(aliases(row));
     const matches = live.filter(item => ids.has(item.session_key) || ids.has(item.id));
@@ -179,7 +186,42 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const route = await routeFor(scope); check(scope);
       return env.host.openSession(row.resolved_id || row.id, { route, profile: route?.profile || scope.profile, intent: 'in-place' });
     },
-    async newChat(scope) { const route = await routeFor(scope); check(scope); return env.host.newChat(route); }
+    async projects(scope) {
+      const route = await routeFor(scope);
+      const value = await fenced(scope, () => env.host.requestProfile(route, 'projects.tree', { preview_limit: 0 }));
+      if (!Array.isArray(value?.projects)) throw new Error('Invalid native project tree.');
+      const home = { id: '__no_project__', name: 'Home', path: null, isNoProject: true };
+      const projects = value.projects.filter(p => p.id !== home.id && !p.isNoProject).flatMap(p => {
+        const paths = [...new Set([p.path, ...(p.repos || []).map(repo => repo.path)].filter(path => typeof path === 'string' && path))];
+        return paths.map(path => ({ id: `${p.id}:${path}`, name: `${p.label || p.name || p.id}${paths.length > 1 ? ` · ${path}` : ''}`, path, isNoProject: false }));
+      });
+      return { projects: [home, ...projects] };
+    },
+    async openProjects(scope) {
+      await routeFor(scope);
+      throw new Error('Adding projects is unavailable through the public Desktop plugin API. Use native project management.');
+    },
+    async newChat(scope, project, idempotencyKey) {
+      const route = await routeFor(scope); check(scope);
+      if (project === undefined) return env.host.newChat(route); // Preserve settle-and-advance fallback.
+      if (project.isNoProject || project.id === '__no_project__') throw new Error('Home creation is unavailable: the public Desktop SDK cannot select a detached workspace. No session was created. Use native Home new chat.');
+      if (typeof project.path !== 'string' || !project.path || !idempotencyKey) throw new Error('Choose a project folder before creating a session.');
+      const created = await fenced(scope, () => env.host.requestProfile(route, 'session.create', {
+        source: 'desktop', cwd: project.path, cwd_explicit: true, close_on_disconnect: false, idempotency_key: idempotencyKey
+      }));
+      if (!created?.stored_session_id || !created?.session_id) throw new Error('Session creation did not return stored and runtime identities.');
+      await fenced(scope, () => env.host.openSession(created.stored_session_id, {
+        route, profile: route?.profile || scope.profile, intent: 'in-place', awaitHydration: true, expectHistory: false
+      }));
+      const owner = env.host.state.focusedSessionOwner.get();
+      if (env.host.state.focusedStoredSessionId.get() !== created.stored_session_id ||
+        owner?.connectionId !== (scope.connectionId ?? 'local') || owner?.profile !== scope.profile) {
+        throw new Error('Workspace handoff cancelled: selection changed after session creation. No final workspace update was sent.');
+      }
+      const info = await fenced(scope, () => env.host.requestProfile(route, 'session.cwd.set', { session_id: created.session_id, cwd: project.path }));
+      if (info?.cwd !== project.path) throw new Error('The session workspace was not confirmed. Do not send a message until the native workspace is checked.');
+      return created;
+    }
   };
 }
 
@@ -187,24 +229,39 @@ const CSS = `
 .sf{display:flex;flex-direction:column;height:100%;min-height:0;min-width:220px;font:12px/1.4 var(--font-sans,inherit);color:var(--ui-text-primary)}
 .sf *{box-sizing:border-box}.sf button,.sf input,.sf select{font:inherit}.sf button{cursor:pointer}.sf button:disabled{cursor:default;opacity:.4}
 .sf button:focus-visible,.sf input:focus-visible,.sf select:focus-visible{outline:2px solid var(--ui-accent);outline-offset:-2px}
-.sf-header{padding:10px 10px 6px;display:flex;align-items:center;gap:6px}.sf-title{font-weight:600;flex:1;letter-spacing:-.02em}.sf-icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:4px;border:0;border-radius:4px;color:var(--ui-text-tertiary);background:transparent}
+.sf-header{padding:6px 12px;display:flex;align-items:center;gap:5px;height:40px;flex-shrink:0}.sf-icon{display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;width:27px;height:27px;padding:4px;border:0;border-radius:4px;color:var(--ui-text-tertiary);background:transparent}
 .sf-icon:hover,.sf-row:hover,.sf-row:focus-within,.sf-section-toggle:hover{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
-.sf-search{display:flex;align-items:center;gap:5px;margin:0 10px 7px;padding:5px 7px;border:1px solid var(--ui-stroke-secondary);border-radius:5px;color:var(--ui-text-tertiary)}
+.sf-search{display:flex;align-items:center;gap:8px;flex:1;min-width:0;color:var(--ui-text-tertiary)}.sf-search svg{flex-shrink:0;width:18px;height:18px}
 .sf-search input{width:100%;min-width:0;padding:0;border:0;background:transparent;color:var(--ui-text-primary);outline:none}
-.sf-tools{display:flex;align-items:center;gap:6px;padding:0 10px 7px}.sf-tools select{flex:1;min-width:0;max-width:100%;border:0;background:var(--ui-bg-quaternary);color:var(--ui-text-secondary);padding:4px;border-radius:3px}
-.sf-scope{padding:0 12px 8px;color:var(--ui-text-quaternary);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sf-scroll{overflow:auto;flex:1;min-height:0;display:flex;flex-direction:column;padding:0 6px 8px}.sf-shelf-start{margin-top:auto;padding-top:14px}
-.sf-section{flex-shrink:0}.sf-section-toggle{display:flex;align-items:center;gap:5px;width:100%;padding:8px 6px 5px;border:0;background:transparent;color:var(--ui-text-tertiary);font-size:11px;text-align:left}.sf-count{margin-left:auto;color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums}
-.sf-row{display:flex;align-items:center;position:relative;gap:6px;min-height:36px;padding:0 4px 0 6px;border-radius:5px}.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
+.sf-header input{font-size:14px}.sf-menu select{max-width:260px;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary)}
+.sf-scroll{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column;padding:0 6px;gap:1px;--sf-body-min:clamp(0px,calc((100% - 76px)/5),56px)}
+/* Reserve three headers and four gaps before sharing the remaining minimum body space; banners can reduce this below a full card. */
+.sf-section{display:flex;flex-direction:column;flex:0 1 auto;max-height:22%;min-height:24px;overflow:hidden}.sf-section[data-populated=true][data-closed=false]{min-height:calc(24px + var(--sf-body-min))}.sf-section[data-section=active]{flex:1 1 0;max-height:none;min-height:var(--sf-body-min)}.sf-section[data-section=pinned][data-populated=true],.sf-section[data-section=active][data-populated=true]{min-height:var(--sf-body-min)}
+.sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:24px;min-height:24px;padding:3px 6px;border:0;background:transparent;color:var(--ui-text-tertiary);font-size:11px;text-align:left}.sf-count{margin-left:auto;color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums}
+.sf-row{position:relative;height:56px;flex-shrink:0;padding:0 10px;border-radius:5px}.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
 .sf-row[data-working=true]{opacity:.55}.sf-row[data-working=true]:hover,.sf-row[data-working=true]:focus-within{opacity:1}
-.sf-open{display:flex;align-items:center;gap:7px;flex:1;min-width:0;align-self:stretch;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-row-text{min-width:0;flex:1}.sf-row-title{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-row-detail{display:block;font-size:10px;color:var(--ui-text-quaternary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sf-status{flex-shrink:0;width:13px;display:flex;color:var(--ui-text-quaternary)}.sf-status[data-attention=true],.sf-wait{color:var(--ui-accent)}.sf-wait{font-size:10px;white-space:nowrap}.sf-time{color:var(--ui-text-quaternary);font-size:10px;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-hover{display:flex;gap:0}.sf-hover .sf-icon{width:22px;height:25px}
-@media (hover:hover){.sf-hover{display:none}.sf-row:hover .sf-hover,.sf-row:focus-within .sf-hover{display:flex}.sf-row:hover .sf-time,.sf-row:focus-within .sf-time{display:none}}
+.sf-open{display:flex;flex-direction:column;justify-content:center;gap:5px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:var(--ui-bg-quaternary);flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:none;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-settle{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{display:flex}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
+.sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
-.sf-footer{padding:7px 10px;border-top:1px solid var(--ui-stroke-secondary);color:var(--ui-text-quaternary);font-size:10px}.sf-undo{display:flex;align-items:center;gap:6px}.sf-undo span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
+.sf-undo{display:flex;align-items:center;gap:6px}.sf-undo span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 `;
-function icon(name, fallback) { const Component = sdk.icons?.[name]; return Component ? h(Component, { size: 14, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, fallback); }
+// Monochrome brand paths: Simple Icons 15.20.0 (CC0), fetched from its pinned GitHub tag.
+const PROVIDER_PATHS = {
+  anthropic: 'M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z',
+  google: 'M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81',
+  openai: 'M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z'
+};
+function providerMark(provider) {
+  const slug = typeof provider === 'string' ? provider.toLowerCase() : '';
+  const path = PROVIDER_PATHS[slug === 'openai-codex' ? 'openai' : slug === 'gemini' ? 'google' : slug];
+  return path ? h('svg', { viewBox: '0 0 24 24', fill: 'currentColor', 'aria-hidden': true, 'data-provider-mark': slug }, h('path', { d: path })) : icon('CircleHelp', '?');
+}
+function icon(name, fallback) {
+  const local = { FolderPlus: 'M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2M12 10v7M8.5 13.5h7', SquarePen: 'M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7M10 14l1-4 9-9 3 3-9 9-4 1', ListFilter: 'M4 6h16M7 12h10M10 18h4' }[name];
+  if (local) return h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: local }));
+  const Component = sdk.icons?.[name]; return Component ? h(Component, { size: 14, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, fallback);
+}
 function IconButton({ label, name, glyph, ...props }) { return h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-xs', ...props, className: `sf-icon ${props.className || ''}`, 'aria-label': label, title: label }, icon(name, glyph)); }
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
 function Settings() {
@@ -212,21 +269,21 @@ function Settings() {
     h('h2', null, 'hermes-t3sidebar'), h('p', null, 'A compact T3-style session browser for the active source and profile.'),
     h('p', null, 'Settle and snooze organize the list only. They do not archive, delete, stop, resume or send a prompt. Snoozes return when their chosen time passes; no agent is awakened.'),
     h('p', null, 'Use normal layout controls to select hermes-t3sidebar in the left pane or hide the native Sessions pane. hermes-t3sidebar never modifies the core sidebar or conversation workspace.'),
-    h('p', null, 'Project filtering changes this list only. New session uses Hermes’ native new-chat flow; the SDK does not expose a pre-send draft project selector.'),
+    h('p', null, 'Project filtering changes this list only. New session asks for a named project before creating an empty session; Home creation is unavailable with the current public workspace contract.'),
     h('p', null, 'Keyboard: ↑/↓ or Home/End to focus rows; Enter to open; Shift+F10 for actions; Shift+Enter to settle and advance (when no approval is pending).'),
     h('p', null, 'Pins, settlement and snoozes belong to this plugin’s backend, not native archival or native pins. Missing backend: browsing remains available, organization is read-only.'));
 }
-function RowActions({ row, scope, mutate, disabled, close }) {
+function RowActions({ row, scope, mutate, disabled, close, snoozeOnly = false }) {
   const [value, setValue] = useState(''), [error, setError] = useState('');
   const waiting = row.status === 'waiting' || row.status === 'unknown';
   const run = payload => { void mutate(row, payload).then(ok => { if (ok) close(); }); };
   const action = (text, payload, extraDisabled = false) => h(sdk.Button, { key: text, type: 'button', variant: 'ghost', size: 'sm', disabled: disabled || extraDisabled,
     onClick: () => run(payload) }, text);
   return h('div', { className: 'sf-menu' }, h('div', { className: 'sf-menu-title' }, row.title || 'Untitled session'),
-    action(row.meta.pinned ? 'Unpin' : 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }),
-    row.meta.state !== 'active' ? action('Restore to Active', { action: 'restore' }) : null,
-    row.section !== 'settled' ? action('Settle', { action: 'settle' }, waiting) : null,
-    row.section !== 'settled' ? action('Settle and advance', { action: 'settle', advance: true }, waiting) : null,
+    !snoozeOnly ? action(row.meta.pinned ? 'Unpin' : 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
+    !snoozeOnly && row.meta.state !== 'active' ? action('Restore to Active', { action: 'restore' }) : null,
+    !snoozeOnly && row.section !== 'settled' ? action('Settle', { action: 'settle' }, waiting) : null,
+    !snoozeOnly && row.section !== 'settled' ? action('Settle and advance', { action: 'settle', advance: true }, waiting) : null,
     ...snoozePresets().map(preset => action(`Snooze · ${preset.label}`, { action: 'snooze', wake_at: preset.wake_at }, waiting)),
     h('label', null, 'Custom snooze · local time', h('input', { type: 'datetime-local', value, disabled: disabled || waiting,
       'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } })),
@@ -237,8 +294,8 @@ function RowActions({ row, scope, mutate, disabled, close }) {
     waiting ? h('p', null, 'Waiting or unknown runtime status stays visible in Active. Settle and snooze are unavailable until status is known.') : null,
     h('p', null, 'Organization only · never stops the agent.'));
 }
-function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus, onNavigate, rowRef, detail }) {
-  const [menuOpen, setMenuOpen] = useState(false), trigger = useRef(null);
+function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus, onNavigate, rowRef }) {
+  const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
   const attention = row.status === 'waiting';
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
@@ -253,15 +310,25 @@ function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus,
       'aria-label': `${row.title || 'Untitled session'}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
       onClick: open, onFocus: () => onFocus(row.key), onKeyDown: keyDown,
       title: [row.title, row.cwd, row.git_branch, row.status === 'waiting' ? 'Waiting for approval or answer' : row.status].filter(Boolean).join('\n') },
-      h('span', { className: 'sf-status', 'data-attention': attention }, icon(attention ? 'CircleHelp' : row.status === 'unknown' ? 'CircleHelp' : row.section === 'working' ? 'LoaderCircle' : row.section === 'snoozed' ? 'AlarmClock' : row.section === 'settled' ? 'CircleCheck' : row.meta.pinned ? 'Pin' : 'MessageSquare', attention ? '!' : '·')),
-      h('span', { className: 'sf-row-text' }, h('span', { className: 'sf-row-title' }, row.title || 'Untitled session'),
-        detail ? h('span', { className: 'sf-row-detail' }, row.cwd ? `${row.cwd.split(/[\\/]/).filter(Boolean).pop()}${row.git_branch ? ` · ${row.git_branch}` : ''}` : row._limited ? 'Project unavailable' : 'No project') : null),
-      attention ? h('span', { className: 'sf-wait' }, 'Waiting') : row.status === 'unknown' ? h('span', { className: 'sf-wait' }, '?') : row.woke ? h('span', { className: 'sf-wait' }, 'Woke') : row.unread ? h('span', { className: 'sf-wait', 'aria-label': 'Unread' }, '•') : null),
-    h('span', { className: 'sf-time', title: row.section === 'snoozed' ? new Date(row.meta.wake_at * 1000).toLocaleString() : undefined }, relative(row.section === 'snoozed' ? row.meta.wake_at : row.section === 'settled' ? row.meta.settled_at : row.activity)),
-    h('div', { className: 'sf-hover' }, h(IconButton, { label: row.meta.state !== 'active' ? 'Restore session' : 'Settle session', name: row.meta.state !== 'active' ? 'Undo2' : 'Check', glyph: '✓', disabled: disabled || (row.meta.state === 'active' && ['waiting', 'unknown'].includes(row.status)),
-      onClick: () => void mutate(row, { action: row.meta.state !== 'active' ? 'restore' : 'settle' }) })),
+      h('span', { className: 'sf-card-meta' },
+        h('span', { className: 'sf-project' },
+          h('span', { className: 'sf-project-icon', 'aria-hidden': true }, typeof row.project?.icon === 'string' && row.project.icon ? row.project.icon : icon(row.project?.is_home ? 'House' : 'Folder', '◇')),
+          row.meta.pinned ? h('span', { className: 'sf-pin', 'aria-label': 'Pinned' }, icon('Pin', '♧')) : null,
+          h('span', { className: 'sf-project-name' }, row.project?.name || 'Project unavailable')),
+        attention || row.status === 'unknown' || row.woke || row.unread ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': attention ? 'Waiting for approval or answer' : row.status === 'unknown' ? 'Status unknown' : row.woke ? 'Snooze ended' : 'Unread' }, attention ? 'Waiting' : row.status === 'unknown' ? '?' : row.woke ? 'Woke' : '•') : null,
+        h('span', { className: 'sf-provider', role: 'img', 'aria-label': row.provider ? `Provider: ${row.provider}` : 'Provider unavailable', title: row.provider || 'Provider unavailable' }, providerMark(row.provider)),
+        h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${compactTokens(row)}` }, compactTokens(row)),
+        h('span', { className: 'sf-time' }, row.status === 'working' ? 'Working' : relative(row.activity))),
+      h('span', { className: 'sf-row-title' }, row.title || 'Untitled session')),
+    h('div', { className: 'sf-hover' },
+      h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },
+        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Snooze session', name: 'Clock', glyph: '◷', disabled: disabled || ['waiting', 'unknown'].includes(row.status), 'aria-haspopup': 'dialog' })),
+        h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Snooze session' },
+          h(RowActions, { row, scope, mutate, disabled, snoozeOnly: true, close: () => setSnoozeOpen(false) }))),
+      h(sdk.Button, { type: 'button', variant: 'ghost', size: 'xs', className: 'sf-icon sf-settle', 'aria-label': row.meta.state !== 'active' ? 'Restore session' : 'Settle session', disabled: disabled || (row.meta.state === 'active' && ['waiting', 'unknown'].includes(row.status)),
+        onClick: () => void mutate(row, { action: row.meta.state !== 'active' ? 'restore' : 'settle' }) }, icon(row.meta.state !== 'active' ? 'Undo2' : 'Check', '✓'), row.meta.state !== 'active' ? 'Restore' : 'Settle')),
     h(sdk.Popover, { open: menuOpen, onOpenChange: setMenuOpen },
-      h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { ref: trigger, label: `Actions for ${row.title || 'Untitled session'}`, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog' })),
+      h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { ref: trigger, className: 'sf-context-trigger', label: `Actions for ${row.title || 'Untitled session'}`, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog' })),
       h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Session actions' }, h(RowActions, { row, scope, mutate, disabled, close: () => setMenuOpen(false) }))));
 }
 export function HermesT3Sidebar({ ctx, controller }) {
@@ -271,9 +338,33 @@ export function HermesT3Sidebar({ ctx, controller }) {
   const scope = { connectionId, profile: profile || 'default', epoch: gatewayActivationEpoch() };
   return h(ScopedSidebar, { key: JSON.stringify(scopeKey(scope)), scope, controller, ctx });
 }
+export function ProjectPicker({ controller, scope, close }) {
+  const [query, setQuery] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const alive = useRef(true), creationKeys = useRef(new Map());
+  useEffect(() => () => { alive.current = false; }, []);
+  const projects = useQuery({ queryKey: [...scopeKey(scope), 'projects'], queryFn: () => controller.projects(scope), retry: false });
+  const select = async project => {
+    if (busy) return;
+    setBusy(true); setError('');
+    try { controller.check(scope); await controller.newChat(scope, project, creationKeys.current.get(project.id) || (() => { const key = `hermes-t3sidebar:${globalThis.crypto.randomUUID()}`; creationKeys.current.set(project.id, key); return key; })()); controller.check(scope); if (alive.current) close(); }
+    catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); }
+    finally { if (alive.current) setBusy(false); }
+  };
+  const entries = projects.data?.projects || [];
+  return h('div', { className: 'sf-menu', 'aria-label': 'Choose project for new session' },
+    h('strong', null, 'New session in…'),
+    h('p', null, 'Home remains listed, but detached Home creation is unavailable through the public SDK. Named project folders are supported.'),
+    entries.length > 8 ? h('input', { type: 'search', 'aria-label': 'Search projects', placeholder: 'Search projects', value: query, onChange: event => setQuery(event.target.value) }) : null,
+    projects.isLoading ? h('div', { role: 'status' }, 'Loading projects…') : null,
+    projects.isError ? h('div', { role: 'alert' }, projects.error.message, h(sdk.Button, { onClick: () => projects.refetch() }, 'Retry projects')) : null,
+    ...entries.filter(project => project.name.toLowerCase().includes(query.toLowerCase())).map(project => h(sdk.Button, { key: project.id, type: 'button', variant: 'ghost', disabled: busy, 'aria-label': `New session in ${project.name}`, onClick: () => void select(project) }, project.name)),
+    busy ? h('div', { role: 'status' }, 'Creating session…') : null,
+    error ? h('div', { role: 'alert' }, error) : null,
+    h(sdk.Button, { type: 'button', variant: 'ghost', onClick: close }, 'Cancel'));
+}
 function ScopedSidebar({ ctx, controller, scope }) {
   const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
-  const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [grouped, setGrouped] = useState(false), [detail, setDetail] = useState(false);
+  const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [grouped, setGrouped] = useState(false), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false);
   const [collapsed, setCollapsed] = useState({}), [limit, setLimit] = useState(0), [undo, setUndo] = useState(null), [actionError, setActionError] = useState('');
   const search = useRef(null), rowRefs = useRef(new Map()), focused = useRef(null), latest = useRef(null);
   const key = scopeKey(scope);
@@ -303,7 +394,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
       if (!isUndo) setUndo({ row, payload: inverseAction(payload.action, before), label: payload.action === 'settle' ? 'Settled' : payload.action === 'snooze' ? 'Snoozed' : payload.action === 'restore' ? 'Restored' : payload.action === 'pin' ? 'Pinned' : 'Unpinned' });
       else setUndo(null);
       if (advance) {
-        const next = latest.current.visible.find(item => item.key !== row.key && (item.section === 'active' || item.section === 'pinned'));
+        const next = [...latest.current.sections.active, ...latest.current.sections.pinned].find(item => item.key !== row.key && latest.current.visible.some(visible => visible.key === item.key));
         if (next) await controller.open(scope, next); else await controller.newChat(scope);
       }
       return true;
@@ -316,39 +407,48 @@ function ScopedSidebar({ ctx, controller, scope }) {
     if (event.key === 'ArrowUp') target = keys[Math.max(0, index - 1)];
     if (event.key === 'Home') target = keys[0];
     if (event.key === 'End') target = keys.at(-1);
-    if (target) { event.preventDefault(); rowRefs.current.get(target)?.focus(); }
+    if (target) { event.preventDefault(); const element = rowRefs.current.get(target); element?.focus({ preventScroll: true }); const body = element?.closest('.sf-section-body'); if (body) { const r = element.getBoundingClientRect(), b = body.getBoundingClientRect(); if (r.top < b.top) body.scrollTop -= b.top - r.top; else if (r.bottom > b.bottom) body.scrollTop += r.bottom - b.bottom; } }
   };
   useEffect(() => {
     if (focused.current && !visible.some(row => row.key === focused.current)) { focused.current = visible[0]?.key; rowRefs.current.get(focused.current)?.focus(); }
   });
   const renderRow = row => h(SessionRow, { key: row.key, row, scope, controller, mutate, disabled: latest.current.disabled || row._liveOnly,
-    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), detail, onFocus: id => { focused.current = id; }, onNavigate: navigate,
+    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: id => { focused.current = id; }, onNavigate: navigate,
     rowRef: element => { if (element) rowRefs.current.set(row.key, element); else rowRefs.current.delete(row.key); } });
   const renderSection = section => {
     const entries = sections[section], force = searching || section === 'active' && entries.some(row => ['waiting', 'unknown'].includes(row.status));
     const closed = !!collapsed[section] && !force;
     const items = grouped ? [...Map.groupBy(entries, row => row.cwd || (row._limited ? 'Project unavailable' : 'No project'))].flatMap(([cwd, entries]) => [h('div', { className: 'sf-group', key: `project:${cwd}`, title: cwd }, cwd.split(/[\\/]/).filter(Boolean).pop() || cwd), ...entries.map(renderRow)]) : entries.map(renderRow);
-    return h('section', { key: section, className: `sf-section ${section === 'working' ? 'sf-shelf-start' : ''}`, 'aria-label': LABELS[section] },
-      h('button', { type: 'button', className: 'sf-section-toggle', 'aria-expanded': !closed, 'aria-label': `${LABELS[section]} (${entries.length})`,
-        onClick: () => setCollapsed(previous => ({ ...previous, [section]: !previous[section] })), title: force ? 'Attention keeps Active expanded' : undefined }, icon(closed ? 'ChevronRight' : 'ChevronDown', closed ? '›' : '⌄'), LABELS[section], h('span', { className: 'sf-count' }, entries.length)),
-      !closed ? entries.length ? items : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : 'No sessions') : null);
+    const headerless = section === 'active' || section === 'pinned';
+    if (section === 'pinned' && !entries.length) return null;
+    return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed },
+      !headerless ? h('button', { type: 'button', className: 'sf-section-toggle', 'aria-expanded': !closed, 'aria-label': `${LABELS[section]} (${entries.length})`,
+        onClick: () => setCollapsed(previous => ({ ...previous, [section]: !previous[section] })) }, icon(closed ? 'ChevronRight' : 'ChevronDown', closed ? '›' : '⌄'), LABELS[section], h('span', { className: 'sf-count' }, entries.length)) : null,
+      !closed ? h('div', { className: 'sf-section-body', 'aria-label': `${section === 'active' ? 'Ready' : LABELS[section]} sessions`, tabIndex: -1 },
+        entries.length ? items : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : 'No sessions')) : null);
+
   };
-  const count = rows.length;
-  const total = sessions.data?.total || 0;
+  const total = sessions.data?.total;
+  const knownTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0;
+  const fallbackCount = knownTotal && total > 500 ? ` is capped at 500 of ${total}`
+    : `: ${sessions.data?.sessions.length || 0} loaded${knownTotal ? ` of ${total} available` : ''}`;
   const canExpand = !sessions.data?.capped && (limit === 0 ? sessions.data?.has_more : expanded.data?.has_more);
   return h('aside', { className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); search.current?.focus(); }
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
   } }, h('style', null, CSS),
-    h('header', { className: 'sf-header' }, h('span', { className: 'sf-title' }, 'hermes-t3sidebar'),
-      h(IconButton, { label: 'New session', name: 'SquarePen', glyph: '+', onClick: () => { try { Promise.resolve(controller.newChat(scope)).catch(error => setActionError(error.message)); } catch (error) { setActionError(error.message); } } }),
-      h(IconButton, { label: 'Search sessions', name: 'Search', glyph: '⌕', onClick: () => search.current?.focus() }),
-      h(IconButton, { label: 'hermes-t3sidebar settings', name: 'Settings2', glyph: '⚙', onClick: () => host.navigate('/settings?tab=plugins&plugin=hermes-t3sidebar') })),
-    h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search sessions…', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) })),
-    h('div', { className: 'sf-tools' }, h('select', { 'aria-label': 'Filter by project', value: project, onChange: event => setProject(event.target.value) }, h('option', { value: '*' }, 'All projects'), ...projects.map(cwd => h('option', { key: cwd, value: cwd }, cwd || 'No project'))),
-      h(IconButton, { label: grouped ? 'Use flat list' : 'Group by project', name: grouped ? 'List' : 'FolderTree', glyph: '☷', 'aria-pressed': grouped, onClick: () => setGrouped(value => !value) }),
-      h(IconButton, { label: detail ? 'Compact rows' : 'Show project details', name: 'ListFilter', glyph: '≡', 'aria-pressed': detail, onClick: () => setDetail(value => !value) })),
-    h('div', { className: 'sf-scope', title: `${scope.connectionId ?? 'active local source'} / ${scope.profile}` }, `${scope.connectionId ?? 'Local'} · ${scope.profile} · current scope only`),
+    h('header', { className: 'sf-header' },
+      h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) })),
+      h(sdk.Popover, { open: filterOpen, onOpenChange: setFilterOpen },
+        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Filter sessions', name: 'ListFilter', glyph: '≡' })),
+        h(sdk.PopoverContent, { align: 'end', 'aria-label': 'Session filters' }, h('div', { className: 'sf-menu' },
+          h('select', { 'aria-label': 'Filter by project', value: project, onChange: event => setProject(event.target.value) }, h('option', { value: '*' }, 'All projects'), ...projects.map(cwd => h('option', { key: cwd, value: cwd }, cwd || 'No project'))),
+          h(sdk.Button, { variant: 'ghost', 'aria-label': grouped ? 'Use flat list' : 'Group by project', 'aria-pressed': grouped, onClick: () => setGrouped(value => !value) }, grouped ? 'Use flat list' : 'Group by project'),
+          h(sdk.Button, { variant: 'ghost', onClick: refresh, 'aria-label': 'Refresh sessions' }, 'Refresh sessions')))),
+      h(IconButton, { label: 'Add project', name: 'FolderPlus', glyph: '+', onClick: () => { void Promise.resolve().then(() => controller.openProjects(scope)).catch(error => { if (sameScope(scope, captureScope())) setActionError(error.message); }); } }),
+      h(sdk.Popover, { open: pickerOpen, onOpenChange: setPickerOpen },
+        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'New session', name: 'SquarePen', glyph: '+' })),
+        h(sdk.PopoverContent, { align: 'end', 'aria-label': 'New session project' }, pickerOpen ? h(ProjectPicker, { controller, scope, close: () => setPickerOpen(false) }) : null))),
     sessions.isLoading ? h(Note, null, 'Loading sessions…') : null,
     sessions.isError ? h(Note, { error: true }, `Session list failed: ${sessions.error.message} `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     !runtimeKnown ? h(Note, { error: runtime.isError }, runtime.isError ? `Runtime status unavailable: ${runtime.error.message}. Sessions remain in Active with unknown status.` : 'Checking runtime status…') : null,
@@ -357,11 +457,10 @@ function ScopedSidebar({ ctx, controller, scope }) {
     actionError ? h(Note, { error: true }, actionError) : null,
     h('div', { className: 'sf-scroll' }, ...SECTIONS.map(renderSection),
       !visible.length && (query || project !== '*') ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null),
-    sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing is capped at 500${total ? ` of ${total}` : ''}; older organized sessions cannot be recovered until the companion returns.`) : null,
+    sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,
     undo ? h('div', { className: 'sf-note sf-undo', role: 'status' }, h('span', null, `${undo.label} · ${undo.row.title || 'session'}`), h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: latest.current.disabled, onClick: () => void mutate(undo.row, undo.payload, true) }, 'Undo'), h(IconButton, { label: 'Dismiss undo', name: 'X', glyph: '×', onClick: () => setUndo(null) })) : null,
-    h('footer', { className: 'sf-footer' }, h('div', null, `${count} loaded · `, h('button', { type: 'button', className: 'sf-icon', title: 'Refresh sessions', 'aria-label': 'Refresh sessions', onClick: refresh }, icon('RefreshCw', '↻'))),
-      h('div', { title: 'The SDK cannot target a native draft project. The project filter never changes new-session workspace.' }, 'New session uses native workspace selection.')));
+    null);
 }
 export default {
   id: 'hermes-t3sidebar', name: 'hermes-t3sidebar', defaultEnabled: false,

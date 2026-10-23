@@ -18,7 +18,19 @@ export const host = {
   profileRoutes: async () => [{ connectionId: host.state.connectionId.get(), profile: host.state.profile.get(), targetProfile: host.state.profile.get(), mode: 'remote' }],
   async listPersistedSessions(route, options) { calls.push(['list', route, options]); if (control.listError) throw new Error('fixture list unavailable'); return { sessions: clone(control.rows), total: control.total || control.rows.length, limit: 500, offset: 0 }; },
   async request(method, params) { calls.push([method, params]); if (method === 'session.active_list') { if (control.runtimeError) throw new Error('fixture runtime disconnected'); return { sessions: clone(control.live) }; } if (method === 'session.list') return { sessions: clone(control.extra || []).slice(0, params.limit) }; throw new Error(`Unexpected RPC ${method}`); },
-  openSession(id, options) { calls.push(['open', id, options]); host.state.focusedStoredSessionId.set(id); host.state.focusedSessionOwner.set(options.route); }, newChat(route) { calls.push(['new', route]); host.state.focusedStoredSessionId.set(null); }, navigate(path) { calls.push(['navigate', path]); }, notify(value) { calls.push(['notify', value]); }
+  async requestProfile(route, method, params) {
+    calls.push(['requestProfile', route, method, clone(params)]);
+    if (method === 'projects.tree') { if (control.projectError) throw new Error('fixture projects unavailable'); return { projects: clone(control.projects) }; }
+    if (method === 'session.create') {
+      if (control.createError) throw new Error('fixture create unavailable');
+      control.created ||= new Map();
+      if (!control.created.has(params.idempotency_key)) control.created.set(params.idempotency_key, { stored_session_id: 'fixture-created', session_id: 'runtime-fixture-created' });
+      return clone(control.created.get(params.idempotency_key));
+    }
+    if (method === 'session.cwd.set') { control.composerCwd = params.cwd; return { cwd: params.cwd }; }
+    throw new Error(`Unexpected profile RPC ${method}`);
+  },
+  openSession(id, options) { calls.push(['open', id, options]); host.state.focusedStoredSessionId.set(id); host.state.focusedSessionOwner.set(options.route); control.afterOpen?.(); }, newChat(route) { calls.push(['new', route]); host.state.focusedStoredSessionId.set(null); }, navigate(path) { calls.push(['navigate', path]); }, notify(value) { calls.push(['notify', value]); }
 };
 export function switchScope(source = 'source-b', profile = 'default') { epoch++; host.state.connectionId.set(source); host.state.profile.set(profile); host.state.gateway.set('open'); }
 export const ctx = {
@@ -58,7 +70,7 @@ export const ctx = {
 export function reset() {
   epoch = 1; queryClient.clear(); calls.length = 0;
   for (const key of Object.keys(control)) delete control[key];
-  Object.assign(control, { contributions: [], disposers: [], rows: [
+  Object.assign(control, { projects: [{ id: 'p_fixture', label: 'Synthetic Sidebar', path: '/projects/hermes-t3sidebar', icon: '◇', repos: [{ path: '/projects/hermes-t3sidebar' }] }], contributions: [], disposers: [], rows: [
     { id: 'approval', title: 'Approval request', cwd: '/projects/hermes-t3sidebar', last_active: now() - 200 },
     { id: 'design', title: 'Sidebar layout', cwd: '/projects/hermes-t3sidebar', git_branch: 'feature/sidebar', last_active: now() - 180 },
     { id: 'readme', title: 'Release notes', cwd: '/projects/docs', last_active: now() - 1300, unread: true },
@@ -75,7 +87,25 @@ export function reset() {
       settled: { state: 'settled', pinned: false, settled_at: now() - 600, wake_at: null, updated_at: now() }
     } }
   });
+  for (const row of control.rows) {
+    row.source = 'desktop';
+    row.project = { id: `synthetic:${row.cwd}`, name: row.cwd.split('/').at(-1), icon: '◇', color: null, cwd: row.cwd, is_home: false };
+    row.provider = 'openai-codex'; row.input_tokens = 1200; row.output_tokens = 300; row.total_tokens = 1500;
+  }
   host.state.connectionId.set('source-a'); host.state.profile.set('default'); host.state.gateway.set('open'); host.state.activeSessionId.set('runtime-design'); host.state.focusedStoredSessionId.set('design'); host.state.focusedSessionOwner.set({ connectionId: 'source-a', profile: 'default' });
+}
+export function loadDenseFixtures() {
+  control.rows = []; control.live = []; control.metadata = { version: 1, sessions: {} }; control.runtimeError = false; control.backendMissing = false;
+  for (const [section, count] of [['active', 100], ['pinned', 20], ['working', 20], ['snoozed', 20], ['settled', 20]]) {
+    for (let i = 0; i < count; i++) {
+      const id = `synthetic-${section}-${String(i).padStart(3, '0')}`;
+      control.rows.push({ id, title: `SYNTHETIC ${section} ${i} — a deliberately long title for overflow and ellipsis verification`, source: 'desktop', last_active: now() - i,
+        cwd: '/synthetic/layout', project: { id: 'synthetic-layout', name: 'Synthetic layout', icon: '◇', is_home: false }, provider: 'anthropic', input_tokens: 1000, output_tokens: 250, total_tokens: 1250 });
+      if (section === 'working') control.live.push({ session_key: id, status: 'working', source: 'desktop' });
+      if (['pinned', 'snoozed', 'settled'].includes(section)) control.metadata.sessions[id] = { state: section === 'pinned' ? 'active' : section, pinned: section === 'pinned', wake_at: now() + 3600, settled_at: now() - i, updated_at: now() };
+    }
+  }
+  queryClient.clear(); switchScope('synthetic-layout-source');
 }
 export function Button({ variant, size, children, ...props }) { return h('button', props, children); }
 const PopoverContext = createContext(null);
@@ -92,6 +122,7 @@ export const icons = Object.fromEntries(Object.entries({
   Settings2: 'M4 7h16M4 17h16M8 4v6M16 14v6', List: 'M4 6h16M4 12h16M4 18h16', FolderTree: 'M4 4v16h16M4 12h10M14 9h6v6h-6',
   ListFilter: 'M4 5h16M7 12h10M10 19h4', ChevronDown: 'M6 9l6 6 6-6', ChevronRight: 'M9 6l6 6-6 6',
   CircleHelp: 'M12 8v5M12 16v1M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0', LoaderCircle: 'M20 12a8 8 0 1 1-8-8',
+  Clock: 'M12 7v5l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
   AlarmClock: 'M12 8v5l3 2M3 3l3 3M21 3l-3 3M21 13a9 9 0 1 1-18 0 9 9 0 0 1 18 0',
   CircleCheck: 'M6 12l4 4 8-8M22 12a10 10 0 1 1-20 0', Pin: 'M9 3h6l-1 6 4 4H6l4-4-1-6M12 13v8',
   MessageSquare: 'M4 4h16v12H9l-5 4V4', Undo2: 'M3 10l5-5M3 10l5 5M3 10h11a6 6 0 0 1 0 12',

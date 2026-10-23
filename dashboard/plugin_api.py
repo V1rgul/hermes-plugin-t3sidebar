@@ -4,6 +4,7 @@ The host mounts ``router`` in its authenticated /api/plugins/hermes-t3sidebar na
 This module is self-contained because Hermes loads it directly via importlib.
 """
 
+import json
 import math
 from pathlib import Path
 import re
@@ -178,22 +179,173 @@ def served_profile():
 	return profile
 
 
+def standalone_runtime(request, profile, actor):
+	# Version-sensitive standalone seam: use ONLY this process's already-loaded
+	# server and the native exact-home snapshot, never import a fresh registry or
+	# dispatch the unqualified legacy RPC. Authentication still comes from core.
+	import sys
+	from hermes_constants import get_hermes_home
+
+	home = get_hermes_home().resolve()
+	if actor is None:
+		raise HTTPException(503, "session_authority_unavailable")
+	owner = Path(actor.profile_id)
+	if not owner.is_absolute() or owner.resolve() != home:
+		raise HTTPException(403, "profile_mismatch")
+	# The installed standalone resolver does not check a native grant's home
+	# (its authority-backed branch does), so retain that boundary here too.
+	native = getattr(request.state, "native_http_principal", None)
+	if native is not None and native.get("profile_id") != str(home):
+		raise HTTPException(403, "profile_mismatch")
+	if "session:read" not in actor.capabilities:
+		raise HTTPException(403, "permission_denied")
+	server = sys.modules.get("tui_gateway.server")
+	if server is None:
+		raise HTTPException(503, "standalone_runtime_unavailable")
+	from tui_gateway.ws_legacy_fallback import _own_profile_read
+	from hermes_cli.web_server_sessions import _open_session_db_for_profile
+	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+
+	provenance = {}
+
+	def profile_home(name):
+		resolved = server._profile_home(name)
+		# Native None means the launch home, not an unresolved profile.
+		return Path(server._launch_home()) if resolved is None else resolved
+
+	def live_item(sid, session, current):
+		item = server._session_live_item(sid, session, current)
+		provenance[(item["id"], item["session_key"])] = session.get("source")
+		return item
+
+	# Adapt only the native launch sentinel and capture source while the native helper maps its exact-home snapshot; never walk another registry.
+	scoped_server = SimpleNamespace(_profile_home=profile_home, _launch_home=server._launch_home,
+		_sessions_lock=server._sessions_lock, _sessions=server._sessions, _session_live_item=live_item)
+	snapshot = _own_profile_read(scoped_server, {"jsonrpc": "2.0", "id": "hermes-t3sidebar-runtime",
+		"method": "session.active_list", "params": {"profile": profile}}, str(home))
+	if "error" in snapshot:
+		raise HTTPException(503, "standalone_profile_unavailable")
+	rows = snapshot["result"]["sessions"]
+	if not rows:
+		return {"sessions": []}
+	# Persisted source facts win; native empty drafts have no DB row yet, so retain their source captured during the same exact-home native mapping.
+	db = _open_session_db_for_profile(profile, read_only=True)
+	try:
+		visible = []
+		for row in rows:
+			record = db.get_session(row["session_key"])
+			source = record.get("source") if record is not None else provenance.get((row["id"], row["session_key"]))
+			if not isinstance(source, str) or not source.strip():
+				raise HTTPException(503, "standalone_session_source_unavailable")
+			if source.strip().lower() in {*INTERNAL_LISTING_SOURCES, "cron"}:
+				continue
+			item = {k: row[k] for k in ("id", "session_key", "status", "current", "last_active", "started_at", "message_count", "model", "title")}
+			# Native legacy previews may contain pending prompts. Runtime needs
+			# liveness/identity only; do not return that text or any extra fields.
+			visible.append({**item, "preview": "", "source": source.strip().lower()})
+		return {"sessions": visible}
+	finally:
+		db.close()
+
+
 async def native_runtime(request, profile):
-	# Version-sensitive native boundary: reuse authenticated authority + native
-	# read protocol, never the process-wide legacy sidecar registry.
+	# Hosted admission carries no parent actor/authority or same-process chats.
+	# Do not invent a principal or probe private loopbacks from the plugin host.
+	if getattr(request.state, "hosted_http_authenticated", False) is True:
+		raise HTTPException(503, "session_authority_unavailable")
 	from hermes_cli.web_server_sessions import _session_mutation_context
 	from gateway.session_active_list import active_list
 	from gateway.session_contract import Principal
 
 	authority, actor = _session_mutation_context(request, profile)
 	if authority is None:
-		raise HTTPException(503, "session_authority_unavailable")
+		return standalone_runtime(request, profile, actor)
 	reader = Principal(actor.subject, actor.profile_id, frozenset({"session:read"}), actor.transport_id)
-	return await active_list(SimpleNamespace(authority=authority, actor=reader), None, {})
+	value = await active_list(SimpleNamespace(authority=authority, actor=reader), None, {})
+	value["sessions"] = [row for row in value["sessions"] if row.get("source") != "cron"]
+	return value
 
 
-LIST_FIELDS = frozenset({"id", "resolved_id", "title", "preview", "cwd", "git_branch", "git_repo_root",
+LIST_FIELDS = frozenset({"id", "source", "resolved_id", "title", "preview", "cwd", "git_branch", "git_repo_root",
 	"last_active", "started_at", "updated_at", "unread", "_lineage_root_id", "_lineage_ids"})
+
+
+def card_projects(db):
+	"""Read this SessionDB's catalog once, without schema initialization or home lookup."""
+	from hermes_cli import projects_db
+
+	db_path = getattr(db, "db_path", None)
+	if db_path is None:
+		return []
+	path = Path(db_path).resolve().parent / "projects.db"
+	if not path.is_file():
+		return []
+	try:
+		connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+		try:
+			connection.row_factory = sqlite3.Row
+			return projects_db.list_projects(connection, include_archived=False)
+		finally:
+			connection.close()
+	except sqlite3.Error:
+		# Missing/legacy/unreadable catalogs must not trigger migrations or hide chats.
+		return []
+
+
+def card_project(cwd, projects):
+	from hermes_cli.projects_db import _normalize_path
+
+	if not isinstance(cwd, str) or not cwd.strip():
+		return {"id": "__no_project__", "name": "Home", "icon": None, "color": None, "cwd": None, "is_home": True}
+	target = _normalize_path(cwd)
+	# Match project_for_path's longest owning folder, including secondary folders.
+	owners = [(folder.path, project) for project in projects for folder in project.folders
+		if target == folder.path or target.startswith(folder.path.rstrip("/\\") + "/")]
+	if owners:
+		folder, project = max(owners, key=lambda owner: len(owner[0]))
+		return {"id": project.id, "name": project.name, "icon": project.icon, "color": project.color, "cwd": folder}
+	return {"id": target, "name": Path(target).name or target, "icon": None, "color": None, "cwd": target}
+
+
+def card_provider(config):
+	if isinstance(config, str):
+		try:
+			config = json.loads(config)
+		except (ValueError, RecursionError):
+			return None
+	if not isinstance(config, dict):
+		return None
+	provider = config.get("provider")
+	if isinstance(provider, str) and provider.strip():
+		return provider.strip()
+	runtime = config.get("gateway_runtime")
+	provider = runtime.get("provider") if isinstance(runtime, dict) else None
+	return provider.strip() if isinstance(provider, str) and provider.strip() else None
+
+
+def card_rows(db, rows):
+	"""Allowlisted card metadata; compression usage is summed once per native segment."""
+	rows = list(rows)
+	segment_ids = {sid for row in rows if row.get("_lineage_ids")
+		for sid in [row["id"], *row["_lineage_ids"]]}
+	segments = db._get_session_rich_rows_batch(segment_ids, compact_rows=True) if segment_ids else {}
+	projects = card_projects(db) if rows else []
+	result = []
+	for row in rows:
+		chain = list(dict.fromkeys([row["id"], *(row.get("_lineage_ids") or [])]))
+		compressed = bool(row.get("_lineage_ids"))
+		tip = segments.get(row["id"], {}) if compressed else row
+		usage = [segments.get(sid, {}) for sid in chain] if compressed else [row]
+		counts = {}
+		for key in ("input_tokens", "output_tokens"):
+			values = [segment.get(key) for segment in usage]
+			counts[key] = sum(values) if all(type(value) is int and value >= 0 for value in values) else None
+		item = {k: v for k, v in row.items() if k in LIST_FIELDS}
+		item.update(project=card_project(row.get("cwd"), projects), provider=card_provider(tip.get("model_config")),
+			model=tip.get("model"), source=tip.get("source", row.get("source")), **counts)
+		item["total_tokens"] = counts["input_tokens"] + counts["output_tokens"] if all(value is not None for value in counts.values()) else None
+		result.append(item)
+	return result
 
 
 def native_sessions(profile, offset, limit, organized_ids):
@@ -204,7 +356,7 @@ def native_sessions(profile, offset, limit, organized_ids):
 	# projection owns compression roots, project/branch inheritance and visibility.
 	db = _open_session_db_for_profile(profile, read_only=True)
 	try:
-		page = db.list_sessions_rich(limit=limit, offset=offset, compact_rows=True, order_by_last_active=True, include_archived=False, include_hidden=False, exclude_sources=list(INTERNAL_LISTING_SOURCES))
+		page = db.list_sessions_rich(limit=limit, offset=offset, compact_rows=True, order_by_last_active=True, include_archived=False, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
 		rows = {row.get("_lineage_root_id") or row["id"]: row for row in page}
 		if offset == 0:
 			for sid in organized_ids:
@@ -214,7 +366,7 @@ def native_sessions(profile, offset, limit, organized_ids):
 				# alias is found; never silently lose a short/colliding stored ID.
 				match_offset = 0
 				while True:
-					matches = db.list_sessions_rich(limit=500, offset=match_offset, id_query=sid, compact_rows=True, order_by_last_active=True, include_archived=False, include_hidden=False, exclude_sources=list(INTERNAL_LISTING_SOURCES))
+					matches = db.list_sessions_rich(limit=500, offset=match_offset, id_query=sid, compact_rows=True, order_by_last_active=True, include_archived=False, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
 					found = False
 					for row in matches:
 						ids = {row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])}
@@ -224,7 +376,7 @@ def native_sessions(profile, offset, limit, organized_ids):
 					if found or len(matches) < 500:
 						break
 					match_offset += 500
-		return {"sessions": [{k: v for k, v in row.items() if k in LIST_FIELDS} for row in rows.values()],
+		return {"sessions": card_rows(db, rows.values()),
 			"offset": offset, "limit": limit, "has_more": len(page) == limit}
 	finally:
 		db.close()
@@ -238,9 +390,14 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		return HermesT3SidebarStore(path if path is not None else default_state_path(), clock)
 
 	def listing_profile(request, allowed=()):
-		if set(request.query_params) - set(allowed):
+		if set(request.query_params) - {"profile", *allowed}:
 			raise HTTPException(422, "Only current-profile listing parameters are accepted")
-		return (profile_reader or served_profile)()
+		# Desktop appends its route's profile at the transport layer. The host
+		# mount has already established home; this is an assertion, not a selector.
+		profile = (profile_reader or served_profile)()
+		if any(value != profile for value in request.query_params.getlist("profile")):
+			raise HTTPException(422, "Only current-profile listing parameters are accepted")
+		return profile
 
 	@api.get("/runtime")
 	async def get_runtime(request: Request, response: Response):

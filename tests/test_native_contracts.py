@@ -45,6 +45,27 @@ class NativeContracts(unittest.TestCase):
 		self.assertEqual(client.get("/runtime?profile=foreign").status_code, 422)
 		self.assertEqual(calls, ["exact-profile"])
 
+	def test_desktop_transport_profile_must_match_every_value(self):
+		calls = []
+		async def runtime(request, profile):
+			calls.append(("runtime", profile))
+			return {"sessions": []}
+		def sessions(profile, offset, limit, ids):
+			calls.append(("sessions", profile))
+			return {"sessions": [], "has_more": False}
+		client = self.client(runtime_reader=runtime, sessions_reader=sessions)
+		for endpoint in ("/runtime", "/sessions?offset=0&limit=5"):
+			separator = "&" if "?" in endpoint else "?"
+			for query in ("profile=exact-profile", "profile=exact-profile&profile=exact-profile"):
+				response = client.get(endpoint + separator + query)
+				self.assertEqual(response.status_code, 200, response.text)
+				self.assertEqual(response.json()["profile"], "exact-profile")
+			before = list(calls)
+			for query in ("profile=foreign", "profile=", "profile=current", "profile=exact-profile&profile=foreign", "profile=foreign&profile=exact-profile", "profile=exact-profile&profile=", "profile=exact-profile&unknown=1"):
+				self.assertEqual(client.get(endpoint + separator + query).status_code, 422, query)
+			self.assertEqual(calls, before)
+		self.assertEqual(calls, [("runtime", "exact-profile")] * 2 + [("sessions", "exact-profile")] * 2)
+
 	def test_runtime_uses_native_waiting_and_read_only_principal(self):
 		# The authority/principal resolver is injected, the active_list implementation is real.
 		fake = ModuleType("hermes_cli.web_server_sessions")
@@ -58,9 +79,10 @@ class NativeContracts(unittest.TestCase):
 			self.assertEqual(principal.subject, actor.subject)
 			self.assertEqual(principal.profile_id, actor.profile_id)
 			self.assertEqual(principal.capabilities, frozenset({"session:read"}))
-			return [entry]
+			return [entry, LiveEntry("internal", entry.live, entry.handle, {"source": "tool", "started_at": 1}, [], False)]
 		with patch.dict(sys.modules, {fake.__name__: fake}), patch.object(listing_module, "live_entries", entries):
-			result = asyncio.run(backend.native_runtime(object(), "exact-profile"))
+			result = asyncio.run(backend.native_runtime(SimpleNamespace(state=SimpleNamespace()), "exact-profile"))
+		self.assertEqual(len(result["sessions"]), 1)
 		self.assertEqual(result["sessions"][0]["status"], "waiting")
 		self.assertEqual(result["sessions"][0]["session_key"], "collision")
 
@@ -128,7 +150,9 @@ class NativeContracts(unittest.TestCase):
 		setattr(fake, "_open_session_db_for_profile", lambda *args, **kwargs: DB())
 		with patch.dict(sys.modules, {fake.__name__: fake}):
 			value = backend.native_sessions("exact-profile", 0, 500, ("old",))
-		self.assertEqual(value["sessions"], [{"id": "old", "cwd": "/retained"}])
+		self.assertEqual(value["sessions"], [{"id": "old", "cwd": "/retained",
+			"project": {"id": "/retained", "name": "retained", "icon": None, "color": None, "cwd": "/retained"},
+			"provider": None, "model": None, "source": None, "input_tokens": None, "output_tokens": None, "total_tokens": None}])
 		self.assertEqual([c["offset"] for c in calls], [0, 0, 500])
 
 	def test_native_internal_sources_excluded_from_pages_and_organized_backfill(self):
@@ -151,6 +175,18 @@ class NativeContracts(unittest.TestCase):
 			backfill = backend.native_sessions("exact-profile", 0, 1, tuple(f"internal-{source}" for source in INTERNAL_LISTING_SOURCES))
 			self.assertEqual(backfill["sessions"], first["sessions"])
 		self.assertEqual(db_path.read_bytes(), before)
+
+	def test_cron_runs_are_excluded_from_pages_and_organized_backfill(self):
+		db_path = self.path / "cron-filter.sqlite3"
+		with closing(SessionDB(db_path)) as db:
+			db.create_session("human", "cli")
+			db.create_session("job-run", "cron")
+		fake = ModuleType("hermes_cli.web_server_sessions")
+		setattr(fake, "_open_session_db_for_profile", lambda profile, *, read_only: SessionDB(db_path, read_only=read_only))
+		with patch.dict(sys.modules, {fake.__name__: fake}):
+			for offset, expected in [(0, ["human"]), (1, [])]:
+				rows = backend.native_sessions("exact-profile", offset, 1, ("job-run",))["sessions"]
+				self.assertEqual([row["id"] for row in rows], expected)
 
 	def test_sessions_missing_native_reader_is_503(self):
 		def unavailable(*args):
