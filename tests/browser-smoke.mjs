@@ -520,7 +520,7 @@ try {
   });
   check('rapid folding reversal settles expanded without inert or stuck content', rapid);
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  check('reduced-motion disables category height transitions', await page.locator('.sf-scroll').evaluate(el => getComputedStyle(el).transitionDuration === '0s'));
+  check('reduced-motion disables category height transitions', await page.locator('.sf-shelves').evaluate(el => getComputedStyle(el).transitionDuration === '0s'));
   for (const height of [400, 650]) {
     await page.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
     await page.mouse.move(1100, 850);
@@ -577,6 +577,7 @@ try {
       await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
     }, count);
     await page.waitForFunction(count => (document.querySelector('[data-section="pinned"]')?.querySelectorAll('.sf-row').length || 0) === count, count);
+    if (count === 1) check('Pinned uses natural flex sizing rather than a calculated grid track', await page.locator('[data-section="pinned"]').evaluate(el => getComputedStyle(el.parentElement).display === 'flex' && getComputedStyle(el).flexGrow === '0' && !el.parentElement.style.gridTemplateRows));
     if (!count) check('empty Pinned reserves no grid space and Ready starts at the top', !await page.locator('[data-section="pinned"]').count() && await page.locator('.sf-scroll').evaluate(list => Math.abs(list.getBoundingClientRect().top - list.querySelector('[data-section="active"]').getBoundingClientRect().top) <= 1));
     else check(`Pinned with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="pinned"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - count * 56) <= 1 && Math.abs(el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().bottom - 1) <= 1, count));
   }
