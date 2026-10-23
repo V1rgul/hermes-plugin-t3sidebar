@@ -974,6 +974,18 @@ try {
     check(`${trigger} always has search and only Filter has All projects`, await picker.getByRole('searchbox', { name: 'Search projects' }).isVisible() && await picker.getByRole('button', { name: 'All projects', exact: true }).count() === (prefix === 'Filter by' ? 1 : 0));
     pickerShapes.push(await picker.locator('.sf-project-options .sf-project-name,.sf-project-path').allTextContents().then(values => values.filter(value => value !== 'All projects')));
     check(`${trigger} groups multiple paths beneath one project name`, await picker.locator('.sf-project-group .sf-project-name').allTextContents().then(names => names.join() === 'Multi workspace') && await picker.locator('.sf-project-group .sf-project-folder .sf-project-path').allTextContents().then(paths => paths.join('|') === '~/main|~/second'));
+    check(`${trigger} uses context-menu-density rows and compact folder spacing`, await picker.locator('.sf-project-choice').evaluateAll(rows => rows.every(row => Math.abs(row.getBoundingClientRect().height - 24) < .1) && [...document.querySelectorAll('.sf-project-group')].every(group => {
+      const choices = [...group.querySelectorAll('.sf-project-choice')];
+      return choices.slice(1).every((row, index) => Math.abs(row.getBoundingClientRect().top - choices[index].getBoundingClientRect().bottom) < .1);
+    })));
+    check(`${trigger} single-folder path is on the right of its name on the same line`, await picker.getByRole('button', { name: `${prefix} Single workspace`, exact: true }).evaluate(row => {
+      const name = row.querySelector('.sf-project-name').getBoundingClientRect(), path = row.querySelector('.sf-project-path').getBoundingClientRect();
+      return name.right < path.left && Math.abs(name.top - path.top) < .1 && getComputedStyle(row.querySelector('.sf-project-path')).textAlign === 'right';
+    }));
+    if (prefix === 'Filter by') check('All projects icon and label align exactly with project icons and labels', await picker.evaluate(el => {
+      const all = el.querySelector('[aria-label="All projects"]'), project = el.querySelector('.sf-project-heading');
+      return ['.sf-project-icon', '.sf-project-name'].every(selector => Math.abs(all.querySelector(selector).getBoundingClientRect().left - project.querySelector(selector).getBoundingClientRect().left) < .1);
+    }));
     check(`${trigger} paths use the dimmed theme color`, await picker.locator('.sf-project-path').evaluateAll(nodes => nodes.every(node => {
       const probe = document.createElement('span'); probe.style.color = 'var(--ui-text-tertiary)'; node.append(probe);
       const expected = getComputedStyle(probe).color; probe.remove();
@@ -995,6 +1007,44 @@ try {
     await picker.getByRole('button', { name: 'Close session actions', exact: true }).click();
   }
   check('Filter and New session render the same project list and grouped paths', JSON.stringify(pickerShapes[0]) === JSON.stringify(pickerShapes[1]));
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.projects = [
+      { id: 'p_many', label: 'Many folders', icon: 'tools', repos: Array.from({ length: 6 }, (_, i) => ({ path: `/home/fixture/worktrees/folder-${i}` })) },
+      ...Array.from({ length: 48 }, (_, i) => ({ id: `p_dense_${i}`, label: `Workspace ${String(i).padStart(2, '0')}`, path: `/home/fixture/Documents/a-deliberately-long-project-folder-name-${i}`, icon: 'repo' }))
+    ];
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  // Desktop's input need not inherit the harness's global border-box reset.
+  const contentBox = await page.addStyleTag({ content: 'input{box-sizing:content-box}' });
+  for (const [trigger, dialogName] of [['Filter sessions', 'Session filters'], ['New session', 'New session project']]) {
+    for (const [width, height] of [[1200, 900], [360, 320]]) {
+      await page.setViewportSize({ width, height });
+      await page.getByRole('button', { name: trigger, exact: true }).click();
+      const picker = page.getByRole('dialog', { name: dialogName, exact: true });
+      await picker.getByRole('button', { name: 'Project Many folders', exact: true }).waitFor();
+      await picker.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      check(`${trigger} at ${width}x${height}: search and popup stay inside their bounds without a global box-sizing reset`, await picker.evaluate(el => {
+        const box = el.getBoundingClientRect(), body = el.querySelector('.sf-project-picker'), input = body.querySelector('input'), r = input.getBoundingClientRect(), b = body.getBoundingClientRect(), style = getComputedStyle(body);
+        return box.left >= 0 && box.right <= innerWidth + .5 && box.top >= 0 && box.bottom <= innerHeight + .5 && body.scrollWidth <= body.clientWidth && getComputedStyle(input).boxSizing === 'border-box' && r.left >= b.left + parseFloat(style.paddingLeft) - .5 && r.right <= b.right - parseFloat(style.paddingRight) + .5;
+      }));
+      check(`${trigger} at ${width}x${height}: six-folder group keeps all rows compact`, await picker.locator('.sf-project-group').evaluate(el => el.querySelectorAll('.sf-project-folder').length === 6 && Math.abs(el.getBoundingClientRect().height - 7 * 24) < .5));
+      if (height === 900) check(`${trigger} uses a taller list instead of the former 360px cap`, await picker.locator('.sf-project-options').evaluate(el => el.clientHeight > 560 && el.scrollHeight > el.clientHeight));
+      const before = await picker.getByRole('searchbox', { name: 'Search projects' }).boundingBox();
+      await picker.locator('.sf-project-options').hover(); await page.mouse.wheel(0, 700);
+      await page.waitForFunction(() => document.querySelector('.sf-project-options')?.scrollTop > 0);
+      const after = await picker.getByRole('searchbox', { name: 'Search projects' }).boundingBox();
+      check(`${trigger} at ${width}x${height}: only choices scroll while search stays fixed`, Math.abs(before.y - after.y) < .1 && await picker.evaluate(el => el.scrollTop === 0 && el.querySelector('.sf-project-picker').scrollTop === 0));
+      await picker.locator('.sf-project-options').evaluate(el => { el.scrollTop = 0; });
+      await picker.screenshot({ path: join(screenshotDir, `${trigger === 'Filter sessions' ? 'filter' : 'new-session'}-project-dense-${height}.png`) });
+      if (height === 900) {
+        await picker.evaluate(el => el.style.setProperty('--radix-popover-content-available-height', '280px'));
+        check(`${trigger} honors the native popover available-height limit`, await picker.locator('.sf-project-picker').evaluate(el => el.getBoundingClientRect().height <= 280 && el.querySelector('.sf-project-options').clientHeight > 0));
+      }
+      await picker.getByRole('button', { name: 'Close session actions', exact: true }).click();
+    }
+  }
+  await contentBox.evaluate(el => el.remove());
   check('no browser page errors', errors.length === 0);
   console.log(`Browser smoke: ${checks.length} checks passed; screenshots ${screenshotDir}/{frontend,hovered,actions,dense-400,dense-650,short-300-error}.png`);
 } finally { await browser?.close(); server.close(); }
