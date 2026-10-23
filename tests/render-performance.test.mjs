@@ -106,6 +106,73 @@ function denseHistory(archives = 500) {
 	mock.host.state.focusedStoredSessionId.set('dense-0');
 }
 
+test('observed viewport height avoids geometry reads on scroll and keyboard navigation', async () => {
+	const previousObserver = globalThis.ResizeObserver;
+	const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
+	const observers = [];
+	let reads = 0;
+	globalThis.ResizeObserver = class {
+		constructor(callback) { this.callback = callback; observers.push(this); }
+		observe(target) { this.target = target; }
+		disconnect() { this.disconnected = true; }
+	};
+	Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get() { reads++; return 112; } });
+	try {
+		denseHistory(); await mount();
+		const section = document.querySelector('[data-section=active]'), body = section.querySelector('.sf-section-body');
+		const observer = observers.find(observer => observer.target === body);
+		assert.ok(observer, 'observe the actual viewport, not the full-height spacer');
+		const resize = async height => { await act(async () => observer.callback([{ target: body, contentRect: { height } }])); await tick(); };
+		await resize(112);
+		assert.equal(section.querySelectorAll('.sf-row').length, 5, 'two viewport rows plus lower overscan at the top');
+		reads = 0;
+		for (const top of [560, 1120, 1680]) {
+			await act(async () => { body.scrollTop = top; body.dispatchEvent(new Event('scroll')); }); await tick();
+		}
+		assert.ok(row('dense-30'), 'scrolling still moves the mounted window');
+		const card = row('dense-30').querySelector('.sf-open');
+		await act(async () => { card.focus(); card.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); }); await tick();
+		assert.equal(document.activeElement.closest('[data-session-id]')?.dataset.sessionId, 'dense-31');
+		assert.equal(reads, 0, 'observed viewport height must be reused by scroll and reveal');
+		await act(async () => { document.activeElement.blur(); body.scrollTop = 0; body.dispatchEvent(new Event('scroll')); }); await tick();
+		await resize(336);
+		assert.equal(section.querySelectorAll('.sf-row').length, 9, 'ResizeObserver updates the visible range without a clientHeight read');
+		await resize(0);
+		assert.equal(section.querySelectorAll('.sf-row').length, 9, 'a collapsed viewport preserves its last positive window height');
+		await act(async () => { const first = row('dense-0').querySelector('.sf-open'); first.focus(); first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); }); await tick();
+		assert.equal(body.scrollTop, 0, 'navigation during an observer zero-height interval reuses the last positive height');
+		assert.equal(reads, 0);
+		await act(async () => root.unmount()); root = null;
+		assert.ok(observers.every(observer => observer.disconnected), 'unmount disconnects all observers');
+	} finally {
+		if (descriptor) Object.defineProperty(HTMLElement.prototype, 'clientHeight', descriptor);
+		else delete HTMLElement.prototype.clientHeight;
+		if (previousObserver === undefined) delete globalThis.ResizeObserver;
+		else globalThis.ResizeObserver = previousObserver;
+	}
+});
+
+test('clients without ResizeObserver retain measured scrolling and resize fallback', async () => {
+	const previousObserver = globalThis.ResizeObserver;
+	const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
+	let height = 112, reads = 0;
+	delete globalThis.ResizeObserver;
+	Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get() { reads++; return height; } });
+	try {
+		denseHistory(); await mount();
+		const section = document.querySelector('[data-section=active]'), body = section.querySelector('.sf-section-body');
+		assert.equal(section.querySelectorAll('.sf-row').length, 5);
+		height = 336; reads = 0;
+		await act(async () => body.dispatchEvent(new Event('scroll'))); await tick();
+		assert.equal(section.querySelectorAll('.sf-row').length, 9);
+		assert.ok(reads > 0, 'older clients still measure instead of freezing a stale height');
+	} finally {
+		if (descriptor) Object.defineProperty(HTMLElement.prototype, 'clientHeight', descriptor);
+		else delete HTMLElement.prototype.clientHeight;
+		if (previousObserver !== undefined) globalThis.ResizeObserver = previousObserver;
+	}
+});
+
 test('500-row shelves bound mounted cards, fold renders and fresh draft reads to the viewport', async () => {
 	denseHistory(); await mount();
 	assert.ok(document.querySelectorAll('.sf-row').length < 80, 'history size must not become mounted card count');

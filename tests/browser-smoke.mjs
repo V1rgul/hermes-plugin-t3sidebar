@@ -498,29 +498,55 @@ try {
   await page.locator('[data-session-id="synthetic-active-000"]').waitFor();
   await page.waitForFunction(() => document.querySelector('[data-session-id="synthetic-working-000"]')?.dataset.working === 'true');
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  const motion = await page.evaluate(async () => {
-    const section = document.querySelector('[data-section="archived"]'), toggle = section.querySelector('.sf-section-toggle');
-    const before = section.getBoundingClientRect().height, samples = [];
-    toggle.click();
-    const start = performance.now();
-    while (performance.now() - start < 320) { await new Promise(requestAnimationFrame); samples.push(section.getBoundingClientRect().height); }
-    const closed = section.getBoundingClientRect().height, inert = section.querySelector('.sf-section-body').inert;
-    toggle.click();
-    const reopened = [];
-    const opening = performance.now();
-    while (performance.now() - opening < 320) { await new Promise(requestAnimationFrame); reopened.push(section.getBoundingClientRect().height); }
-    return { before, closed, inert, closingIntermediate: samples.some(h => h > 25 && h < before - 1), openingIntermediate: reopened.some(h => h > 25 && h < before - 1), final: section.getBoundingClientRect().height };
-  });
-  check('fold and unfold animate real category height, not just the chevron', motion.closingIntermediate && motion.openingIntermediate && Math.abs(motion.closed - 24) < 1 && Math.abs(motion.final - motion.before) < 1 && motion.inert);
-  const rapid = await page.evaluate(async () => {
-    const section = document.querySelector('[data-section="archived"]'), toggle = section.querySelector('.sf-section-toggle');
-    toggle.click(); await new Promise(requestAnimationFrame); toggle.click();
-    const start = performance.now(); while (performance.now() - start < 320) await new Promise(requestAnimationFrame);
-    return section.dataset.closed === 'false' && !section.querySelector('.sf-section-body').inert && section.getBoundingClientRect().height > 24;
-  });
-  check('rapid folding reversal settles expanded without inert or stuck content', rapid);
+  for (const shelf of ['archived', 'working']) {
+    const motion = await page.evaluate(async shelf => {
+      const section = document.querySelector(`[data-section="${shelf}"]`), toggle = section.querySelector('.sf-section-toggle');
+      const height = () => section.getBoundingClientRect().height;
+      const collect = async () => {
+        const samples = [], start = performance.now();
+        while (performance.now() - start < 320) { await new Promise(requestAnimationFrame); samples.push(height()); }
+        return samples;
+      };
+      const before = height();
+      toggle.click();
+      const closing = await collect(), closed = height();
+      const body = section.querySelector('.sf-section-body');
+      const inaccessible = body.inert && body.getAttribute('aria-hidden') === 'true';
+      toggle.click();
+      const opening = await collect();
+      return { before, closed, inaccessible, closing, opening, final: height(), reopened: !body.inert && !body.hasAttribute('aria-hidden') };
+    }, shelf);
+    console.log(`MOTION ${shelf}: ${JSON.stringify(motion)}`);
+    check(`${shelf} fold and unfold animate real category height, not just the chevron`, motion.closing.some(h => h > 25 && h < motion.before - 1) && motion.opening.some(h => h > 25 && h < motion.before - 1) && Math.abs(motion.closed - 24) < 1 && Math.abs(motion.final - motion.before) < 1 && motion.inaccessible && motion.reopened);
+    const rapid = await page.evaluate(async shelf => {
+      const section = document.querySelector(`[data-section="${shelf}"]`), toggle = section.querySelector('.sf-section-toggle');
+      const before = section.getBoundingClientRect().height;
+      const wait = async ms => { const start = performance.now(); while (performance.now() - start < ms) await new Promise(requestAnimationFrame); };
+      const intermediate = async () => {
+        const start = performance.now();
+        while (performance.now() - start < 260) {
+          await new Promise(requestAnimationFrame);
+          const height = section.getBoundingClientRect().height;
+          if (height > 25 && height < before - 1) return true;
+        }
+        return false;
+      };
+      toggle.click();
+      const duringClose = await intermediate();
+      toggle.click(); await wait(320);
+      const open = section.dataset.closed === 'false' && !section.querySelector('.sf-section-body').inert && Math.abs(section.getBoundingClientRect().height - before) < 1;
+      toggle.click(); await wait(320);
+      toggle.click();
+      const duringOpen = await intermediate();
+      toggle.click(); await wait(320);
+      const closed = section.dataset.closed === 'true' && section.querySelector('.sf-section-body').inert && Math.abs(section.getBoundingClientRect().height - 24) < 1;
+      toggle.click(); await wait(320);
+      return duringClose && duringOpen && open && closed && Math.abs(section.getBoundingClientRect().height - before) < 1;
+    }, shelf);
+    check(`${shelf} rapid folding reversal settles expanded without inert or stuck content`, rapid);
+  }
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  check('reduced-motion disables category height transitions', await page.locator('.sf-shelves').evaluate(el => getComputedStyle(el).transitionDuration === '0s'));
+  check('reduced-motion disables category height transitions on their actual owners', await page.locator('.sf-shelves,[data-section="working"]').evaluateAll(els => els.every(el => getComputedStyle(el).transitionDuration === '0s')));
   for (const height of [400, 650]) {
     await page.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
     await page.mouse.move(1100, 850);
@@ -534,6 +560,7 @@ try {
     check(`${height}px: Pinned before headerless Ready, secondary headings fixed and visible`, layout.sections.map(s => s.name).join(',') === 'pinned,active,working,snoozed,archived' && layout.sections.slice(0, 2).every(s => !s.header) && layout.sections.slice(2).every(s => s.header.height === 24 && s.header.top >= layout.list.top && s.header.bottom <= layout.root.bottom && s.body.top >= s.header.bottom));
     check(`${height}px: no whole-list scrolling; all five bodies constrained`, layout.overflow === 'hidden' && layout.listScrollHeight <= layout.listHeight + 1 && layout.sections.every(s => s.body.height > 0 && s.body.bottom <= layout.list.bottom + 1 && s.scrollHeight > s.body.height));
     check(`${height}px: expanded Archived gets a substantially larger share`, layout.sections.find(s => s.name === 'archived').rect.height > layout.list.height * .35 && layout.sections.filter(s => s.name !== 'archived').every(s => s.body.height > 0));
+    check(`${height}px: dense Working is capped at 18% of the remaining grid`, await page.locator('[data-section="working"]').evaluate(el => Math.abs(el.getBoundingClientRect().height - el.parentElement.getBoundingClientRect().height * .18) <= 1));
     check(`${height}px: toolbar single line and Search left of Filter and New session`, layout.toolbar.length === 3 && layout.toolbar.every(r => Math.abs((r.top + r.bottom) / 2 - (layout.toolbar[0].top + layout.toolbar[0].bottom) / 2) < 2) && layout.toolbar.every((r, i, arr) => !i || arr[i-1].right <= r.left));
     // Scroll each body in turn: every other category's scrollTop AND geometry stay fixed.
     for (const section of ['pinned', 'active', 'working', 'snoozed', 'archived']) {
@@ -561,6 +588,10 @@ try {
     const card = page.locator('[data-session-id="synthetic-active-000"]');
     const metadata = await card.locator('.sf-card-meta').boundingBox(), title = await card.locator('.sf-row-title').boundingBox();
     check(`${height}px: 56px two-line card; title ellipsis below metadata`, (await card.boundingBox()).height === 56 && metadata.y + metadata.height <= title.y && await card.locator('.sf-row-title').evaluate(el => getComputedStyle(el).textOverflow === 'ellipsis' && el.scrollWidth > el.clientWidth));
+    check(`${height}px: card text lines use a centered 3px gap without changing line heights`, await card.locator('.sf-open').evaluate(el => {
+      const meta = el.querySelector('.sf-card-meta').getBoundingClientRect(), title = el.querySelector('.sf-row-title').getBoundingClientRect(), bounds = el.getBoundingClientRect();
+      return getComputedStyle(el).rowGap === '3px' && meta.height === 19 && title.height === 19 && title.top - meta.bottom === 3 && Math.abs((meta.top + title.bottom) / 2 - (bounds.top + bounds.bottom) / 2) < 1;
+    }));
     await card.hover(); const action = await card.locator('.sf-hover').boundingBox(), titleHovered = await card.locator('.sf-row-title').boundingBox();
     check(`${height}px: hover actions stay at top, title unaffected`, action.y < title.y && action.y + action.height <= title.y + 1 && JSON.stringify(titleHovered) === JSON.stringify(title));
     await page.mouse.move(1100, 850);
@@ -594,6 +625,15 @@ try {
     }, count);
     await page.waitForFunction(count => document.querySelector('[data-section="working"]')?.querySelectorAll('.sf-row').length === count, count);
     check(`Working with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="working"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - (24 + count * 56)) <= 1, count));
+    check(`Working ${count}: parent track is content-fit, not count-derived pixels`, await page.locator('[data-section="working"]').evaluate(el => el.parentElement.style.gridTemplateRows.includes('fit-content(18%)') && !el.style.height && !el.style.maxHeight));
+    if (!count) check('empty Working retains only its 24px header and no scroll-body footprint', await page.locator('[data-section="working"]').evaluate(el => el.querySelector('.sf-section-toggle').getBoundingClientRect().height === 24 && el.querySelector('.sf-section-body').getBoundingClientRect().height === 0));
+    if (count === 2) {
+      // A CSS row-size change must flow through intrinsic layout without new data.
+      await page.locator('.harness-sidebar').evaluate(el => { el.style.height = '1800px'; });
+      const css = await page.addStyleTag({ content: '[data-section="working"] .sf-row{height:70px}' });
+      check('Working follows actual CSS content height without recalculating JavaScript row geometry', await page.locator('[data-section="working"]').evaluate(el => Math.abs(el.getBoundingClientRect().height - 164) <= 1));
+      await css.evaluate(el => el.remove());
+    }
   }
   await page.evaluate(() => window.hermesT3SidebarHarness.loadDenseFixtures());
   await page.waitForFunction(() => document.querySelector('[data-section="working"]')?.querySelectorAll('.sf-row').length === 20);
@@ -614,6 +654,10 @@ try {
         const bounds = list.getBoundingClientRect();
         return {
           fits: list.scrollHeight <= list.clientHeight + 1,
+          tightCards: [...list.querySelectorAll('.sf-open')].every(el => {
+            const meta = el.querySelector('.sf-card-meta').getBoundingClientRect(), title = el.querySelector('.sf-row-title').getBoundingClientRect();
+            return el.closest('.sf-row').getBoundingClientRect().height === 56 && getComputedStyle(el).rowGap === '3px' && meta.height === 19 && title.height === 19 && title.top - meta.bottom === 3;
+          }),
           headers: [...list.querySelectorAll('.sf-section-toggle')].every(el => {
             const r = el.getBoundingClientRect();
             return r.height === 24 && r.top >= bounds.top && r.bottom <= bounds.bottom + 1;
@@ -625,6 +669,7 @@ try {
         };
       });
       check(`${height}px${banner === 'error' ? ' with error' : ''}: headers and complete scroll bodies fit without outer clipping`, geometry.fits && geometry.headers && geometry.bodies);
+      check(`${height}px ${banner}: tight card text preserves 56px rows and 19px lines`, geometry.tightCards);
       check(`${height}px ${banner}: no Undo or dismiss-Undo controls`, await noUndo());
       if (height === 300 && banner === 'error') await page.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, 'short-300-error.png') });
     }

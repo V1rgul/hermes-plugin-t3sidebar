@@ -522,6 +522,8 @@ const CSS = `
 .sf-shelves{display:grid;flex:1;min-height:0;gap:1px;transition:grid-template-rows .22s ease}
 /* Fixed header minima survive short panes; Archives gets most of the flexible space. */
 .sf-section{display:flex;flex-direction:column;min-height:0;overflow:hidden}.sf-section[data-section=pinned]{flex:0 1 auto;max-height:18%}.sf-section[data-section=active]{grid-row:1}.sf-section[data-section=working]{grid-row:2}.sf-section[data-section=snoozed]{grid-row:3}.sf-section[data-section=archived]{grid-row:4}
+/* Working contributes its intrinsic header + body size to fit-content(18%); animating its own body track keeps the parent cap stable during reversals. */
+.sf-section[data-section=working]{display:grid;grid-template-rows:24px minmax(0,1fr);min-height:25px;transition:grid-template-rows .22s ease}.sf-section[data-section=working][data-closed=true]{grid-template-rows:24px minmax(0,0fr);min-height:24px}.sf-section[data-section=working][data-populated=false]{min-height:24px}.sf-section[data-section=working][data-populated=false] .sf-section-body{display:none}
 .sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:24px;min-height:24px;padding:3px 6px;border:0;background:transparent;color:var(--ui-text-tertiary);font-size:11px;text-align:left}.sf-count{color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums}.sf-section-label,.sf-count,.sf-section-chevron{flex-shrink:0}.sf-section-line{flex:1;min-width:0;height:1px;background:var(--ui-stroke-secondary)}.sf-section-chevron{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px}
 .sf-row{position:relative;height:56px;flex-shrink:0;padding:0 10px;border-radius:5px}.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
 .sf-row[data-has-draft=true][data-current=false]{background:color-mix(in srgb,var(--ui-orange,#db704b) 10%,transparent)}
@@ -529,7 +531,7 @@ const CSS = `
 .sf-row[data-dimmed=true]{opacity:.55}.sf-row[data-dimmed=true]:hover,.sf-row[data-dimmed=true]:focus-within{opacity:1}
 /* Native semantic blue is independent of the user's configurable accent. */
 .sf-row[data-working=true] .sf-time{color:var(--ui-blue,#0053fd)}
-.sf-open{display:flex;flex-direction:column;justify-content:center;gap:5px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
+.sf-open{display:flex;flex-direction:column;justify-content:center;gap:3px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
 .sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
 .sf-row[data-menu-open=true] .sf-hover{visibility:visible;opacity:1}.sf-row[data-menu-open=true] .sf-provider,.sf-row[data-menu-open=true] .sf-token,.sf-row[data-menu-open=true] .sf-time{visibility:hidden}.sf-row[data-dimmed=true][data-menu-open=true]{opacity:1}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
@@ -540,7 +542,7 @@ const CSS = `
 .sf-status{font-weight:600}
 .sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--ui-orange,#db704b)}.sf-status[data-status=input]{color:var(--ui-purple,#9e94d5)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
 .sf-section-body{transition:opacity .18s ease,visibility 0s}.sf-section[data-closed=true] .sf-section-body{opacity:0;visibility:hidden;transition:opacity .18s ease,visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:opacity .16s ease,background-color .16s ease,box-shadow .16s ease}.sf-hover{transition:opacity .12s ease;opacity:0}.sf-row:hover .sf-hover{opacity:1}.sf-custom-time{display:flex;align-items:center;gap:4px}.sf-custom-time input{min-width:0}.sf-custom-time .sf-icon{flex-shrink:0}
-@media(prefers-reduced-motion:reduce){.sf-shelves,.sf-section-body,.sf-section-chevron,.sf-row,.sf-hover{transition:none!important}}
+@media(prefers-reduced-motion:reduce){.sf-shelves,.sf-section[data-section=working],.sf-section-body,.sf-section-chevron,.sf-row,.sf-hover{transition:none!important}}
 `;
 // Monochrome brand paths: Simple Icons 15.20.0 (CC0), fetched from its pinned GitHub tag.
 const PROVIDER_PATHS = {
@@ -690,7 +692,7 @@ const MemoSessionRow = memo(SessionRow, (previous, next) => Object.keys(next).ev
 // Fixed-height windows keep shelves proportional to their viewport, not history.
 // Small lists retain their original DOM; open popovers keep their owner mounted.
 function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
-  const body = useRef(null), pending = useRef(null);
+  const body = useRef(null), pending = useRef(null), viewportHeight = useRef(null);
   const [viewport, setViewport] = useState({ top: 0, height: 560 });
   const [retained, setRetained] = useState(() => new Set()), [focusedKey, setFocusedKey] = useState(null);
   const windowed = entries.length > 80;
@@ -701,15 +703,21 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
   const update = useCallback(() => {
     const element = body.current?.parentElement;
     if (!element) return;
-    const top = Math.floor(element.scrollTop / 56), height = element.clientHeight;
+    // Observer-backed clients need no height measurement on the scroll path.
+    const top = Math.floor(element.scrollTop / 56), height = viewportHeight.current ?? element.clientHeight;
     setViewport(previous => previous.top === top && (!height || previous.height === height) ? previous : { top, height: height || previous.height });
   }, []);
   useEffect(() => {
     const element = body.current?.parentElement;
+    if (typeof ResizeObserver === 'function') viewportHeight.current = element.clientHeight || 560;
     update();
     element.addEventListener('scroll', update, { passive: true });
     if (typeof ResizeObserver !== 'function') return () => element.removeEventListener('scroll', update);
-    const observer = new ResizeObserver(update); observer.observe(element);
+    const observer = new ResizeObserver(entries => {
+      const entry = entries.find(entry => entry.target === element);
+      // Collapse must not erase the last usable height before reopening/navigation.
+      if (entry?.contentRect.height > 0) { viewportHeight.current = entry.contentRect.height; update(); }
+    }); observer.observe(element);
     return () => { observer.disconnect(); element.removeEventListener('scroll', update); };
   }, [update]);
   useEffect(() => {
@@ -717,8 +725,9 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
       const index = entries.findIndex(row => row.key === key), element = body.current?.parentElement;
       if (index < 0 || !element) return;
       pending.current = key;
-      if (index * 56 < element.scrollTop) element.scrollTop = index * 56;
-      else if ((index + 1) * 56 > element.scrollTop + element.clientHeight) element.scrollTop = (index + 1) * 56 - element.clientHeight;
+      const top = element.scrollTop, height = viewportHeight.current ?? element.clientHeight;
+      if (index * 56 < top) element.scrollTop = index * 56;
+      else if ((index + 1) * 56 > top + height) element.scrollTop = (index + 1) * 56 - height;
       setFocusedKey(key); update();
     };
     navigators.current.set(section, reveal);
@@ -805,9 +814,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const searching = !!query.trim();
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
   const sectionTrack = section => {
+    // CSS owns Working's content fit, cap, and body-track fold animation.
+    if (section === 'working') return 'fit-content(18%)';
     const count = sections[section].length;
-    // Fit Working to its cards, capped by pane space so long lists still scroll.
-    if (section === 'working') return !isClosed(section) && count ? `minmax(25px,clamp(25px,18%,${24 + count * 56}px))` : 'minmax(24px,24px)';
     if (isClosed(section)) return 'minmax(24px,0fr)';
     return `minmax(25px,${section === 'archived' && count ? 3 : count ? .65 : .25}fr)`;
   };
