@@ -252,11 +252,18 @@ try {
   check('snooze does not stop or alter the live worker', await page.evaluate(() => window.hermesT3SidebarHarness.control.live.find(item => item.id === 'runtime-worker').status === 'working'));
   await worker.hover(); await worker.getByRole('button', { name: 'Snooze session', exact: true }).click();
   const unsnooze = snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true });
-  check('Unsnooze is the first Snooze menu action and uses theme green', await snoozeDialog.locator('form > button').first().textContent() === 'Unsnooze' && await unsnooze.evaluate(el => {
+  check('Unsnooze is the first enabled Snooze menu action and uses theme green', await snoozeDialog.locator('form > button:not(:disabled)').first().textContent() === 'Unsnooze' && await unsnooze.evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe);
     const green = getComputedStyle(probe).color; probe.remove();
     return getComputedStyle(el).color === green;
   }));
+  check('snoozed menu starts with two disabled blue info rows before Unsnooze', await snoozeDialog.locator('form').evaluate(form => {
+    const [remaining, date, unsnooze] = form.children;
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; form.append(probe);
+    const blue = getComputedStyle(probe).color; probe.remove();
+    return remaining.disabled && date.disabled && /^\d+d \d+h \d+min left$/.test(remaining.textContent) && unsnooze.textContent === 'Unsnooze' && [remaining, date].every(el => getComputedStyle(el).color === blue && getComputedStyle(el).opacity === '1');
+  }));
+  check('wake date uses the client locale short date and time in its local timezone', await snoozeDialog.locator('.sf-snooze-info').nth(1).textContent() === await page.evaluate(() => new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(window.hermesT3SidebarHarness.control.metadata.sessions.root.wake_at * 1000))));
   await unsnooze.hover();
   check('Unsnooze stays green on hover', await unsnooze.evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe);
@@ -283,17 +290,17 @@ try {
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('Unpin returns the session to Ready without any Undo toast', await noUndo());
   await design.hover(); await snooze.click();
-  check('Next Monday at 8:00 is the fourth preset, without redundant Snooze prefixes', JSON.stringify(await snoozeDialog.locator('form > button').allTextContents()) === JSON.stringify(['In 1 hour', 'In 3 hours', 'Tomorrow at 9:00', 'Next Monday at 8:00']) && !/Custom snooze/.test(await snoozeDialog.innerText()));
+  check('Next Monday at 9:00 is the fourth preset, without redundant Snooze prefixes', JSON.stringify(await snoozeDialog.locator('form > button').allTextContents()) === JSON.stringify(['In 1 hour', 'In 3 hours', 'Tomorrow at 9:00', 'Next Monday at 9:00']) && !/Custom snooze/.test(await snoozeDialog.innerText()));
   const expectedMonday = await page.evaluate(() => {
     const monday = new Date();
     monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7));
-    monday.setHours(8, 0, 0, 0);
+    monday.setHours(9, 0, 0, 0);
     return monday.getTime() / 1000;
   });
   const mondayCallStart = await page.evaluate(() => window.hermesT3SidebarHarness.calls.length);
-  await snoozeDialog.getByRole('button', { name: 'Next Monday at 8:00', exact: true }).click();
+  await snoozeDialog.getByRole('button', { name: 'Next Monday at 9:00', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
-  check('fourth Snooze preset sends next calendar Monday 08:00 in client local time and lands in Snoozed without a toast', await page.evaluate(({ expectedMonday, mondayCallStart }) => {
+  check('fourth Snooze preset sends next calendar Monday 09:00 in client local time and lands in Snoozed without a toast', await page.evaluate(({ expectedMonday, mondayCallStart }) => {
     const fixture = window.hermesT3SidebarHarness;
     return fixture.calls.slice(mondayCallStart).some(call => call[0] === 'rest' && call[1] === '/sessions/design' && call[2]?.body?.action === 'snooze' && call[2].body.wake_at === expectedMonday) && fixture.control.metadata.sessions.design.wake_at === expectedMonday;
   }, { expectedMonday, mondayCallStart }) && await noUndo());
@@ -801,6 +808,26 @@ try {
       if (height === 300 && banner === 'error') await page.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, 'short-300-error.png') });
     }
   }
+  await page.reload();
+  await page.getByRole('button', { name: 'Plugin settings', exact: true }).click();
+  const presetSetting = page.locator('[aria-label="Snooze preset time"]');
+  check('plugin settings default the shared Tomorrow/Monday time to 09:00', await presetSetting.inputValue() === '09:00');
+  await presetSetting.fill('14:35');
+  const settingsDesign = page.locator('[data-session-id="design"]');
+  await settingsDesign.hover(); await settingsDesign.getByRole('button', { name: 'Snooze session', exact: true }).click();
+  check('settings change updates both calendar snooze choices without a reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Next Monday at 14:35', exact: true }).count() === 1);
+  const configuredTomorrow = await page.evaluate(() => { const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(14, 35, 0, 0); return tomorrow.getTime() / 1000; });
+  await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).click();
+  await page.waitForFunction(expected => window.hermesT3SidebarHarness.control.metadata.sessions.design?.wake_at === expected, configuredTomorrow);
+  check('configured Tomorrow action saves its exact local wake deadline', await page.evaluate(expected => window.hermesT3SidebarHarness.control.metadata.sessions.design.wake_at === expected, configuredTomorrow));
+  await page.reload();
+  await page.getByRole('button', { name: 'Plugin settings', exact: true }).click();
+  check('configured preset time persists across actual browser reload', await presetSetting.inputValue() === '14:35');
+  await page.locator('[data-session-id="design"]').hover();
+  await page.locator('[data-session-id="design"]').getByRole('button', { name: 'Snooze session', exact: true }).click();
+  check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Next Monday at 14:35', exact: true }).count() === 1);
+  await snoozeDialog.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  await presetSetting.fill('09:00');
   check('no browser page errors', errors.length === 0);
   console.log(`Browser smoke: ${checks.length} checks passed; screenshots ${screenshotDir}/{frontend,hovered,actions,dense-400,dense-650,short-300-error}.png`);
 } finally { await browser?.close(); server.close(); }

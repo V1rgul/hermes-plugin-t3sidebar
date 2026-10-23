@@ -105,6 +105,28 @@ test('successful structurally-shared poll advances age and due snooze without a 
   } finally { Date.now = realNow; }
 });
 
+test('open snooze menu precise minutes update even when rounded card duration stays unchanged', async () => {
+  const realNow = Date.now, start = realNow();
+  let now = start;
+  Date.now = () => now;
+  try {
+    const deadline = start / 1000 + 2 * 86400 + 16 * 3600 + 12 * 60;
+    mock.control.metadata.sessions.snoozed.wake_at = deadline;
+    await mount();
+    await click(row('snoozed').querySelector('[aria-label="Snooze session"]'));
+    const key = [...flow.scopeKey(flow.captureScope()), 'sessions'], previousData = mock.queryClient.getQueryData(key);
+    const info = () => document.querySelector('.sf-snooze-info');
+    assert.equal(row('snoozed').querySelector('.sf-time').textContent, '3d');
+    assert.equal(info().textContent, '2d 16h 12min left');
+    now += 61_000;
+    await act(async () => mock.queryClient.refetchQueries({ queryKey: key, exact: true })); await tick();
+    assert.equal(mock.queryClient.getQueryData(key), previousData);
+    assert.equal(row('snoozed').querySelector('.sf-time').textContent, '3d');
+    assert.equal(info().textContent, '2d 16h 11min left');
+    assert.equal(mock.control.metadata.sessions.snoozed.wake_at, deadline);
+  } finally { Date.now = realNow; }
+});
+
 function denseHistory(archives = 500) {
 	mock.control.rows = Array.from({ length: 500 + archives }, (_, index) => ({ id: `dense-${index}`, title: `Dense conversation ${index}`, archived: index >= 500, last_active: Date.now() / 1000 - index, total_tokens: 12345 }));
 	mock.control.extra = []; mock.control.live = []; mock.control.metadata = { version: 1, sessions: {} };

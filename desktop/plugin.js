@@ -9,6 +9,16 @@ const EMPTY_STATE = { version: 1, sessions: {} };
 const EMPTY_ROWS = [];
 const DEFAULT_META = { state: 'active', pinned: false };
 const tokenFormatter = Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+const shortDateTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' });
+const SNOOZE_TIME_KEY = ['hermes-t3sidebar-preferences', 'snooze-time'];
+const validSnoozeTime = value => typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
+function readSnoozeTime(ctx) {
+  try { const value = ctx.storage.get('snooze-time', '09:00'); return validSnoozeTime(value) ? value : '09:00'; }
+  catch (_) { return '09:00'; }
+}
+function useSnoozeTime(ctx) {
+  return useQuery({ queryKey: SNOOZE_TIME_KEY, queryFn: () => readSnoozeTime(ctx), initialData: () => readSnoozeTime(ctx), staleTime: Infinity }).data;
+}
 const activationEpoch = sdk.atom(gatewayActivationEpoch());
 export const durableId = row => row._lineage_root_id || row.id;
 export const aliases = row => [...new Set([row.id, row.resolved_id, durableId(row), ...(row._lineage_ids || [])].filter(Boolean))];
@@ -168,14 +178,20 @@ export function snoozeRemaining(wakeAt, now = Date.now() / 1000) {
   const hours = Math.round(remaining / 3600);
   return hours < 24 ? `${hours}h` : `${Math.round(remaining / 86400)}d`;
 }
-export function snoozePresets(now = Date.now()) {
-  const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(9, 0, 0, 0);
-  // Calendar arithmetic preserves local 08:00 across daylight-saving changes.
-  const monday = new Date(now); monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7)); monday.setHours(8, 0, 0, 0);
+export function snoozePreciseRemaining(wakeAt, now = Date.now() / 1000) {
+  const minutes = Math.max(0, Math.ceil((wakeAt - now) / 60));
+  return `${Math.floor(minutes / 1440)}d ${Math.floor(minutes / 60) % 24}h ${minutes % 60}min left`;
+}
+export function snoozePresets(now = Date.now(), presetTime = '09:00') {
+  const [hour, minute] = (validSnoozeTime(presetTime) ? presetTime : '09:00').split(':').map(Number);
+  const labelTime = `${hour}:${String(minute).padStart(2, '0')}`;
+  const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(hour, minute, 0, 0);
+  // Calendar arithmetic preserves the configured local time across daylight-saving changes.
+  const monday = new Date(now); monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7)); monday.setHours(hour, minute, 0, 0);
   return [{ label: 'In 1 hour', wake_at: Math.floor(now / 1000) + 3600 },
     { label: 'In 3 hours', wake_at: Math.floor(now / 1000) + 10800 },
-    { label: 'Tomorrow at 9:00', wake_at: Math.floor(tomorrow.getTime() / 1000) },
-    { label: 'Next Monday at 8:00', wake_at: Math.floor(monday.getTime() / 1000) }];
+    { label: `Tomorrow at ${labelTime}`, wake_at: Math.floor(tomorrow.getTime() / 1000) },
+    { label: `Next Monday at ${labelTime}`, wake_at: Math.floor(monday.getTime() / 1000) }];
 }
 export function parseLocalWake(value, now = Date.now()) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) throw new Error('Choose a local date and time.');
@@ -609,6 +625,7 @@ const CSS = `
 .sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-row .sf-project{gap:4px}.sf-row .sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--ui-blue,#0053fd);font-weight:400}.sf-snooze-time svg{width:13px;height:13px;flex-shrink:0}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
+.sf-menu button.sf-snooze-info:disabled{color:var(--ui-blue,#0053fd);opacity:1;font-weight:400;cursor:default}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}
 .sf-menu .sf-menu-action{display:flex;align-items:center;gap:8px}.sf-menu-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex-shrink:0}.sf-menu-icon svg{width:14px;height:14px}.sf-menu button.sf-menu-action[data-destructive=true]{color:var(--ui-red)}
 .sf-menu-label{display:flex;align-items:center;flex:1;min-width:0}
@@ -647,9 +664,22 @@ function MenuAction({ name, destructive = false, children, ...props }) {
     h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, icon(name)), h('span', { className: 'sf-menu-label' }, children));
 }
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
-function Settings() {
+function Settings({ ctx }) {
+  const client = useQueryClient(), presetTime = useSnoozeTime(ctx);
+  const [error, setError] = useState('');
+  const save = value => {
+    if (!validSnoozeTime(value)) { setError('Choose a valid time.'); return; }
+    try {
+      ctx.storage.set('snooze-time', value);
+      if (ctx.storage.get('snooze-time') !== value) throw new Error('The snooze preset time was not saved.');
+      client.setQueryData(SNOOZE_TIME_KEY, value); setError('');
+    } catch (err) { setError(err.message); }
+  };
   return h('section', { style: { padding: 20, maxWidth: 650, color: 'var(--ui-text-secondary)' } },
     h('h2', null, 'hermes-t3sidebar'), h('p', null, 'A compact T3-style session browser for the active source and profile.'),
+    h('label', null, 'Snooze preset time ', h('input', { type: 'time', step: 60, value: presetTime, 'aria-label': 'Snooze preset time', onChange: event => save(event.target.value) })),
+    h('p', null, 'Used for Tomorrow and Next Monday in this Desktop client’s local time. Defaults to 09:00; existing snoozes are unchanged.'),
+    error ? h('div', { role: 'alert' }, error) : null,
     h('p', null, 'Archive and Unarchive change native Hermes archives and keep conversation history. Snoozes return when their chosen time passes; no agent is stopped or awakened, and no prompt is sent.'),
     h('p', null, 'Use normal layout controls to select hermes-t3sidebar in the left pane or hide the native Sessions pane. hermes-t3sidebar never modifies the core sidebar or conversation workspace.'),
     h('p', null, 'Project filtering changes this list only. New session asks for a named project before creating an empty session; Home creation is unavailable with the current public workspace contract.'),
@@ -692,7 +722,7 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
       h(MenuAction, { name: 'FolderOpen', onClick: () => update({ icon: null }) }, 'Default icon')),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
-function RowActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, snoozeOnly = false }) {
+function RowActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, snoozeOnly = false, presetTime, snoozeDetail }) {
   const [value, setValue] = useState(''), [error, setError] = useState(''), [renaming, setRenaming] = useState(false), [title, setTitle] = useState(row.title || ''), [busy, setBusy] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
   const alive = useRef(true);
@@ -713,8 +743,10 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
   };
   return h('div', { className: 'sf-menu' }, h('div', { className: 'sf-menu-title' }, sessionTitle(row)),
     snoozeOnly ? h('form', { onSubmit: custom },
+      row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-info', disabled: true }, snoozeDetail) : null,
+      row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-info', disabled: true }, shortDateTime.format(new Date(row.meta.wake_at * 1000))) : null,
       row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-unsnooze', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'restore' }) }, 'Unsnooze') : null,
-      ...snoozePresets().map(preset => h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
+      ...snoozePresets(Date.now(), presetTime).map(preset => h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
       h('label', null, 'Custom · local time', h('span', { className: 'sf-custom-time' },
         h('input', { type: 'datetime-local', value, disabled: disabled || snoozeDisabled, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
         h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value }))))
@@ -740,7 +772,7 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
 export function cardStatus(row, active = false) {
   return row.status === 'waiting' ? 'input' : row.status === 'working' ? 'working' : row.woke ? 'woke' : ((!active && row.completion?.done_token) || row.unread === true) ? 'done' : null;
 }
-function SessionRow({ row, active, hidden, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain }) {
+function SessionRow({ row, active, hidden, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain, presetTime, snoozeDetail }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
   useEffect(() => { retain?.(row.key, menuOpen || snoozeOpen); return () => retain?.(row.key, false); }, [retain, row.key, menuOpen, snoozeOpen]);
   const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
@@ -789,7 +821,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
       row.archived !== true ? h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },
         h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Snooze session', name: 'Clock', glyph: '◷', disabled, 'aria-haspopup': 'dialog' })),
         h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Snooze session' },
-          h(RowActions, { row, scope, controller, mutate, disabled, snoozeOnly: true, close: () => setSnoozeOpen(false) }))) : null,
+          h(RowActions, { row, scope, controller, mutate, disabled, presetTime, snoozeDetail, snoozeOnly: true, close: () => setSnoozeOpen(false) }))) : null,
       h(sdk.Button, { type: 'button', variant: 'ghost', size: 'xs', className: 'sf-icon sf-archive', 'aria-label': row.archived === true ? 'Unarchive session' : 'Archive session', disabled: disabled || (row.archived !== true && row.status !== 'idle'),
         onClick: () => void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive' }) }, icon(row.archived === true ? 'ArchiveRestore' : 'Archive', '▤'), row.archived === true ? 'Unarchive' : 'Archive')),
     h(sdk.Popover, { open: menuOpen, onOpenChange: setMenuOpen },
@@ -903,6 +935,7 @@ export function ProjectPicker({ controller, scope, close }) {
     error ? h('div', { role: 'alert' }, error) : null);
 }
 function ScopedSidebar({ ctx, controller, scope }) {
+  const presetTime = useSnoozeTime(ctx);
   const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false), [deleteTarget, setDeleteTarget] = useState(null);
   const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [actionError, setActionError] = useState('');
@@ -1020,6 +1053,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const rowRef = useCallback((id, element) => { if (element) rowRefs.current.set(id, element); else rowRefs.current.delete(id); }, []);
   const disabled = latest.current.disabled;
   const renderRow = (row, retain) => h(MemoSessionRow, { key: row.key, row, retain, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
+    presetTime, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
   const renderSection = section => {
     const entries = sections[section], closed = isClosed(section);
@@ -1040,7 +1074,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // Toolbar/popover/error state is not a list input: retain its element tree,
   // not only the cards, so these interactions never walk thousands of rows.
   const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, activeId, activeOwner,
-    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now,
+    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime,
     archives.isError, archives.error, archives.isLoading, archives.isFetching, archives.data?.has_more]);
   const total = sessions.data?.total;
   const knownTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0;
@@ -1089,7 +1123,7 @@ export default {
     const controller = createController(ctx);
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
-    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings) });
+    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx }) });
     let disposed = false, pending = null;
     const disposeEvent = ctx.onEvent('*', event => {
       if (disposed) return;
@@ -1117,6 +1151,6 @@ export default {
         return queryClient.invalidateQueries({ queryKey: scopeKey(scope), predicate: query => resources.includes(query.queryKey[4]), refetchType: 'active' }, { cancelRefetch: false });
       }).catch(() => { /* Query retains errors for the pane's normal recovery UI. */ });
     });
-    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts']) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
+    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-preferences']) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
   }
 };

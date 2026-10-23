@@ -459,7 +459,12 @@ for (const status of ['working', 'starting', 'running children', 'waiting', 'unk
     assert.equal(row('root').querySelector('.sf-snooze-time'), null);
   }
   await click(row('root').querySelector('[aria-label="Snooze session"]'));
-  assert.equal($('form > button').textContent, 'Unsnooze');
+  assert.equal($('form > button:not(:disabled)').textContent, 'Unsnooze');
+  const information = all('form > .sf-snooze-info');
+  assert.equal(information.length, 2);
+  assert.equal(information[0].disabled && information[1].disabled, true);
+  assert.match(information[0].textContent, /^\d+d \d+h \d+min left$/);
+  assert.equal(information[1].textContent, new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(mock.control.metadata.sessions.root.wake_at * 1000)));
   assert.equal(button('Unsnooze').className.includes('sf-unsnooze'), true);
   await click(button('Unsnooze'));
   assert.equal(mock.control.metadata.sessions.root.state, 'active');
@@ -486,13 +491,13 @@ test('Unsnooze only dismisses and removes the countdown after exact backend conf
   assert.equal(row('snoozed').querySelector('.sf-snooze-time'), null);
 });
 
-test('fourth snooze option persists next Monday at 08:00 without a toast or opening a session', async () => {
+test('fourth snooze option persists next Monday at 09:00 without a toast or opening a session', async () => {
   await mount();
   const wake = flow.snoozePresets()[3].wake_at;
   await click(row('design').querySelector('[aria-label="Snooze session"]'));
   assert.deepEqual([...$('[role=dialog]').querySelectorAll('form > button')].map(node => node.textContent),
-    ['In 1 hour', 'In 3 hours', 'Tomorrow at 9:00', 'Next Monday at 8:00']);
-  await click(button('Next Monday at 8:00'));
+    ['In 1 hour', 'In 3 hours', 'Tomorrow at 9:00', 'Next Monday at 9:00']);
+  await click(button('Next Monday at 9:00'));
   assert.equal(mock.control.metadata.sessions.design.wake_at, wake);
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
   assert.equal($('[role=dialog]'), null); assert.equal($('.sf-undo'), null);
