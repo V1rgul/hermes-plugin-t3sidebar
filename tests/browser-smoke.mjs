@@ -24,6 +24,12 @@ try {
   browser = await chromium.launch({ executablePath: await executable(), headless: true, args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1, timezoneId: 'Europe/Paris' });
   const noUndo = async () => !await page.getByRole('button', { name: /^(?:Undo|Dismiss undo)$/, includeHidden: true }).count() && !await page.locator('.sf-undo').count();
+  const deleteIsRed = locator => locator.evaluate(el => {
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-red)'; el.append(probe);
+    const red = getComputedStyle(probe).color; probe.remove();
+    const label = el.querySelector('.sf-menu-label'), icon = el.querySelector('.sf-menu-icon svg');
+    return !!label && !!icon && el.getAttribute('data-destructive') === 'true' && getComputedStyle(el).color === red && getComputedStyle(label).color === red && getComputedStyle(icon).color === red && getComputedStyle(icon).stroke === red;
+  });
   const buttonStyle = locator => locator.evaluate(el => {
     const style = getComputedStyle(el);
     return { background: style.backgroundColor, color: style.color };
@@ -207,10 +213,37 @@ try {
   await page.getByRole('button', { name: 'Restore to Ready', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('context Restore returns the snoozed session to Ready without any Undo toast', await noUndo());
+  const worker = page.locator('[data-session-id="root"]');
+  await worker.click({ button: 'right' });
+  const disabledDelete = page.getByRole('button', { name: 'Delete session', exact: true });
+  check('working session Delete remains disabled and has a leading icon', await disabledDelete.isDisabled() && await disabledDelete.locator('.sf-menu-icon svg').count() === 1);
+  check('disabled Delete icon and text retain the red theme color and dimming', await deleteIsRed(disabledDelete) && await disabledDelete.evaluate(el => Number(getComputedStyle(el).opacity) < 1));
+  await page.getByRole('button', { name: 'Pin', exact: true }).click();
+  await page.locator('section[aria-label="Pinned"] [data-session-id="root"]').waitFor();
+  await page.mouse.move(1100, 850);
+  check('pinning a running session keeps it Pinned with undimmed blue Working status', await worker.evaluate(el => {
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; el.append(probe);
+    const blue = getComputedStyle(probe).color; probe.remove();
+    return el.dataset.working === 'true' && el.dataset.dimmed === 'false' && getComputedStyle(el).opacity === '1' && el.querySelector('[data-status=working]')?.textContent === 'Working' && getComputedStyle(el.querySelector('.sf-time')).color === blue;
+  }));
+  await worker.click({ button: 'right' });
+  check('Unpin has a leading decorative icon', await page.getByRole('button', { name: 'Unpin', exact: true }).locator('.sf-menu-icon[aria-hidden=true] svg').count() === 1);
+  await page.getByRole('button', { name: 'Unpin', exact: true }).click();
+  await page.locator('section[aria-label="Working"] [data-session-id="root"]').waitFor();
+  check('unpinning a running session restores the Working shelf', await worker.getAttribute('data-dimmed') === 'true');
   await design.click({ button: 'right' });
   await page.getByRole('button', { name: 'Pin', exact: true }).click();
   await page.locator('section[aria-label="Pinned"] [data-session-id="design"]').waitFor();
   check('Pin moves the session to Pinned without any Undo toast', await noUndo());
+  await design.hover(); await snooze.click();
+  await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
+  await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
+  check('snoozing a pinned session wins without clearing its pin', await design.locator('.sf-pin').count() === 1);
+  await design.click({ button: 'right' });
+  check('Restore has a leading decorative icon', await page.getByRole('button', { name: 'Restore to Ready', exact: true }).locator('.sf-menu-icon[aria-hidden=true] svg').count() === 1);
+  await page.getByRole('button', { name: 'Restore to Ready', exact: true }).click();
+  await page.locator('section[aria-label="Pinned"] [data-session-id="design"]').waitFor();
+  check('restoring a pinned snooze returns to Pinned', await design.locator('.sf-pin').count() === 1);
   await design.click({ button: 'right' });
   await page.getByRole('button', { name: 'Unpin', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
@@ -253,6 +286,22 @@ try {
   check('open row context menu retains row highlight, actions and hidden metadata off hover', await design.getAttribute('data-menu-open') === 'true' && await design.evaluate(el => getComputedStyle(el).backgroundColor) === rowHoverBackground && await snooze.isVisible() && await archive.isVisible() && await design.locator('.sf-provider,.sf-token,.sf-time').evaluateAll(els => els.every(el => getComputedStyle(el).visibility === 'hidden')));
   check('context menu omits archive and snooze actions', !await context.getByRole('button', { name: /^(?:Unarchive|Archive|Snooze)/ }).count());
   check('context menu offers Rename, Copy session ID and row project filter', await context.getByRole('button', { name: 'Rename', exact: true }).count() === 1 && await context.getByRole('button', { name: 'Copy session ID', exact: true }).count() === 1 && await context.getByRole('button', { name: /^Filter by / }).count() === 1);
+  check('each context action aligns a decorative icon before its text', await context.locator('.sf-menu-action').evaluateAll(actions => actions.length === 5 && actions.every(action => {
+    const icon = action.querySelector('.sf-menu-icon'), label = action.querySelector('.sf-menu-label');
+    if (!icon?.querySelector('svg') || !label || icon.getAttribute('aria-hidden') !== 'true' || action.firstElementChild !== icon) return false;
+    const i = icon.getBoundingClientRect(), l = label.getBoundingClientRect();
+    return i.width === 14 && i.right < l.left && Math.abs(i.top + i.height / 2 - l.top - l.height / 2) < 1;
+  })));
+  const menuDelete = context.getByRole('button', { name: 'Delete session', exact: true });
+  check('Delete icon and text use the red theme color', await deleteIsRed(menuDelete));
+  await menuDelete.hover();
+  check('Delete icon and text remain red on hover', await deleteIsRed(menuDelete));
+  await menuDelete.focus(); await page.keyboard.press('Tab'); await page.keyboard.press('Shift+Tab');
+  check('Delete retains red text/icon and focus indication under keyboard focus', await menuDelete.evaluate(el => el === document.activeElement && el.matches(':focus-visible') && getComputedStyle(el).outlineStyle !== 'none') && await deleteIsRed(menuDelete));
+  await context.locator('.sf-menu').evaluate(el => el.style.setProperty('--ui-red', '#d72b46'));
+  check('Delete icon and text follow changes to the red theme token', await deleteIsRed(menuDelete));
+  await context.locator('.sf-menu').evaluate(el => el.style.removeProperty('--ui-red'));
+  await page.mouse.move(1100, 850);
   check('stored-only Rename is disabled with an explanation', await context.getByRole('button', { name: 'Rename', exact: true }).isDisabled() && /live|runtime/i.test(await context.innerText()));
   await context.getByRole('button', { name: 'Copy session ID', exact: true }).click();
   check('Copy session ID uses the public clipboard with the durable ID', await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'clipboard' && call[1] === 'design')));

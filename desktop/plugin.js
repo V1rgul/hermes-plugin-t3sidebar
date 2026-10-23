@@ -144,8 +144,8 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
       : row.archived === true ? 'archived'
       : status === 'unknown' ? 'active'
       : meta.state === 'snoozed' && !woke ? 'snoozed'
-      : status === 'working' ? 'working'
-      : meta.pinned ? 'pinned' : 'active';
+      : meta.pinned ? 'pinned'
+      : status === 'working' ? 'working' : 'active';
     const newSession = isEmptySession(row, runtimeKnown ? matches : []);
     if (!matchesFilters({ ...row, newSession }, query, project)) continue;
     // Runtime last_active is also a resume/reattach clock, not conversation progress.
@@ -538,6 +538,7 @@ const CSS = `
 .sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}
+.sf-menu .sf-menu-action{display:flex;align-items:center;gap:8px}.sf-menu-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex-shrink:0}.sf-menu-icon svg{width:14px;height:14px}.sf-menu button.sf-menu-action[data-destructive=true]{color:var(--ui-red)}
 .sf-menu>div:not(.sf-menu-title),.sf-menu form{display:flex;flex-direction:column;gap:4px}
 .sf-status{font-weight:600}
 .sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--ui-orange,#db704b)}.sf-status[data-status=input]{color:var(--ui-purple,#9e94d5)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
@@ -567,6 +568,10 @@ function icon(name, fallback) {
   const Component = sdk.icons?.[name]; return Component ? h(Component, { size: 14, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, fallback);
 }
 function IconButton({ label, name, glyph, children, title = label, ...props }) { return h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-xs', ...props, className: `sf-icon ${props.className || ''}`, 'aria-label': label, title }, children ?? icon(name, glyph)); }
+function MenuAction({ name, destructive = false, children, ...props }) {
+  return h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', ...props, className: 'sf-menu-action', 'data-destructive': destructive || undefined },
+    h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, icon(name)), h('span', { className: 'sf-menu-label' }, children));
+}
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
 function Settings() {
   return h('section', { style: { padding: 20, maxWidth: 650, color: 'var(--ui-text-secondary)' } },
@@ -589,7 +594,7 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
     catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); }
     finally { if (alive.current) setBusy(false); }
   };
-  const action = (text, payload) => h(sdk.Button, { key: text, type: 'button', variant: 'ghost', size: 'sm', disabled: disabled || busy, onClick: () => run(payload) }, text);
+  const action = (text, name, payload) => h(MenuAction, { key: text, name, disabled: disabled || busy, onClick: () => run(payload) }, text);
   const projectCwd = typeof row.cwd === 'string' ? row.cwd : row.project?.is_home ? '' : null;
   const custom = event => {
     event.preventDefault();
@@ -602,19 +607,19 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
         h('input', { type: 'datetime-local', value, disabled: disabled || snoozeDisabled, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
         h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value }))))
       : h('div', null,
-        action(row.meta.pinned ? 'Unpin' : 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }),
-        row.archived !== true && row.meta.state === 'snoozed' ? action('Restore to Ready', { action: 'restore' }) : null,
-        h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy || !row.runtimeId, onClick: () => setRenaming(true) }, 'Rename'),
+        action(row.meta.pinned ? 'Unpin' : 'Pin', 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }),
+        row.archived !== true && row.meta.state === 'snoozed' ? action('Restore to Ready', 'CornerDownLeft', { action: 'restore' }) : null,
+        h(MenuAction, { name: 'Pencil', disabled: busy || !row.runtimeId, onClick: () => setRenaming(true) }, 'Rename'),
         !row.runtimeId ? h('p', null, 'Rename requires a live runtime. Open the thread and retry.') : null,
         renaming ? h('form', { onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
           h('span', { className: 'sf-custom-time' },
           h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
           h(IconButton, { type: 'submit', label: 'Save rename', name: 'Check', glyph: '✓', disabled: busy || !title.trim() }))) : null,
-        h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy, onClick: () => void perform(() => controller.copyId(scope, row)) }, 'Copy session ID'),
-        h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy || projectCwd === null || row._limited, onClick: () => {
+        h(MenuAction, { name: 'Copy', disabled: busy, onClick: () => void perform(() => controller.copyId(scope, row)) }, 'Copy session ID'),
+        h(MenuAction, { name: 'ListFilter', disabled: busy || projectCwd === null || row._limited, onClick: () => {
           try { controller.check(scope); filterProject(projectCwd); close(); } catch (err) { setError(err.message); }
         } }, `Filter by ${row.project?.name || (projectCwd === '' ? 'Home' : 'session project')}`),
-        h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: disabled || busy || row.status !== 'idle' || row._liveOnly || typeof sdk.ConfirmDialog !== 'function', onClick: () => { controller.check(scope); deleteSession(row); close(); } }, 'Delete session'),
+        h(MenuAction, { name: 'Trash2', destructive: true, disabled: disabled || busy || row.status !== 'idle' || row._liveOnly || typeof sdk.ConfirmDialog !== 'function', onClick: () => { controller.check(scope); deleteSession(row); close(); } }, 'Delete session'),
         row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
@@ -648,7 +653,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
     else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
-  return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': draft.data === true && !draft.isError, 'data-working': row.section === 'working', 'data-unread': !!(!active && row.completion?.done_token) || row.unread === true || row.woke || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
+  return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': draft.data === true && !draft.isError, 'data-working': row.status === 'working', 'data-unread': !!(!active && row.completion?.done_token) || row.unread === true || row.woke || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
     h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${sessionTitle(row)}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,

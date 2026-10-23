@@ -66,6 +66,24 @@ test('working and starting dim shelf; idle pins; snooze wake; native archives by
   assert.deepEqual(result.archived.map(r => r.id), ['s2', 's1']);
 });
 
+test('pins outrank working and starting, including running children, but not snoozes or archive/input safety', () => {
+  const rows = [{ id: 'tip', _lineage_root_id: 'root', _lineage_ids: ['old'] }];
+  for (const status of ['idle', 'working', 'starting']) for (const running_subagents of [0, 2]) {
+    const live = [{ id: 'runtime', session_key: 'old', status, running_subagents }];
+    for (const [state, wake_at, expected] of [['active', null, 'pinned'], ['settled', null, 'pinned'], ['snoozed', 101, 'snoozed'], ['snoozed', 100, 'pinned']]) {
+      const metadata = { sessions: { root: { state, pinned: true, wake_at } } };
+      const sections = flow.buildSections(rows, metadata, live, { now: 100 });
+      const card = sections[expected][0];
+      assert.equal(card?.key, 'root', `${status}/${running_subagents}/${state}/${wake_at}`);
+      assert.equal(card.status, status !== 'idle' || running_subagents ? 'working' : 'idle');
+      assert.equal(Object.values(sections).flat().length, 1);
+      assert.equal(flow.buildSections([{ ...rows[0], archived: true }], metadata, live, { now: 100 }).archived[0]?.key, 'root');
+      assert.equal(flow.buildSections(rows, metadata, [{ ...live[0], status: 'waiting' }], { now: 100 }).active[0]?.status, 'waiting');
+      assert.equal(flow.buildSections(rows, metadata, live, { now: 100, runtimeKnown: false }).active[0]?.status, 'unknown');
+    }
+  }
+});
+
 test('unknown runtime never silently classifies idle or hides in settled', () => {
   const result = flow.buildSections([{ id: 's' }], { sessions: { s: { state: 'settled' } } }, [], { runtimeKnown: false });
   assert.equal(result.active[0].status, 'unknown'); assert.equal(result.archived.length, 0);
@@ -76,11 +94,14 @@ test('running subagents keep an idle parent Working across compression aliases a
   const metadata = { sessions: { root: { state: 'active', pinned: true } } };
   const live = [{ id: 'runtime-parent', session_key: 'old', status: 'idle', running_subagents: 2, last_active: 9999 }];
   let sections = flow.buildSections(rows, metadata, live);
-  assert.equal(sections.working[0]?.key, 'root');
-  assert.equal(sections.working[0]?.status, 'working');
-  assert.equal(sections.working[0]?.activity, 100);
+  assert.equal(sections.pinned[0]?.key, 'root');
+  assert.equal(sections.pinned[0]?.status, 'working');
+  assert.equal(sections.pinned[0]?.activity, 100);
+  metadata.sessions.root.pinned = false;
+  assert.equal(flow.buildSections(rows, metadata, live).working[0]?.key, 'root');
+  metadata.sessions.root.pinned = true;
   live[0].running_subagents = 1;
-  assert.equal(flow.buildSections(rows, metadata, live).working.length, 1);
+  assert.equal(flow.buildSections(rows, metadata, live).pinned[0]?.status, 'working');
   for (const count of [0, null, undefined, -1, '1', Infinity, 1.5]) {
     live[0].running_subagents = count;
     sections = flow.buildSections(rows, metadata, live);
@@ -318,6 +339,43 @@ test('React search and exact project filter stay flat with keyboard navigation',
   const first = row('readme').querySelector('.sf-open'); first.focus();
   await act(async () => first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
   assert.equal(document.activeElement?.closest('[data-session-id]')?.dataset.sessionId, 'legacy');
+});
+
+test('context actions have decorative leading icons and Delete is marked destructive without bypassing confirmation', async () => {
+  await mount(); await click(button('Actions for Sidebar layout'));
+  const menu = $('.sf-menu'), actions = [...menu.querySelectorAll('.sf-menu-action')];
+  assert.deepEqual(actions.map(action => action.querySelector('.sf-menu-label')?.textContent), ['Pin', 'Rename', 'Copy session ID', 'Filter by hermes-t3sidebar', 'Delete session']);
+  for (const action of actions) {
+    assert.equal(action.firstElementChild?.className, 'sf-menu-icon');
+    assert.equal(action.firstElementChild?.getAttribute('aria-hidden'), 'true');
+    assert.ok(action.firstElementChild?.querySelector('svg'));
+  }
+  assert.equal(button('Delete session').dataset.destructive, 'true');
+  assert.equal(button('Pin').hasAttribute('data-destructive'), false);
+  await click(button('Delete session'));
+  assert.equal($('[role=dialog][aria-label="Delete session?"]') !== null, true);
+  assert.equal(mock.calls.some(call => call[2] === 'session.mutate'), false, 'menu Delete still only opens confirmation');
+});
+
+test('a pinned working card keeps its Working status, stays undimmed and follows pin/snooze transitions', async () => {
+  mock.control.metadata.sessions.root = { state: 'active', pinned: true };
+  await mount();
+  assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Pinned');
+  assert.equal(row('root').dataset.working, 'true');
+  assert.equal(row('root').dataset.dimmed, 'false');
+  assert.equal(row('root').querySelector('[data-status=working]')?.textContent, 'Working');
+  mock.control.metadata.sessions.root = { state: 'snoozed', pinned: true, wake_at: Math.floor(Date.now() / 1000) + 3600 };
+  await refresh(); assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Snoozed');
+  assert.equal(row('root').querySelector('[data-status=working]')?.textContent, 'Working');
+  mock.control.metadata.sessions.root = { state: 'active', pinned: true };
+  await refresh(); assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Pinned');
+  await click(button('Actions for Runtime classification')); await click(button('Unpin'));
+  assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Working');
+  await click(button('Actions for Runtime classification')); await click(button('Pin'));
+  assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Pinned');
+  mock.control.live.find(item => item.id === 'runtime-worker').status = 'waiting';
+  await refresh(); assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Ready');
+  assert.equal(row('root').querySelector('[data-status=input]')?.textContent, 'Input');
 });
 
 test('search keeps focus after its second character filters out the previously focused card', async () => {

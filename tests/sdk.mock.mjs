@@ -262,6 +262,8 @@ export const icons = Object.fromEntries(Object.entries({
   AlarmClock: 'M12 8v5l3 2M3 3l3 3M21 3l-3 3M21 13a9 9 0 1 1-18 0 9 9 0 0 1 18 0',
   CircleCheck: 'M6 12l4 4 8-8M22 12a10 10 0 1 1-20 0', Pin: 'M9 3h6l-1 6 4 4H6l4-4-1-6M12 13v8',
   MessageSquare: 'M4 4h16v12H9l-5 4V4', Undo2: 'M3 10l5-5M3 10l5 5M3 10h11a6 6 0 0 1 0 12',
-  Check: 'M5 12l5 5L20 7', Ellipsis: 'M5 12h1M11 12h1M17 12h1', X: 'M6 6l12 12M6 18L18 6', RefreshCw: 'M20 4v6h-6M20 10a8 8 0 1 0 0 7'
+  Check: 'M5 12l5 5L20 7', Ellipsis: 'M5 12h1M11 12h1M17 12h1', X: 'M6 6l12 12M6 18L18 6', RefreshCw: 'M20 4v6h-6M20 10a8 8 0 1 0 0 7',
+  Copy: 'M9 9h12v12H9ZM5 15H3V3h12v2', CornerDownLeft: 'M9 10l-5 5 5 5M4 15h12a4 4 0 0 0 4-4V4',
+  Pencil: 'M16 3l5 5-13 13H3v-5ZM14 5l5 5', Trash2: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7'
 }).map(([name, path]) => [name, props => h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: path }))]));
 reset();
