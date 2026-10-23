@@ -20,6 +20,14 @@ export const host = {
   async request(method, params) { calls.push([method, params]); if (method === 'session.active_list') { if (control.runtimeError) throw new Error('fixture runtime disconnected'); return { sessions: clone(control.live) }; } if (method === 'session.list') return { sessions: clone(control.extra || []).slice(0, params.limit) }; throw new Error(`Unexpected RPC ${method}`); },
   async requestProfile(route, method, params) {
     calls.push(['requestProfile', route, method, clone(params)]);
+    if (method === 'session.archive') {
+      if (control.archiveError) throw new Error('fixture archive RPC unavailable');
+      const rows = [...control.rows, ...(control.extra || [])].filter(row => row.id === params.session_id || row._lineage_root_id === params.session_id || row._lineage_ids?.includes(params.session_id));
+      if (!rows.length) throw new Error('fixture stored session missing');
+      if (!control.dropArchiveWrite) for (const row of rows) row.archived = params.archived;
+      control.afterArchive?.();
+      return { archived: params.archived, session_key: params.session_id };
+    }
     if (method === 'projects.tree') { if (control.projectError) throw new Error('fixture projects unavailable'); return { projects: clone(control.projects) }; }
     if (method === 'session.create') {
       if (control.createError) throw new Error('fixture create unavailable');
@@ -41,17 +49,26 @@ export const ctx = {
       if (control.runtimeError) throw new Error('fixture runtime disconnected');
       return { profile: control.runtimeProfile || host.state.profile.get(), sessions: clone(control.live) };
     }
-    if (path.startsWith('/sessions?')) {
-      if (control.listError || control.sessionsMissing) throw new Error('fixture listing unavailable');
+    if (path.startsWith('/sessions?') || path.startsWith('/archives?')) {
+      const archives = path.startsWith('/archives?');
+      if (control.listError || (archives ? control.archivesMissing : control.sessionsMissing)) throw new Error('fixture listing unavailable');
       const offset = Number(new URLSearchParams(path.split('?')[1]).get('offset'));
-      const history = [...control.rows, ...(control.extra || [])];
+      const history = [...control.rows, ...(control.extra || [])].filter(row => !['cron', 'tool', 'oneshot', 'kanban'].includes(row.source) && (archives ? row.archived === true : row.archived !== true));
       const page = history.slice(offset, offset + 500);
-      const organized = offset === 0 ? history.filter(r => control.metadata.sessions[r._lineage_root_id || r.id]) : [];
+      const organized = !archives && offset === 0 ? history.filter(r => control.metadata.sessions[r._lineage_root_id || r.id]) : [];
       const sessions = [...new Map([...page, ...organized].map(r => [r.id, r])).values()];
-      return { profile: host.state.profile.get(), sessions: clone(sessions), offset, limit: 500, has_more: (control.total || history.length) > offset + 500 };
+      return { profile: (archives ? control.archivesProfile : control.sessionsProfile) || host.state.profile.get(), sessions: clone(sessions), offset, limit: 500, has_more: history.length > offset + 500 };
+    }
+    if (path.endsWith('/archive')) {
+      if (control.archiveReadError) throw new Error('fixture archive readback unavailable');
+      const id = decodeURIComponent(path.slice('/sessions/'.length, -'/archive'.length));
+      const row = [...control.rows, ...(control.extra || [])].find(row => row.id === id || row._lineage_root_id === id);
+      if (!row) throw new Error('404 stored session missing');
+      return { profile: control.archiveReadProfile || host.state.profile.get(), id: control.archiveReadId || id, archived: control.archiveReadMissingFlag ? undefined : row.archived === true };
     }
     const id = decodeURIComponent(path.slice('/sessions/'.length));
     if (!options || options.method !== 'POST') throw new Error('Unexpected REST request');
+    if (control.metadataWriteError) throw new Error('fixture metadata write failed');
     if (!control.dropWrite) {
       const item = control.metadata.sessions[id] || { state: 'active', settled_at: null, wake_at: null, pinned: false, updated_at: now() };
       const { action, wake_at } = options.body;
@@ -77,32 +94,40 @@ export function reset() {
     { id: 'tip', _lineage_root_id: 'root', _lineage_ids: ['root', 'old', 'tip'], title: 'Runtime classification', cwd: '/projects/hermes-t3sidebar', last_active: now() - 4 },
     { id: 'pinned', title: 'Hydraulic sizing', cwd: '/projects/hydraulics', last_active: now() - 300 },
     { id: 'snoozed', title: 'Review tomorrow', cwd: '/projects/docs', last_active: now() - 7200 },
-    { id: 'settled', title: 'SDK inventory', cwd: '/projects/hermes-t3sidebar', last_active: now() - 5000 }
+    { id: 'archived', archived: true, title: 'SDK inventory', cwd: '/projects/hermes-t3sidebar', last_active: now() - 5000 },
+    { id: 'legacy', archived: false, title: 'Legacy completed entry', cwd: '/projects/docs', last_active: now() - 6000 }
   ], live: [{ id: 'runtime-approval', session_key: 'approval', status: 'waiting', last_active: now() - 200 },
     { id: 'runtime-worker', session_key: 'old', status: 'working', last_active: now() - 4 }],
     metadata: { version: 1, sessions: {
       approval: { state: 'settled', pinned: true, settled_at: now(), wake_at: null, updated_at: now() },
       pinned: { state: 'active', pinned: true, settled_at: null, wake_at: null, updated_at: now() },
       snoozed: { state: 'snoozed', pinned: false, settled_at: null, wake_at: now() + 3600, updated_at: now() },
-      settled: { state: 'settled', pinned: false, settled_at: now() - 600, wake_at: null, updated_at: now() }
+      legacy: { state: 'settled', pinned: false, settled_at: now() - 600, wake_at: null, updated_at: now() }
     } }
   });
   for (const row of control.rows) {
     row.source = 'desktop';
+    row.archived ||= false;
     row.project = { id: `synthetic:${row.cwd}`, name: row.cwd.split('/').at(-1), icon: '◇', color: null, cwd: row.cwd, is_home: false };
     row.provider = 'openai-codex'; row.input_tokens = 1200; row.output_tokens = 300; row.total_tokens = 1500;
   }
   host.state.connectionId.set('source-a'); host.state.profile.set('default'); host.state.gateway.set('open'); host.state.activeSessionId.set('runtime-design'); host.state.focusedStoredSessionId.set('design'); host.state.focusedSessionOwner.set({ connectionId: 'source-a', profile: 'default' });
 }
+export function loadArchivePaginationFixtures() {
+  control.rows = Array.from({ length: 501 }, (_, i) => ({ id: `synthetic-page-active-${i}`, title: `SYNTHETIC active page ${i}`, archived: false, source: 'desktop' }));
+  control.extra = Array.from({ length: 501 }, (_, i) => ({ id: `synthetic-page-archive-${i}`, title: `SYNTHETIC archive page ${i}`, archived: true, source: 'desktop', cwd: '/synthetic/archive-pagination', project: { name: 'Archive pagination', icon: '◇' }, git_branch: 'retained', provider: 'anthropic', total_tokens: 1250 }));
+  control.live = []; control.metadata = { version: 1, sessions: {} }; control.runtimeError = false; control.backendMissing = false;
+  queryClient.clear(); switchScope('synthetic-pagination-source');
+}
 export function loadDenseFixtures() {
-  control.rows = []; control.live = []; control.metadata = { version: 1, sessions: {} }; control.runtimeError = false; control.backendMissing = false;
-  for (const [section, count] of [['active', 100], ['pinned', 20], ['working', 20], ['snoozed', 20], ['settled', 20]]) {
+  control.rows = []; control.extra = []; control.live = []; control.metadata = { version: 1, sessions: {} }; control.runtimeError = false; control.backendMissing = false;
+  for (const [section, count] of [['active', 100], ['pinned', 20], ['working', 20], ['snoozed', 20], ['archived', 20]]) {
     for (let i = 0; i < count; i++) {
       const id = `synthetic-${section}-${String(i).padStart(3, '0')}`;
-      control.rows.push({ id, title: `SYNTHETIC ${section} ${i} — a deliberately long title for overflow and ellipsis verification`, source: 'desktop', last_active: now() - i,
+      control.rows.push({ id, archived: section === 'archived', title: `SYNTHETIC ${section} ${i} — a deliberately long title for overflow and ellipsis verification`, source: 'desktop', last_active: now() - i,
         cwd: '/synthetic/layout', project: { id: 'synthetic-layout', name: 'Synthetic layout', icon: '◇', is_home: false }, provider: 'anthropic', input_tokens: 1000, output_tokens: 250, total_tokens: 1250 });
       if (section === 'working') control.live.push({ session_key: id, status: 'working', source: 'desktop' });
-      if (['pinned', 'snoozed', 'settled'].includes(section)) control.metadata.sessions[id] = { state: section === 'pinned' ? 'active' : section, pinned: section === 'pinned', wake_at: now() + 3600, settled_at: now() - i, updated_at: now() };
+      if (['pinned', 'snoozed'].includes(section)) control.metadata.sessions[id] = { state: section === 'pinned' ? 'active' : section, pinned: section === 'pinned', wake_at: now() + 3600, settled_at: null, updated_at: now() };
     }
   }
   queryClient.clear(); switchScope('synthetic-layout-source');

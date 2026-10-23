@@ -36,9 +36,23 @@ test('frontend controller interoperates with real FastAPI and persistent SQLite 
 		const scope = { connectionId: 'fixture', profile: 'default', epoch: 1 };
 		let cached;
 		const pageCache = new QueryClient();
-		const client = { fetchQuery: options => pageCache.fetchQuery(options), cancelQueries: async () => {}, setQueryData: (_, data) => { cached = data; }, invalidateQueries: async () => {} };
+		const client = {
+			fetchQuery: options => pageCache.fetchQuery(options), cancelQueries: async () => {},
+			setQueryData: (key, data) => { if (key.at(-1) === 'metadata') cached = data; pageCache.setQueryData(key, data); },
+			removeQueries: options => pageCache.removeQueries(options), invalidateQueries: async () => {}
+		};
 		const route = { connectionId: 'fixture', profile: 'default', targetProfile: 'default' };
-		const env = { capture: () => scope, routes: async () => [route], host: {} };
+		const rpcCalls = [];
+		const env = { capture: () => scope, routes: async () => [route], host: {
+			async requestProfile(target, method, params) {
+				assert.deepEqual(target, route); assert.equal(method, 'session.archive');
+				rpcCalls.push({ method, params });
+				const response = await fetch(`http://127.0.0.1:${Number(line)}/fixture/native-archive`, {
+					method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...params, profile: target.targetProfile })
+				});
+				assert.equal(response.status, 200); return response.json();
+			}
+		} };
 		const controller = createController({ rest }, client, env);
 		assert.deepEqual(await controller.metadata(scope), { version: 1, sessions: {} });
 		const first = await controller.list(scope);
@@ -49,14 +63,22 @@ test('frontend controller interoperates with real FastAPI and persistent SQLite 
 		assert.equal(older.sessions[0].id, 'durable'); assert.equal(older.sessions[0].cwd, '/old-project');
 		await controller.mutate(scope, 'durable', { action: 'pin' });
 		assert.equal(cached.sessions.durable.pinned, true);
-		await controller.mutate(scope, 'durable', { action: 'settle' });
-		assert.equal(cached.sessions.durable.state, 'settled');
+		const existingArchives = await controller.archives(scope);
+		assert.deepEqual(existingArchives.sessions.map(row => row.id), ['external-archived']);
+		assert.equal(existingArchives.sessions[0].archived, true);
+		await controller.mutate(scope, 'durable', { action: 'archive' });
+		assert.equal((await rest('/sessions/durable/archive')).archived, true);
 		assert.equal(cached.sessions.durable.pinned, true);
-		assert.equal(buildSections([{ id: 'tip', _lineage_root_id: 'durable' }], cached, []).settled.length, 1);
+		assert.equal((await controller.list(scope)).sessions.some(row => row.id === 'durable'), false);
 		const reopened = createController({ rest }, client, env);
-		const recovered = await reopened.list(scope);
-		assert.equal(recovered.sessions.length, 501);
-		assert.equal(buildSections(recovered.sessions, await reopened.metadata(scope), live.sessions, { project: '/old-project' }).settled[0].id, 'durable');
+		const recovered = await reopened.archives(scope);
+		assert.equal(recovered.sessions.length, 2);
+		assert.equal(buildSections(recovered.sessions, await reopened.metadata(scope), live.sessions, { project: '/old-project' }).archived[0].id, 'durable');
+		await reopened.mutate(scope, 'durable', { action: 'unarchive' });
+		assert.equal((await rest('/sessions/durable/archive')).archived, false);
+		assert.equal((await reopened.archives(scope)).sessions.some(row => row.id === 'durable'), false);
+		assert.equal((await reopened.list(scope)).sessions.some(row => row.id === 'durable'), true);
+		assert.deepEqual(rpcCalls.map(call => call.params.archived), [true, false]);
 		reopened.dispose();
 		const wake_at = Date.now() / 1000 + 0.25;
 		await controller.mutate(scope, 'durable', { action: 'snooze', wake_at });

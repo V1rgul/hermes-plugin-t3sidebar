@@ -4,6 +4,7 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+from contextlib import closing
 
 from types import ModuleType
 from hermes_state import SessionDB
@@ -26,6 +27,8 @@ with tempfile.TemporaryDirectory(prefix="hermes-t3sidebar-http-") as directory:
 		db.update_session_cwd("durable", "/old-project", git_branch="retained")
 		for i in range(500):
 			db.create_session(f"recent-{i}", "cli", cwd="/recent")
+		db.create_session("external-archived", "cli", cwd="/archived-project")
+		db.set_session_archived("external-archived", True, notify=False)
 	finally:
 		db.close()
 	native = ModuleType("hermes_cli.web_server_sessions")
@@ -38,6 +41,14 @@ with tempfile.TemporaryDirectory(prefix="hermes-t3sidebar-http-") as directory:
 		# Injected fixture; native active_list itself is exercised in test_native_contracts.
 		return {"sessions": [{"session_key": "recent-0", "status": "waiting"}]}
 	app = FastAPI()
+	@app.post("/fixture/native-archive")
+	def native_archive(params: dict):
+		# Test-only RPC transport adapter: native lineage mutation in this scratch DB.
+		assert params["profile"] == "default" and type(params["archived"]) is bool
+		with closing(SessionDB(db_path)) as writer:
+			assert writer.set_session_archived(params["session_id"], params["archived"], notify=False)
+		return {"session_key": params["session_id"], "archived": params["archived"]}
+
 	app.include_router(module.create_router(Path(directory) / "state.sqlite3", profile_reader=lambda: "default", runtime_reader=runtime_reader), prefix="/api/plugins/hermes-t3sidebar")
 	with socket.socket() as listener:
 		listener.bind(("127.0.0.1", 0))

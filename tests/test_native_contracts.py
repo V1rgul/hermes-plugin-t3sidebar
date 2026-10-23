@@ -150,7 +150,7 @@ class NativeContracts(unittest.TestCase):
 		setattr(fake, "_open_session_db_for_profile", lambda *args, **kwargs: DB())
 		with patch.dict(sys.modules, {fake.__name__: fake}):
 			value = backend.native_sessions("exact-profile", 0, 500, ("old",))
-		self.assertEqual(value["sessions"], [{"id": "old", "cwd": "/retained",
+		self.assertEqual(value["sessions"], [{"id": "old", "cwd": "/retained", "archived": False,
 			"project": {"id": "/retained", "name": "retained", "icon": None, "color": None, "cwd": "/retained"},
 			"provider": None, "model": None, "source": None, "input_tokens": None, "output_tokens": None, "total_tokens": None}])
 		self.assertEqual([c["offset"] for c in calls], [0, 0, 500])

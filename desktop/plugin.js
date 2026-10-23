@@ -3,8 +3,8 @@ import * as sdk from '@hermes/plugin-sdk';
 import { createElement as h, useEffect, useRef, useState } from 'react';
 
 const { host, useValue, useQuery, useMutation, useQueryClient, queryClient, gatewayActivationEpoch } = sdk;
-export const SECTIONS = ['pinned', 'active', 'working', 'snoozed', 'settled'];
-const LABELS = { active: 'Active', pinned: 'Pinned', working: 'Working', snoozed: 'Snoozed', settled: 'Settled' };
+export const SECTIONS = ['pinned', 'active', 'working', 'snoozed', 'archived'];
+const LABELS = { active: 'Ready', pinned: 'Pinned', working: 'Working', snoozed: 'Snoozed', archived: 'Archived' };
 const EMPTY_STATE = { version: 1, sessions: {} };
 const activationEpoch = sdk.atom(gatewayActivationEpoch());
 export const durableId = row => row._lineage_root_id || row.id;
@@ -46,11 +46,13 @@ export function compactTokens(row) {
   const total = valid(row.total_tokens) ? row.total_tokens : valid(row.input_tokens) && valid(row.output_tokens) ? row.input_tokens + row.output_tokens : null;
   return total === null ? '—' : Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(total);
 }
-export function mergeRows(rich, extra = [], live = [], extraRich = false) {
+export function mergeRows(rich, extra = [], live = [], extraRich = false, archives = []) {
   const rows = new Map();
-  for (const row of [...extra.map(r => ({ ...r, _limited: !extraRich })), ...rich.map(r => ({ ...r, _limited: false }))]) {
-    const key = durableId(row), previous = rows.get(key);
+  // Archive feed wins over stale active pages, and remains rich/project-filterable.
+  for (const row of [...extra.map(r => ({ ...r, _limited: !extraRich })), ...rich.map(r => ({ ...r, _limited: false })), ...archives.map(r => ({ ...r, _limited: false }))]) {
+    const key = durableId(row), previousKey = rows.has(key) ? key : [...rows.keys()].find(id => aliases(rows.get(id)).some(alias => aliases(row).includes(alias))), previous = rows.get(previousKey);
     if (!key || !visibleSource(row)) continue;
+    if (previousKey && previousKey !== key) rows.delete(previousKey);
     rows.set(key, { ...previous, ...row, _lineage_ids: [...new Set([...(previous ? aliases(previous) : []), ...aliases(row)])] });
   }
   const known = new Set([...rows.values()].flatMap(aliases));
@@ -73,9 +75,10 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
       : matches.some(i => i.status === 'working' || i.status === 'starting') ? 'working'
       : matches.some(i => !['idle', 'working', 'starting', 'waiting'].includes(i.status)) ? 'unknown' : 'idle';
     const woke = meta.state === 'snoozed' && meta.wake_at <= now;
-    const section = status === 'waiting' || status === 'unknown' ? 'active'
+    const section = status === 'waiting' ? 'active'
+      : row.archived === true ? 'archived'
+      : status === 'unknown' ? 'active'
       : meta.state === 'snoozed' && !woke ? 'snoozed'
-      : meta.state === 'settled' ? 'settled'
       : status === 'working' ? 'working'
       : meta.pinned ? 'pinned' : 'active';
     const text = [row.title, row.preview, row.cwd, row.git_branch, ...aliases(row)].filter(Boolean).join(' ').toLowerCase();
@@ -86,8 +89,8 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
   }
   for (const section of SECTIONS) result[section].sort((a, b) => {
     if (section === 'active' && (a.status === 'waiting') !== (b.status === 'waiting')) return a.status === 'waiting' ? -1 : 1;
-    const delta = section === 'settled' ? (b.meta.settled_at || 0) - (a.meta.settled_at || 0)
-      : section === 'snoozed' ? a.meta.wake_at - b.meta.wake_at : b.activity - a.activity;
+    // Native history has no archive timestamp; archives are ordered by last activity.
+    const delta = section === 'snoozed' ? a.meta.wake_at - b.meta.wake_at : b.activity - a.activity;
     return delta || a.key.localeCompare(b.key);
   });
   return result;
@@ -131,29 +134,52 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     if (value?.profile !== (route?.targetProfile || scope.profile) || !Array.isArray(value?.sessions)) throw new Error('Invalid current-profile listing response.');
     return value;
   }
+  function readTicket(scope, ticket) {
+    check(scope);
+    if (writing || ticket !== generation) throw new Error('Superseded session listing.');
+  }
+  async function archiveFlag(scope, route, id) {
+    const value = await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}/archive`));
+    if (value?.profile !== (route?.targetProfile || scope.profile) || value?.id !== id || typeof value?.archived !== 'boolean') throw new Error('The server did not confirm the exact native archive state. Refresh and retry.');
+    return value.archived;
+  }
   return {
     dispose() { disposed = true; generation++; }, check,
     async list(scope) {
-      const route = await routeFor(scope);
+      const ticket = generation, route = await routeFor(scope);
       try {
-        return qualified(await fenced(scope, () => ctx.rest('/sessions?offset=0&limit=500')), scope, route);
+        const value = qualified(await fenced(scope, () => ctx.rest('/sessions?offset=0&limit=500')), scope, route);
+        readTicket(scope, ticket); return value;
       } catch (error) {
-        check(scope);
+        readTicket(scope, ticket);
         const value = await fenced(scope, () => env.host.listPersistedSessions(route, { profile: route?.targetProfile || scope.profile, limit: 500 }));
+        readTicket(scope, ticket);
         return { ...value, capped: true, companionError: error.message };
       }
+    },
+    async archives(scope, pages = 0) {
+      const ticket = generation, route = await routeFor(scope), sessions = [];
+      let has_more = true;
+      for (let page = 0; page <= pages && has_more; page++) {
+        const value = qualified(await fenced(scope, () => ctx.rest(`/archives?offset=${page * 500}&limit=500`)), scope, route);
+        readTicket(scope, ticket);
+        if (typeof value.has_more !== 'boolean' || value.sessions.some(row => row.archived !== true)) throw new Error('Invalid native archive listing response.');
+        sessions.push(...value.sessions); has_more = value.has_more;
+      }
+      return { sessions, has_more };
     },
     async runtime(scope) {
       const route = await routeFor(scope);
       return qualified(await fenced(scope, () => ctx.rest('/runtime')), scope, route);
     },
     async expanded(scope, pages) {
-      const route = await routeFor(scope), sessions = [];
+      const ticket = generation, route = await routeFor(scope), sessions = [];
       let has_more = true;
       for (let page = 1; page <= pages && has_more; page++) {
         const offset = page * 500;
         const value = await fenced(scope, () => client.fetchQuery({ queryKey: [...scopeKey(scope), 'page', offset], staleTime: Infinity,
-          queryFn: async () => qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=${offset}&limit=500`)), scope, route) }));
+          queryFn: async () => { const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=${offset}&limit=500`)), scope, route); readTicket(scope, ticket); return value; } }));
+        readTicket(scope, ticket);
         sessions.push(...value.sessions); has_more = value.has_more;
       }
       return { sessions, has_more };
@@ -170,8 +196,31 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
       writing = true; generation++;
       const key = [...scopeKey(scope), 'metadata'];
+      const native = payload.action === 'archive' || payload.action === 'unarchive';
       try {
-        await client.cancelQueries({ queryKey: key, exact: true }); check(scope);
+        await client.cancelQueries({ queryKey: native ? scopeKey(scope) : key, exact: !native }); check(scope);
+        if (native) {
+          const route = await routeFor(scope), archived = payload.action === 'archive';
+          const before = await archiveFlag(scope, route, id); // Unsupported/missing durable rows cannot be written.
+          await fenced(scope, () => env.host.requestProfile(route, 'session.archive', { session_id: id, archived }));
+          if (await archiveFlag(scope, route, id) !== archived) throw new Error('The server did not confirm this native archive change. Refresh and retry.');
+          let state;
+          try {
+            state = validState(await fenced(scope, () => ctx.rest('/state')));
+            const meta = state.sessions[id];
+            const restore = payload.restoreMetadata;
+            const metadataPayload = restore ? (restore.state === 'snoozed' && restore.wake_at > Date.now() / 1000 ? { action: 'snooze', wake_at: restore.wake_at } : { action: restore.state === 'settled' ? 'settle' : 'restore' })
+              // Record an explicit Ready restoration even for external archives with no plugin metadata,
+              // so the companion's organized-row backfill retains an older unarchived conversation.
+              : !archived && (!meta || meta.state !== 'active') ? { action: 'restore' } : null;
+            if (metadataPayload) {
+              await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: metadataPayload }));
+              state = verifyAction(validState(await fenced(scope, () => ctx.rest('/state'))), id, metadataPayload);
+            }
+          } catch (error) { check(scope); throw new Error(`Native ${archived ? 'archive' : 'unarchive'} confirmed, but organization restore failed: ${error.message}`); }
+          check(scope); client.setQueryData(key, state);
+          return { archived, before };
+        }
         await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: payload }));
         const value = verifyAction(validState(await fenced(scope, () => ctx.rest('/state'))), id, payload);
         await client.cancelQueries({ queryKey: key, exact: true }); check(scope);
@@ -179,7 +228,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         return value;
       } finally {
         writing = false;
-        if (!disposed && sameScope(scope, env.capture())) void client.invalidateQueries({ queryKey: key, exact: true });
+        if (!disposed && sameScope(scope, env.capture())) {
+          if (native) client.removeQueries({ predicate: query => sameScope({ connectionId: query.queryKey[1], profile: query.queryKey[2], epoch: query.queryKey[3] }, scope) && query.queryKey[0] === 'hermes-t3sidebar' && query.queryKey[4] === 'page' });
+          await client.invalidateQueries({ queryKey: native ? scopeKey(scope) : key, exact: !native });
+        }
       }
     },
     async open(scope, row) {
@@ -203,7 +255,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     },
     async newChat(scope, project, idempotencyKey) {
       const route = await routeFor(scope); check(scope);
-      if (project === undefined) return env.host.newChat(route); // Preserve settle-and-advance fallback.
+      if (project === undefined) return env.host.newChat(route); // Preserve archive-and-advance fallback.
       if (project.isNoProject || project.id === '__no_project__') throw new Error('Home creation is unavailable: the public Desktop SDK cannot select a detached workspace. No session was created. Use native Home new chat.');
       if (typeof project.path !== 'string' || !project.path || !idempotencyKey) throw new Error('Choose a project folder before creating a session.');
       const created = await fenced(scope, () => env.host.requestProfile(route, 'session.create', {
@@ -240,7 +292,7 @@ const CSS = `
 .sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:24px;min-height:24px;padding:3px 6px;border:0;background:transparent;color:var(--ui-text-tertiary);font-size:11px;text-align:left}.sf-count{margin-left:auto;color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums}
 .sf-row{position:relative;height:56px;flex-shrink:0;padding:0 10px;border-radius:5px}.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
 .sf-row[data-working=true]{opacity:.55}.sf-row[data-working=true]:hover,.sf-row[data-working=true]:focus-within{opacity:1}
-.sf-open{display:flex;flex-direction:column;justify-content:center;gap:5px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:var(--ui-bg-quaternary);flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:none;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-settle{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{display:flex}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
+.sf-open{display:flex;flex-direction:column;justify-content:center;gap:5px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:var(--ui-bg-quaternary);flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:none;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{display:flex}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
 .sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
 .sf-undo{display:flex;align-items:center;gap:6px}.sf-undo span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
@@ -258,7 +310,7 @@ function providerMark(provider) {
   return path ? h('svg', { viewBox: '0 0 24 24', fill: 'currentColor', 'aria-hidden': true, 'data-provider-mark': slug }, h('path', { d: path })) : icon('CircleHelp', '?');
 }
 function icon(name, fallback) {
-  const local = { FolderPlus: 'M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2M12 10v7M8.5 13.5h7', SquarePen: 'M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7M10 14l1-4 9-9 3 3-9 9-4 1', ListFilter: 'M4 6h16M7 12h10M10 18h4' }[name];
+  const local = { Archive: 'M3 3h18v4H3zM5 7v14h14V7M10 11h4', ArchiveRestore: 'M3 3h18v4H3zM5 7v14h14V7M12 17v-7M9 13l3-3 3 3', FolderPlus: 'M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2M12 10v7M8.5 13.5h7', SquarePen: 'M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7M10 14l1-4 9-9 3 3-9 9-4 1', ListFilter: 'M4 6h16M7 12h10M10 18h4' }[name];
   if (local) return h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: local }));
   const Component = sdk.icons?.[name]; return Component ? h(Component, { size: 14, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, fallback);
 }
@@ -267,32 +319,33 @@ function Note({ children, error = false }) { return h('div', { className: 'sf-no
 function Settings() {
   return h('section', { style: { padding: 20, maxWidth: 650, color: 'var(--ui-text-secondary)' } },
     h('h2', null, 'hermes-t3sidebar'), h('p', null, 'A compact T3-style session browser for the active source and profile.'),
-    h('p', null, 'Settle and snooze organize the list only. They do not archive, delete, stop, resume or send a prompt. Snoozes return when their chosen time passes; no agent is awakened.'),
+    h('p', null, 'Archive and Unarchive change native Hermes archives and keep conversation history. Snoozes return when their chosen time passes; no agent is stopped or awakened, and no prompt is sent.'),
     h('p', null, 'Use normal layout controls to select hermes-t3sidebar in the left pane or hide the native Sessions pane. hermes-t3sidebar never modifies the core sidebar or conversation workspace.'),
     h('p', null, 'Project filtering changes this list only. New session asks for a named project before creating an empty session; Home creation is unavailable with the current public workspace contract.'),
-    h('p', null, 'Keyboard: ↑/↓ or Home/End to focus rows; Enter to open; Shift+F10 for actions; Shift+Enter to settle and advance (when no approval is pending).'),
-    h('p', null, 'Pins, settlement and snoozes belong to this plugin’s backend, not native archival or native pins. Missing backend: browsing remains available, organization is read-only.'));
+    h('p', null, 'Keyboard: ↑/↓ or Home/End to focus rows; Enter to open; Shift+F10 for actions; Shift+Enter to archive and advance (only with confirmed idle status).'),
+    h('p', null, 'Pins and snoozes belong to this plugin’s backend. Archived includes existing native archives, sorted by last activity, not archive time. Older plugin-only completed entries return to Ready; no history is automatically archived. Missing backend: browsing remains available, organization is read-only.'));
 }
 function RowActions({ row, scope, mutate, disabled, close, snoozeOnly = false }) {
   const [value, setValue] = useState(''), [error, setError] = useState('');
-  const waiting = row.status === 'waiting' || row.status === 'unknown';
+  const archived = row.archived === true, waiting = row.status !== 'idle', snoozeDisabled = waiting || archived;
   const run = payload => { void mutate(row, payload).then(ok => { if (ok) close(); }); };
   const action = (text, payload, extraDisabled = false) => h(sdk.Button, { key: text, type: 'button', variant: 'ghost', size: 'sm', disabled: disabled || extraDisabled,
     onClick: () => run(payload) }, text);
   return h('div', { className: 'sf-menu' }, h('div', { className: 'sf-menu-title' }, row.title || 'Untitled session'),
     !snoozeOnly ? action(row.meta.pinned ? 'Unpin' : 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
-    !snoozeOnly && row.meta.state !== 'active' ? action('Restore to Active', { action: 'restore' }) : null,
-    !snoozeOnly && row.section !== 'settled' ? action('Settle', { action: 'settle' }, waiting) : null,
-    !snoozeOnly && row.section !== 'settled' ? action('Settle and advance', { action: 'settle', advance: true }, waiting) : null,
-    ...snoozePresets().map(preset => action(`Snooze · ${preset.label}`, { action: 'snooze', wake_at: preset.wake_at }, waiting)),
-    h('label', null, 'Custom snooze · local time', h('input', { type: 'datetime-local', value, disabled: disabled || waiting,
+    !snoozeOnly && !archived && row.meta.state === 'snoozed' ? action('Restore to Ready', { action: 'restore' }) : null,
+    !snoozeOnly ? action(archived ? 'Unarchive' : 'Archive', { action: archived ? 'unarchive' : 'archive' }, !archived && waiting) : null,
+    !snoozeOnly && !archived ? action('Archive and advance', { action: 'archive', advance: true }, waiting) : null,
+    ...snoozePresets().map(preset => action(`Snooze · ${preset.label}`, { action: 'snooze', wake_at: preset.wake_at }, snoozeDisabled)),
+    h('label', null, 'Custom snooze · local time', h('input', { type: 'datetime-local', value, disabled: disabled || snoozeDisabled,
       'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } })),
-    h(sdk.Button, { variant: 'ghost', size: 'sm', disabled: disabled || waiting || !value, onClick: () => {
+    h(sdk.Button, { variant: 'ghost', size: 'sm', disabled: disabled || snoozeDisabled || !value, onClick: () => {
       try { const wake_at = parseLocalWake(value); setError(''); run({ action: 'snooze', wake_at }); } catch (e) { setError(e.message); }
     } }, 'Snooze until chosen time'),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null,
-    waiting ? h('p', null, 'Waiting or unknown runtime status stays visible in Active. Settle and snooze are unavailable until status is known.') : null,
-    h('p', null, 'Organization only · never stops the agent.'));
+    waiting ? h('p', null, 'Archive and snooze require confirmed idle status. Waiting stays visible in Ready; Unarchive remains available.') : null,
+    archived ? h('p', null, 'Unarchive before snoozing this conversation.') : null,
+    h('p', null, 'History kept · never stops the agent.'));
 }
 function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus, onNavigate, rowRef }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
@@ -301,7 +354,7 @@ function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus,
   const keyDown = event => {
     if (event.target !== event.currentTarget) return;
     if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); setMenuOpen(true); }
-    else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && row.status !== 'waiting' && row.status !== 'unknown') void mutate(row, { action: 'settle', advance: true }); }
+    else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
   return h('div', { className: 'sf-row', 'data-current': active, 'data-working': row.section === 'working', 'data-session-id': row.key,
@@ -322,11 +375,11 @@ function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus,
       h('span', { className: 'sf-row-title' }, row.title || 'Untitled session')),
     h('div', { className: 'sf-hover' },
       h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },
-        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Snooze session', name: 'Clock', glyph: '◷', disabled: disabled || ['waiting', 'unknown'].includes(row.status), 'aria-haspopup': 'dialog' })),
+        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Snooze session', name: 'Clock', glyph: '◷', disabled: disabled || row.status !== 'idle' || row.archived === true, 'aria-haspopup': 'dialog' })),
         h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Snooze session' },
           h(RowActions, { row, scope, mutate, disabled, snoozeOnly: true, close: () => setSnoozeOpen(false) }))),
-      h(sdk.Button, { type: 'button', variant: 'ghost', size: 'xs', className: 'sf-icon sf-settle', 'aria-label': row.meta.state !== 'active' ? 'Restore session' : 'Settle session', disabled: disabled || (row.meta.state === 'active' && ['waiting', 'unknown'].includes(row.status)),
-        onClick: () => void mutate(row, { action: row.meta.state !== 'active' ? 'restore' : 'settle' }) }, icon(row.meta.state !== 'active' ? 'Undo2' : 'Check', '✓'), row.meta.state !== 'active' ? 'Restore' : 'Settle')),
+      h(sdk.Button, { type: 'button', variant: 'ghost', size: 'xs', className: 'sf-icon sf-archive', 'aria-label': row.archived === true ? 'Unarchive session' : 'Archive session', disabled: disabled || (row.archived !== true && row.status !== 'idle'),
+        onClick: () => void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive' }) }, icon(row.archived === true ? 'ArchiveRestore' : 'Archive', '▤'), row.archived === true ? 'Unarchive' : 'Archive')),
     h(sdk.Popover, { open: menuOpen, onOpenChange: setMenuOpen },
       h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { ref: trigger, className: 'sf-context-trigger', label: `Actions for ${row.title || 'Untitled session'}`, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog' })),
       h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Session actions' }, h(RowActions, { row, scope, mutate, disabled, close: () => setMenuOpen(false) }))));
@@ -365,7 +418,7 @@ export function ProjectPicker({ controller, scope, close }) {
 function ScopedSidebar({ ctx, controller, scope }) {
   const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [grouped, setGrouped] = useState(false), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState({}), [limit, setLimit] = useState(0), [undo, setUndo] = useState(null), [actionError, setActionError] = useState('');
+  const [collapsed, setCollapsed] = useState({}), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [undo, setUndo] = useState(null), [actionError, setActionError] = useState('');
   const search = useRef(null), rowRefs = useRef(new Map()), focused = useRef(null), latest = useRef(null);
   const key = scopeKey(scope);
   const mutation = useMutation({ mutationFn: async ({ id, payload }) => controller.mutate(scope, id, payload) });
@@ -374,14 +427,15 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const runtime = useQuery({ ...opts, queryKey: [...key, 'runtime'], queryFn: () => controller.runtime(scope) });
   const metadata = useQuery({ ...opts, queryKey: [...key, 'metadata'], queryFn: () => controller.metadata(scope), enabled: !mutation.isPending });
   const expanded = useQuery({ ...opts, staleTime: Infinity, refetchInterval: false, queryKey: [...key, 'expanded', limit], enabled: limit > 0, queryFn: () => controller.expanded(scope, limit) });
+  const archives = useQuery({ ...opts, queryKey: [...key, 'archives', archiveLimit], queryFn: () => controller.archives(scope, archiveLimit) });
   const live = runtime.isError ? [] : runtime.data?.sessions || [];
-  const rows = mergeRows(sessions.data?.sessions || [], sessions.data?.capped ? [] : expanded.data?.sessions || [], live, true);
+  const rows = mergeRows(sessions.data?.sessions || [], sessions.data?.capped ? [] : expanded.data?.sessions || [], live, true, archives.isError ? [] : archives.data?.sessions || []);
   const runtimeKnown = !!runtime.data && !runtime.isError;
   const sections = buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, query, project });
   const searching = !!query.trim();
   const visible = SECTIONS.flatMap(section => collapsed[section] && !searching && !(section === 'active' && sections.active.some(row => row.status === 'waiting' || row.status === 'unknown')) ? [] : sections[section]);
   const projects = [...new Set(rows.filter(row => !row._limited).map(row => row.cwd || ''))].sort();
-  latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || mutation.isPending };
+  latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
   const refresh = () => { try { controller.check(scope); void client.invalidateQueries({ queryKey: key }); } catch (_) { /* old pane */ } };
   const mutate = async (row, input, isUndo = false) => {
     try {
@@ -389,9 +443,12 @@ function ScopedSidebar({ ctx, controller, scope }) {
       if (latest.current.disabled) throw new Error('hermes-t3sidebar backend unavailable or another change is saving.');
       const { advance, ...payload } = input;
       const before = latest.current.metadata.sessions[row.key] || { state: 'active', pinned: false };
+      if (!isUndo && ['archive', 'snooze'].includes(payload.action) && row.status !== 'idle') throw new Error('Archive and snooze require confirmed idle status.');
+      if (row._liveOnly) throw new Error('This session has no confirmed stored history yet.');
       setActionError('');
-      await mutation.mutateAsync({ id: row.key, payload }); controller.check(scope);
-      if (!isUndo) setUndo({ row, payload: inverseAction(payload.action, before), label: payload.action === 'settle' ? 'Settled' : payload.action === 'snooze' ? 'Snoozed' : payload.action === 'restore' ? 'Restored' : payload.action === 'pin' ? 'Pinned' : 'Unpinned' });
+      const result = await mutation.mutateAsync({ id: row.key, payload }); controller.check(scope);
+      const native = payload.action === 'archive' || payload.action === 'unarchive';
+      if (!isUndo) setUndo({ row, payload: native ? { action: result.before ? 'archive' : 'unarchive', restoreMetadata: before } : inverseAction(payload.action, before), label: payload.action === 'archive' ? 'Archived' : payload.action === 'unarchive' ? 'Unarchived' : payload.action === 'snooze' ? 'Snoozed' : payload.action === 'restore' ? 'Restored' : payload.action === 'pin' ? 'Pinned' : 'Unpinned' });
       else setUndo(null);
       if (advance) {
         const next = [...latest.current.sections.active, ...latest.current.sections.pinned].find(item => item.key !== row.key && latest.current.visible.some(visible => visible.key === item.key));
@@ -425,7 +482,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
       !headerless ? h('button', { type: 'button', className: 'sf-section-toggle', 'aria-expanded': !closed, 'aria-label': `${LABELS[section]} (${entries.length})`,
         onClick: () => setCollapsed(previous => ({ ...previous, [section]: !previous[section] })) }, icon(closed ? 'ChevronRight' : 'ChevronDown', closed ? '›' : '⌄'), LABELS[section], h('span', { className: 'sf-count' }, entries.length)) : null,
       !closed ? h('div', { className: 'sf-section-body', 'aria-label': `${section === 'active' ? 'Ready' : LABELS[section]} sessions`, tabIndex: -1 },
-        entries.length ? items : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : 'No sessions')) : null);
+        section === 'archived' && archives.isError ? h('div', { className: 'sf-empty', role: 'alert' }, `Archives unavailable: ${archives.error.message}`) : entries.length ? items : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : section === 'archived' && archives.isLoading ? 'Loading archives…' : 'No sessions'),
+        section === 'archived' && !archives.isError && archives.data?.has_more ? h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: archives.isFetching, onClick: () => setArchiveLimit(previous => previous + 1) }, 'Browse older archives') : null) : null);
 
   };
   const total = sessions.data?.total;
@@ -451,7 +509,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
         h(sdk.PopoverContent, { align: 'end', 'aria-label': 'New session project' }, pickerOpen ? h(ProjectPicker, { controller, scope, close: () => setPickerOpen(false) }) : null))),
     sessions.isLoading ? h(Note, null, 'Loading sessions…') : null,
     sessions.isError ? h(Note, { error: true }, `Session list failed: ${sessions.error.message} `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
-    !runtimeKnown ? h(Note, { error: runtime.isError }, runtime.isError ? `Runtime status unavailable: ${runtime.error.message}. Sessions remain in Active with unknown status.` : 'Checking runtime status…') : null,
+    !runtimeKnown ? h(Note, { error: runtime.isError }, runtime.isError ? `Runtime status unavailable: ${runtime.error.message}. Native archives remain Archived; other sessions stay accessible in Ready.` : 'Checking runtime status…') : null,
     metadata.isError ? h(Note, { error: true }, `hermes-t3sidebar backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback. `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,

@@ -4,13 +4,15 @@ A T3 Code-inspired replacement session sidebar for Hermes Desktop. It opens exis
 
 ## Workflow
 
-- **Active:** conversations ready for your attention. Pending approvals and questions remain visible here, even when the session was snoozed or settled.
+- **Ready:** headerless conversations ready for your attention. Pending approvals and questions remain visible here rather than disappearing into a background shelf.
 - **Working:** running jobs separated from attention items and visually subdued.
 - **Snoozed:** conversations put aside until a chosen time, with presets and a custom date/time.
-- **Recently settled:** a reversible history ordered by settlement time, not deletion or native archival.
-- Compact session rows, search, project filtering, pins and row actions.
+- **Archived:** Hermes’s real archived sessions, including conversations archived outside this plugin. Archive and Unarchive use native session archival; history is retained. The shelf is ordered by last activity, not an invented archival timestamp.
+- Headerless Pinned cards above Ready, two-line session cards, search, project filtering and hover-only Snooze/Archive actions. Category bodies scroll independently while secondary headers remain visible.
 
-Settlement and snoozing are organizational metadata. They never stop a running agent, send a prompt, delete history or modify Hermes’s native archive flag. Snooze eligibility is based on an absolute server timestamp: closing Desktop does not reset the deadline. Due items become Active on the next metadata refresh; no background agent is resumed.
+Archive/Unarchive calls Hermes’s profile-routed `session.archive` operation with an explicit boolean and verifies the exact stored session’s flag through the read-only companion before confirming success. Archival applies to the native compression lineage; it is not deletion, an agent-stop operation or a hidden prompt. Pins and snoozing remain plugin-owned organization metadata. Snooze eligibility is based on an absolute server timestamp: closing Desktop does not reset the deadline. Due items become Ready on the next metadata refresh; no background agent is resumed.
+
+Earlier versions used a plugin-only settlement shelf. Existing settlement metadata is retained for compatibility but does not count as native archival and is not automatically converted by bulk-writing session history. Those conversations rejoin the ordinary list unless another current condition (such as a pin, snooze or running job) places them elsewhere. Archive them explicitly to move them into Hermes’s real archive.
 
 ## Package
 
@@ -51,8 +53,9 @@ The plugin was previously named **Session Flow** (`session-flow`). Its ID, backe
 ## Boundaries
 
 - Works in the selected gateway/profile scope, rather than silently aggregating different accounts or servers.
-- The server companion provides persistent pins, settlement, snooze, profile-qualified runtime status and rich history pagination. If unavailable, the SDK’s first 500 rich sessions remain browseable with an explicit cap; organization is read-only and runtime status is unknown, with no local metadata or unqualified runtime fallback.
-- Older history loads on demand. Organized sessions are recovered outside the recent page automatically, including due snoozes and newly settled old conversations. Search covers loaded rows and recovered organized sessions, not history that has not yet been loaded.
+- The server companion provides persistent pins, snooze, profile-qualified runtime status, native archive-state readback and separate rich history/archive pagination. If unavailable, the SDK’s first 500 regular rich sessions remain browseable with an explicit cap; organization and native archive actions are unavailable, with no local metadata or unqualified runtime fallback. An archive-list failure is reported rather than presented as an empty archive.
+- Older regular history and archives load on demand independently. Organized regular sessions are recovered outside the recent page automatically, including due snoozes. Search covers loaded rows and recovered organized sessions, not history that has not yet been loaded.
+- Native archived-and-hidden conversations can appear in Archived, but Unarchive deliberately preserves their separate hidden flag. They will not return to this ordinary session list unless their native visibility is changed separately.
 - Pins are hermes-t3sidebar metadata, not synchronized with Hermes’s native pin store. Drag/reorder, bulk selection and cross-profile aggregation are not implemented in this version.
 - Runtime Working/Waiting state comes from the gateway’s live session snapshot, not its connection status or a recent-activity heuristic. Unknown runtime status must not be presented as confirmed idle.
 - Project filtering does not change Hermes’s sidebar grouping or the draft workspace.

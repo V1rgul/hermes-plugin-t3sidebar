@@ -45,9 +45,9 @@ test('only supported import specifiers; opt-in left-pane registration and dispos
   mock.control.disposers.forEach(fn => fn()); assert.equal(mock.control.listener, null);
 });
 
-test('waiting outranks pin, settled, snoozed and working across compression aliases', () => {
+test('waiting outranks native archives, pin, legacy completion, snoozed and working across compression aliases', () => {
   for (const state of ['active', 'settled', 'snoozed']) {
-    const result = flow.buildSections([{ id: 'tip', _lineage_root_id: 'root', _lineage_ids: ['old'] }], { sessions: { root: { state, pinned: true, wake_at: 9999 } } }, [
+    const result = flow.buildSections([{ id: 'tip', archived: true, _lineage_root_id: 'root', _lineage_ids: ['old'] }], { sessions: { root: { state, pinned: true, wake_at: 9999 } } }, [
       { id: 'worker', session_key: 'tip', status: 'working' }, { id: 'approval', session_key: 'old', status: 'waiting' }
     ], { now: 100 });
     assert.equal(result.active[0].key, 'root'); assert.equal(result.active[0].status, 'waiting');
@@ -55,20 +55,20 @@ test('waiting outranks pin, settled, snoozed and working across compression alia
   }
 });
 
-test('working and starting dim shelf; idle pins; snooze wake; settlement ordering', () => {
-  const rows = ['work', 'start', 'pin', 'due', 'later', 's1', 's2'].map(id => ({ id }));
+test('working and starting dim shelf; idle pins; snooze wake; native archives by activity', () => {
+  const rows = ['work', 'start', 'pin', 'due', 'later', 's1', 's2'].map(id => ({ id, archived: id.startsWith('s') && id !== 'start', last_active: id === 's2' ? 40 : id === 's1' ? 30 : 0 }));
   const result = flow.buildSections(rows, { sessions: {
     pin: { state: 'active', pinned: true }, due: { state: 'snoozed', wake_at: 100 }, later: { state: 'snoozed', wake_at: 101 },
     s1: { state: 'settled', settled_at: 30 }, s2: { state: 'settled', settled_at: 40 }
   } }, [{ session_key: 'work', status: 'working' }, { session_key: 'start', status: 'starting' }], { now: 100 });
   assert.deepEqual(result.working.map(r => r.id), ['start', 'work']); assert.equal(result.pinned[0].id, 'pin');
   assert.equal(result.active[0].id, 'due'); assert.equal(result.active[0].woke, true); assert.equal(result.snoozed[0].id, 'later');
-  assert.deepEqual(result.settled.map(r => r.id), ['s2', 's1']);
+  assert.deepEqual(result.archived.map(r => r.id), ['s2', 's1']);
 });
 
 test('unknown runtime never silently classifies idle or hides in settled', () => {
   const result = flow.buildSections([{ id: 's' }], { sessions: { s: { state: 'settled' } } }, [], { runtimeKnown: false });
-  assert.equal(result.active[0].status, 'unknown'); assert.equal(result.settled.length, 0);
+  assert.equal(result.active[0].status, 'unknown'); assert.equal(result.archived.length, 0);
 });
 
 test('waiting sorts first; ties stable; project filtering independent from grouping', () => {
@@ -143,11 +143,11 @@ test('old in-flight metadata cannot overwrite mutation; concurrent writers rejec
 function cloneState() { return JSON.parse(JSON.stringify(mock.control.metadata)); }
 
 test('React mounts headerless Ready and Pinned, waiting stays Ready, dim working and native open', async () => {
-  await mount(); assert.ok(row('approval')); assert.equal(row('approval').closest('section'), shelf('Active'));
-  assert.equal($('aside').getAttribute('aria-label'), plugin.name); assert.equal($('.sf-title'), null); assert.equal(shelf('Active').querySelector('.sf-section-toggle'), null); assert.equal(shelf('Pinned').querySelector('.sf-section-toggle'), null);
+  await mount(); assert.ok(row('approval')); assert.equal(row('approval').closest('section'), shelf('Ready'));
+  assert.equal($('aside').getAttribute('aria-label'), plugin.name); assert.equal($('.sf-title'), null); assert.equal(shelf('Ready').querySelector('.sf-section-toggle'), null); assert.equal(shelf('Pinned').querySelector('.sf-section-toggle'), null);
   assert.equal($('.sf-scroll').firstElementChild, shelf('Pinned'));
   assert.equal(row('root').dataset.working, 'true'); assert.equal(row('pinned').closest('section'), shelf('Pinned'));
-  assert.equal(row('snoozed').closest('section'), shelf('Snoozed')); assert.equal(row('settled').closest('section'), shelf('Settled'));
+  assert.equal(row('snoozed').closest('section'), shelf('Snoozed')); assert.equal(row('archived').closest('section'), shelf('Archived'));
   await click(row('design').querySelector('.sf-open')); assert.ok(mock.calls.some(c => c[0] === 'open' && c[1] === 'design'));
   await click(button('New session')); assert.ok(button('New session in Home'));
   assert.equal(mock.calls.some(c => c[0] === 'new'), false); assert.doesNotMatch(document.body.textContent, /native workspace selection/);
@@ -164,7 +164,7 @@ test('React search, project filter, optional local grouping and keyboard navigat
   assert.equal(button('Show project details'), undefined); assert.equal($('.sf-row-detail'), null);
   const first = row('readme').querySelector('.sf-open'); first.focus();
   await act(async () => first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
-  assert.equal(document.activeElement, row('snoozed').querySelector('.sf-open'));
+  assert.equal(document.activeElement?.closest('[data-session-id]')?.dataset.sessionId, 'legacy');
 });
 
 test('card Snooze opens time choices and confirms organization without opening the session', async () => {
@@ -177,16 +177,16 @@ test('card Snooze opens time choices and confirms organization without opening t
   assert.equal($('[role=dialog]'), null);
   assert.equal(mock.calls.some(call => call[0] === 'open'), false);
   await click(button('Undo'));
-  assert.equal(row('design').closest('section'), shelf('Active'));
+  assert.equal(row('design').closest('section'), shelf('Ready'));
   assert.equal(row('approval').querySelector('[aria-label="Snooze session"]').disabled, true);
 });
 
 test('React settles and restores with Undo and readback, and settle-and-advance opens next', async () => {
-  await mount(); await click(row('design').querySelector('[aria-label="Settle session"]'));
-  assert.equal(row('design').closest('section'), shelf('Settled')); assert.ok(button('Undo'));
-  await click(button('Undo')); assert.equal(row('design').closest('section'), shelf('Active'));
-  await click(button('Actions for Sidebar layout')); await click(button('Settle and advance'));
-  assert.equal(row('design').closest('section'), shelf('Settled'));
+  await mount(); await click(row('design').querySelector('[aria-label="Archive session"]'));
+  assert.equal(row('design').closest('section'), shelf('Archived')); assert.ok(button('Undo'));
+  await click(button('Undo')); assert.equal(row('design').closest('section'), shelf('Ready'));
+  await click(button('Actions for Sidebar layout')); await click(button('Archive and advance'));
+  assert.equal(row('design').closest('section'), shelf('Archived'));
   assert.ok(mock.calls.some(c => c[0] === 'open' && c[1] === 'approval'));
 });
 
@@ -194,7 +194,7 @@ test('React context menu snooze preset and custom validation, Restore', async ()
   await mount(); await act(async () => row('design').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))); await tick();
   assert.ok($('[role=dialog]')); await click(button('Snooze · In 1 hour'));
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
-  await click(row('design').querySelector('[aria-label="Restore session"]')); assert.equal(row('design').closest('section'), shelf('Active'));
+  await click(button('Actions for Sidebar layout')); await click(button('Restore to Ready')); assert.equal(row('design').closest('section'), shelf('Ready'));
   await click(button('Actions for Sidebar layout')); await input($('input[type=datetime-local]'), '2020-01-01T12:00');
   await click(button('Snooze until chosen time')); assert.match($('[role=alert]').textContent, /future/);
   await input($('input[type=datetime-local]'), '2030-01-01T12:00'); await click(button('Snooze until chosen time'));
@@ -203,22 +203,22 @@ test('React context menu snooze preset and custom validation, Restore', async ()
 
 test('React waiting stays in headerless Ready and cannot be settled; secondary sections collapse', async () => {
   await mount(); assert.equal(button('Active (3)'), undefined); assert.ok(row('approval'));
-  assert.equal(row('approval').querySelector('[aria-label="Restore session"]').disabled, false);
+  assert.equal(row('approval').querySelector('[aria-label="Archive session"]').disabled, true);
   await click(button('Actions for Approval request'));
-  assert.equal([...$('[role=dialog]').querySelectorAll('button')].find(node => node.textContent === 'Settle').disabled, true);
+  assert.equal([...$('[role=dialog]').querySelectorAll('button')].find(node => node.textContent === 'Archive').disabled, true);
   assert.equal(button('Snooze · In 1 hour').disabled, true);
-  await click(button('Close session actions')); await click(button('Settled (1)')); assert.equal(row('settled'), null);
+  await click(button('Close session actions')); await click(button('Archived (1)')); assert.equal(row('archived'), null);
 });
 
-test('React runtime failure shows unknown and keeps settled rows in Active', async () => {
+test('React runtime failure shows unknown without flooding Ready with native archives', async () => {
   mock.control.runtimeError = true; await mount();
-  assert.match(document.body.textContent, /Runtime status unavailable/); assert.equal(row('settled').closest('section'), shelf('Active'));
-  assert.match(row('settled').querySelector('.sf-open').getAttribute('aria-label'), /status unknown/);
+  assert.match(document.body.textContent, /Runtime status unavailable/); assert.equal(row('archived').closest('section'), shelf('Archived'));
+  assert.match(row('archived').querySelector('.sf-open').getAttribute('aria-label'), /status unknown/);
 });
 
 test('React missing backend is read-only without local fallback; list errors visible', async () => {
   mock.control.backendMissing = true; await mount(); assert.match(document.body.textContent, /Read-only browsing/);
-  assert.equal(row('design').querySelector('[aria-label="Settle session"]').disabled, true);
+  assert.equal(row('design').querySelector('[aria-label="Archive session"]').disabled, true);
   await click(row('design').querySelector('.sf-open')); assert.ok(mock.calls.some(c => c[0] === 'open'));
   mock.control.listError = true; await refresh(); assert.match(document.body.textContent, /Session list failed/);
 });
@@ -244,9 +244,10 @@ test('scope change after POST prevents wrong-source readback or cache publicatio
 });
 
 test('React route switch clears undo and scoped metadata; no cross-source cache collision', async () => {
-  await mount(); await click(row('design').querySelector('[aria-label="Settle session"]')); assert.ok(button('Undo'));
+  await mount(); await click(row('design').querySelector('[aria-label="Archive session"]')); assert.ok(button('Undo'));
+  mock.control.rows.find(row => row.id === 'design').archived = false;
   await act(async () => { mock.control.metadata = { version: 1, sessions: {} }; mock.switchScope('source-b', 'default'); }); await tick(); await tick();
-  assert.equal(button('Undo'), undefined); assert.equal(row('design').closest('section'), shelf('Active'));
+  assert.equal(button('Undo'), undefined); assert.equal(row('design').closest('section'), shelf('Ready'));
   const keys = mock.queryClient.getQueryCache().getAll().map(q => q.queryKey); assert.ok(keys.some(key => key[1] === 'source-b'));
 });
 
@@ -296,21 +297,22 @@ test('focused stored tile identity, not runtime id, selects row only for matchin
 });
 
 test('search reveals collapsed shelf hits and preserves collapsed preference on clearing', async () => {
-  await mount(); await click(button('Settled (1)')); assert.equal(row('settled'), null);
-  await input($('input[type=search]'), 'SDK inventory'); assert.ok(row('settled'));
+  await mount(); await click(button('Archived (1)')); assert.equal(row('archived'), null);
+  await input($('input[type=search]'), 'SDK inventory'); assert.ok(row('archived'));
   assert.doesNotMatch(document.body.textContent, /No matching sessions/);
-  await input($('input[type=search]'), ''); assert.equal(row('settled'), null);
+  await input($('input[type=search]'), ''); assert.equal(row('archived'), null);
 });
 
 test('501st organized session survives remount and keeps rich project filtering after due wake', async () => {
   mock.control.rows = Array.from({ length: 500 }, (_, i) => ({ id: `recent${i}`, title: `Recent ${i}` }));
   mock.control.extra = [{ id: 'old-tip', _lineage_root_id: 'old-root', _lineage_ids: ['old-root', 'old-tip'], title: 'Old project session', cwd: '/old-project', git_branch: 'retained' }];
   await mount(); await click(button('Browse older sessions'));
-  await click(row('old-root').querySelector('[aria-label="Settle session"]'));
+  await click(row('old-root').querySelector('[aria-label="Archive session"]'));
   await act(async () => root.unmount()); root = null; controller.dispose(); mock.queryClient.clear();
-  await mount(); assert.equal(row('old-root').closest('section'), shelf('Settled'));
+  await mount(); assert.equal(row('old-root').closest('section'), shelf('Archived'));
+  await click(row('old-root').querySelector('[aria-label="Unarchive session"]'));
   mock.control.metadata.sessions['old-root'] = { state: 'snoozed', pinned: false, wake_at: 1, settled_at: null, updated_at: 1 };
-  await refresh(); assert.equal(row('old-root').closest('section'), shelf('Active'));
+  await refresh(); assert.equal(row('old-root').closest('section'), shelf('Ready'));
   if (!$('select')) await click(button('Filter sessions'));
   await act(async () => { $('select').value = '/old-project'; $('select').dispatchEvent(new Event('change', { bubbles: true })); }); await tick();
   assert.ok(row('old-root')); assert.equal(all('.sf-row').length, 1);
@@ -364,7 +366,7 @@ test('cron excluded from recent, extra, organized, runtime and SDK fallback rows
 test('Pinned absent when empty while Ready and all secondary categories remain', async () => {
   mock.control.metadata.sessions.pinned.pinned = false; await mount();
   assert.equal(shelf('Pinned'), null);
-  for (const name of ['Active', 'Working', 'Snoozed', 'Settled']) assert.ok(shelf(name));
+  for (const name of ['Ready', 'Working', 'Snoozed', 'Archived']) assert.ok(shelf(name));
 });
 
 test('public native tree always includes synthetic Home and expands multiple folder paths', async () => {
@@ -406,6 +408,165 @@ test('project creation never sends final cwd setter after selection or source dr
     assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.cwd.set'), false);
     controller.dispose();
   }
+});
+
+test('legacy completion metadata never classifies native archives or migrates history', async () => {
+  const rows = ['ready', 'pin', 'work', 'native'].map(id => ({ id, archived: id === 'native' }));
+  const metadata = { sessions: Object.fromEntries(rows.map(r => [r.id, { state: 'settled', pinned: r.id === 'pin' }])) };
+  const sections = flow.buildSections(rows, metadata, [{ session_key: 'work', status: 'working' }]);
+  assert.deepEqual(sections.active.map(r => r.id), ['ready']);
+  assert.deepEqual(sections.pinned.map(r => r.id), ['pin']);
+  assert.deepEqual(sections.working.map(r => r.id), ['work']);
+  assert.deepEqual(sections.archived.map(r => r.id), ['native']);
+  await mount();
+  assert.equal(row('legacy').closest('section')?.getAttribute('aria-label'), 'Ready');
+  assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.archive' || c[0] === 'rest' && c[2]?.method === 'POST'), false);
+  assert.doesNotMatch(document.body.textContent, /\bsettle(?:d)?\b/i);
+  await click(button('Actions for Sidebar layout')); assert.doesNotMatch($('[role=dialog]').textContent, /\bsettle(?:d)?\b/i);
+});
+
+test('archives created elsewhere appear without plugin metadata and retain rich cards', async () => {
+  await mount();
+  mock.control.rows.push({ id: 'external', archived: true, title: 'Archived in another client', cwd: '/external', git_branch: 'retained', provider: 'anthropic', total_tokens: 1234, project: { name: 'External project', icon: '◇' } });
+  await refresh();
+  assert.equal(row('external').closest('section')?.getAttribute('aria-label'), 'Archived');
+  assert.equal(row('external').querySelector('.sf-project-name').textContent, 'External project');
+  assert.equal(mock.control.metadata.sessions.external, undefined);
+  assert.equal(row('external').querySelector('[aria-label="Snooze session"]').disabled, true);
+  await click(row('external').querySelector('[aria-label="Unarchive session"]'));
+  assert.equal(row('external').closest('section')?.getAttribute('aria-label'), 'Ready');
+  assert.equal(mock.control.metadata.sessions.external.state, 'active');
+  await click(button('Undo'));
+  assert.equal(row('external').closest('section')?.getAttribute('aria-label'), 'Archived');
+});
+
+test('native RPC uses exact owning route, durable root, explicit true/false and before/after persisted readback', async () => {
+  controller = flow.createController(mock.ctx); const scope = flow.captureScope();
+  const archived = await controller.mutate(scope, 'root', { action: 'archive' });
+  assert.deepEqual(archived, { archived: true, before: false });
+  const restored = await controller.mutate(scope, 'root', { action: 'unarchive' });
+  assert.deepEqual(restored, { archived: false, before: true });
+  const rpc = mock.calls.filter(c => c[0] === 'requestProfile');
+  assert.deepEqual(rpc.map(c => [c[1].connectionId, c[1].profile, c[2], c[3]]), [
+    ['source-a', 'default', 'session.archive', { session_id: 'root', archived: true }],
+    ['source-a', 'default', 'session.archive', { session_id: 'root', archived: false }]
+  ]);
+  assert.equal(mock.calls.filter(c => c[0] === 'rest' && c[1] === '/sessions/root/archive').length, 4);
+  assert.deepEqual(mock.calls.filter(c => c[0] === 'rest' && c[2]?.method === 'POST').map(c => [c[1], c[2].body]), [['/sessions/root', { action: 'restore' }]]);
+});
+
+test('exact native reader rejects wrong profile/id/missing flag/unsupported or missing ID BEFORE mutation', async () => {
+  for (const flag of ['archiveReadProfile', 'archiveReadId', 'archiveReadMissingFlag', 'archiveReadError', 'missingId']) {
+    mock.reset(); const c = flow.createController(mock.ctx);
+    if (flag !== 'missingId') mock.control[flag] = flag === 'archiveReadProfile' || flag === 'archiveReadId' ? 'foreign' : true;
+    await assert.rejects(c.mutate(flow.captureScope(), flag === 'missingId' ? 'absent' : 'design', { action: 'archive' }), /exact native archive state|unavailable|missing/);
+    assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.archive'), false, flag);
+    c.dispose();
+  }
+});
+
+test('native post-RPC verification rejects malformed replies and dropped writes without metadata mutation', async () => {
+  for (const flag of ['archiveReadProfile', 'archiveReadId', 'archiveReadMissingFlag', 'archiveReadError', 'dropArchiveWrite']) {
+    mock.reset(); const c = flow.createController(mock.ctx);
+    if (flag === 'dropArchiveWrite') mock.control.dropArchiveWrite = true;
+    else mock.control.afterArchive = () => { mock.control[flag] = flag === 'archiveReadProfile' || flag === 'archiveReadId' ? 'foreign' : true; };
+    await assert.rejects(c.mutate(flow.captureScope(), 'design', { action: 'archive' }), /did not confirm|unavailable/);
+    assert.equal(mock.calls.filter(c => c[0] === 'requestProfile' && c[2] === 'session.archive').length, 1);
+    assert.equal(mock.calls.some(c => c[0] === 'rest' && c[1] === '/state'), false, flag);
+    assert.equal(mock.queryClient.getQueryData([...flow.scopeKey(flow.captureScope()), 'metadata']), undefined);
+    c.dispose();
+  }
+});
+
+test('source switch across native RPC cancels wrong-source readback and cache publication including ABA', async () => {
+  for (const aba of [false, true]) {
+    mock.reset(); controller = flow.createController(mock.ctx); const scope = flow.captureScope();
+    mock.control.afterArchive = () => { mock.switchScope(); if (aba) mock.switchScope('source-a'); };
+    await assert.rejects(controller.mutate(scope, 'design', { action: 'archive' }), /Source\/profile changed/);
+    assert.equal(mock.calls.filter(c => c[0] === 'rest' && c[1].endsWith('/archive')).length, 1);
+    assert.equal(mock.calls.some(c => c[0] === 'rest' && c[1] === '/state'), false);
+    assert.equal(mock.queryClient.getQueryData([...flow.scopeKey(scope), 'metadata']), undefined);
+    controller.dispose();
+  }
+});
+
+test('archive readback validates backend target profile instead of display alias', async () => {
+  const scope = { connectionId: 'a', profile: 'alias', epoch: 1 };
+  const route = { ...scope, targetProfile: 'actual' }; const effects = []; let flag = false;
+  controller = flow.createController({ rest: async path => {
+    effects.push(path); return path === '/state' ? { version: 1, sessions: {} } : { profile: 'actual', id: 'root', archived: flag };
+  } }, mock.queryClient, { capture: () => scope, routes: async () => [route], host: { requestProfile: async (...args) => { effects.push(args); flag = args[2].archived; } } });
+  assert.deepEqual(await controller.mutate(scope, 'root', { action: 'archive' }), { archived: true, before: false });
+  assert.deepEqual(effects[1], [route, 'session.archive', { session_id: 'root', archived: true }]);
+});
+
+test('Unarchive restores Ready/pin, Undo rearchives and preserves previous future snooze and pin', async () => {
+  const wake_at = Math.floor(Date.now() / 1000) + 7200;
+  mock.control.metadata.sessions.archived = { state: 'snoozed', pinned: true, wake_at };
+  await mount();
+  await click(row('archived').querySelector('[aria-label="Unarchive session"]'));
+  assert.equal(row('archived').closest('section')?.getAttribute('aria-label'), 'Pinned');
+  assert.equal(mock.control.metadata.sessions.archived.state, 'active');
+  await click(button('Undo'));
+  assert.equal(row('archived').closest('section')?.getAttribute('aria-label'), 'Archived');
+  assert.equal(mock.control.metadata.sessions.archived.state, 'snoozed');
+  assert.equal(mock.control.metadata.sessions.archived.wake_at, wake_at);
+  assert.equal(mock.control.metadata.sessions.archived.pinned, true);
+  assert.equal(row('archived').querySelector('[aria-label="Snooze session"]').disabled, true);
+});
+
+test('native confirmed unarchive with metadata restore failure reports partial state, not success or false Undo', async () => {
+  mock.control.metadata.sessions.archived = { state: 'snoozed', pinned: true, wake_at: Math.floor(Date.now() / 1000) + 7200 };
+  mock.control.metadataWriteError = true; await mount();
+  await click(row('archived').querySelector('[aria-label="Unarchive session"]'));
+  assert.match(document.body.textContent, /Native unarchive confirmed, but organization restore failed/);
+  assert.equal(mock.control.rows.find(r => r.id === 'archived').archived, false);
+  assert.equal(button('Undo'), undefined);
+  assert.equal(row('archived').closest('section')?.getAttribute('aria-label'), 'Snoozed');
+});
+
+test('archive pagination is independent from active expansion and invalidates cached pages beyond 500', async () => {
+  mock.control.rows = Array.from({ length: 1001 }, (_, i) => ({ id: `active-${i}`, archived: false, title: `Active ${i}` }));
+  mock.control.extra = Array.from({ length: 501 }, (_, i) => ({ id: `archive-${i}`, archived: true, cwd: '/archives', git_branch: 'retained' }));
+  controller = flow.createController(mock.ctx); const scope = flow.captureScope(), key = flow.scopeKey(scope);
+  const archives = await controller.archives(scope, 1);
+  assert.equal(archives.sessions.length, 501); assert.equal(archives.has_more, false);
+  assert.ok(archives.sessions.every(r => r.archived && r.git_branch === 'retained'));
+  assert.equal(mock.calls.some(c => c[0] === 'rest' && c[1].startsWith('/sessions?')), false);
+  const expanded = await controller.expanded(scope, 2); assert.equal(expanded.sessions.length, 501);
+  assert.equal(mock.queryClient.getQueryData([...key, 'page', 1000]).sessions[0].id, 'active-1000');
+  for (const suffix of [['sessions'], ['expanded', 2], ['archives', 1]]) mock.queryClient.setQueryData([...key, ...suffix], { fixture: true });
+  const foreign = ['hermes-t3sidebar', 'foreign', scope.profile, scope.epoch, 'page', 500]; mock.queryClient.setQueryData(foreign, { retain: true });
+  await controller.mutate(scope, 'active-1000', { action: 'archive' });
+  assert.equal(mock.queryClient.getQueryData([...key, 'page', 500]), undefined);
+  assert.equal(mock.queryClient.getQueryData([...key, 'page', 1000]), undefined);
+  assert.deepEqual(mock.queryClient.getQueryData(foreign), { retain: true });
+  for (const suffix of [['sessions'], ['expanded', 2], ['archives', 1]]) assert.equal(mock.queryClient.getQueryState([...key, ...suffix]).isInvalidated, true);
+  assert.equal((await controller.expanded(scope, 2)).sessions.some(r => r.id === 'active-1000'), false);
+  assert.equal((await controller.archives(scope, 1)).sessions.some(r => r.id === 'active-1000'), true);
+  await controller.mutate(scope, 'active-1000', { action: 'unarchive' });
+  assert.equal((await controller.expanded(scope, 2)).sessions.some(r => r.id === 'active-1000'), true);
+});
+
+test('old external Unarchive remains rich and Ready after remount beyond the first 500 active rows', async () => {
+  mock.control.rows = Array.from({ length: 500 }, (_, i) => ({ id: `recent-${i}`, archived: false, title: `Recent ${i}` }));
+  mock.control.extra = [{ id: 'external-old', archived: true, title: 'Old external archive', cwd: '/old-external', git_branch: 'retained', project: { name: 'External old project' } }];
+  await mount(); await click(row('external-old').querySelector('[aria-label="Unarchive session"]'));
+  assert.equal(row('external-old').closest('section')?.getAttribute('aria-label'), 'Ready');
+  await act(async () => root.unmount()); root = null; controller.dispose(); mock.queryClient.clear();
+  await mount();
+  assert.equal(row('external-old').closest('section')?.getAttribute('aria-label'), 'Ready');
+  assert.equal(row('external-old').querySelector('.sf-project-name').textContent, 'External old project');
+  assert.equal(mock.control.metadata.sessions['external-old'].state, 'active');
+});
+
+test('late archive listing cannot publish across a native mutation generation', async () => {
+  let finish; const scope = flow.captureScope();
+  controller = flow.createController({ rest: (path, options) => path.startsWith('/archives?') ? new Promise(resolve => { finish = resolve; }) : mock.ctx.rest(path, options) });
+  const pending = controller.archives(scope); await tick();
+  await controller.mutate(scope, 'design', { action: 'archive' });
+  const rejected = assert.rejects(pending, /Superseded/);
+  finish({ profile: 'default', sessions: [], has_more: false }); await rejected;
 });
 
 test('picker retry keeps the same idempotency key after failed create', async () => {

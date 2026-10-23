@@ -266,7 +266,7 @@ async def native_runtime(request, profile):
 	return value
 
 
-LIST_FIELDS = frozenset({"id", "source", "resolved_id", "title", "preview", "cwd", "git_branch", "git_repo_root",
+LIST_FIELDS = frozenset({"id", "source", "archived", "resolved_id", "title", "preview", "cwd", "git_branch", "git_repo_root",
 	"last_active", "started_at", "updated_at", "unread", "_lineage_root_id", "_lineage_ids"})
 
 
@@ -341,6 +341,7 @@ def card_rows(db, rows):
 			values = [segment.get(key) for segment in usage]
 			counts[key] = sum(values) if all(type(value) is int and value >= 0 for value in values) else None
 		item = {k: v for k, v in row.items() if k in LIST_FIELDS}
+		item["archived"] = bool(row.get("archived", False))
 		item.update(project=card_project(row.get("cwd"), projects), provider=card_provider(tip.get("model_config")),
 			model=tip.get("model"), source=tip.get("source", row.get("source")), **counts)
 		item["total_tokens"] = counts["input_tokens"] + counts["output_tokens"] if all(value is not None for value in counts.values()) else None
@@ -348,7 +349,7 @@ def card_rows(db, rows):
 	return result
 
 
-def native_sessions(profile, offset, limit, organized_ids):
+def native_sessions(profile, offset, limit, organized_ids, archived_only=False):
 	from hermes_cli.web_server_sessions import _open_session_db_for_profile
 	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
 
@@ -356,9 +357,9 @@ def native_sessions(profile, offset, limit, organized_ids):
 	# projection owns compression roots, project/branch inheritance and visibility.
 	db = _open_session_db_for_profile(profile, read_only=True)
 	try:
-		page = db.list_sessions_rich(limit=limit, offset=offset, compact_rows=True, order_by_last_active=True, include_archived=False, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
+		page = db.list_sessions_rich(limit=limit, offset=offset, compact_rows=True, order_by_last_active=True, include_archived=False, archived_only=archived_only, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
 		rows = {row.get("_lineage_root_id") or row["id"]: row for row in page}
-		if offset == 0:
+		if offset == 0 and not archived_only:
 			for sid in organized_ids:
 				if sid in rows:
 					continue
@@ -382,7 +383,25 @@ def native_sessions(profile, offset, limit, organized_ids):
 		db.close()
 
 
-def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, profile_reader=None) -> APIRouter:
+def native_archives(profile, offset, limit):
+	return native_sessions(profile, offset, limit, (), archived_only=True)
+
+
+def native_archive(profile, session_id):
+	"""Read an exact stored ID, never a title/key/substring or lineage alias."""
+	from hermes_cli.web_server_sessions import _open_session_db_for_profile
+
+	db = _open_session_db_for_profile(profile, read_only=True)
+	try:
+		row = db._get_session_rich_rows_batch([session_id], compact_rows=True).get(session_id)
+		if row is None:
+			raise HTTPException(404, "session_not_found")
+		return {"id": session_id, "archived": bool(row["archived"])}
+	finally:
+		db.close()
+
+
+def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None) -> APIRouter:
 	"""Inject a temporary path and clock for tests; production accepts neither over HTTP."""
 	api = APIRouter()
 
@@ -423,6 +442,30 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise
 		except Exception as exc:
 			raise HTTPException(503, "native_session_listing_unavailable") from exc
+
+	@api.get("/archives")
+	def get_archives(request: Request, response: Response, offset: int = Query(0, ge=0), limit: int = Query(500, ge=1, le=500)):
+		response.headers["Cache-Control"] = "no-store"
+		try:
+			profile = listing_profile(request, ("offset", "limit"))
+			value = (archives_reader or native_archives)(profile, offset, limit)
+			return {**value, "profile": profile}
+		except HTTPException:
+			raise
+		except Exception as exc:
+			raise HTTPException(503, "native_archive_listing_unavailable") from exc
+
+	@api.get("/sessions/{session_id}/archive")
+	def get_archive(session_id: SessionId, request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		try:
+			profile = listing_profile(request)
+			value = (archive_reader or native_archive)(profile, session_id)
+			return {"profile": profile, "id": session_id, "archived": value["archived"]}
+		except HTTPException:
+			raise
+		except Exception as exc:
+			raise HTTPException(503, "native_archive_state_unavailable") from exc
 
 	@api.get("/state", response_model=FlowState)
 	def get_state(response: Response):

@@ -255,7 +255,7 @@ class BackendTests(unittest.TestCase):
 		self.assertEqual(manifest["name"], "hermes-t3sidebar")
 		self.assertEqual(manifest["api"], "plugin_api.py")
 		self.assertTrue(manifest["tab"]["hidden"])
-		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/runtime", "/sessions", "/sessions/{session_id}"})
+		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/runtime", "/sessions", "/archives", "/sessions/{session_id}/archive", "/sessions/{session_id}"})
 
 
 if __name__ == "__main__":
