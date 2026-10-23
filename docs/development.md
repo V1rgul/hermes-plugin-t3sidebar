@@ -16,7 +16,7 @@ To inspect the rendered sidebar with synthetic data:
 npm run harness
 ```
 
-Open `http://127.0.0.1:4173`. The right-hand panel is a labeled test workspace, not an alternative chat implementation. Generated screenshots are written to `artifacts/`.
+Open `http://127.0.0.1:4173`. The right-hand panel is a labeled test workspace, not an alternative chat implementation. Browser tests write screenshots to `t3-sidebar-ui-verification/` under `TMPDIR` (or the Hermes scratch directory when unset). The README's maintained screenshots live in `docs/images/`.
 
 The production plugin itself needs none of these Node development dependencies or generated bundles.
 
