@@ -344,7 +344,7 @@ test('React search and exact project filter stay flat with keyboard navigation',
 test('context actions have decorative leading icons and Delete is marked destructive without bypassing confirmation', async () => {
   await mount(); await click(button('Actions for Sidebar layout'));
   const menu = $('.sf-menu'), actions = [...menu.querySelectorAll('.sf-menu-action')];
-  assert.deepEqual(actions.map(action => action.querySelector('.sf-menu-label')?.textContent), ['Pin', 'Rename', 'Copy session ID', 'Filter by hermes-t3sidebar', 'Delete session']);
+  assert.deepEqual(actions.map(action => action.getAttribute('aria-label') || action.querySelector('.sf-menu-label')?.textContent), ['Pin', 'Rename', 'Copy session ID', 'Delete session', 'Project']);
   for (const action of actions) {
     assert.equal(action.firstElementChild?.className, 'sf-menu-icon');
     assert.equal(action.firstElementChild?.getAttribute('aria-hidden'), 'true');
@@ -1153,7 +1153,7 @@ test('context menu copies durable ID and filters by exact session project withou
   const text = $('[role=dialog]').textContent;
   assert.doesNotMatch(text, /Archive|Snooze ·|Custom snooze/);
   await click(button('Copy session ID')); assert.ok(mock.calls.some(call => call[0] === 'clipboard' && call[1] === 'root'));
-  await click(button('Actions for Release notes')); await click(button('Filter by docs'));
+  await click(button('Actions for Release notes')); await click(button('Project')); await click(button('Filter for'));
   assert.ok(row('readme')); assert.equal(row('design'), null);
   assert.equal(mock.calls.some(call => call[0] === 'new' || call[2] === 'session.cwd.set'), false);
 });

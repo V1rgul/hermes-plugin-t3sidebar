@@ -80,6 +80,34 @@ export const host = {
       return { archived: params.archived, session_key: params.session_id };
     }
     if (method === 'projects.tree') { if (control.projectError) throw new Error('fixture projects unavailable'); return { projects: clone(control.projects) }; }
+    if (method === 'projects.list') {
+      if (control.projectError) throw new Error('fixture projects unavailable');
+      return { projects: clone(control.projectCatalog) };
+    }
+    if (method === 'projects.get') {
+      if (control.projectReadError) throw new Error('fixture project readback unavailable');
+      return { project: clone(control.projectReadback || control.projectCatalog.find(project => project.id === params.id) || null) };
+    }
+    if (method === 'projects.update' || method === 'projects.create') {
+      if (control.projectWriteError) throw new Error('fixture project write unavailable');
+      let project = control.projectCatalog.find(item => item.id === params.id);
+      if (method === 'projects.create') {
+        if (control.projectCatalog.some(item => item.folders.some(folder => folder.path === params.primary_path))) throw new Error('folder already belongs to project');
+        project = { id: `p_created_${control.projectCatalog.length}`, name: params.name, icon: params.icon ?? null, color: params.color ?? null,
+          folders: params.folders.map(path => ({ path })), archived: false };
+        control.projectCatalog.push(project);
+      }
+      if (!project) throw new Error('fixture project missing');
+      if (!control.dropProjectWrite) {
+        if (method === 'projects.update') for (const key of ['name', 'icon', 'color']) if (params[key] !== undefined && params[key] !== null) project[key] = params[key] || null;
+        for (const row of [...control.rows, ...(control.extra || [])]) if (row.project?.id === project.id || row.project?.id === row.project?.cwd && project.folders.some(folder => folder.path === row.project.cwd)) {
+          Object.assign(row.project, { id: project.id, name: project.name, icon: project.icon, color: project.color });
+        }
+      }
+      control.afterProjectWrite?.();
+      if (control.projectLostReply) { control.projectLostReply = false; throw new Error('fixture project reply lost after commit'); }
+      return { project: clone(project) };
+    }
     if (method === 'session.create') {
       if (control.createError) throw new Error('fixture create unavailable');
       control.created ||= new Map();
@@ -200,6 +228,7 @@ export function reset() {
     row.project = { id: `synthetic:${row.cwd}`, name: row.cwd.split('/').at(-1), icon: '◇', color: null, cwd: row.cwd, is_home: false };
     row.provider = 'openai-codex'; row.input_tokens = 1200; row.output_tokens = 300; row.total_tokens = 1500;
   }
+  control.projectCatalog = [...new Map(control.rows.map(row => [row.project.id, { ...row.project, folders: [{ path: row.project.cwd }], archived: false }])).values()];
   host.state.connectionId.set('source-a'); host.state.profile.set('default'); host.state.gateway.set('open'); host.state.activeSessionId.set('runtime-design'); host.state.focusedStoredSessionId.set('design'); host.state.focusedSessionOwner.set({ connectionId: 'source-a', profile: 'default' });
 }
 export function loadArchivePaginationFixtures() {
@@ -222,6 +251,14 @@ export function loadDenseFixtures() {
   queryClient.clear(); switchScope('synthetic-layout-source');
 }
 export function Button({ variant, size, children, ...props }) { return h('button', props, children); }
+// Public color-picker contract, with cosmetic styling only for the harness.
+export const PROFILE_SWATCHES = Array.from({ length: 12 }, (_, index) => `hsl(${index * 30} 68% 58%)`);
+export function ColorSwatches({ swatches, value, onChange, clearLabel }) {
+  return h('div', null, h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 } },
+    ...swatches.map(color => h('button', { key: color, type: 'button', 'aria-label': color, 'aria-pressed': value === color, onClick: () => onChange(color),
+      style: { width: 20, height: 20, borderRadius: '50%', backgroundColor: color, border: value === color ? '2px solid currentColor' : 'none' } }))),
+    h('button', { type: 'button', onClick: () => onChange(null) }, clearLabel));
+}
 // Public ConfirmDialog contract: cancel is inert, confirm awaits work, errors keep it open.
 // The harness omits only the native component's cosmetic success-close delay.
 export function ConfirmDialog({ open, onClose, onConfirm, title, description, confirmLabel, cancelLabel = 'Cancel', busyLabel, destructive }) {
@@ -247,10 +284,10 @@ export function Codicon({ name, size, ...props }) {
 const PopoverContext = createContext(null);
 export function Popover({ open, onOpenChange, children }) { const anchor = useRef(null); return h(PopoverContext.Provider, { value: { open, onOpenChange, anchor } }, children); }
 export function PopoverTrigger({ children }) { const value = useContext(PopoverContext); return React.cloneElement(children, { ref: node => { value.anchor.current = node; }, onClick: () => value.onOpenChange(!value.open), 'aria-expanded': value.open }); }
-export function PopoverContent({ align, side, children, style, ...props }) {
+export function PopoverContent({ align, side, children, style, onKeyDown, ...props }) {
   const value = useContext(PopoverContext);
   const rect = value.anchor.current?.getBoundingClientRect();
-  return value.open ? createPortal(h('div', { ...props, style: { ...style, position: 'fixed', left: Math.min(rect?.right || 280, window.innerWidth - 300) + 6, top: Math.max(10, Math.min(rect?.top || 120, window.innerHeight - 440)) }, role: 'dialog', className: 'mock-popover', onKeyDown: event => { if (event.key === 'Escape') value.onOpenChange(false); } }, children,
+  return value.open ? createPortal(h('div', { ...props, style: { ...style, position: 'fixed', left: Math.min(rect?.right || 280, window.innerWidth - 300) + 6, top: Math.max(10, Math.min(rect?.top || 120, window.innerHeight - 440)) }, role: 'dialog', className: 'mock-popover', onKeyDown: event => { onKeyDown?.(event); if (event.key === 'Escape' && !event.defaultPrevented) value.onOpenChange(false); } }, children,
     h('button', { type: 'button', 'aria-label': 'Close session actions', onClick: () => value.onOpenChange(false) }, 'Close')), document.body) : null;
 }
 export const icons = Object.fromEntries(Object.entries({
@@ -263,7 +300,7 @@ export const icons = Object.fromEntries(Object.entries({
   CircleCheck: 'M6 12l4 4 8-8M22 12a10 10 0 1 1-20 0', Pin: 'M9 3h6l-1 6 4 4H6l4-4-1-6M12 13v8',
   MessageSquare: 'M4 4h16v12H9l-5 4V4', Undo2: 'M3 10l5-5M3 10l5 5M3 10h11a6 6 0 0 1 0 12',
   Check: 'M5 12l5 5L20 7', Ellipsis: 'M5 12h1M11 12h1M17 12h1', X: 'M6 6l12 12M6 18L18 6', RefreshCw: 'M20 4v6h-6M20 10a8 8 0 1 0 0 7',
-  Copy: 'M9 9h12v12H9ZM5 15H3V3h12v2', CornerDownLeft: 'M9 10l-5 5 5 5M4 15h12a4 4 0 0 0 4-4V4',
+  Copy: 'M9 9h12v12H9ZM5 15H3V3h12v2', FolderOpen: 'M3 5h6l2 3h10v12H3Z', CornerDownLeft: 'M9 10l-5 5 5 5M4 15h12a4 4 0 0 0 4-4V4',
   Pencil: 'M16 3l5 5-13 13H3v-5ZM14 5l5 5', Trash2: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7'
 }).map(([name, path]) => [name, props => h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: path }))]));
 reset();

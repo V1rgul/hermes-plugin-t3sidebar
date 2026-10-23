@@ -277,7 +277,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       } catch (_) { check(scope); return false; }
     },
     async list(scope) {
-      const ticket = generation, route = await routeFor(scope);
+      const ticket = generation;
+      readTicket(scope, ticket);
+      const route = await routeFor(scope);
       try {
         const value = qualified(await fenced(scope, () => ctx.rest('/sessions?offset=0&limit=500')), scope, route);
         readTicket(scope, ticket); return value;
@@ -289,7 +291,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       }
     },
     async archives(scope, pages = 0) {
-      const ticket = generation, route = await routeFor(scope), sessions = [];
+      const ticket = generation;
+      readTicket(scope, ticket);
+      const route = await routeFor(scope), sessions = [];
       let has_more = true;
       for (let page = 0; page <= pages && has_more; page++) {
         const value = qualified(await fenced(scope, () => ctx.rest(`/archives?offset=${page * 500}&limit=500`)), scope, route);
@@ -304,7 +308,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       return qualified(await fenced(scope, () => ctx.rest('/runtime')), scope, route);
     },
     async expanded(scope, pages) {
-      const ticket = generation, route = await routeFor(scope), sessions = [];
+      const ticket = generation;
+      readTicket(scope, ticket);
+      const route = await routeFor(scope), sessions = [];
       let has_more = true;
       for (let page = 1; page <= pages && has_more; page++) {
         const offset = page * 500;
@@ -447,6 +453,65 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const ok = await fenced(scope, () => ctx.os.writeClipboard(durableId(row)));
       if (!ok) throw new Error('Clipboard access is unavailable. The session ID was not copied.');
     },
+    async copyProjectPath(scope, project) {
+      check(scope);
+      if (!project?.cwd || project.is_home) throw new Error('Project path is unavailable.');
+      const ok = await fenced(scope, () => ctx.os.writeClipboard(project.cwd));
+      if (!ok) throw new Error('Clipboard access is unavailable. The project path was not copied.');
+    },
+    async updateProject(scope, project, patch) {
+      check(scope);
+      if (!project?.id || !project.cwd || project.is_home) throw new Error('A named project is required.');
+      const fields = Object.keys(patch);
+      if (!fields.length || fields.some(key => !['name', 'color', 'icon'].includes(key) || patch[key] !== null && typeof patch[key] !== 'string')) throw new Error('Invalid project change.');
+      const expected = { ...patch };
+      for (const field of ['color', 'icon']) if (field in expected) expected[field] ||= null;
+      if ('name' in patch) {
+        if (typeof patch.name !== 'string' || !patch.name.trim()) throw new Error('Enter a non-empty project name.');
+        expected.name = patch.name.trim();
+      }
+      if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
+      writing = true; generation++;
+      try {
+        const route = await routeFor(scope);
+        const rpc = (method, params) => fenced(scope, () => env.host.requestProfile(route, method, params));
+        await client.cancelQueries({ queryKey: scopeKey(scope) }); check(scope);
+        const catalog = await rpc('projects.list', {});
+        if (!Array.isArray(catalog?.projects)) throw new Error('Invalid native project catalog.');
+        let target = catalog.projects.find(item => item.id === project.id);
+        // Re-resolve path-ID adoption on every edit so a retry cannot create a second project record.
+        const automatic = project.id === project.cwd;
+        if (!target && automatic) target = catalog.projects.find(item => item.folders?.some(folder => folder.path === project.cwd));
+        if (target?.archived || target && !target.folders?.some(folder => folder.path === project.cwd) || !target && !automatic) throw new Error('This project changed or was removed. Refresh and retry.');
+        const payload = Object.fromEntries(Object.entries(expected).map(([key, value]) => [key, value === null ? '' : value]));
+        let id;
+        if (target) {
+          id = target.id;
+          await rpc('projects.update', { id, ...payload });
+        } else {
+          const created = await rpc('projects.create', { name: project.name, folders: [project.cwd], primary_path: project.cwd,
+            icon: project.icon || null, color: project.color || null, use: false, ...expected });
+          id = created?.project?.id;
+          if (typeof id !== 'string' || !id) throw new Error('Project creation did not return a native identity. Refresh and retry.');
+        }
+        const saved = (await rpc('projects.get', { id }))?.project;
+        if (saved?.id !== id || saved.archived || !saved.folders?.some(folder => folder.path === project.cwd) ||
+          fields.some(key => (saved[key] ?? null) !== (expected[key] || null))) throw new Error('The server did not confirm this project change. Refresh and retry.');
+        check(scope);
+        for (const [key, data] of client.getQueriesData({ queryKey: scopeKey(scope) })) {
+          if (!['sessions', 'expanded', 'archives', 'page'].includes(key[4]) || !Array.isArray(data?.sessions)) continue;
+          client.setQueryData(key, { ...data, sessions: data.sessions.map(row => row.project?.id === project.id || row.project?.id === id
+            ? { ...row, project: { ...row.project, id, name: saved.name, icon: saved.icon, color: saved.color } } : row) });
+        }
+        return saved;
+      } finally {
+        writing = false;
+        if (!disposed && sameScope(scope, env.capture())) {
+          client.removeQueries({ queryKey: [...scopeKey(scope), 'page'] });
+          refresh(scope, { queryKey: scopeKey(scope) });
+        }
+      }
+    },
     async ackWake(scope, row) {
       const woke_at = row.meta?.woke_at;
       if (!(Number.isFinite(woke_at) && woke_at > 0)) return;
@@ -539,7 +604,9 @@ const CSS = `
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}
 .sf-menu .sf-menu-action{display:flex;align-items:center;gap:8px}.sf-menu-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex-shrink:0}.sf-menu-icon svg{width:14px;height:14px}.sf-menu button.sf-menu-action[data-destructive=true]{color:var(--ui-red)}
+.sf-menu-label{display:flex;align-items:center;flex:1;min-width:0}
 .sf-menu>div:not(.sf-menu-title),.sf-menu form{display:flex;flex-direction:column;gap:4px}
+.sf-project-submenu{width:240px;max-height:calc(100vh - 32px);overflow:auto}.sf-project-submenu fieldset{border:0;padding:0;margin:4px 0;min-width:0}.sf-project-submenu legend{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:7px}.sf-project-submenu fieldset:disabled{opacity:.5}.sf-project-icons{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}.sf-project-icons button{display:flex;align-items:center;justify-content:center;aspect-ratio:1;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary)}.sf-project-icons button:hover,.sf-project-icons button[aria-pressed=true]{background:var(--ui-control-hover-background);color:var(--ui-text-primary)}.sf-submenu-arrow{display:inline-flex;margin-left:auto}
 .sf-status{font-weight:600}
 .sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--ui-orange,#db704b)}.sf-status[data-status=input]{color:var(--ui-purple,#9e94d5)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
 .sf-section-body{transition:opacity .18s ease,visibility 0s}.sf-section[data-closed=true] .sf-section-body{opacity:0;visibility:hidden;transition:opacity .18s ease,visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:opacity .16s ease,background-color .16s ease,box-shadow .16s ease}.sf-hover{transition:opacity .12s ease;opacity:0}.sf-row:hover .sf-hover{opacity:1}.sf-custom-time{display:flex;align-items:center;gap:4px}.sf-custom-time input{min-width:0}.sf-custom-time .sf-icon{flex-shrink:0}
@@ -582,8 +649,45 @@ function Settings() {
     h('p', null, 'Keyboard: ↑/↓ or Home/End to focus rows; Enter to open; Shift+F10 for actions; Shift+Enter to archive and advance (only with confirmed idle status).'),
     h('p', null, 'Pins and snoozes belong to this plugin’s backend. Archived includes existing native archives, sorted by last activity, not archive time. Older plugin-only completed entries return to Ready; no history is automatically archived. Missing backend: browsing remains available, organization is read-only.'));
 }
+// Native ProjectAppearancePicker is private; compose its public swatches and Codicons without importing app internals.
+const PROJECT_ICONS = ['folder-library', 'repo', 'rocket', 'beaker', 'flame', 'star-full', 'heart', 'zap', 'target', 'lightbulb', 'tools', 'device-desktop', 'device-mobile', 'terminal', 'dashboard', 'globe', 'broadcast', 'cloud', 'database', 'package', 'book', 'organization', 'bug', 'shield', 'key', 'gift', 'telescope', 'home'];
+export function ProjectActions({ row, scope, controller, filterProject, close }) {
+  const [renaming, setRenaming] = useState(false), [name, setName] = useState(row.project?.name || ''), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const project = row.project, editable = !!(project?.id && project.cwd && !project.is_home && !row._limited);
+  const perform = async work => {
+    if (busy) return;
+    setBusy(true); setError('');
+    try { controller.check(scope); await work(); controller.check(scope); if (alive.current) close(); }
+    catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); }
+    finally { if (alive.current) setBusy(false); }
+  };
+  const update = patch => void perform(() => controller.updateProject(scope, project, patch));
+  return h('div', { className: 'sf-menu sf-project-submenu' },
+    h('div', { className: 'sf-menu-title' }, project?.name || 'Project unavailable'),
+    h(MenuAction, { name: 'Pencil', disabled: busy || !editable, onClick: () => setRenaming(true) }, 'Rename'),
+    renaming ? h('form', { onSubmit: event => { event.preventDefault(); update({ name }); } },
+      h('span', { className: 'sf-custom-time' },
+        h('input', { value: name, autoFocus: true, 'aria-label': 'Project name', disabled: busy, onChange: event => setName(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
+        h(IconButton, { type: 'submit', label: 'Save project rename', name: 'Check', glyph: '✓', disabled: busy || !name.trim() }))) : null,
+    h(MenuAction, { name: 'Copy', disabled: busy || !project?.cwd || project.is_home || row._limited, onClick: () => void perform(() => controller.copyProjectPath(scope, project)) }, 'Copy path'),
+    h(MenuAction, { name: 'ListFilter', disabled: busy || row._limited || typeof row.cwd !== 'string' && !project?.is_home,
+      onClick: () => void perform(() => filterProject(row.cwd || '')) }, 'Filter for'),
+    !editable ? h('p', null, 'Project editing requires a named project with a known folder.') : null,
+    h('fieldset', { disabled: busy || !editable, 'aria-label': 'Project color' }, h('legend', null, 'Color'),
+      sdk.ColorSwatches && sdk.PROFILE_SWATCHES ? h(sdk.ColorSwatches, { swatches: sdk.PROFILE_SWATCHES, value: project?.color || null, clearLabel: 'No color', clearIcon: 'circle-slash', onChange: color => update({ color }) })
+        : h('p', null, 'Color selection requires a newer Desktop SDK.')),
+    h('fieldset', { disabled: busy || !editable, 'aria-label': 'Project icon' }, h('legend', null, 'Icon'),
+      h('div', { className: 'sf-project-icons' }, ...PROJECT_ICONS.map(icon => h('button', { key: icon, type: 'button', 'aria-label': `Project icon: ${icon}`, title: icon,
+        'aria-pressed': project?.icon === icon, style: project?.icon === icon && project?.color ? { color: project.color } : undefined,
+        onClick: () => update({ icon: project?.icon === icon ? null : icon }) }, projectMark({ icon })))),
+      h(MenuAction, { name: 'FolderOpen', onClick: () => update({ icon: null }) }, 'Default icon')),
+    error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
+}
 function RowActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, snoozeOnly = false }) {
   const [value, setValue] = useState(''), [error, setError] = useState(''), [renaming, setRenaming] = useState(false), [title, setTitle] = useState(row.title || ''), [busy, setBusy] = useState(false);
+  const [projectOpen, setProjectOpen] = useState(false);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const snoozeDisabled = row.status !== 'idle' || row.archived === true;
@@ -595,7 +699,7 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
     finally { if (alive.current) setBusy(false); }
   };
   const action = (text, name, payload) => h(MenuAction, { key: text, name, disabled: disabled || busy, onClick: () => run(payload) }, text);
-  const projectCwd = typeof row.cwd === 'string' ? row.cwd : row.project?.is_home ? '' : null;
+
   const custom = event => {
     event.preventDefault();
     try { const wake_at = parseLocalWake(value); setError(''); run({ action: 'snooze', wake_at }); } catch (err) { setError(err.message); }
@@ -616,11 +720,13 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
           h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
           h(IconButton, { type: 'submit', label: 'Save rename', name: 'Check', glyph: '✓', disabled: busy || !title.trim() }))) : null,
         h(MenuAction, { name: 'Copy', disabled: busy, onClick: () => void perform(() => controller.copyId(scope, row)) }, 'Copy session ID'),
-        h(MenuAction, { name: 'ListFilter', disabled: busy || projectCwd === null || row._limited, onClick: () => {
-          try { controller.check(scope); filterProject(projectCwd); close(); } catch (err) { setError(err.message); }
-        } }, `Filter by ${row.project?.name || (projectCwd === '' ? 'Home' : 'session project')}`),
         h(MenuAction, { name: 'Trash2', destructive: true, disabled: disabled || busy || row.status !== 'idle' || row._liveOnly || typeof sdk.ConfirmDialog !== 'function', onClick: () => { controller.check(scope); deleteSession(row); close(); } }, 'Delete session'),
-        row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null),
+        row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null,
+        h(sdk.Popover, { open: projectOpen, onOpenChange: setProjectOpen },
+          h(sdk.PopoverTrigger, { asChild: true }, h(MenuAction, { name: 'FolderOpen', 'aria-label': 'Project', disabled: busy, onKeyDown: event => { if (event.key === 'ArrowRight') { event.preventDefault(); setProjectOpen(true); } } }, 'Project', h('span', { className: 'sf-submenu-arrow', 'aria-hidden': true }, icon('ChevronRight', '›')))),
+          h(sdk.PopoverContent, { side: 'right', align: 'start', style: { padding: 0 }, 'aria-label': 'Project actions', onKeyDown: event => {
+            if (event.key === 'ArrowLeft' && event.target.tagName !== 'INPUT' && event.target.tagName !== 'TEXTAREA' && !event.target.isContentEditable || event.key === 'Escape') { event.stopPropagation(); setProjectOpen(false); }
+          } }, h(ProjectActions, { row, scope, controller, filterProject, close })))),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
 export function cardStatus(row, active = false) {

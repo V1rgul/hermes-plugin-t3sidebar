@@ -1,0 +1,188 @@
+import test, { afterEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import React, { act } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import * as mock from './sdk.mock.mjs';
+import { createController, captureScope, scopeKey, HermesT3Sidebar } from '../desktop/plugin.js';
+
+const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', { url: 'http://localhost' });
+Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, MouseEvent: dom.window.MouseEvent, KeyboardEvent: dom.window.KeyboardEvent, IS_REACT_ACT_ENVIRONMENT: true });
+const { createRoot } = await import('react-dom/client');
+let controller, root, client;
+const tick = async () => act(async () => new Promise(resolve => setTimeout(resolve, 15)));
+const dialog = () => document.querySelector('[aria-label="Project actions"]');
+const button = (label, parent = document) => [...parent.querySelectorAll('button')].find(node => node.getAttribute('aria-label') === label || node.textContent === label);
+const click = async node => { assert.ok(node); await act(async () => node.click()); await tick(); };
+const rpcCalls = () => mock.calls.filter(call => call[0] === 'requestProfile');
+function fixture() {
+  client = new QueryClient({ defaultOptions: { queries: { gcTime: Infinity } } });
+  controller = createController(mock.ctx, client);
+  const scope = captureScope(), project = structuredClone(mock.control.rows.find(row => row.id === 'design').project);
+  const key = [...scopeKey(scope), 'sessions'];
+  client.setQueryData(key, { sessions: structuredClone(mock.control.rows) });
+  return { scope, project, key };
+}
+afterEach(async () => {
+  if (root) { await act(async () => root.unmount()); root = null; }
+  controller?.dispose(); controller = null; client?.clear(); client = null; mock.reset();
+});
+
+test('native project edits are routed and read back before publishing to every matching card', async () => {
+  const { scope, project, key } = fixture();
+  for (const patch of [{ name: '  Renamed workspace  ' }, { color: mock.PROFILE_SWATCHES[2] }, { icon: 'rocket' }, { color: null }, { icon: null }]) {
+    const start = mock.calls.length;
+    const saved = await controller.updateProject(scope, project, patch);
+    const calls = mock.calls.slice(start).filter(call => call[0] === 'requestProfile');
+    assert.deepEqual(calls.map(call => call[2]), ['projects.list', 'projects.update', 'projects.get']);
+    assert.ok(calls.every(call => call[1].connectionId === scope.connectionId && call[1].profile === scope.profile));
+    const [field] = Object.keys(patch), expected = field === 'name' ? patch.name.trim() : patch[field];
+    assert.equal(saved[field], expected);
+    assert.equal(calls[1][3][field], expected ?? '');
+    for (const row of client.getQueryData(key).sessions) assert.equal(row.project[field], row.project.id === project.id ? expected : mock.control.rows.find(item => item.id === row.id).project[field]);
+  }
+});
+
+test('dropped writes and wrong identity/folder readbacks never publish unverified project data', async () => {
+  const { scope, project, key } = fixture();
+  const before = client.getQueryData(key);
+  mock.control.dropProjectWrite = true;
+  await assert.rejects(controller.updateProject(scope, project, { icon: 'rocket' }), /did not confirm/);
+  assert.equal(client.getQueryData(key), before);
+  mock.control.dropProjectWrite = false;
+  for (const override of [{ id: 'wrong' }, { folders: [{ path: '/other' }] }]) {
+    mock.control.projectReadback = { ...mock.control.projectCatalog.find(item => item.id === project.id), ...override, icon: 'rocket' };
+    await assert.rejects(controller.updateProject(scope, project, { icon: 'rocket' }), /did not confirm/);
+    assert.equal(client.getQueryData(key), before);
+  }
+});
+
+test('removed, archived and moved native projects are rejected before writing', async () => {
+  const { scope, project } = fixture();
+  const record = mock.control.projectCatalog.find(item => item.id === project.id);
+  for (const change of [() => { record.archived = true; }, () => { record.archived = false; record.folders = [{ path: '/moved' }]; }, () => { mock.control.projectCatalog = []; }]) {
+    change();
+    await assert.rejects(controller.updateProject(scope, project, { name: 'Wrong target' }), /changed or was removed/);
+  }
+  assert.ok(!rpcCalls().some(call => ['projects.update', 'projects.create'].includes(call[2])));
+});
+
+test('auto projects adopt once without selecting a workspace and retry lost replies without duplicates', async () => {
+  const { scope } = fixture();
+  const project = { id: '/automatic', cwd: '/automatic', name: 'Auto', icon: 'tools', color: mock.PROFILE_SWATCHES[1] };
+  mock.control.projectLostReply = true;
+  await assert.rejects(controller.updateProject(scope, project, { name: 'Adopted' }), /reply lost/);
+  const saved = await controller.updateProject(scope, project, { icon: 'rocket' });
+  assert.equal(saved.name, 'Adopted'); assert.equal(saved.color, project.color); assert.equal(saved.icon, 'rocket');
+  const creates = rpcCalls().filter(call => call[2] === 'projects.create');
+  assert.equal(creates.length, 1); assert.equal(creates[0][3].use, false);
+  assert.deepEqual(creates[0][3].folders, ['/automatic']);
+  assert.equal(mock.control.projectCatalog.filter(item => item.folders.some(folder => folder.path === '/automatic')).length, 1);
+});
+
+test('source switch after a project write prevents foreign readback and cache publication', async () => {
+  const { scope, project, key } = fixture(), before = client.getQueryData(key);
+  mock.control.afterProjectWrite = () => mock.switchScope();
+  await assert.rejects(controller.updateProject(scope, project, { color: mock.PROFILE_SWATCHES[4] }), /Source\/profile changed/);
+  assert.ok(!rpcCalls().some(call => call[2] === 'projects.get'));
+  assert.equal(client.getQueryData(key), before);
+});
+
+test('auto-project first clears store native nulls rather than update-only empty-string sentinels', async () => {
+  const { scope } = fixture();
+  for (const field of ['color', 'icon']) {
+    const path = `/auto-clear-${field}`, project = { id: path, cwd: path, name: 'Auto', icon: 'tools', color: mock.PROFILE_SWATCHES[1] };
+    const saved = await controller.updateProject(scope, project, { [field]: null });
+    assert.equal(saved[field], null);
+    const created = rpcCalls().filter(call => call[2] === 'projects.create').at(-1)[3];
+    assert.equal(created[field], null);
+    assert.equal(saved[field === 'icon' ? 'color' : 'icon'], project[field === 'icon' ? 'color' : 'icon']);
+  }
+});
+
+test('rich history reads cannot start mid-save and publish stale first-load results after readback', async () => {
+  const { scope, project } = fixture();
+  controller.dispose();
+  let release, reached;
+  const gate = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { reached = resolve; });
+  controller = createController(mock.ctx, client, { capture: captureScope, routes: () => mock.host.profileRoutes(), host: { ...mock.host,
+    async requestProfile(route, method, params) {
+      if (method === 'projects.update') { reached(); await gate; }
+      return mock.host.requestProfile(route, method, params);
+    }
+  } });
+  const saving = controller.updateProject(scope, project, { name: 'After save' });
+  await started;
+  const before = mock.calls.length;
+  for (const method of ['list', 'archives', 'expanded']) {
+    const key = [...scopeKey(scope), 'first-load', method];
+    await assert.rejects(client.fetchQuery({ queryKey: key, retry: false, queryFn: () => controller[method](scope, 1) }), /Superseded session listing/);
+    assert.equal(client.getQueryData(key), undefined);
+  }
+  assert.equal(mock.calls.length, before, 'no history snapshot is read while saving');
+  release(); await saving;
+  const saved = await controller.list(scope);
+  assert.equal(saved.sessions.find(row => row.id === 'design').project.name, 'After save');
+});
+
+test('project rename validates blank names and Home is not materialized', async () => {
+  const { scope, project } = fixture();
+  await assert.rejects(controller.updateProject(scope, project, { name: '  ' }), /non-empty/);
+  await assert.rejects(controller.updateProject(scope, { ...project, is_home: true }, { color: null }), /named project/);
+  assert.equal(rpcCalls().length, 0);
+});
+
+test('Copy path copies the project root, checks clipboard failure and fences stale scope', async () => {
+  const { scope, project } = fixture();
+  await controller.copyProjectPath(scope, project);
+  assert.deepEqual(mock.calls.at(-1), ['clipboard', project.cwd]);
+  mock.control.clipboardError = true;
+  await assert.rejects(controller.copyProjectPath(scope, project), /not copied/);
+  mock.switchScope(); const count = mock.calls.length;
+  await assert.rejects(controller.copyProjectPath(scope, project), /Source\/profile changed/);
+  assert.equal(mock.calls.length, count);
+});
+
+test('Project submenu is last; actions have leading icons and selectors persist native changes', async () => {
+  controller = createController(mock.ctx);
+  root = createRoot(document.getElementById('app'));
+  await act(async () => root.render(React.createElement(QueryClientProvider, { client: mock.queryClient }, React.createElement(HermesT3Sidebar, { ctx: mock.ctx, controller }))));
+  await tick(); await tick();
+  const open = async () => { await click(button('Actions for Sidebar layout')); await click(button('Project')); assert.ok(dialog()); };
+  await open();
+  const actions = [...dialog().querySelectorAll('.sf-menu-action')];
+  assert.deepEqual(actions.slice(0, 3).map(action => action.textContent), ['Rename', 'Copy path', 'Filter for']);
+  assert.ok(actions.slice(0, 3).every(action => action.firstElementChild.className === 'sf-menu-icon' && action.firstElementChild.querySelector('svg')));
+  assert.equal(dialog().querySelectorAll('.sf-project-icons button').length, 28);
+  assert.equal(dialog().querySelectorAll('[aria-label="Project color"] button').length, 13);
+  await click(button('Rename', dialog()));
+  const nameInput = dialog().querySelector('[aria-label="Project name"]');
+  await act(async () => nameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })));
+  assert.ok(dialog()); assert.equal(dialog().querySelector('[aria-label="Project name"]'), nameInput);
+  await click(button('Project icon: rocket', dialog()));
+  assert.equal(dialog(), null);
+  assert.ok(document.querySelector('[data-session-id="design"] [data-codicon="rocket"]'));
+  await open(); await click(button(mock.PROFILE_SWATCHES[3], dialog()));
+  assert.equal(mock.control.rows.find(row => row.id === 'design').project.color, mock.PROFILE_SWATCHES[3]);
+  await open(); await click(button('No color', dialog()));
+  assert.equal(mock.control.rows.find(row => row.id === 'design').project.color, null);
+  await open(); await click(button('Default icon', dialog()));
+  assert.equal(mock.control.rows.find(row => row.id === 'design').project.icon, null);
+  await open(); await click(button('Copy path', dialog()));
+  assert.deepEqual(mock.calls.find(call => call[0] === 'clipboard'), ['clipboard', '/projects/hermes-t3sidebar']);
+  await open(); await click(button('Filter for', dialog()));
+  assert.equal(dialog(), null);
+  assert.equal(document.querySelector('[data-session-id="readme"]'), null);
+});
+
+test('project write errors stay visible in submenu and do not close or fabricate success', async () => {
+  controller = createController(mock.ctx);
+  root = createRoot(document.getElementById('app'));
+  await act(async () => root.render(React.createElement(QueryClientProvider, { client: mock.queryClient }, React.createElement(HermesT3Sidebar, { ctx: mock.ctx, controller }))));
+  await tick(); await tick();
+  await click(button('Actions for Sidebar layout')); await click(button('Project'));
+  mock.control.projectWriteError = true;
+  await click(button('Project icon: rocket', dialog()));
+  assert.match(dialog().querySelector('[role="alert"]').textContent, /project write unavailable/);
+  assert.ok(!document.querySelector('[data-session-id="design"] [data-codicon="rocket"]'));
+});
