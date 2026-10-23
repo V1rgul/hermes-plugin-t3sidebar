@@ -54,7 +54,30 @@ test('frontend controller interoperates with real FastAPI and persistent SQLite 
 			}
 		} };
 		const controller = createController({ rest }, client, env);
-		assert.deepEqual(await controller.metadata(scope), { version: 1, sessions: {} });
+		const offline = await controller.metadata(scope);
+		assert.deepEqual(offline.sessions, {});
+		assert.equal(offline.completions.durable.done_token, 'fixture-offline-turn');
+		assert.ok(offline.completions.durable.done_at > 0);
+		assert.equal((await controller.list(scope)).sessions.some(row => row.id === 'durable'), true, 'completion-only old history is recovered before any organization action');
+		const secondCache = new QueryClient();
+		const secondClient = createController({ rest }, secondCache, env);
+		try {
+			assert.deepEqual((await secondClient.metadata(scope)).completions, offline.completions);
+			await secondClient.ackDone(scope, { id: 'durable', completion: offline.completions.durable });
+			assert.deepEqual((await controller.metadata(scope)).completions, {}, 'one client acknowledgment clears the shared backend flag');
+			const produce = async turn_id => {
+				const response = await fetch(`http://127.0.0.1:${Number(line)}/fixture/complete`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session_id: 'durable', turn_id }) });
+				assert.equal(response.status, 200);
+			};
+			await produce('fixture-offline-turn');
+			assert.deepEqual((await controller.metadata(scope)).completions, {}, 'a duplicate backend receipt cannot recreate a read flag');
+			await produce('fixture-newer-turn');
+			await secondClient.ackDone(scope, { id: 'durable', completion: offline.completions.durable });
+			const current = (await controller.metadata(scope)).completions.durable;
+			assert.equal(current.done_token, 'fixture-newer-turn', 'a stale acknowledgment preserves the newer completion');
+			await secondClient.ackDone(scope, { id: 'durable', completion: current });
+			assert.deepEqual((await controller.metadata(scope)).completions, {});
+		} finally { secondClient.dispose(); secondCache.clear(); }
 		const first = await controller.list(scope);
 		assert.equal(first.sessions.length, 500); assert.equal(first.has_more, true);
 		const live = await controller.runtime(scope);

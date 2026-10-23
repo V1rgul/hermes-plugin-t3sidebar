@@ -52,11 +52,11 @@ class BackendTests(unittest.TestCase):
 		response = self.client.post(f"/api/plugins/hermes-t3sidebar/sessions/{session}", json={"action": action, **kwargs})
 		self.assertEqual(response.status_code, 200, response.text)
 		self.assertEqual(response.headers["cache-control"], "no-store")
-		self.assertEqual(set(response.json()), {"version", "sessions"})
+		self.assertEqual(set(response.json()), {"version", "sessions", "completions"})
 		return response.json()["sessions"][session]
 
 	def test_empty_and_full_response_shape(self):
-		self.assertEqual(self.state(), {"version": 1, "sessions": {}})
+		self.assertEqual(self.state(), {"version": 1, "sessions": {}, "completions": {}})
 		self.assertEqual(self.act("pin"), {
 			"state": "active", "settled_at": None, "wake_at": None,
 			"woke_at": None, "pinned": True, "updated_at": self.now,
@@ -220,7 +220,7 @@ class BackendTests(unittest.TestCase):
 	def test_ack_absent_row_does_not_create_or_sweep(self):
 		response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/absent", json={"action": "ack_wake", "woke_at": self.now})
 		self.assertEqual(response.status_code, 200, response.text)
-		self.assertEqual(response.json(), {"version": 1, "sessions": {}})
+		self.assertEqual(response.json(), {"version": 1, "sessions": {}, "completions": {}})
 		self.act("snooze", wake_at=self.now + 1)
 		self.now += 2
 		response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/absent", json={"action": "ack_wake", "woke_at": self.now})
@@ -378,7 +378,7 @@ class BackendTests(unittest.TestCase):
 				imports.update(alias.name for alias in node.names)
 			elif isinstance(node, ast.ImportFrom):
 				imports.add(node.module)
-		self.assertEqual(imports, {"asyncio", "json", "math", "pathlib", "re", "sqlite3", "sys", "time", "typing", "types", "fastapi", "pydantic", "hermes_constants", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.ws_legacy_fallback"})
+		self.assertEqual(imports, {"asyncio", "importlib.util", "json", "math", "pathlib", "re", "sqlite3", "sys", "time", "typing", "types", "fastapi", "pydantic", "hermes_constants", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.ws_legacy_fallback"})
 		# Native access is read-only listing only; mutation stays in plugin-owned SQLite.
 		self.assertNotIn("import tui_gateway.server", source)
 		parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}

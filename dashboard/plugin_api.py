@@ -5,6 +5,7 @@ This module is self-contained because Hermes loads it directly via importlib.
 """
 
 import asyncio
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -15,12 +16,21 @@ from typing import Annotated, Callable, Literal
 
 from types import SimpleNamespace
 from fastapi import APIRouter, HTTPException, Path as PathParameter, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+# Dashboard loads this file directly, without a reliable package name. Load exactly our fixed sibling ledger; no request or profile value controls code.
+_completion_spec = importlib.util.spec_from_file_location(
+	"hermes_t3sidebar_completion_state", Path(__file__).resolve().parents[1] / "completion_state.py")
+assert _completion_spec is not None and _completion_spec.loader is not None
+_completion_module = importlib.util.module_from_spec(_completion_spec)
+_completion_spec.loader.exec_module(_completion_module)
+CompletionStore = _completion_module.CompletionStore
 
 
 SESSION_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
 SessionId = Annotated[str, PathParameter(pattern=SESSION_ID_PATTERN, max_length=256)]
-Action = Literal["settle", "restore", "snooze", "pin", "unpin", "ack_wake"]
+Action = Literal["settle", "restore", "snooze", "pin", "unpin", "ack_wake", "ack_done"]
 
 
 class SessionAction(BaseModel):
@@ -29,6 +39,7 @@ class SessionAction(BaseModel):
 	action: Action
 	wake_at: float | None = None
 	woke_at: float | None = None
+	done_token: str | None = Field(default=None, min_length=1, max_length=256)
 
 	@field_validator("wake_at", "woke_at", mode="before")
 	@classmethod
@@ -59,6 +70,11 @@ class SessionAction(BaseModel):
 				raise ValueError("ack_wake requires woke_at")
 		elif "woke_at" in self.model_fields_set:
 			raise ValueError("woke_at is only valid for ack_wake")
+		if self.action == "ack_done":
+			if self.done_token is None:
+				raise ValueError("ack_done requires done_token")
+		elif "done_token" in self.model_fields_set:
+			raise ValueError("done_token is only valid for ack_done")
 		return self
 
 
@@ -71,9 +87,15 @@ class SessionMetadata(BaseModel):
 	updated_at: float
 
 
+class CompletionMetadata(BaseModel):
+	done_at: float = Field(gt=0, allow_inf_nan=False)
+	done_token: str = Field(min_length=1, max_length=256)
+
+
 class FlowState(BaseModel):
 	version: Literal[1] = 1
 	sessions: dict[str, SessionMetadata]
+	completions: dict[str, CompletionMetadata] = Field(default_factory=dict)
 
 
 def default_state_path() -> Path:
@@ -111,6 +133,7 @@ class HermesT3SidebarStore:
 						SELECT session_id, state, settled_at, wake_at, pinned, updated_at, woke_at
 						FROM session_metadata ORDER BY session_id
 					""").fetchall()
+					completions = CompletionStore.read(connection)
 				except sqlite3.OperationalError as exc:
 					# Only absent/legacy schema needs a writer; do not hide IO/lock errors.
 					if not str(exc).startswith(("no such table:", "no such column:")):
@@ -121,14 +144,14 @@ class HermesT3SidebarStore:
 						raise ValueError("clock must return a finite UTC epoch timestamp")
 					if not any(row["state"] == "snoozed" and row["wake_at"] <= now for row in rows):
 						connection.execute("COMMIT")
-						return self._state_rows(rows)
+						return self._state_rows(rows, completions)
 			finally:
 				connection.close()
 		return self._transaction()
 
 	@staticmethod
-	def _state_rows(rows) -> dict:
-		result = {"version": 1, "sessions": {}}
+	def _state_rows(rows, completions) -> dict:
+		result = {"version": 1, "sessions": {}, "completions": completions}
 		for row in rows:
 			metadata = dict(row)
 			key = metadata.pop("session_id")
@@ -175,10 +198,11 @@ class HermesT3SidebarStore:
 			columns = {row["name"] for row in connection.execute("PRAGMA table_info(session_metadata)")}
 			if "woke_at" not in columns:
 				connection.execute("ALTER TABLE session_metadata ADD COLUMN woke_at REAL")
+			CompletionStore.ensure_schema(connection)
 			# updated_at is the wake instant, not the time somebody next opens
 			# Desktop. Reading late does not change effective wake chronology.
 			# Acknowledgment must not materialize a different, newly due snooze.
-			if body is None or body.action != "ack_wake":
+			if body is None or body.action not in ("ack_wake", "ack_done"):
 				connection.execute("""
 					UPDATE session_metadata
 					SET state = 'active', settled_at = NULL, updated_at = wake_at,
@@ -186,7 +210,7 @@ class HermesT3SidebarStore:
 					WHERE state = 'snoozed' AND wake_at <= ?
 				""", (now,))
 			if body is not None:
-				if body.action != "ack_wake":
+				if body.action not in ("ack_wake", "ack_done"):
 					connection.execute("""
 						INSERT INTO session_metadata (session_id, state, settled_at, wake_at, pinned, updated_at)
 						VALUES (?, 'active', NULL, NULL, 0, ?)
@@ -214,12 +238,14 @@ class HermesT3SidebarStore:
 						UPDATE session_metadata SET woke_at = NULL
 						WHERE session_id = ? AND woke_at = ?
 					""", (session_id, body.woke_at))
+				elif body.action == "ack_done":
+					CompletionStore.acknowledge(connection, session_id, body.done_token)
 				else:
 					connection.execute("""
 						UPDATE session_metadata SET pinned = ?, updated_at = ? WHERE session_id = ?
 					""", (int(body.action == "pin"), now, session_id))
 			rows = connection.execute("SELECT * FROM session_metadata ORDER BY session_id").fetchall()
-			result = self._state_rows(rows)
+			result = self._state_rows(rows, CompletionStore.read(connection))
 			connection.execute("COMMIT")
 			return result
 		except BaseException:
@@ -615,7 +641,11 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		response.headers["Cache-Control"] = "no-store"
 		try:
 			profile = listing_profile(request, ("offset", "limit"))
-			ids = tuple(store().state()["sessions"]) if offset == 0 else ()
+			if offset == 0:
+				state = store().state()
+				ids = tuple(sorted(state["sessions"].keys() | state["completions"].keys()))
+			else:
+				ids = ()
 			value = (sessions_reader or native_sessions)(profile, offset, limit, ids)
 			return {**value, "profile": profile}
 		except HTTPException:

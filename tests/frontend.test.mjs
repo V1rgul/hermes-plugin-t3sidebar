@@ -955,6 +955,87 @@ test('picker retry keeps the same idempotency key after failed create', async ()
   assert.equal(creates.length, 2); assert.equal(creates[0][3].idempotency_key, creates[1][3].idempotency_key);
 });
 
+test('server-owned completion shows Done with unread=false and clears only after successful open', async () => {
+  mock.control.rows.find(item => item.id === 'readme').unread = false;
+  const completion = { done_token: 'backend-turn-1', done_at: Date.now() / 1000 };
+  mock.control.metadata.completions = { readme: completion };
+  await mount();
+  assert.equal(row('readme').querySelector('.sf-status')?.dataset.status, 'done');
+  assert.equal(row('readme').dataset.unread, 'true');
+  await remount();
+  assert.equal(row('readme').querySelector('.sf-status')?.dataset.status, 'done');
+  assert.equal([...mock.storageData.values()].some(value => value.includes('backend-turn-1')), false, 'the client does not persist completion flags');
+  mock.control.openError = true;
+  await click(row('readme').querySelector('.sf-open'));
+  assert.equal(mock.control.metadata.completions.readme.done_token, completion.done_token);
+  assert.equal(mock.calls.some(call => call[2]?.body?.action === 'ack_done'), false);
+  mock.control.openError = false;
+  await click(row('readme').querySelector('.sf-open'));
+  assert.deepEqual(mock.control.metadata.completions, {});
+  assert.equal(row('readme').querySelector('.sf-status') === null, true);
+  const acknowledgments = mock.calls.filter(call => call[2]?.body?.action === 'ack_done');
+  assert.equal(acknowledgments.length, 1);
+  assert.deepEqual(acknowledgments[0][2].body, { action: 'ack_done', done_token: 'backend-turn-1' });
+});
+
+test('qualified focus serializes shared Woke and Done acknowledgments without creating Undo', async () => {
+  const wake = Math.floor(Date.now() / 1000) - 1;
+  mock.control.metadata.sessions.design = { state: 'active', pinned: false, woke_at: wake, updated_at: wake };
+  mock.control.metadata.completions = { design: { done_token: 'viewed-turn', done_at: wake } };
+  await mount(); await tick();
+  assert.equal(mock.control.metadata.sessions.design.woke_at, null);
+  assert.deepEqual(mock.control.metadata.completions, {});
+  assert.deepEqual(mock.calls.filter(call => ['ack_wake', 'ack_done'].includes(call[2]?.body?.action)).map(call => call[2].body.action), ['ack_wake', 'ack_done']);
+  await refresh();
+  assert.equal(mock.calls.filter(call => call[2]?.body?.action === 'ack_done').length, 1);
+  assert.equal(button('Undo'), undefined);
+});
+
+test('an older delayed open cannot acknowledge a newer backend completion generation', async () => {
+  mock.control.rows.find(item => item.id === 'readme').unread = false;
+  const previous = { done_token: 'old-result', done_at: Date.now() / 1000 };
+  mock.control.metadata.completions = { readme: previous }; await mount();
+  const original = mock.host.openSession; let finish;
+  mock.host.openSession = () => new Promise(resolve => { finish = resolve; });
+  try {
+    const opening = controller.open(flow.captureScope(), { id: 'readme', completion: { ...previous } }); await tick();
+    mock.control.metadata.completions.readme = { done_token: 'new-result', done_at: previous.done_at + 1 };
+    await refresh();
+    await act(async () => { finish(); await opening; }); await tick();
+    assert.equal(mock.control.metadata.completions.readme.done_token, 'new-result');
+    assert.equal(row('readme').querySelector('.sf-status')?.dataset.status, 'done');
+    assert.deepEqual(mock.calls.find(call => call[2]?.body?.action === 'ack_done')[2].body, { action: 'ack_done', done_token: 'old-result' });
+  } finally { mock.host.openSession = original; }
+});
+
+test('Done acknowledgments require confirmed readback and a matching focused owner', async () => {
+  mock.control.rows.find(item => item.id === 'readme').unread = false;
+  mock.control.metadata.completions = { readme: { done_token: 'read-me', done_at: Date.now() / 1000 } };
+  mock.host.state.focusedStoredSessionId.set('readme');
+  mock.host.state.focusedSessionOwner.set({ connectionId: 'foreign', profile: 'default' });
+  await mount();
+  assert.equal(mock.calls.some(call => call[2]?.body?.action === 'ack_done'), false);
+  mock.control.dropWrite = true;
+  await assert.rejects(controller.ackDone(flow.captureScope(), { id: 'readme', completion: mock.control.metadata.completions.readme }), /did not confirm/);
+  assert.equal(mock.control.metadata.completions.readme.done_token, 'read-me');
+  mock.control.dropWrite = false;
+  await act(async () => mock.host.state.focusedSessionOwner.set({ connectionId: 'source-a', profile: 'default' })); await tick();
+  assert.deepEqual(mock.control.metadata.completions, {});
+});
+
+test('backend completion metadata validates without synthesizing flags on older companions', () => {
+  assert.equal(flow.validState({ version: 1, sessions: {} }).completions, undefined);
+  assert.throws(() => flow.verifyAction({ version: 1, sessions: {} }, 'id', { action: 'ack_done', done_token: 'exact-token' }), /did not confirm/);
+  for (const completions of [null, [], { id: {} }, { id: { done_token: false, done_at: 1 } }, { id: { done_token: '', done_at: 1 } }, { id: { done_token: 'valid', done_at: 0 } }]) {
+    assert.throws(() => flow.validState({ version: 1, sessions: {}, completions }), /completion/);
+  }
+  const completion = { done_token: 'exact-token', done_at: 1 };
+  for (const [fields, expected] of [[{ status: 'idle' }, 'done'], [{ status: 'working' }, 'working'], [{ status: 'waiting' }, 'input'], [{ status: 'idle', woke: true }, 'woke']]) {
+    assert.equal(flow.cardStatus({ ...fields, completion, unread: false }), expected);
+  }
+  assert.equal(flow.cardStatus({ status: 'idle', completion, unread: false }, true), null);
+});
+
 test('backend unread shows Done and clears on successful native open; Input and Working outrank it', async () => {
   await mount();
   assert.equal(row('readme').querySelector('.sf-status').dataset.status, 'done');

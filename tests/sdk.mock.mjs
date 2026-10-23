@@ -149,6 +149,10 @@ export const ctx = {
     const id = decodeURIComponent(path.slice('/sessions/'.length));
     if (!options || options.method !== 'POST') throw new Error('Unexpected REST request');
     if (control.metadataWriteError) throw new Error('fixture metadata write failed');
+    if (options.body.action === 'ack_done') {
+      if (!control.dropWrite && control.metadata.completions?.[id]?.done_token === options.body.done_token) delete control.metadata.completions[id];
+      return clone(control.metadata);
+    }
     if (options.body.action === 'ack_wake') {
       const item = control.metadata.sessions[id];
       if (!control.dropWrite && item?.woke_at === options.body.woke_at) item.woke_at = null;

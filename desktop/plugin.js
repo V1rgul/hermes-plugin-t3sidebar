@@ -50,6 +50,10 @@ export function validState(value) {
       (item.state === 'snoozed' && !(Number.isFinite(item.wake_at) && item.wake_at > 0)) ||
       (item.woke_at != null && !(Number.isFinite(item.woke_at) && item.woke_at > 0))) throw new Error('Invalid hermes-t3sidebar metadata.');
   }
+  if (value.completions !== undefined) {
+    if (!value.completions || typeof value.completions !== 'object' || Array.isArray(value.completions)) throw new Error('Invalid completion state.');
+    for (const item of Object.values(value.completions)) if (!item || typeof item.done_token !== 'string' || !item.done_token.length || item.done_token.length > 256 || !Number.isFinite(item.done_at) || item.done_at <= 0) throw new Error('Invalid completion marker.');
+  }
   return value;
 }
 export const visibleSource = row => !['cron', 'tool', 'oneshot', 'kanban'].includes(String(row.source || '').toLowerCase());
@@ -137,7 +141,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     // Runtime last_active is also a resume/reattach clock, not conversation progress.
     const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
     const runtimes = matches.filter(item => typeof item.id === 'string' && item.id && item.id !== item.session_key);
-    result[section].push({ ...row, key: durableId(row), meta, section, status, woke, newSession,
+    result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, section, status, woke, newSession,
       runtimeId: runtimes.length === 1 ? runtimes[0].id : null, activity });
   }
   for (const section of SECTIONS) result[section].sort((a, b) => {
@@ -167,7 +171,8 @@ export function parseLocalWake(value, now = Date.now()) {
 }
 export function verifyAction(state, id, payload) {
   const item = state.sessions[id];
-  const expected = payload.action === 'ack_wake' ? item?.woke_at !== payload.woke_at : payload.action === 'settle' ? item?.state === 'settled'
+  const expected = payload.action === 'ack_done' ? !!state.completions && state.completions[id]?.done_token !== payload.done_token
+    : payload.action === 'ack_wake' ? item?.woke_at !== payload.woke_at : payload.action === 'settle' ? item?.state === 'settled'
     : payload.action === 'restore' ? item?.state === 'active'
     : payload.action === 'snooze' ? item?.state === 'snoozed' && item?.wake_at === payload.wake_at
     : payload.action === 'pin' ? item?.pinned === true : item?.pinned === false;
@@ -179,7 +184,7 @@ export function verifyAction(state, id, payload) {
 export function createController(ctx, client = queryClient, env = { capture: captureScope, routes: () => host.profileRoutes(), host }) {
   let disposed = false, writing = false, generation = 0;
   let pendingRoutes = null;
-  const wakeAcks = new Map(), deleteRequests = new Map();
+  const wakeAcks = new Map(), doneAcks = new Map(), deleteRequests = new Map();
   function check(scope) { if (disposed || !sameScope(scope, env.capture())) throw new Error('Source/profile changed; refresh before trying again.'); }
   async function fenced(scope, fn) { check(scope); const result = await fn(); check(scope); return result; }
   async function routeFor(scope) {
@@ -240,7 +245,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     }
   }
   return {
-    dispose() { disposed = true; generation++; pendingRoutes = null; deleteRequests.clear(); }, check,
+    dispose() { disposed = true; generation++; pendingRoutes = null; deleteRequests.clear(); doneAcks.clear(); }, check,
     async hasDraft(scope, row) {
       check(scope);
       // The public getter is ID-addressed, not route-qualified. Use the same tip as open().
@@ -441,10 +446,20 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       wakeAcks.set(key, work);
       try { return await work; } finally { wakeAcks.delete(key); }
     },
+    async ackDone(scope, row) {
+      const done_token = row.completion?.done_token;
+      if (!done_token) return;
+      const key = JSON.stringify([...scopeKey(scope), durableId(row), done_token]);
+      if (doneAcks.has(key)) return doneAcks.get(key);
+      const work = this.mutate(scope, durableId(row), { action: 'ack_done', done_token });
+      doneAcks.set(key, work);
+      try { return await work; } finally { doneAcks.delete(key); }
+    },
     async open(scope, row) {
       const route = await routeFor(scope); check(scope);
       await fenced(scope, () => env.host.openSession(row.resolved_id || row.id, { route, profile: route?.profile || scope.profile, intent: 'in-place' }));
       await this.ackWake(scope, row);
+      await this.ackDone(scope, row);
       check(scope); refresh(scope, { queryKey: [...scopeKey(scope), 'sessions'] });
     },
     async projects(scope) {
@@ -590,8 +605,8 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
         row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
-export function cardStatus(row) {
-  return row.status === 'waiting' ? 'input' : row.status === 'working' ? 'working' : row.woke ? 'woke' : row.unread === true ? 'done' : null;
+export function cardStatus(row, active = false) {
+  return row.status === 'waiting' ? 'input' : row.status === 'working' ? 'working' : row.woke ? 'woke' : ((!active && row.completion?.done_token) || row.unread === true) ? 'done' : null;
 }
 function SessionRow({ row, active, hidden, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
@@ -610,7 +625,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
     // Enabling a shelf refetches its stale query automatically; avoid a second read here.
     if (!hidden && !previous.hidden && previous.active !== active) void draft.refetch();
   }, [active, hidden, draft.refetch]);
-  const attention = row.status === 'waiting', badge = cardStatus(row);
+  const attention = row.status === 'waiting', badge = cardStatus(row, active);
   const tokens = compactTokens(row), provider = providerMark(row.provider);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
@@ -619,7 +634,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
     else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
-  return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': draft.data === true && !draft.isError, 'data-working': row.section === 'working', 'data-unread': row.unread === true || row.woke || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
+  return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': draft.data === true && !draft.isError, 'data-working': row.section === 'working', 'data-unread': !!(!active && row.completion?.done_token) || row.unread === true || row.woke || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
     h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${sessionTitle(row)}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
@@ -700,7 +715,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   useEffect(() => {
     try { ctx.storage.set(preferenceKey, collapsed); } catch (_) { /* Folding still works when persistence is unavailable. */ }
   }, [ctx, preferenceKey, collapsed]);
-  const search = useRef(null), rowRefs = useRef(new Map()), focused = useRef(null), latest = useRef(null), readWakes = useRef(new Set());
+  const search = useRef(null), rowRefs = useRef(new Map()), focused = useRef(null), latest = useRef(null), readMarkers = useRef(new Set());
   const key = scopeKey(scope);
   const mutation = useMutation({ mutationFn: async ({ id, payload }) => controller.mutate(scope, id, payload) });
   const opts = { refetchInterval: 5000, staleTime: 2000, retry: false };
@@ -753,14 +768,26 @@ function ScopedSidebar({ ctx, controller, scope }) {
     if (!metadata.data || metadata.isError || mutation.isPending || !activeId || activeOwner?.connectionId !== (scope.connectionId ?? 'local') || activeOwner?.profile !== scope.profile) return;
     const row = rows.find(item => aliases(item).includes(activeId));
     const meta = row && metadata.data.sessions[durableId(row)];
-    if (!(meta?.woke_at > 0)) return;
-    const marker = JSON.stringify([durableId(row), meta.woke_at]);
-    if (readWakes.current.has(marker)) return;
-    readWakes.current.add(marker);
-    void controller.ackWake(scope, { ...row, meta }).catch(error => {
-      if (sameScope(scope, captureScope())) setActionError(`Thread opened, but its Woke marker could not be acknowledged: ${error.message}`);
-    });
-  }, [activeId, activeOwner, metadata.data, metadata.isError, mutation.isPending, rows, controller, scope]);
+    const completion = row && metadata.data.completions?.[durableId(row)];
+    if (!row) return;
+    const markers = [
+      meta?.woke_at > 0 && { label: 'Woke', token: meta.woke_at, ack: () => controller.ackWake(scope, { ...row, meta }) },
+      completion?.done_token && { label: 'Done', token: completion.done_token, ack: () => controller.ackDone(scope, { ...row, completion }) }
+    ].filter(Boolean);
+    // Both acknowledgments use the same writer; serialize them and retry failures on the next poll.
+    void (async () => {
+      for (const marker of markers) {
+        const key = JSON.stringify([durableId(row), marker.label, marker.token]);
+        if (readMarkers.current.has(key)) continue;
+        readMarkers.current.add(key);
+        try { await marker.ack(); }
+        catch (error) {
+          readMarkers.current.delete(key);
+          if (sameScope(scope, captureScope())) setActionError(`Thread opened, but its ${marker.label} marker could not be acknowledged: ${error.message}`);
+        }
+      }
+    })();
+  }, [activeId, activeOwner, metadata.data, metadata.dataUpdatedAt, metadata.isError, mutation.isPending, rows, controller, scope]);
   const refresh = () => { try { controller.check(scope); void client.invalidateQueries({ queryKey: key }); } catch (_) { /* old pane */ } };
   const mutate = useCallback(async (row, input) => {
     try {

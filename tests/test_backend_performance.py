@@ -21,7 +21,7 @@ class MetadataReadPerformance(unittest.TestCase):
 		self.store = backend.HermesT3SidebarStore(self.path, lambda: self.now)
 		self.store.mutate("future", backend.SessionAction(action="snooze", wake_at=1100.0))
 
-	def test_current_no_due_read_is_one_select_without_writer_or_schema_work(self):
+	def test_current_no_due_read_is_two_selects_without_writer_or_schema_work(self):
 		statements, opens = [], []
 		connect = sqlite3.connect
 		def traced(*args, **kwargs):
@@ -37,7 +37,7 @@ class MetadataReadPerformance(unittest.TestCase):
 		self.assertEqual(len(opens), 1)
 		self.assertIn("mode=ro", str(opens[0][0][0]))
 		self.assertTrue(opens[0][1].get("uri"))
-		self.assertEqual([s.split()[0].upper() for s in statements], ["BEGIN", "SELECT", "COMMIT"])
+		self.assertEqual([s.split()[0].upper() for s in statements], ["BEGIN", "SELECT", "SELECT", "COMMIT"])
 		self.assertNotIn("IMMEDIATE", " ".join(statements).upper())
 
 	def test_reserved_writer_does_not_block_committed_no_due_snapshot(self):

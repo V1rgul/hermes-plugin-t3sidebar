@@ -435,6 +435,28 @@ try {
     const fixture = window.hermesT3SidebarHarness;
     return !fixture.control.rows.some(row => row.id === 'synthetic-new-empty') && fixture.calls.some(call => call[0] === 'rest' && call[1] === '/sessions/synthetic-new-empty/snapshot');
   }));
+  // The server response, not a browser completion event, owns this marker.
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.rows.find(row => row.id === 'readme').unread = false;
+    fixture.control.metadata.completions = { readme: { done_token: 'synthetic-server-turn', done_at: Date.now() / 1000 } };
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  const backendDone = page.locator('[data-session-id="readme"]');
+  await backendDone.locator('.sf-status[data-status="done"]').waitFor();
+  await page.mouse.move(1100, 850);
+  check('backend-owned marker displays green Done and bold title without native unread or a client completion event', await backendDone.evaluate(el => {
+    const badge = el.querySelector('.sf-status'), probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe);
+    const green = getComputedStyle(probe).color; probe.remove();
+    return badge.textContent === 'Done' && getComputedStyle(badge).color === green && Number(getComputedStyle(el.querySelector('.sf-row-title')).fontWeight) >= 600;
+  }) && await page.evaluate(() => window.hermesT3SidebarHarness.control.rows.find(row => row.id === 'readme').unread === false));
+  await page.screenshot({ path: join(screenshotDir, 'done-backend-marker.png'), fullPage: true });
+  await backendDone.locator('.sf-open').click();
+  await backendDone.locator('.sf-status').waitFor({ state: 'detached' });
+  check('opening Done acknowledges the exact shared backend generation and creates no Undo', await page.evaluate(() => {
+    const fixture = window.hermesT3SidebarHarness;
+    return !fixture.control.metadata.completions.readme && fixture.calls.some(call => call[0] === 'rest' && call[1] === '/sessions/readme' && call[2]?.body?.action === 'ack_done' && call[2].body.done_token === 'synthetic-server-turn');
+  }) && await noUndo());
   // Exercise the real Archived pagination control without expanding active history.
   await page.evaluate(() => window.hermesT3SidebarHarness.loadArchivePaginationFixtures());
   await page.locator('[data-session-id="synthetic-page-active-0"]').waitFor();

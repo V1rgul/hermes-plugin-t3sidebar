@@ -40,7 +40,16 @@ with tempfile.TemporaryDirectory(prefix="hermes-t3sidebar-http-") as directory:
 	async def runtime_reader(request, profile):
 		# Injected fixture; native active_list itself is exercised in test_native_contracts.
 		return {"sessions": [{"session_key": "recent-0", "status": "waiting"}]}
+	completion_store = module.CompletionStore(Path(directory) / "state.sqlite3")
+	# Real server-side ledger write before any HTTP/UI client exists.
+	completion_store.record("durable", "fixture-offline-turn")
 	app = FastAPI()
+	@app.post("/fixture/complete")
+	def complete(params: dict):
+		# Test-only producer seam; production has no endpoint for creating Done.
+		completion_store.record(params["session_id"], params["turn_id"])
+		return {"ok": True}
+
 	@app.post("/fixture/native-archive")
 	def native_archive(params: dict):
 		# Test-only RPC transport adapter: native lineage mutation in this scratch DB.
