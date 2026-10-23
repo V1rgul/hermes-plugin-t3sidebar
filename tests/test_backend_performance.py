@@ -113,6 +113,77 @@ class NativeAliasPerformance(unittest.TestCase):
 			self.assertEqual(path.read_bytes(), before)
 
 
+class OrganizedHistoryPerformance(unittest.TestCase):
+	def test_archived_organization_misses_use_bounded_native_page_not_per_id_queries(self):
+		from hermes_state import SessionDB
+		with tempfile.TemporaryDirectory(prefix="flow-organized-performance-") as temp:
+			path = Path(temp) / "native.sqlite3"
+			with closing(SessionDB(path)) as db:
+				assert db._conn is not None
+				with db._conn:
+					for i in range(500):
+						for archived in (0, 1):
+							db._conn.execute("INSERT INTO sessions(id, source, started_at, archived) VALUES (?, 'cli', ?, ?)", (f"{'archive' if archived else 'regular'}-{i:04d}", i + 1, archived))
+			statements = []
+			def open_db(profile, *, read_only):
+				self.assertEqual(profile, "exact-profile")
+				self.assertTrue(read_only)
+				db = SessionDB(path, read_only=True)
+				assert db._conn is not None
+				db._conn.set_trace_callback(statements.append)
+				return db
+			before = path.read_bytes()
+			with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db):
+				value = backend.native_sessions("exact-profile", 0, 500, tuple(f"archive-{i:04d}" for i in range(500)))
+			self.assertEqual({row["id"] for row in value["sessions"]}, {f"regular-{i:04d}" for i in range(500)})
+			self.assertTrue(value["has_more"])
+			self.assertEqual(sum("WITH RECURSIVE chain(root_id, cur_id)" in sql for sql in statements), 2)
+			self.assertEqual(path.read_bytes(), before)
+
+
+	def test_lookahead_keeps_rich_archive_precedence_and_compression_aliases(self):
+		from hermes_state import SessionDB
+		with tempfile.TemporaryDirectory(prefix="flow-organized-lineage-") as temp:
+			path = Path(temp) / "native.sqlite3"
+			with closing(SessionDB(path)) as db:
+				assert db._conn is not None
+				with db._conn:
+					for i in range(32):
+						root, tip = f"root-{i}", f"tip-{i}"
+						db._conn.execute("INSERT INTO sessions(id, source, started_at, archived, end_reason) VALUES (?, 'cli', ?, ?, 'compression')", (root, i + 1, i % 2))
+						# Tip flags deliberately disagree: native root archive wins.
+						db._conn.execute("INSERT INTO sessions(id, source, started_at, archived, parent_session_id) VALUES (?, 'cli', ?, ?, ?)", (tip, i + 100, 1 - i % 2, root))
+					db._conn.execute("INSERT INTO sessions(id, source, started_at) VALUES ('recent', 'cli', 1000)")
+					for source in ("cron", "tool", "kanban", "oneshot"):
+						db._conn.execute("INSERT INTO sessions(id, source, started_at) VALUES (?, ?, 500)", (source, source))
+			before = path.read_bytes()
+			with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", side_effect=lambda profile, *, read_only: SessionDB(path, read_only=read_only)):
+				value = backend.native_sessions("exact-profile", 0, 1, tuple(f"tip-{i}" for i in range(32)) + ("cron", "tool", "kanban", "oneshot"))
+			self.assertEqual({row["id"] for row in value["sessions"]}, {"recent"} | {f"tip-{i}" for i in range(0, 32, 2)})
+			self.assertTrue(all(not row["archived"] for row in value["sessions"]))
+			self.assertEqual(path.read_bytes(), before)
+
+	def test_full_lookahead_retains_exact_substring_pagination_beyond_it(self):
+		calls = []
+		class DB:
+			def list_sessions_rich(self, **options):
+				calls.append(options)
+				if not options.get("id_query"):
+					return [{"id": f"recent-{i}"} for i in range(500)] if options["offset"] == 0 else [{"id": f"lookahead-{i}"} for i in range(500)]
+				if options["id_query"] == "old":
+					return [{"id": f"prefix-old-{i}"} for i in range(500)] if options["offset"] == 0 else [{"id": "old"}]
+				return []
+			def close(self):
+				pass
+		with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", return_value=DB()), patch.object(backend, "card_rows", side_effect=lambda db, rows: list(rows)):
+			value = backend.native_sessions("exact-profile", 0, 500, ("old", "lookahead-49", *(f"missing-{i}" for i in range(30))))
+		self.assertEqual({row["id"] for row in value["sessions"]}, {f"recent-{i}" for i in range(500)} | {"old", "lookahead-49"})
+		self.assertEqual([row["id"] for row in value["sessions"][-2:]], ["old", "lookahead-49"])
+		self.assertEqual([(c["offset"], c["limit"]) for c in calls if not c.get("id_query")], [(0, 500), (500, 500)])
+		self.assertEqual([c["offset"] for c in calls if c.get("id_query") == "old"], [0, 500])
+		self.assertTrue(all("cron" in c["exclude_sources"] and not c["include_archived"] for c in calls))
+
+
 class RuntimeLoopPerformance(unittest.TestCase):
 	def test_parallel_standalone_workers_keep_distinct_profile_contexts(self):
 		from threading import Barrier

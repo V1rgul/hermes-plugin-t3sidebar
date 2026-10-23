@@ -460,7 +460,30 @@ try {
   // Exercise the real Archived pagination control without expanding active history.
   await page.evaluate(() => window.hermesT3SidebarHarness.loadArchivePaginationFixtures());
   await page.locator('[data-session-id="synthetic-page-active-0"]').waitFor();
+  await page.getByRole('button', { name: 'Archived (500)', exact: true }).waitFor();
+  check('500 loaded archives retain their logical count without mounting 500 cards', await page.locator('[data-section="archived"] .sf-row').count() > 0 && await page.locator('[data-section="archived"] .sf-row').count() < 30);
+  for (const motion of ['reduce', 'no-preference']) {
+    await page.emulateMedia({ reducedMotion: motion });
+    await page.getByRole('button', { name: 'Archived (500)', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('[data-section="archived"]')?.dataset.closed === 'true');
+    check(`500-archive ${motion} fold keeps body inert and mounted rows bounded`, await page.locator('[data-section="archived"] .sf-section-body').evaluate(el => el.inert) && await page.locator('[data-section="archived"] .sf-row').count() < 30);
+    await page.getByRole('button', { name: 'Archived (500)', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('[data-section="archived"]')?.dataset.closed === 'false');
+    await page.waitForFunction(() => document.querySelector('[data-section="archived"] .sf-section-body')?.clientHeight > 100);
+    check(`500-archive ${motion} reopen preserves bounded rows and restores its body`, !await page.locator('[data-section="archived"] .sf-section-body').evaluate(el => el.inert) && await page.locator('[data-section="archived"] .sf-row').count() < 30);
+  }
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const lastLoadedArchive = await page.evaluate(() => window.hermesT3SidebarHarness.control.extra.slice(0, 500).map(row => row.id).sort((a, b) => a.localeCompare(b)).at(-1));
+  await page.locator('[data-session-id="synthetic-page-active-0"] .sf-open').focus();
+  await page.keyboard.press('End');
+  await page.waitForFunction(id => document.activeElement?.closest('[data-session-id]')?.dataset.sessionId === id, lastLoadedArchive);
+  check('End reaches an unmounted archive through full logical ordering', await page.locator('[data-section="archived"] .sf-row').count() < 30 && await page.locator('[data-section="archived"] .sf-section-body').evaluate(el => el.scrollTop > 0));
+  await page.keyboard.press('Home');
+  await page.waitForFunction(() => document.activeElement?.closest('[data-session-id]')?.dataset.sessionId === 'synthetic-page-active-0');
+  check('Home returns from a virtual archive to the first Ready card', await page.locator('[data-section="active"] .sf-section-body').evaluate(el => el.scrollTop === 0));
   await page.getByRole('button', { name: 'Browse older archives', exact: true }).click();
+  await page.getByRole('button', { name: 'Archived (501)', exact: true }).waitFor();
+  await page.getByRole('searchbox').fill('archive page 500');
   await page.locator('[data-session-id="synthetic-page-archive-500"]').waitFor({ state: 'attached' });
   check('501st archive loads rich metadata independently of older active history', !await page.locator('[data-session-id="synthetic-page-active-500"]').count() && await page.locator('[data-session-id="synthetic-page-archive-500"] .sf-project-name').textContent() === 'Archive pagination');
   await page.getByRole('searchbox').fill('archive page 500');
@@ -507,7 +530,7 @@ try {
       return { root: rect(el), list: rect(scroll), overflow: getComputedStyle(scroll).overflowY, listScrollHeight: scroll.scrollHeight, listHeight: scroll.clientHeight,
         toolbar: [...el.querySelector('.sf-header').children].map(rect), sections: [...el.querySelectorAll('.sf-section')].map(s => ({ name: s.dataset.section, rect: rect(s), header: s.querySelector('.sf-section-toggle') ? rect(s.querySelector('.sf-section-toggle')) : null, body: rect(s.querySelector('.sf-section-body')), scrollHeight: s.querySelector('.sf-section-body').scrollHeight, count: s.querySelectorAll('.sf-row').length })) };
     });
-    check(`${height}px: 100 Ready plus 20 rows in each priority shelf`, layout.sections.find(s => s.name === 'active').count === 100 && layout.sections.filter(s => s.name !== 'active').every(s => s.count === 20));
+    check(`${height}px: logical Ready rows use a bounded viewport while small priority shelves retain all 20 rows`, layout.sections.find(s => s.name === 'active').count > 0 && layout.sections.find(s => s.name === 'active').count < 30 && layout.sections.filter(s => s.name !== 'active').every(s => s.count === 20));
     check(`${height}px: Pinned before headerless Ready, secondary headings fixed and visible`, layout.sections.map(s => s.name).join(',') === 'pinned,active,working,snoozed,archived' && layout.sections.slice(0, 2).every(s => !s.header) && layout.sections.slice(2).every(s => s.header.height === 24 && s.header.top >= layout.list.top && s.header.bottom <= layout.root.bottom && s.body.top >= s.header.bottom));
     check(`${height}px: no whole-list scrolling; all five bodies constrained`, layout.overflow === 'hidden' && layout.listScrollHeight <= layout.listHeight + 1 && layout.sections.every(s => s.body.height > 0 && s.body.bottom <= layout.list.bottom + 1 && s.scrollHeight > s.body.height));
     check(`${height}px: expanded Archived gets a substantially larger share`, layout.sections.find(s => s.name === 'archived').rect.height > layout.list.height * .35 && layout.sections.filter(s => s.name !== 'archived').every(s => s.body.height > 0));

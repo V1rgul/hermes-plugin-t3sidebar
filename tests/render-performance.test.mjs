@@ -100,6 +100,51 @@ test('successful structurally-shared poll advances age and due snooze without a 
   } finally { Date.now = realNow; }
 });
 
+function denseHistory(archives = 500) {
+	mock.control.rows = Array.from({ length: 500 + archives }, (_, index) => ({ id: `dense-${index}`, title: `Dense conversation ${index}`, archived: index >= 500, last_active: Date.now() / 1000 - index, total_tokens: 12345 }));
+	mock.control.extra = []; mock.control.live = []; mock.control.metadata = { version: 1, sessions: {} };
+	mock.host.state.focusedStoredSessionId.set('dense-0');
+}
+
+test('500-row shelves bound mounted cards, fold renders and fresh draft reads to the viewport', async () => {
+	denseHistory(); await mount();
+	assert.ok(document.querySelectorAll('.sf-row').length < 80, 'history size must not become mounted card count');
+	const descriptor = Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype, 'format');
+	let formatted = 0;
+	Object.defineProperty(Intl.NumberFormat.prototype, 'format', { ...descriptor, get() {
+		const format = descriptor.get.call(this); return value => { formatted++; return format(value); };
+	} });
+	try {
+		await click(button('Archived (500)'));
+		assert.ok(formatted < 80, `close renders are bounded, got ${formatted}`);
+		formatted = 0; const start = mock.calls.length;
+		await click(button('Archived (500)'));
+		assert.ok(formatted < 80, `reopen renders are bounded, got ${formatted}`);
+		const reads = mock.calls.slice(start).filter(call => call[0] === 'getDraft').length;
+		assert.ok(reads > 0 && reads < 80, `visible archived drafts must be fresh without 500 reads, got ${reads}`);
+		await input(document.querySelector('input[type=search]'), 'Dense conversation 999');
+		assert.ok(row('dense-999'));
+		await input(document.querySelector('input[type=search]'), '');
+		assert.ok(document.querySelectorAll('.sf-row').length < 80, 'clearing search must not remount history');
+	} finally { Object.defineProperty(Intl.NumberFormat.prototype, 'format', descriptor); }
+});
+
+test('windowed keyboard navigation reaches unmounted rows; search retains menus and never unfolds Archives', async () => {
+	denseHistory(); await mount();
+	const first = row('dense-0').querySelector('.sf-open');
+	await act(async () => { first.focus(); first.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })); }); await tick();
+	assert.equal(document.activeElement.closest('[data-session-id]')?.dataset.sessionId, 'dense-999');
+	await act(async () => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }))); await tick();
+	assert.equal(document.activeElement.closest('[data-session-id]')?.dataset.sessionId, 'dense-0');
+	await act(async () => row('dense-0').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))); await tick();
+	await input(document.querySelector('input[type=search]'), 'Dense conversation 0');
+	assert.ok(document.querySelector('[role=dialog][aria-label="Session actions"]'), 'matching card menu survives changing from a window to a small result');
+	await input(document.querySelector('input[type=search]'), '');
+	await click(button('Archived (500)'));
+	await input(document.querySelector('input[type=search]'), 'Dense conversation 999');
+	assert.equal(document.querySelector('[data-section=archived]').dataset.closed, 'true');
+});
+
 function observeResources(scope = flow.captureScope()) {
   const reads = {}, unsubscribers = [];
   for (const resource of ['sessions', 'runtime', 'metadata', 'archives', 'expanded', 'page', 'projects', 'draft']) {

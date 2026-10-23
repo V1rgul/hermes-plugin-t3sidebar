@@ -36,6 +36,8 @@ Earlier versions used a plugin-only settlement shelf. Existing settlement metada
 
 Local toolbar interactions avoid rebuilding every card, history lineage merges use an index, and verified actions no longer wait for an unrelated full-list refresh. Scoped lifecycle events refresh runtime only; history changes trigger broader reconciliation. The companion avoids writer transactions for ordinary metadata reads and keeps blocking standalone runtime reads off the event loop and outside the global session lock. Before/after measurements, regression coverage and remaining limitations are documented in [the performance report](docs/performance.md).
 
+Large sections mount only their visible cards plus a small overscan, retaining focused cards and open-menu owners. Counts, scroll ranges and keyboard ordering still cover every loaded session. Runtime classification uses an indexed join; organized-history recovery uses one bounded lookahead to avoid hundreds of native searches for archived metadata IDs. The [large-history report](docs/large-history-performance.md) measures five hundred Ready plus five hundred Archived cards, both motion modes, search/filter clearing and backend reads.
+
 ## Package
 
 ```text

@@ -120,11 +120,21 @@ export function mergeRows(rich, extra = [], live = [], extraRich = false, archiv
 }
 export function buildSections(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown = true, query = '', project = '*' } = {}) {
   const result = Object.fromEntries(SECTIONS.map(section => [section, []]));
+  const runtimeIndex = new Map();
+  for (let index = 0; index < live.length; index++) {
+    for (const id of new Set([live[index].session_key, live[index].id])) {
+      if (!runtimeIndex.has(id)) runtimeIndex.set(id, []);
+      runtimeIndex.get(id).push(index);
+    }
+  }
   for (const row of rows) {
     if (!visibleSource(row)) continue;
     const meta = metadata.sessions[durableId(row)] || DEFAULT_META;
     const ids = new Set(aliases(row));
-    const matches = live.filter(item => ids.has(item.session_key) || ids.has(item.id));
+    // Preserve snapshot order and repeated entries, but do not rescan every runtime per card.
+    const positions = new Set();
+    for (const id of ids) for (const index of runtimeIndex.get(id) || EMPTY_ROWS) positions.add(index);
+    const matches = [...positions].sort((a, b) => a - b).map(index => live[index]);
     // Waiting wins over every metadata shelf and working signal, across the entire lineage.
     const status = !runtimeKnown ? 'unknown' : matches.some(i => i.status === 'waiting') ? 'waiting'
       : matches.some(i => i.status === 'working' || i.status === 'starting' || Number.isInteger(i.running_subagents) && i.running_subagents > 0) ? 'working'
@@ -608,8 +618,9 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
 export function cardStatus(row, active = false) {
   return row.status === 'waiting' ? 'input' : row.status === 'working' ? 'working' : row.woke ? 'woke' : ((!active && row.completion?.done_token) || row.unread === true) ? 'done' : null;
 }
-function SessionRow({ row, active, hidden, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age }) {
+function SessionRow({ row, active, hidden, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
+  useEffect(() => { retain?.(row.key, menuOpen || snoozeOpen); return () => retain?.(row.key, false); }, [retain, row.key, menuOpen, snoozeOpen]);
   const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
   const draft = useQuery({
     queryKey: ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, durableId(row), row.resolved_id || row.id],
@@ -675,6 +686,61 @@ function sameCard(a, b) {
 }
 const MemoSessionRow = memo(SessionRow, (previous, next) => Object.keys(next).every(key =>
   key === 'row' ? sameCard(previous.row, next.row) : Object.is(previous[key], next[key])));
+// Fixed-height windows keep shelves proportional to their viewport, not history.
+// Small lists retain their original DOM; open popovers keep their owner mounted.
+function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
+  const body = useRef(null), pending = useRef(null);
+  const [viewport, setViewport] = useState({ top: 0, height: 560 });
+  const [retained, setRetained] = useState(() => new Set()), [focusedKey, setFocusedKey] = useState(null);
+  const windowed = entries.length > 80;
+  const retain = useCallback((key, keep) => setRetained(previous => {
+    if (previous.has(key) === keep) return previous;
+    const next = new Set(previous); if (keep) next.add(key); else next.delete(key); return next;
+  }), []);
+  const update = useCallback(() => {
+    const element = body.current?.parentElement;
+    if (!element) return;
+    const top = Math.floor(element.scrollTop / 56), height = element.clientHeight;
+    setViewport(previous => previous.top === top && (!height || previous.height === height) ? previous : { top, height: height || previous.height });
+  }, []);
+  useEffect(() => {
+    const element = body.current?.parentElement;
+    update();
+    element.addEventListener('scroll', update, { passive: true });
+    if (typeof ResizeObserver !== 'function') return () => element.removeEventListener('scroll', update);
+    const observer = new ResizeObserver(update); observer.observe(element);
+    return () => { observer.disconnect(); element.removeEventListener('scroll', update); };
+  }, [update]);
+  useEffect(() => {
+    const reveal = key => {
+      const index = entries.findIndex(row => row.key === key), element = body.current?.parentElement;
+      if (index < 0 || !element) return;
+      pending.current = key;
+      if (index * 56 < element.scrollTop) element.scrollTop = index * 56;
+      else if ((index + 1) * 56 > element.scrollTop + element.clientHeight) element.scrollTop = (index + 1) * 56 - element.clientHeight;
+      setFocusedKey(key); update();
+    };
+    navigators.current.set(section, reveal);
+    return () => navigators.current.delete(section);
+  }, [entries, section, navigators, update]);
+  useEffect(() => {
+    if (!pending.current) return;
+    const element = rowRefs.current.get(pending.current);
+    if (element) { pending.current = null; element.focus({ preventScroll: true }); }
+  });
+  const start = Math.max(0, Math.min(viewport.top - 3, entries.length - 1));
+  const end = Math.min(entries.length, viewport.top + Math.ceil(viewport.height / 56) + 3);
+  const positions = useMemo(() => new Map(entries.map((row, index) => [row.key, index])), [entries]);
+  const indexes = windowed ? [...new Set([
+    ...Array.from({ length: Math.max(0, end - start) }, (_, offset) => start + offset),
+    ...[...retained, focusedKey].map(key => positions.get(key)).filter(index => index !== undefined)
+  ])].sort((a, b) => a - b) : entries.map((_, index) => index);
+  return h('div', { ref: body, className: 'sf-window', onScroll: update,
+    onFocusCapture: event => { const row = event.target.closest('[data-session-id]'); if (row) setFocusedKey(row.dataset.sessionId); },
+    onBlurCapture: event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusedKey(null); },
+    style: { position: 'relative', height: windowed ? entries.length * 56 : undefined } },
+    ...indexes.map(index => h('div', { key: entries[index].key, style: windowed ? { position: 'absolute', top: index * 56, left: 0, right: 0 } : undefined }, renderRow(entries[index], retain))));
+}
 export function HermesT3Sidebar({ ctx, controller }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
   useValue(host.state.gateway);
@@ -715,7 +781,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   useEffect(() => {
     try { ctx.storage.set(preferenceKey, collapsed); } catch (_) { /* Folding still works when persistence is unavailable. */ }
   }, [ctx, preferenceKey, collapsed]);
-  const search = useRef(null), rowRefs = useRef(new Map()), focused = useRef(null), latest = useRef(null), readMarkers = useRef(new Set());
+  const search = useRef(null), rowRefs = useRef(new Map()), navigators = useRef(new Map()), focused = useRef(null), latest = useRef(null), readMarkers = useRef(new Set());
   const key = scopeKey(scope);
   const mutation = useMutation({ mutationFn: async ({ id, payload }) => controller.mutate(scope, id, payload) });
   const opts = { refetchInterval: 5000, staleTime: 2000, retry: false };
@@ -812,20 +878,23 @@ function ScopedSidebar({ ctx, controller, scope }) {
     if (event.key === 'ArrowUp') target = keys[Math.max(0, index - 1)];
     if (event.key === 'Home') target = keys[0];
     if (event.key === 'End') target = keys.at(-1);
-    if (target) { event.preventDefault(); const element = rowRefs.current.get(target); element?.focus({ preventScroll: true }); const body = element?.closest('.sf-section-body'); if (body) { const r = element.getBoundingClientRect(), b = body.getBoundingClientRect(); if (r.top < b.top) body.scrollTop -= b.top - r.top; else if (r.bottom > b.bottom) body.scrollTop += r.bottom - b.bottom; } }
+    if (target) { event.preventDefault(); const row = latest.current.visible.find(row => row.key === target); navigators.current.get(row.section)?.(target); }
   }, []);
   useEffect(() => {
     // Only recover a card's own focus; blur relinquishes ownership to search, menus or the composer.
-    if (focused.current && !visible.some(row => row.key === focused.current)) { focused.current = visible[0]?.key; rowRefs.current.get(focused.current)?.focus(); }
+    if (focused.current && !visible.some(row => row.key === focused.current)) {
+      const target = visible[0]; focused.current = target?.key;
+      if (target) navigators.current.get(target.section)?.(target.key);
+    }
   });
   const focusRow = useCallback(id => { focused.current = id; }, []);
   const rowRef = useCallback((id, element) => { if (element) rowRefs.current.set(id, element); else rowRefs.current.delete(id); }, []);
   const disabled = latest.current.disabled;
-  const renderRow = row => h(MemoSessionRow, { key: row.key, row, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
+  const renderRow = (row, retain) => h(MemoSessionRow, { key: row.key, row, retain, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: relative(row.activity, now) });
   const renderSection = section => {
     const entries = sections[section], closed = isClosed(section);
-    const items = entries.map(renderRow);
+    const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs });
     const headerless = section === 'active' || section === 'pinned';
     if (section === 'pinned' && !entries.length) return null;
     return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed },

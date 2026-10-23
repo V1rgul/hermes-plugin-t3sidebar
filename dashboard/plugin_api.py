@@ -551,14 +551,32 @@ def native_sessions(profile, offset, limit, organized_ids, archived_only=False):
 		covered = {sid for row in page for sid in
 			(row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])) if sid}
 		if offset == 0 and not archived_only:
+			pending = set(organized_ids) - covered
+			lookahead_matches, exhausted = {}, False
+			# Many retained archive/deleted IDs otherwise cause one full native
+			# rich search each. Inspect ONE additional native page, not an
+			# unbounded history scan or a raw-ID visibility approximation.
+			if len(page) == limit and len(pending) >= 32:
+				lookahead = db.list_sessions_rich(limit=500, offset=limit, compact_rows=True, order_by_last_active=True, include_archived=False, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
+				lookahead_matches = {sid: row for row in lookahead for sid in
+					(row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])) if sid in pending}
+				# A short page exhausts this same native filtered listing. Full
+				# pages retain exact-ID recovery beyond the bounded lookahead.
+				exhausted = len(lookahead) < 500
 			for sid in organized_ids:
 				if sid in covered:
 					continue
+				# Preserve organized-ID insertion order for both lookup paths.
 				# id_query is a substring query. Page its matches until the exact
 				# alias is found; never silently lose a short/colliding stored ID.
 				match_offset = 0
 				while True:
-					matches = db.list_sessions_rich(limit=500, offset=match_offset, id_query=sid, compact_rows=True, order_by_last_active=True, include_archived=False, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
+					if sid in lookahead_matches:
+						matches = [lookahead_matches[sid]]
+					elif exhausted:
+						break
+					else:
+						matches = db.list_sessions_rich(limit=500, offset=match_offset, id_query=sid, compact_rows=True, order_by_last_active=True, include_archived=False, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
 					found = False
 					for row in matches:
 						ids = {row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])}
