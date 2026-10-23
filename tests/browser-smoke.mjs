@@ -206,7 +206,7 @@ try {
   await design.hover(); await snooze.click();
   check('Snooze menu omits redundant history/agent footer', !await snoozeDialog.innerText().then(text => /History kept|never stops the agent/i.test(text)));
   check('Snooze menu omits bottom chosen-time text button', !await snoozeDialog.getByRole('button', { name: 'Snooze until chosen time', exact: true }).count());
-  await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
+  await page.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('hover Snooze saves the selected time without any Undo toast', await noUndo());
   await design.click({ button: 'right' });
@@ -231,12 +231,41 @@ try {
   await page.getByRole('button', { name: 'Unpin', exact: true }).click();
   await page.locator('section[aria-label="Working"] [data-session-id="root"]').waitFor();
   check('unpinning a running session restores the Working shelf', await worker.getAttribute('data-dimmed') === 'true');
+  await worker.hover();
+  check('working session can Snooze while Archive stays disabled', await worker.getByRole('button', { name: 'Snooze session', exact: true }).isEnabled() && await worker.getByRole('button', { name: 'Archive session', exact: true }).isDisabled());
+  await worker.getByRole('button', { name: 'Snooze session', exact: true }).click();
+  check('working Snooze presets and custom time are enabled', await snoozeDialog.getByRole('button', { name: 'In 1 hour', exact: true }).isEnabled() && await snoozeDialog.locator('input[type=datetime-local]').isEnabled());
+  await snoozeDialog.getByRole('button', { name: 'In 1 hour', exact: true }).click();
+  await page.locator('section[aria-label="Snoozed"] [data-session-id="root"]').waitFor();
+  await page.mouse.move(1100, 850);
+  check('snoozed worker shows remaining time in non-bold theme blue instead of Working or age', await worker.locator('.sf-time').evaluate(el => {
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; el.append(probe);
+    const blue = getComputedStyle(probe).color; probe.remove();
+    return el.textContent === '1h left' && !el.querySelector('.sf-status') && getComputedStyle(el).color === blue && getComputedStyle(el).fontWeight === '400' && getComputedStyle(el).visibility === 'visible';
+  }));
+  check('session-card project icon/name gap is compact at 4px', await worker.locator('.sf-project').evaluate(el => getComputedStyle(el).columnGap === '4px'));
+  check('snooze does not stop or alter the live worker', await page.evaluate(() => window.hermesT3SidebarHarness.control.live.find(item => item.id === 'runtime-worker').status === 'working'));
+  await worker.hover(); await worker.getByRole('button', { name: 'Snooze session', exact: true }).click();
+  const unsnooze = snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true });
+  check('Unsnooze is the first Snooze menu action and uses theme green', await snoozeDialog.locator('form > button').first().textContent() === 'Unsnooze' && await unsnooze.evaluate(el => {
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe);
+    const green = getComputedStyle(probe).color; probe.remove();
+    return getComputedStyle(el).color === green;
+  }));
+  await unsnooze.hover();
+  check('Unsnooze stays green on hover', await unsnooze.evaluate(el => {
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe);
+    const green = getComputedStyle(probe).color; probe.remove(); return getComputedStyle(el).color === green;
+  }));
+  await unsnooze.click();
+  await page.locator('section[aria-label="Working"] [data-session-id="root"]').waitFor();
+  check('Unsnooze returns the running card to Working and removes its countdown', await worker.locator('[data-status=working]').textContent() === 'Working' && !await worker.locator('.sf-snooze-time').count());
   await design.click({ button: 'right' });
   await page.getByRole('button', { name: 'Pin', exact: true }).click();
   await page.locator('section[aria-label="Pinned"] [data-session-id="design"]').waitFor();
   check('Pin moves the session to Pinned without any Undo toast', await noUndo());
   await design.hover(); await snooze.click();
-  await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
+  await page.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('snoozing a pinned session wins without clearing its pin', await design.locator('.sf-pin').count() === 1);
   await design.click({ button: 'right' });
@@ -249,7 +278,7 @@ try {
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('Unpin returns the session to Ready without any Undo toast', await noUndo());
   await design.hover(); await snooze.click();
-  check('Next Monday at 8:00 is the fourth Snooze preset', (await snoozeDialog.getByRole('button', { name: /^Snooze · / }).allTextContents()).length === 4 && await snoozeDialog.getByRole('button', { name: /^Snooze · / }).nth(3).textContent() === 'Snooze · Next Monday at 8:00');
+  check('Next Monday at 8:00 is the fourth preset, without redundant Snooze prefixes', JSON.stringify(await snoozeDialog.locator('form > button').allTextContents()) === JSON.stringify(['In 1 hour', 'In 3 hours', 'Tomorrow at 9:00', 'Next Monday at 8:00']) && !/Custom snooze/.test(await snoozeDialog.innerText()));
   const expectedMonday = await page.evaluate(() => {
     const monday = new Date();
     monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7));
@@ -257,7 +286,7 @@ try {
     return monday.getTime() / 1000;
   });
   const mondayCallStart = await page.evaluate(() => window.hermesT3SidebarHarness.calls.length);
-  await snoozeDialog.getByRole('button', { name: 'Snooze · Next Monday at 8:00', exact: true }).click();
+  await snoozeDialog.getByRole('button', { name: 'Next Monday at 8:00', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('fourth Snooze preset sends next calendar Monday 08:00 in client local time and lands in Snoozed without a toast', await page.evaluate(({ expectedMonday, mondayCallStart }) => {
     const fixture = window.hermesT3SidebarHarness;
@@ -367,7 +396,7 @@ try {
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('Archived list Unarchive restores Ready without an Undo banner', await noUndo());
   await design.hover(); await snooze.click();
-  await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
+  await page.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('direct Snooze control remains available without an Undo toast', await noUndo());
   await page.locator('[data-session-id="design"]').click({ button: 'right' });

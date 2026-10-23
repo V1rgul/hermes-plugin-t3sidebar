@@ -88,10 +88,15 @@ test('successful structurally-shared poll advances age and due snooze without a 
     const key = [...flow.scopeKey(flow.captureScope()), 'sessions'];
     const previousData = mock.queryClient.getQueryData(key);
     assert.equal(row('design').querySelector('.sf-time').textContent, 'now');
+    assert.equal(row('snoozed').querySelector('.sf-snooze-time').textContent, '1h left');
     now += 6_000;
     await act(async () => mock.queryClient.refetchQueries({ queryKey: key, exact: true })); await tick();
     assert.equal(mock.queryClient.getQueryData(key), previousData, 'the age test must exercise structural sharing');
     assert.equal(row('design').querySelector('.sf-time').textContent, '1m');
+    now = start + 61_000;
+    await act(async () => mock.queryClient.refetchQueries({ queryKey: key, exact: true })); await tick();
+    assert.equal(mock.queryClient.getQueryData(key), previousData);
+    assert.equal(row('snoozed').querySelector('.sf-snooze-time').textContent, '59m left', 'existing structurally-shared polls advance the countdown');
     const deadline = mock.control.metadata.sessions.snoozed.wake_at;
     now = deadline * 1000 + 1;
     await act(async () => mock.queryClient.refetchQueries({ queryKey: key, exact: true })); await tick();
