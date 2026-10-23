@@ -1,6 +1,10 @@
-"""Content-free native turn observers; no Desktop, gateway, or HTTP dependency.
+"""Content-free native activity/completion hooks; no Desktop or HTTP dependency.
 
 Only the ordinary Agent runtime currently emits both supported hooks. In particular codex_app_server bypasses on_session_end: do not infer its success from usage, child-stop events, or persisted assistant messages.
+
+pre_llm_call also precedes codex_app_server dispatch in the installed runtime.
+It follows native turn persistence/preflight compaction, not session viewing.
+Skipped/timed-out hooks remain best effort and must never block agent activity.
 """
 
 from collections import OrderedDict
@@ -35,6 +39,7 @@ class NativeSnapshot:
 	aliases: frozenset[str]
 	delegations: frozenset[str]
 	live: bool
+	archived: bool
 
 
 def native_snapshot(home, session_id, *, dispatched_before=None):
@@ -87,6 +92,11 @@ def native_snapshot(home, session_id, *, dispatched_before=None):
 	ids = sorted(aliases)
 	placeholders = ",".join("?" for _ in ids)
 	with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
+		flags = connection.execute(
+			f"SELECT id, source, archived FROM sessions WHERE id IN ({placeholders})", ids,
+		).fetchall()
+		if {row[0] for row in flags} != aliases or any(not _human(row[1]) for row in flags):
+			return None
 		rows = connection.execute(
 			f"SELECT delegation_id, state, dispatched_at FROM async_delegations WHERE "
 			f"parent_session_id IN ({placeholders}) OR origin_session_id IN ({placeholders}) "
@@ -96,11 +106,58 @@ def native_snapshot(home, session_id, *, dispatched_before=None):
 	# Its baseline must not absorb children created since this hook began.
 	delegations = frozenset(_identifier(row[0]) for row in rows
 		if dispatched_before is None or row[2] < dispatched_before)
-	return NativeSnapshot(root, aliases, delegations, any(row[1] not in TERMINAL_DELEGATIONS for row in rows))
+	return NativeSnapshot(root, aliases, delegations,
+		any(row[1] not in TERMINAL_DELEGATIONS for row in rows), any(row[2] for row in flags))
+
+
+def restore_archived_activity(home, session_id, before):
+	"""Use native archival only for a proven, exact human compression lineage.
+
+	The installed set_session_archived selector follows compression-ended parents
+	without excluding explicit forks. Its footprint can exceed the rich listing's
+	lineage; refuse those cases rather than restoring another conversation. This
+	metadata-only preflight mirrors that selector, not prompt/history projection.
+	The public setter has no compare-and-set fence, so concurrent external lineage
+	changes between preflight and commit remain a native API limitation.
+	"""
+	from hermes_state import SessionDB
+
+	current = native_snapshot(home, session_id)
+	if current is None or current.root != before.root or current.aliases != before.aliases:
+		return False
+	if not current.archived:
+		return True
+	path = home / "state.db"
+	with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
+		rows = connection.execute("""
+			WITH RECURSIVE
+			ancestors(id) AS (
+				SELECT ? UNION SELECT parent.id FROM ancestors a
+				JOIN sessions child ON child.id = a.id
+				JOIN sessions parent ON parent.id = child.parent_session_id
+				WHERE parent.end_reason = 'compression'
+			), descendants(id) AS (
+				SELECT ? UNION SELECT child.id FROM descendants d
+				JOIN sessions parent ON parent.id = d.id
+				JOIN sessions child ON child.parent_session_id = parent.id
+				WHERE parent.end_reason = 'compression'
+			)
+			SELECT id FROM ancestors UNION SELECT id FROM descendants
+		""", (current.root, current.root)).fetchall()
+	if frozenset(row[0] for row in rows) != current.aliases:
+		return False
+	# Never call recoverable-session helpers: they also clear native end stamps.
+	# Explicit False preserves messages, activity, read state, and pin/hidden flags.
+	with closing(SessionDB(db_path=path)) as db:
+		if not db.set_session_archived(current.root, False, notify=False):
+			return False
+	verified = native_snapshot(home, session_id)
+	return (verified is not None and verified.root == current.root
+		and verified.aliases == current.aliases and not verified.archived)
 
 
 class CompletionObserver:
-	"""Profile-bound observer with bounded, ephemeral, ID-only turn receipts.
+	"""Profile-bound activity hook with bounded, ephemeral, ID-only turn receipts.
 
 	pre_llm_call exposes the real task_id and turn_id in the native contract. Missing/evicted/failed begin observations skip completion rather than guess whether already-finished children were dispatched during that turn.
 	"""
@@ -144,13 +201,22 @@ class CompletionObserver:
 				self._prune(started)
 				if key in self._receipts:
 					return None
+				# Reserve before I/O: concurrent duplicate callbacks cannot each restore.
+				pending = (started, None)
+				self._receipts[key] = pending
 			snapshot = native_snapshot(self.home, sid, dispatched_before=started_wall)
 			with self._lock:
 				now = self.clock()
 				self._prune(now)
-				if not self._closed and now - started <= self._ttl:
-					# End tombstones and the first begin win against late workers.
-					self._receipts.setdefault(key, (started, snapshot))
+				if (not self._closed and self._same_home() and now - started <= self._ttl
+						and self._receipts.get(key) is pending):
+					# Viewing/resume construction never invokes this turn hook. Only a
+					# real pre-loop activity receipt may restore deliberate archives.
+					# Fence late workers before any write, not just before Done admission.
+					if snapshot is not None and snapshot.archived:
+						if not restore_archived_activity(self.home, sid, snapshot):
+							snapshot = None
+					self._receipts[key] = (started, snapshot)
 					self._prune(now)
 		except Exception:
 			log.debug("Completion begin observation unavailable")
@@ -178,7 +244,7 @@ class CompletionObserver:
 			if before is None:
 				return None
 			after = native_snapshot(self.home, sid)
-			if (after is None or after.root != before.root or after.live
+			if (after is None or after.root != before.root or after.live or after.archived
 					or not after.delegations <= before.delegations):
 				return None
 			with self._lock:

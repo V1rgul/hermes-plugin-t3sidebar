@@ -84,7 +84,7 @@ try {
     await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
   }, removedCard);
   await page.waitForFunction(() => !document.querySelector('[data-session-id="design"] .sf-provider'));
-  check('unknown provider has no question-mark icon or empty provider spacer', !await page.locator('[data-session-id="design"] .sf-provider').count() && await page.locator('[data-session-id="design"] .sf-token').textContent() === '1.5K');
+  check('unknown provider has no question-mark icon or empty provider spacer', !await page.locator('[data-session-id="design"] .sf-provider').count() && await page.locator('[data-session-id="design"] .sf-token').textContent() === '2K');
   await page.evaluate(async () => {
     const fixture = window.hermesT3SidebarHarness;
     fixture.control.rows.find(row => row.id === 'design').provider = 'openai-codex';
@@ -337,7 +337,7 @@ try {
   check('open row context menu retains row highlight, actions and hidden metadata off hover', await design.getAttribute('data-menu-open') === 'true' && await design.evaluate(el => getComputedStyle(el).backgroundColor) === rowHoverBackground && await snooze.isVisible() && await archive.isVisible() && await design.locator('.sf-provider,.sf-token,.sf-time').evaluateAll(els => els.every(el => getComputedStyle(el).visibility === 'hidden')));
   check('context menu omits archive and snooze actions', !await context.getByRole('button', { name: /^(?:Unarchive|Archive|Snooze)/ }).count());
   check('context menu offers Rename, Copy session ID and Project last instead of the old filter action', await context.getByRole('button', { name: 'Rename', exact: true }).count() === 1 && await context.getByRole('button', { name: 'Copy session ID', exact: true }).count() === 1 && !await context.getByRole('button', { name: /^Filter by / }).count() && await context.locator('.sf-menu-action').last().getAttribute('aria-label') === 'Project');
-  check('each context action aligns a decorative icon before its text', await context.locator('.sf-menu-action').evaluateAll(actions => actions.length === 5 && actions.every(action => {
+  check('each context action aligns a decorative icon before its text', await context.locator('.sf-menu-action').evaluateAll(actions => actions.length === 6 && actions.every(action => {
     const icon = action.querySelector('.sf-menu-icon'), label = action.querySelector('.sf-menu-label');
     if (!icon?.querySelector('svg') || !label || icon.getAttribute('aria-hidden') !== 'true' || action.firstElementChild !== icon) return false;
     const i = icon.getBoundingClientRect(), l = label.getBoundingClientRect();
@@ -905,6 +905,30 @@ try {
   check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Next Monday at 14:35', exact: true }).count() === 1);
   await snoozeDialog.getByRole('button', { name: 'Close session actions', exact: true }).click();
   await presetSetting.fill('09:00');
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.projects.push({ id: 'p_move', label: 'Move target', path: '/move-target', repos: [{ path: '/move-target' }], icon: 'tools' });
+    const archived = fixture.control.rows.find(row => row.id === 'archived');
+    archived.unread = true;
+    fixture.control.metadata.sessions.archived = { state: 'snoozed', pinned: true, wake_at: Date.now() / 1000 + 3600 };
+    fixture.control.metadata.completions = { archived: { done_token: 'archived-result', done_at: 1 } };
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  const archiveShelf = page.getByRole('button', { name: 'Archived (1)', exact: true });
+  if (await archiveShelf.getAttribute('aria-expanded') === 'false') await archiveShelf.click();
+  const archivedCard = page.locator('[data-session-id="archived"]');
+  check('archived card suppresses stale Done, pin and snooze', !await archivedCard.locator('.sf-status,.sf-pin,[aria-label="Snooze session"]').count());
+  await archivedCard.locator('.sf-open').click();
+  check('viewing an archive preserves native archival', await page.evaluate(() => window.hermesT3SidebarHarness.control.rows.find(row => row.id === 'archived').archived === true));
+  await settingsDesign.click({ button: 'right' });
+  const moveMenu = page.getByRole('dialog', { name: 'Session actions', exact: true });
+  check('Move to project is directly above final Project submenu', await moveMenu.locator('.sf-menu-action').evaluateAll(items => items.at(-2).getAttribute('aria-label') === 'Move to project' && items.at(-1).getAttribute('aria-label') === 'Project'));
+  await moveMenu.getByRole('button', { name: 'Move to project', exact: true }).click();
+  const moveDialog = page.getByRole('dialog', { name: 'Move to project', exact: true });
+  await moveDialog.getByRole('button', { name: 'Move to Move target', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('[data-session-id="design"] .sf-project-name')?.textContent === 'Move target');
+  check('project move changes native workspace and verified card metadata', await page.evaluate(() => window.hermesT3SidebarHarness.control.rows.find(row => row.id === 'design').cwd === '/move-target'));
   check('no browser page errors', errors.length === 0);
   console.log(`Browser smoke: ${checks.length} checks passed; screenshots ${screenshotDir}/{frontend,hovered,actions,dense-400,dense-650,short-300-error}.png`);
 } finally { await browser?.close(); server.close(); }

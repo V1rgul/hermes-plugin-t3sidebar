@@ -27,6 +27,9 @@ CompletionStore = ledger.CompletionStore
 
 class CompletionTests(unittest.TestCase):
     def setUp(self):
+        archive = patch.object(backend, "native_archive", side_effect=lambda profile, sid: {"id": sid, "archived": False})
+        archive.start()
+        self.addCleanup(archive.stop)
         self.temp = tempfile.TemporaryDirectory(prefix="t3sidebar-completion-")
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "profile/plugin-data/hermes-t3sidebar/state.sqlite3"

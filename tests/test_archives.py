@@ -52,7 +52,7 @@ class NativeArchives(unittest.TestCase):
 			client = self.client()
 			# Old plugin settlement is not a native archive migration.
 			self.assertEqual(client.post("/sessions/active", json={"action": "settle"}).status_code, 200)
-			self.assertEqual(client.post("/sessions/root", json={"action": "pin"}).status_code, 200)
+			self.assertEqual(client.post("/sessions/root", json={"action": "pin"}).status_code, 409)
 			regular = client.get("/sessions").json()["sessions"]
 			self.assertEqual([row["id"] for row in regular], ["active"])
 			self.assertIs(regular[0]["archived"], False)

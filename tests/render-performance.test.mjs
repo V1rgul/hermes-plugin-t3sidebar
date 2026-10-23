@@ -73,7 +73,7 @@ test('memoized cards refresh title/provider/project/tokens and retain exact open
   assert.equal(row('design').querySelector('.sf-row-title').textContent, 'Changed title');
   assert.equal(row('design').querySelector('.sf-project-name').textContent, 'Changed project');
   assert.equal(row('design').querySelector('.sf-provider').getAttribute('aria-label'), 'Provider: anthropic');
-  assert.equal(row('design').querySelector('.sf-token').textContent, '4.5K');
+  assert.equal(row('design').querySelector('.sf-token').textContent, '5K');
   await click(row('design').querySelector('.sf-open'));
   assert.equal(mock.calls.filter(call => call[0] === 'open').at(-1)[1], 'new-tip', 'memo equality must not preserve a stale handler row');
 });

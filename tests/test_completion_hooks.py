@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 from types import SimpleNamespace
+from typing import Any
 import unittest
 from unittest.mock import patch
 
@@ -53,8 +54,8 @@ class CompletionHookTests(unittest.TestCase):
 		self.addCleanup(self.timeout_patch.stop)
 		self.ledger_path = self.home / "plugin-data/hermes-t3sidebar/state.sqlite3"
 
-	def payload(self, session="human", turn="human:task:turn1", **updates):
-		result = dict(session_id=session, task_id="task", turn_id=turn, platform="cli", model="test-model", telemetry_schema_version=1)
+	def payload(self, session="human", turn="human:task:turn1", **updates) -> dict[str, Any]:
+		result: dict[str, Any] = dict(session_id=session, task_id="task", turn_id=turn, platform="cli", model="test-model", telemetry_schema_version=1)
 		result.update(updates)
 		return result
 
@@ -340,6 +341,232 @@ class CompletionHookTests(unittest.TestCase):
 				self.assertIsNone(future.result(timeout=5))
 		self.end()
 		self.assertEqual(self.markers(), {})
+
+	def archive(self, session="human"):
+		# Never notify the real process plugin registry from isolated fixtures.
+		self.assertTrue(self.db.set_session_archived(session, True, notify=False))
+
+	def native_flags(self):
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			return dict(connection.execute("SELECT id, archived FROM sessions"))
+
+	def test_plain_view_and_resume_notifications_leave_archived_history_untouched(self):
+		self.archive()
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			before = "\n".join(connection.iterdump())
+		# Native rich reads, reattachment/start and info are not activity receipts.
+		self.assertTrue(hooks.native_snapshot(self.home, "human").archived)
+		self.assertEqual(self.manager.invoke_hook("on_session_start", **self.payload()), [])
+		self.assertEqual(self.manager.invoke_hook("session:resume", **self.payload()), [])
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			self.assertEqual("\n".join(connection.iterdump()), before)
+		self.assertEqual(self.native_flags(), {"human": 1})
+		self.assertEqual(self.markers(), {})
+
+	def test_real_native_pre_turn_restores_without_history_or_recency_changes(self):
+		from agent.turn_context import _collect_pre_llm_call_context
+		from hermes_state import SessionDB
+		self.db.append_message("human", "user", "Existing scratch history")
+		self.db.append_message("human", "assistant", "Existing scratch reply")
+		self.db.set_session_pinned("human", True)
+		self.db.set_session_read("human", True)
+		self.db.set_session_hidden("human", True)
+		self.archive()
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			# Compare all native tables/columns, allowing only the requested archive flag.
+			before = "\n".join(connection.iterdump())
+			connection.execute("UPDATE sessions SET archived = 0 WHERE id = 'human'")
+			expected = "\n".join(connection.iterdump())
+			connection.rollback()
+		agent = SimpleNamespace(session_id="human", model="test", platform="cli")
+		# Full get_session would hydrate prompts; it is not part of this observer.
+		with patch.object(SessionDB, "get_session", side_effect=AssertionError("history read")):
+			with patch("hermes_cli.lifecycle.invoke_hook", self.manager.invoke_hook):
+				context = _collect_pre_llm_call_context(agent, effective_task_id="task", turn_id="resumed-turn", original_user_message="new real activity", messages=[], conversation_history=[])
+		self.assertEqual(context, "")
+		self.assertNotEqual(before, expected)
+		self.assertEqual(self.native_flags(), {"human": 0})
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			self.assertEqual("\n".join(connection.iterdump()), expected)
+		self.assertEqual(self.markers(), {})
+		self.end(turn="resumed-turn")
+		self.assertEqual(self.markers()["human"]["done_token"], "resumed-turn")
+
+	def test_restore_compression_lineage_without_touching_other_sessions(self):
+		self.db.end_session("human", "compression")
+		self.db.create_session("tip", "cli", parent_session_id="human")
+		self.db.end_session("tip", "compression")
+		self.db.create_session("tip2", "cli", parent_session_id="tip")
+		self.db.create_session("human-other", "cli")
+		self.archive()
+		self.archive("human-other")
+		self.begin("tip2")
+		self.assertEqual(self.native_flags(), {"human": 0, "tip": 0, "tip2": 0, "human-other": 1})
+		self.end("tip2")
+		self.assertEqual(set(self.markers()), {"human"})
+
+	def test_independent_branch_reset_and_delegate_do_not_restore_parent(self):
+		self.archive()
+		for marker in ("_branched_from", "_reset_from", "_delegate_from"):
+			sid = "fork-" + marker
+			self.db.create_session(sid, "cli", parent_session_id="human", model_config={marker: "human"})
+			self.archive(sid)
+			self.begin(sid, sid)
+			self.end(sid, sid)
+			self.assertEqual(self.native_flags()["human"], 1)
+			self.assertEqual(self.native_flags()[sid], int(marker == "_delegate_from"))
+		self.assertNotIn("human", self.markers())
+
+	def test_native_overbroad_compression_selector_is_refused(self):
+		from hermes_state import SessionDB
+		self.db.end_session("human", "compression")
+		self.db.create_session("tip", "cli", parent_session_id="human")
+		self.db.create_session("branch", "cli", parent_session_id="human", model_config={"_branched_from": "human"})
+		self.archive()
+		# Installed native archival also flags the branch. Do not propagate its
+		# broad selector when the rich projection proves independent ownership.
+		self.assertEqual(hooks.native_snapshot(self.home, "tip").aliases, {"human", "tip"})
+		with patch.object(SessionDB, "set_session_archived", side_effect=AssertionError("overbroad write")):
+			self.begin("tip", "tip-activity")
+			self.end("tip", "tip-activity")
+			self.begin("branch", "branch-activity")
+			self.end("branch", "branch-activity")
+		self.assertEqual(self.native_flags(), {"human": 1, "tip": 1, "branch": 1})
+		self.assertEqual(self.markers(), {})
+
+	def test_archived_end_and_archive_during_turn_never_record_done(self):
+		self.archive()
+		self.end()
+		self.assertEqual(self.native_flags(), {"human": 1})
+		self.assertEqual(self.markers(), {})
+		self.begin(turn="active")
+		self.assertEqual(self.native_flags(), {"human": 0})
+		self.archive()
+		self.end(turn="active")
+		self.assertEqual(self.native_flags(), {"human": 1})
+		self.assertEqual(self.markers(), {})
+
+	def test_duplicate_begin_cannot_override_a_subsequent_manual_archive(self):
+		from hermes_state import SessionDB
+		self.archive()
+		setter = SessionDB.set_session_archived
+		calls = []
+		def counted(db, *args, **kwargs):
+			calls.append((args, kwargs))
+			return setter(db, *args, **kwargs)
+		with patch.object(SessionDB, "set_session_archived", counted):
+			self.begin()
+			self.begin()
+		self.assertEqual(calls, [(("human", False), {"notify": False})])
+		self.archive()
+		self.begin()
+		self.end()
+		self.assertEqual(self.native_flags(), {"human": 1})
+		self.assertEqual(self.markers(), {})
+
+	def test_resumed_activity_restores_even_if_the_turn_later_fails(self):
+		for index, flags in enumerate((dict(completed=False, failed=True), dict(completed=False, interrupted=True))):
+			self.archive()
+			turn = f"real-but-unsuccessful-{index}"
+			self.begin(turn=turn)
+			self.assertEqual(self.native_flags(), {"human": 0})
+			payload = self.payload(turn=turn, completed=True, failed=False, interrupted=False)
+			payload.update(flags)
+			self.manager.invoke_hook("on_session_end", **payload)
+			self.assertEqual(self.markers(), {})
+
+	def test_archived_compression_segment_blocks_done_even_if_root_is_visible(self):
+		self.db.end_session("human", "compression")
+		self.db.create_session("tip", "cli", parent_session_id="human")
+		self.begin("tip")
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			connection.execute("UPDATE sessions SET archived = 1 WHERE id = 'tip'")
+			connection.commit()
+		self.end("tip")
+		self.assertEqual(self.markers(), {})
+
+	def test_restore_failure_false_success_and_unverified_readback_skip_done(self):
+		from hermes_state import SessionDB
+		for index, failure in enumerate((OSError("unwritable"), False, True)):
+			self.archive()
+			turn = f"restore-error-{index}"
+			mock_setter = (patch.object(SessionDB, "set_session_archived", side_effect=failure)
+				if isinstance(failure, Exception) else patch.object(SessionDB, "set_session_archived", return_value=failure))
+			with mock_setter:
+				self.assertEqual(self.begin(turn=turn), [])
+			self.assertEqual(self.end(turn=turn), [])
+			self.assertEqual(self.native_flags(), {"human": 1})
+			self.assertEqual(self.markers(), {})
+
+	def test_invalid_and_nonhuman_activity_cannot_restore(self):
+		self.archive()
+		for index, updates in enumerate((dict(session_id="hum"), dict(session_id="../human"), dict(task_id=None), dict(turn_id=None), dict(platform="cron"), dict(platform="subagent"))):
+			payload = self.payload(turn=f"invalid-restore-{index}")
+			payload.update(updates)
+			self.observer.on_pre_llm_call(**payload)
+		self.assertEqual(self.native_flags(), {"human": 1})
+		for index, source in enumerate(("cron", "subagent", "internal", "unknown", "")):
+			sid = f"archived-worker-{index}"
+			self.db.create_session(sid, source)
+			self.archive(sid)
+			self.begin(sid, sid)
+			self.end(sid, sid)
+			self.assertEqual(self.native_flags()[sid], 1)
+		self.assertEqual(self.markers(), {})
+
+	def test_restore_is_profile_home_exact_with_colliding_ids(self):
+		from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+		from hermes_state import SessionDB
+		self.archive()
+		other_home = self.home / "another-profile"
+		other_home.mkdir()
+		token = set_hermes_home_override(other_home)
+		try:
+			with closing(SessionDB(db_path=other_home / "state.db")) as db:
+				db.create_session("human", "cli")
+				db.set_session_archived("human", True, notify=False)
+			other = hooks.CompletionObserver(other_home)
+			self.addCleanup(other.close)
+			self.begin()  # foreign callback home cannot admit the default observer
+			self.assertEqual(self.native_flags(), {"human": 1})
+			other.on_pre_llm_call(**self.payload())
+			with closing(sqlite3.connect(other_home / "state.db")) as connection:
+				self.assertEqual(connection.execute("SELECT archived FROM sessions WHERE id = 'human'").fetchone()[0], 0)
+			self.assertEqual(self.native_flags(), {"human": 1})
+		finally:
+			reset_hermes_home_override(token)
+		self.begin()
+		self.assertEqual(self.native_flags(), {"human": 0})
+
+	def test_late_or_duplicate_begin_cannot_restore_after_end_or_unload(self):
+		from contextvars import copy_context
+		for stop in ("end", "unload"):
+			with self.subTest(stop=stop):
+				self.archive()
+				observer = hooks.CompletionObserver(self.home)
+				self.addCleanup(observer.close)
+				entered, release = threading.Event(), threading.Event()
+				snapshot = hooks.native_snapshot(self.home, "human")
+				calls = []
+				def delayed(*args, **kwargs):
+					calls.append(args)
+					entered.set()
+					self.assertTrue(release.wait(5))
+					return snapshot
+				with patch.object(hooks, "native_snapshot", side_effect=delayed):
+					with ThreadPoolExecutor(max_workers=1) as executor:
+						future = executor.submit(copy_context().run, observer.on_pre_llm_call, **self.payload())
+						self.assertTrue(entered.wait(5))
+						observer.on_pre_llm_call(**self.payload())  # pending duplicate
+						if stop == "end":
+							observer.on_session_end(**self.payload(completed=True, failed=False, interrupted=False))
+						else:
+							observer.close()
+						release.set()
+						self.assertIsNone(future.result(timeout=5))
+				self.assertEqual(len(calls), 1)
+				self.assertEqual(self.native_flags(), {"human": 1})
+				self.assertEqual(self.markers(), {})
 
 	def test_receipts_are_bounded_expire_and_cleanup_fences_workers(self):
 		self.observer._capacity = 2

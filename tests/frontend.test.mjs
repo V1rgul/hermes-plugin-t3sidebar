@@ -77,7 +77,7 @@ test('pins outrank working and starting, including running children, but not sno
       assert.equal(card?.key, 'root', `${status}/${running_subagents}/${state}/${wake_at}`);
       assert.equal(card.status, status !== 'idle' || running_subagents ? 'working' : 'idle');
       assert.equal(Object.values(sections).flat().length, 1);
-      assert.equal(flow.buildSections([{ ...rows[0], archived: true }], metadata, live, { now: 100 }).archived[0]?.key, 'root');
+      assert.equal(flow.buildSections([{ ...rows[0], archived: true }], metadata, live, { now: 100 })[status !== 'idle' || running_subagents ? 'working' : 'archived'][0]?.key, 'root');
       assert.equal(flow.buildSections(rows, metadata, [{ ...live[0], status: 'waiting' }], { now: 100 }).active[0]?.status, 'waiting');
       assert.equal(flow.buildSections(rows, metadata, live, { now: 100, runtimeKnown: false }).active[0]?.status, 'unknown');
     }
@@ -241,9 +241,10 @@ test('Delete confirms before mutation, cancel is inert and errors remain retryab
   mock.control.deleteError = false; await click(button('Delete'));
   assert.equal(row('design'), null); assert.equal($('[role=dialog]'), null);
   assert.equal(mock.host.state.focusedStoredSessionId.get(), null);
-  const writes = mock.calls.filter(call => call[2] === 'session.mutate');
+  const writes = mock.calls.filter(call => call[0] === 'rest' && call[1].endsWith('/delete'));
   assert.equal(writes.length, 2); assert.deepEqual(writes[0], writes[1]);
-  assert.deepEqual({ ...writes[0][3], request_id: 'retained' }, { session_id: 'design', request_id: 'retained', expected_revision: 0, expected_generation: 0, operation: 'delete', payload: {} });
+  assert.deepEqual({ ...writes[0][2].body, request_id: 'retained' }, { request_id: 'retained', expected_revision: 0, expected_generation: 0 });
+  assert.ok(!mock.calls.some(call => call[2] === 'session.mutate'));
   assert.ok(mock.calls.some(call => call[0] === 'new' && call[1].connectionId === 'source-a'));
 });
 
@@ -255,8 +256,8 @@ test('Delete verifies every lineage ID and retries lost replies under the same i
   await assert.rejects(controller.delete(scope, item), /reply lost/);
   assert.equal(mock.control.rows.some(row => row.id === 'tip'), false);
   await controller.delete(scope, item);
-  const calls = mock.calls.filter(call => call[2] === 'session.mutate');
-  assert.deepEqual(calls[0], calls[1]); assert.equal(calls[0][3].session_id, 'root');
+  const calls = mock.calls.filter(call => call[0] === 'rest' && call[1].endsWith('/delete'));
+  assert.deepEqual(calls[0], calls[1]); assert.equal(calls[0][1], '/sessions/root/delete');
   for (const id of ['root', 'old', 'tip']) assert.ok(mock.calls.some(call => call[0] === 'rest' && call[1] === `/sessions/${id}/snapshot`));
 });
 
@@ -344,7 +345,7 @@ test('React search and exact project filter stay flat with keyboard navigation',
 test('context actions have decorative leading icons and Delete is marked destructive without bypassing confirmation', async () => {
   await mount(); await click(button('Actions for Sidebar layout'));
   const menu = $('.sf-menu'), actions = [...menu.querySelectorAll('.sf-menu-action')];
-  assert.deepEqual(actions.map(action => action.getAttribute('aria-label') || action.querySelector('.sf-menu-label')?.textContent), ['Pin', 'Rename', 'Copy session ID', 'Delete session', 'Project']);
+  assert.deepEqual(actions.map(action => action.getAttribute('aria-label') || action.querySelector('.sf-menu-label')?.textContent), ['Pin', 'Rename', 'Copy session ID', 'Delete session', 'Move to project', 'Project']);
   for (const action of actions) {
     assert.equal(action.firstElementChild?.className, 'sf-menu-icon');
     assert.equal(action.firstElementChild?.getAttribute('aria-hidden'), 'true');
@@ -801,10 +802,10 @@ test('card metadata uses native project, provider and token totals without model
   const card = row('design');
   assert.equal(card.querySelector('.sf-project-icon').textContent, '⚙');
   assert.equal(card.querySelector('.sf-project-name').textContent, 'hermes-t3sidebar');
-  assert.equal(card.querySelector('.sf-token').textContent, '1.5K');
+  assert.equal(card.querySelector('.sf-token').textContent, '2K');
   assert.ok(card.querySelector('[data-provider-mark="openai-codex"]'));
   assert.deepEqual([...row('pinned').querySelector('.sf-project').children].map(el => el.className), ['sf-project-icon', 'sf-pin', 'sf-project-name']);
-  assert.equal(flow.compactTokens({ input_tokens: 1000, output_tokens: 250 }), '1.3K');
+  assert.equal(flow.compactTokens({ input_tokens: 1000, output_tokens: 250 }), '1K');
   assert.equal(flow.compactTokens({ total_tokens: 0 }), '0');
   assert.equal(flow.compactTokens({ total_tokens: null, input_tokens: null, output_tokens: null }), '—');
 });
@@ -846,7 +847,7 @@ test('provider icons stay absent until a supported concrete provider arrives and
       assert.equal(mark.getAttribute('aria-label'), `Provider: ${provider}`);
       assert.ok(mark.querySelector(`[data-provider-mark="${provider}"]`));
     } else assert.equal(mark === null, true, `no placeholder or spacer for ${provider}`);
-    assert.equal(row('design').querySelector('.sf-token').textContent, '1.5K');
+    assert.equal(row('design').querySelector('.sf-token').textContent, '2K');
   }
 });
 
@@ -1565,12 +1566,12 @@ test('shared actions omit obsolete footer; picker omits Cancel; hidden card cont
 test('pin, archive and unarchive create no Undo even when native readback fails', async () => {
   await mount();
   for (const id of ['design', 'archived']) {
-    await click(button('Actions for Sidebar layout')); await click(button(mock.control.metadata.sessions.design?.pinned ? 'Unpin' : 'Pin'));
+    await click(button('Actions for Hydraulic sizing')); await click(button(mock.control.metadata.sessions.pinned?.pinned ? 'Unpin' : 'Pin'));
     assert.equal(button('Undo'), undefined);
     await click(row(id).querySelector(`[aria-label="${id === 'design' ? 'Archive' : 'Unarchive'} session"]`));
     assert.equal(button('Undo'), undefined);
   }
-  await click(button('Actions for Sidebar layout')); await click(button('Pin')); assert.equal(button('Undo'), undefined);
+  await click(button('Actions for Hydraulic sizing')); await click(button(mock.control.metadata.sessions.pinned?.pinned ? 'Unpin' : 'Pin')); assert.equal(button('Undo'), undefined);
   mock.control.archiveReadError = true;
   await click(row('design').querySelector('[aria-label="Unarchive session"]'));
   assert.equal(button('Undo'), undefined); assert.match($('[role=alert]').textContent, /unavailable/);

@@ -1,4 +1,4 @@
-"""hermes-t3sidebar metadata and narrowly scoped native read-only listings.
+"""hermes-t3sidebar metadata, native listings and sanctioned native deletion.
 
 The host mounts ``router`` in its authenticated /api/plugins/hermes-t3sidebar namespace.
 This module is self-contained because Hermes loads it directly via importlib.
@@ -76,6 +76,15 @@ class SessionAction(BaseModel):
 		elif "done_token" in self.model_fields_set:
 			raise ValueError("done_token is only valid for ack_done")
 		return self
+
+
+class SessionDelete(BaseModel):
+	"""Keep the entire confirmed request unchanged after an ambiguous response."""
+	model_config = ConfigDict(extra="forbid", strict=True)
+
+	request_id: str = Field(pattern=SESSION_ID_PATTERN, min_length=1, max_length=256)
+	expected_revision: int = Field(ge=0)
+	expected_generation: int = Field(ge=0)
 
 
 class SessionMetadata(BaseModel):
@@ -611,6 +620,21 @@ def native_archive(profile, session_id):
 		db.close()
 
 
+def native_workspace(profile, session_id):
+	"""Exact stored segment facts after a native move; no resume/title/alias resolution."""
+	from hermes_cli.web_server_sessions import _open_session_db_for_profile
+
+	db = _open_session_db_for_profile(profile, read_only=True)
+	try:
+		row = db._get_session_rich_rows_batch([session_id], compact_rows=True).get(session_id)
+		if row is None:
+			raise HTTPException(404, "session_not_found")
+		return {"id": session_id, **{key: row.get(key) for key in ("cwd", "git_branch", "git_repo_root")},
+			"project": card_project(row.get("cwd"), card_projects(db))}
+	finally:
+		db.close()
+
+
 def native_delete_snapshot(profile, session_id):
 	"""Exact read-only CAS counters/absence; never resolve titles, prefixes or aliases."""
 	from hermes_cli.web_server_sessions import _open_session_db_for_profile
@@ -623,6 +647,71 @@ def native_delete_snapshot(profile, session_id):
 			"runtime_generation": row["runtime_generation"] if row else None}
 	finally:
 		db.close()
+
+
+async def native_delete(request, profile, session_id, body):
+	"""Delegate to core HTTP deletion, never legacy RPC or a second native writer.
+
+	Core owns actor/history authorization, exact receipts, revision/generation,
+	busy/lease/worker/lineage guards, owner forwarding and artifact cleanup.
+	Hosted admission is not an actor; those topologies must use core HTTP itself.
+	"""
+	if getattr(request.state, "hosted_http_authenticated", None) is not None:
+		raise HTTPException(503, "native_delete_context_unavailable")
+	from hermes_constants import get_hermes_home
+	from hermes_cli.web_server_sessions import _session_mutation_context, _session_db_path_for_profile
+	from hermes_cli.web_routers.sessions import delete_session_endpoint
+
+	home = get_hermes_home().resolve()
+	# A matching display name is not enough: check core's actual store resolution.
+	if _session_db_path_for_profile(profile).resolve().parent != home:
+		raise HTTPException(403, "profile_mismatch")
+	authority, actor = _session_mutation_context(request, profile)
+	if actor is None:
+		raise HTTPException(503, "native_delete_context_unavailable")
+	owner = Path(actor.profile_id)
+	if not owner.is_absolute() or owner.resolve() != home:
+		raise HTTPException(403, "profile_mismatch")
+	native = getattr(request.state, "native_http_principal", None)
+	if native is not None and native.get("profile_id") != str(home):
+		raise HTTPException(403, "profile_mismatch")
+	if "session:control" not in actor.capabilities:
+		raise HTTPException(403, "permission_denied")
+	if authority is not None and (authority.profile_id != str(home)
+		or Path(authority.db.db_path).resolve().parent != home):
+		raise HTTPException(403, "profile_mismatch")
+
+	result = await delete_session_endpoint(session_id=session_id, request=request, profile=profile,
+		request_id=body.request_id, expected_revision=body.expected_revision,
+		expected_generation=body.expected_generation)
+	# Never equate a refreshed page/event with deletion. Validate the exact native
+	# receipt, then independently read every returned ID in this same profile.
+	absent = isinstance(result, dict) and result.get("already_absent") is True
+	if not isinstance(result, dict) or result.get("ok") is not True:
+		raise HTTPException(503, "native_delete_receipt_invalid")
+	if absent:
+		deleted_ids = [session_id]
+	else:
+		deleted_ids = result.get("deleted_ids")
+		if (result.get("session_id") != session_id or result.get("operation") != "delete"
+			or type(result.get("revision")) is not int or result["revision"] != body.expected_revision + 1
+			or type(result.get("execution_generation")) is not int
+			or result["execution_generation"] != body.expected_generation
+			or not isinstance(deleted_ids, list) or session_id not in deleted_ids
+			or any(not isinstance(sid, str) or re.fullmatch(SESSION_ID_PATTERN, sid) is None for sid in deleted_ids)
+			or len(set(deleted_ids)) != len(deleted_ids)):
+			raise HTTPException(503, "native_delete_receipt_invalid")
+	for sid in deleted_ids:
+		snapshot = await asyncio.to_thread(native_delete_snapshot, profile, sid)
+		if snapshot["session_id"] != sid or snapshot["exists"] is not False:
+			raise HTTPException(503, "native_delete_verification_failed")
+	# Allowlist the response: no native session payloads/configuration escape.
+	value = {"ok": True, "profile": profile, "session_id": session_id,
+		"request_id": body.request_id, "operation": "delete", "deleted_ids": deleted_ids,
+		"already_absent": absent, "verified_absent": True}
+	if not absent:
+		value.update(revision=result["revision"], execution_generation=result["execution_generation"])
+	return value
 
 
 def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None) -> APIRouter:
@@ -706,14 +795,49 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		except Exception as exc:
 			raise HTTPException(503, "native_session_snapshot_unavailable") from exc
 
+	@api.get("/sessions/{session_id}/workspace")
+	def get_workspace(session_id: SessionId, request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		try:
+			profile = listing_profile(request)
+			return {**native_workspace(profile, session_id), "profile": profile}
+		except HTTPException:
+			raise
+		except Exception as exc:
+			raise HTTPException(503, "native_workspace_state_unavailable") from exc
+
+	@api.post("/sessions/{session_id}/delete")
+	async def delete_session(session_id: SessionId, body: SessionDelete, request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		try:
+			profile = listing_profile(request)
+			return await native_delete(request, profile, session_id, body)
+		except HTTPException:
+			raise
+		except Exception as exc:
+			# Ambiguous failures must retain the original request for exact retry.
+			raise HTTPException(503, "native_delete_unavailable") from exc
+
 	@api.get("/state", response_model=FlowState)
 	def get_state(response: Response):
 		response.headers["Cache-Control"] = "no-store"
 		return store().state()
 
 	@api.post("/sessions/{session_id}", response_model=FlowState)
-	def update_session(session_id: SessionId, body: SessionAction, response: Response):
+	def update_session(session_id: SessionId, body: SessionAction, request: Request, response: Response):
 		response.headers["Cache-Control"] = "no-store"
+		profile = listing_profile(request)
+		if body.action in ("pin", "snooze"):
+			try:
+				archive = (archive_reader or native_archive)(profile, session_id)
+			except HTTPException:
+				raise
+			except Exception as exc:
+				raise HTTPException(503, "native_archive_state_unavailable") from exc
+			if archive.get("id") != session_id or type(archive.get("archived")) is not bool:
+				raise HTTPException(503, "native_archive_state_unavailable")
+			if archive["archived"]:
+				raise HTTPException(409, "native_session_archived")
 		return store().mutate(session_id, body)
 
 	return api

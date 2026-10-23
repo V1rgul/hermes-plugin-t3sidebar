@@ -164,9 +164,9 @@ test('ambiguous delete rejects promptly and retries exact request identity befor
   assert.equal(f.refreshFinished, false);
   assert.ok(f.client.getQueryData([...f.prefix, 'sessions']).sessions.find(row => row.id === 'design'));
   await f.run();
-  const writes = mock.calls.filter(call => call[0] === 'requestProfile' && call[2] === 'session.mutate');
+  const writes = mock.calls.filter(call => call[0] === 'rest' && call[1].endsWith('/delete'));
   assert.equal(writes.length, 2);
-  assert.deepEqual(writes[0][3], writes[1][3]);
+  assert.deepEqual(writes[0][2].body, writes[1][2].body);
   assert.equal(f.client.getQueryData([...f.prefix, 'sessions']).sessions.some(row => row.id === 'design'), false);
 });
 

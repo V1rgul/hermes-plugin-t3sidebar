@@ -34,29 +34,17 @@ export const host = {
   async request(method, params) { calls.push([method, params]); if (method === 'session.active_list') { if (control.runtimeError) throw new Error('fixture runtime disconnected'); return { sessions: clone(control.live) }; } if (method === 'session.list') return { sessions: clone(control.extra || []).slice(0, params.limit) }; throw new Error(`Unexpected RPC ${method}`); },
   async requestProfile(route, method, params) {
     calls.push(['requestProfile', route, method, clone(params)]);
-    if (method === 'session.mutate' && params.operation === 'delete') {
-      if (control.deleteError) throw new Error('fixture delete unavailable');
-      const digest = JSON.stringify(params);
-      control.deleteReceipts ||= new Map();
-      let receipt = control.deleteReceipts.get(params.request_id);
-      if (receipt && receipt.digest !== digest) throw new Error('admission_conflict');
-      if (!receipt) {
-        const rows = [...control.rows, ...(control.extra || [])].filter(row => row.id === params.session_id || row._lineage_root_id === params.session_id || row._lineage_ids?.includes(params.session_id));
-        if (!rows.length) throw new Error('session_not_found');
-        if (params.expected_revision !== (rows[0].runtime_revision ?? 0) || params.expected_generation !== (rows[0].runtime_generation ?? 0)) throw new Error('stale_revision');
-        const deleted_ids = [...new Set(rows.flatMap(row => [row.id, row._lineage_root_id, ...(row._lineage_ids || [])]).filter(Boolean))];
-        if (control.live.some(row => deleted_ids.includes(row.session_key) && (row.status !== 'idle' || row.running_subagents > 0))) throw new Error('session_busy');
-        receipt = { digest, result: { session_id: params.session_id, operation: 'delete', revision: params.expected_revision + 1, execution_generation: params.expected_generation, deleted_ids } };
-        if (!control.dropDelete) {
-          control.rows = control.rows.filter(row => !deleted_ids.includes(row.id));
-          control.extra = (control.extra || []).filter(row => !deleted_ids.includes(row.id));
-          control.live = control.live.filter(row => !deleted_ids.includes(row.session_key));
-          control.deleteReceipts.set(params.request_id, receipt);
-        }
-      }
-      control.afterDelete?.();
-      if (control.deleteLostReply) { control.deleteLostReply = false; throw new Error('fixture reply lost after commit'); }
-      return clone(control.deleteResult || receipt.result);
+
+    if (method === 'session.workspace.move') {
+      if (control.moveError) throw new Error('fixture move unavailable');
+      const rows = [...control.rows, ...(control.extra || [])].filter(row => row.id === params.session_key || row._lineage_root_id === params.session_key || row._lineage_ids?.includes(params.session_key));
+      if (!rows.length) throw new Error('session_not_found');
+      if (control.live.some(row => rows.some(stored => [stored.id, stored._lineage_root_id, ...(stored._lineage_ids || [])].includes(row.session_key)) && row.status !== 'idle')) throw new Error('session_busy');
+      const project = control.projects.find(item => item.path === params.cwd || item.repos?.some(repo => repo.path === params.cwd));
+      if (!control.dropMove) for (const row of rows) Object.assign(row, { cwd: params.cwd, git_branch: null, git_repo_root: null,
+        project: { id: project.id, name: project.label || project.name, cwd: params.cwd, icon: project.icon || null, color: project.color || null } });
+      control.afterMove?.();
+      return { cwd: params.cwd, branch: null, git_repo_root: null };
     }
     if (method === 'session.title') {
       const live = control.live.find(item => item.id === params.session_id);
@@ -159,6 +147,37 @@ export const ctx = {
       const organized = !archives && offset === 0 ? history.filter(r => control.metadata.sessions[r._lineage_root_id || r.id]) : [];
       const sessions = [...new Map([...page, ...organized].map(r => [r.id, r])).values()];
       return { profile: (archives ? control.archivesProfile : control.sessionsProfile) || host.state.profile.get(), sessions: clone(sessions), offset, limit: 500, has_more: history.length > offset + 500 };
+    }
+    if (path.endsWith('/delete') && options?.method === 'POST') {
+      const id = decodeURIComponent(path.slice('/sessions/'.length, -'/delete'.length)), params = options.body;
+      if (control.deleteError) throw new Error('fixture delete unavailable');
+      const digest = JSON.stringify({ id, ...params });
+      control.deleteReceipts ||= new Map();
+      let receipt = control.deleteReceipts.get(params.request_id);
+      if (receipt && receipt.digest !== digest) throw new Error('admission_conflict');
+      if (!receipt) {
+        const rows = [...control.rows, ...(control.extra || [])].filter(row => row.id === id || row._lineage_root_id === id || row._lineage_ids?.includes(id));
+        const deleted_ids = rows.length ? [...new Set(rows.flatMap(row => [row.id, row._lineage_root_id, ...(row._lineage_ids || [])]).filter(Boolean))] : [id];
+        if (rows.length && (params.expected_revision !== (rows[0].runtime_revision ?? 0) || params.expected_generation !== (rows[0].runtime_generation ?? 0))) throw new Error('stale_revision');
+        if (control.live.some(row => deleted_ids.includes(row.session_key) && (row.status !== 'idle' || row.running_subagents > 0))) throw new Error('session_busy');
+        receipt = { digest, result: { ok: true, profile: host.state.profile.get(), request_id: params.request_id, session_id: id, operation: 'delete',
+          verified_absent: true, already_absent: !rows.length, ...(rows.length ? { revision: params.expected_revision + 1, execution_generation: params.expected_generation } : {}), deleted_ids } };
+        if (!control.dropDelete) {
+          control.rows = control.rows.filter(row => !deleted_ids.includes(row.id));
+          control.extra = (control.extra || []).filter(row => !deleted_ids.includes(row.id));
+          control.live = control.live.filter(row => !deleted_ids.includes(row.session_key));
+          control.deleteReceipts.set(params.request_id, receipt);
+        }
+      }
+      control.afterDelete?.();
+      if (control.deleteLostReply) { control.deleteLostReply = false; throw new Error('fixture reply lost after commit'); }
+      return clone(control.deleteResult || receipt.result);
+    }
+    if (path.endsWith('/workspace')) {
+      const id = decodeURIComponent(path.slice('/sessions/'.length, -'/workspace'.length));
+      const row = [...control.rows, ...(control.extra || [])].find(row => row.id === id || row._lineage_root_id === id || row._lineage_ids?.includes(id));
+      if (!row) throw new Error('session_not_found');
+      return clone({ profile: host.state.profile.get(), id, cwd: row.cwd, git_branch: row.git_branch ?? null, git_repo_root: row.git_repo_root ?? null, project: row.project, ...control.workspaceOverride });
     }
     if (path.endsWith('/snapshot')) {
       if (control.snapshotError) throw new Error('fixture snapshot unavailable');
