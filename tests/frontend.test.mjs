@@ -310,10 +310,10 @@ test('focused stored tile identity, not runtime id, selects row only for matchin
 });
 
 test('search reveals collapsed shelf hits and preserves collapsed preference on clearing', async () => {
-  await mount(); await click(button('Archived (1)')); assert.equal(row('archived'), null);
-  await input($('input[type=search]'), 'SDK inventory'); assert.ok(row('archived'));
+  await mount(); await click(button('Working (1)')); assert.equal(row('root'), null);
+  await input($('input[type=search]'), 'Runtime classification'); assert.ok(row('root'));
   assert.doesNotMatch(document.body.textContent, /No matching sessions/);
-  await input($('input[type=search]'), ''); assert.equal(row('archived'), null);
+  await input($('input[type=search]'), ''); assert.equal(row('root'), null);
 });
 
 test('501st organized session survives remount and keeps rich project filtering after due wake', async () => {
@@ -732,6 +732,154 @@ test('Rename rechecks runtime ownership before writing and collapsed bodies are 
   assert.match($('style').textContent, /prefers-reduced-motion:reduce/);
 });
 
+const draftQueries = () => mock.queryClient.getQueryCache().findAll({ queryKey: ['hermes-t3sidebar-drafts'] });
+async function refreshDrafts() {
+  await act(async () => mock.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-drafts'] }));
+  await tick();
+}
+
+test('composer presence is boolean-only, text-trimmed, read-only and exact open-tip addressed', async () => {
+  controller = flow.createController(mock.ctx); const scope = flow.captureScope();
+  const item = { id: 'old', resolved_id: 'tip', _lineage_root_id: 'root', _lineage_ids: ['root', 'old', 'tip'] };
+  mock.control.drafts.tip = 'SYNTHETIC private draft';
+  assert.equal(await controller.hasDraft(scope, item), true);
+  assert.deepEqual(mock.calls, [['getDraft', 'tip']]);
+  mock.control.mountedDrafts.tip = ' \n\t ';
+  assert.equal(await controller.hasDraft(scope, item), false, 'mounted whitespace overrides nonempty stash');
+  mock.control.mountedDrafts.tip = '';
+  assert.equal(await controller.hasDraft(scope, item), false, 'mounted empty overrides stash');
+  delete mock.control.mountedDrafts.tip;
+  mock.control.drafts.tip = ''; // Attachment-only composer has no textual draft.
+  assert.equal(await controller.hasDraft(scope, item), false, 'attachments alone are not exposed as text');
+  assert.equal(await controller.hasDraft(scope, { id: 'missing' }), false);
+  mock.control.draftError = true;
+  assert.equal(await controller.hasDraft(scope, item), false);
+  delete mock.host.composer;
+  assert.equal(await controller.hasDraft(scope, item), false, 'older SDK without composer');
+  mock.host.composer = {};
+  assert.equal(await controller.hasDraft(scope, item), false, 'older SDK without getter');
+  assert.ok(mock.calls.every(call => call[0] === 'getDraft'));
+  assert.equal(mock.queryClient.getQueryCache().getAll().length, 0);
+  assert.equal(mock.storageData.size, 0);
+});
+
+test('composer reads fence source, profile, ABA, disposal and stale failures before publishing', async () => {
+  for (const drift of ['source', 'profile', 'aba', 'dispose', 'error']) {
+    mock.reset(); controller = flow.createController(mock.ctx); const scope = flow.captureScope(); let finish, fail;
+    mock.control.readDraft = () => new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+    const pending = controller.hasDraft(scope, { id: 'design' });
+    const rejected = assert.rejects(pending, /Source\/profile changed/);
+    if (drift === 'dispose') controller.dispose();
+    else if (drift === 'profile') mock.switchScope('source-a', 'other');
+    else { mock.switchScope(); if (drift === 'aba') mock.switchScope('source-a'); }
+    if (drift === 'error') fail(new Error('SYNTHETIC private error')); else finish('SYNTHETIC private draft');
+    await rejected;
+    const count = mock.calls.length;
+    await assert.rejects(controller.hasDraft(scope, { id: 'design' }), /Source\/profile changed/);
+    assert.equal(mock.calls.length, count, 'stale invocation never calls SDK');
+    controller.dispose();
+  }
+});
+
+test('composer focused owner mismatch stays neutral before and after asynchronous read', async () => {
+  controller = flow.createController(mock.ctx); const scope = flow.captureScope();
+  mock.control.mountedDrafts.design = 'SYNTHETIC foreign composer';
+  mock.host.state.focusedSessionOwner.set({ connectionId: 'foreign', profile: 'default' });
+  assert.equal(await controller.hasDraft(scope, { id: 'design' }), false);
+  assert.equal(mock.calls.length, 0);
+  mock.host.state.focusedSessionOwner.set({ connectionId: 'source-a', profile: 'default' });
+  let finish; mock.control.readDraft = () => new Promise(resolve => { finish = resolve; });
+  const pending = controller.hasDraft(scope, { id: 'design' });
+  mock.host.state.focusedSessionOwner.set({ connectionId: 'source-a', profile: 'other' });
+  finish('SYNTHETIC foreign composer'); assert.equal(await pending, false);
+});
+
+test('React draft tint follows typing and clearing with boolean-only independent cache and no writes', async () => {
+  await mount(); assert.equal(row('design').dataset.hasDraft, 'false');
+  const stored = [...mock.storageData]; const calls = mock.calls.length;
+  mock.control.mountedDrafts.design = 'SYNTHETIC private composer text';
+  await refreshDrafts();
+  assert.equal(row('design').dataset.hasDraft, 'true'); assert.equal(row('design').dataset.current, 'true');
+  assert.equal(row('readme').dataset.hasDraft, 'false');
+  assert.ok(mock.calls.slice(calls).every(call => call[0] === 'getDraft'));
+  assert.ok(draftQueries().length > 0);
+  assert.ok(draftQueries().every(query => typeof query.state.data === 'boolean'));
+  assert.ok(draftQueries().every(query => query.queryKey[1] === 'source-a' && query.queryKey[2] === 'default' && query.queryKey[3] === 1));
+  assert.doesNotMatch(JSON.stringify(mock.queryClient.getQueryCache().getAll().map(query => query.state)), /SYNTHETIC private/);
+  assert.doesNotMatch(document.body.textContent, /SYNTHETIC private/);
+  assert.deepEqual([...mock.storageData], stored);
+  const css = $('style').textContent;
+  assert.match(css, /\.sf-row\[data-has-draft=true\]\{background:color-mix\(in srgb,var\(--ui-orange[^)]*\) 10%,transparent\)/);
+  assert.match(css, /\.sf-row\[data-has-draft=true\]:hover[^}]*14%,transparent/);
+  assert.match(css, /\.sf-row\[data-current=true\][^}]*box-shadow:inset 2px 0 var\(--ui-accent\)/);
+  mock.control.mountedDrafts.design = ' \t\n'; await refreshDrafts();
+  assert.equal(row('design').dataset.hasDraft, 'false');
+  mock.control.mountedDrafts.design = 'SYNTHETIC draft again'; await refreshDrafts();
+  mock.control.draftError = true; await refreshDrafts();
+  assert.equal(row('design').dataset.hasDraft, 'false', 'getter error removes previous tint');
+});
+
+test('React draft reads are mount/open-shelf bounded and independent from gateway token invalidation', async () => {
+  mock.ctx.storage.set(JSON.stringify(['folds', 'source-a', 'default']), { working: true, snoozed: true, archived: true });
+  mock.control.drafts.tip = 'SYNTHETIC stashed tip';
+  await mount();
+  assert.ok(!mock.calls.some(call => call[0] === 'getDraft' && ['tip', 'snoozed', 'archived'].includes(call[1])));
+  const before = mock.calls.filter(call => call[0] === 'getDraft').length;
+  await refresh();
+  assert.equal(mock.calls.filter(call => call[0] === 'getDraft').length, before, 'session token/list refresh does not fan out draft reads');
+  await click(button('Working (1)')); assert.equal(row('root').dataset.hasDraft, 'true');
+  assert.equal(mock.calls.filter(call => call[0] === 'getDraft' && call[1] === 'tip').length, 1);
+  const tipQuery = draftQueries().find(query => query.queryKey[4] === 'root');
+  assert.ok(tipQuery); assert.equal(tipQuery.state.data, true);
+  await click(button('Working (1)')); mock.control.drafts.tip = '';
+  await refreshDrafts();
+  assert.equal(mock.calls.filter(call => call[0] === 'getDraft' && call[1] === 'tip').length, 1, 'folded cached query disabled');
+  await click(button('Working (1)')); assert.equal(row('root').dataset.hasDraft, 'false');
+  assert.equal(mock.calls.filter(call => call[0] === 'getDraft' && call[1] === 'tip').length, 2);
+});
+
+test('React draft focus entering/leaving refetches only affected cards and configures focused polling', async () => {
+  await mount();
+  const counts = () => Object.fromEntries(['design', 'readme', 'approval'].map(id => [id, mock.calls.filter(call => call[0] === 'getDraft' && call[1] === id).length]));
+  const before = counts();
+  mock.control.mountedDrafts.design = 'SYNTHETIC unsaved before switch';
+  mock.control.drafts.readme = 'SYNTHETIC stashed new selection';
+  await act(async () => mock.host.state.focusedStoredSessionId.set('readme')); await tick();
+  assert.equal(row('design').dataset.hasDraft, 'true'); assert.equal(row('readme').dataset.hasDraft, 'true');
+  const after = counts();
+  assert.equal(after.design, before.design + 1); assert.equal(after.readme, before.readme + 1); assert.equal(after.approval, before.approval);
+  for (const query of draftQueries()) {
+    const observer = query.getObserversCount() ? query.observers[0] : null;
+    assert.equal(observer?.options.refetchInterval, query.queryKey[4] === 'readme' ? 2000 : false);
+    assert.equal(observer?.options.refetchOnMount, 'always');
+    assert.equal(observer?.options.refetchOnWindowFocus, false);
+  }
+});
+
+test('React stale draft result cannot tint new scope with colliding ID or populate its cache', async () => {
+  let finish; mock.control.readDraft = id => id === 'design' ? new Promise(resolve => { finish = resolve; }) : null;
+  await mount(); const oldScope = flow.captureScope();
+  const staleFinish = finish;
+  await act(async () => { delete mock.control.readDraft; mock.switchScope('source-b', 'other'); }); await tick(); await tick();
+  await act(async () => staleFinish('SYNTHETIC old-scope draft')); await tick();
+  assert.equal(row('design').dataset.hasDraft, 'false');
+  const queries = draftQueries().filter(query => query.queryKey[1] === 'source-b');
+  assert.ok(queries.length > 0); assert.ok(queries.every(query => query.state.data === false));
+  assert.ok(draftQueries().filter(query => query.queryKey[1] === oldScope.connectionId).every(query => query.state.data !== true));
+});
+
+test('plugin disposal cancels and removes only its listing and separate draft cache roots', async () => {
+  plugin.register(mock.ctx);
+  const scope = flow.captureScope(); let finish;
+  const pending = mock.queryClient.fetchQuery({ queryKey: ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, 'design'], queryFn: () => new Promise(resolve => { finish = resolve; }) });
+  const rejected = assert.rejects(pending);
+  mock.queryClient.setQueryData(['hermes-t3sidebar-drafts', 'other', 'default', 1, 'design'], true);
+  mock.queryClient.setQueryData(['unrelated-fixture'], true);
+  mock.control.disposers.forEach(fn => fn()); finish(true); await rejected;
+  assert.equal(draftQueries().length, 0);
+  assert.equal(mock.queryClient.getQueryData(['unrelated-fixture']), true);
+});
+
 async function remount() {
   await act(async () => root.unmount()); root = null; controller.dispose(); mock.queryClient.clear();
   await mount();
@@ -771,16 +919,29 @@ test('fold storage accepts only secondary-shelf booleans and tolerates read/writ
   assert.equal($('[role=alert]'), null);
 });
 
-test('search temporarily expands saved folds without persisting expansion or showing catch-up', async () => {
+test('search keeps Archived folded while retaining matching counts and explicit expansion', async () => {
   await mount(); await click(button('Archived (1)'));
   const before = [...mock.storageData];
-  await input($('input[type=search]'), 'SDK inventory'); assert.ok(row('archived'));
+  await input($('input[type=search]'), 'SDK inventory'); assert.equal(Boolean(row('archived')), false);
+  assert.equal(button('Archived (1)').getAttribute('aria-expanded'), 'false');
   assert.doesNotMatch(document.body.textContent, /All caught up|No matching sessions/);
   assert.deepEqual([...mock.storageData], before);
   await input($('input[type=search]'), 'no such session');
   assert.match(document.body.textContent, /No matching sessions/);
   assert.doesNotMatch(document.body.textContent, /All caught up/);
   await input($('input[type=search]'), ''); assert.equal(row('archived'), null);
+  await input($('input[type=search]'), 'SDK inventory'); await click(button('Archived (1)')); assert.ok(row('archived'));
+});
+
+test('search clear control is present for any text and rename uses an adjacent icon-only submit', async () => {
+  await mount(); assert.equal(button('Clear search'), undefined);
+  await input($('input[type=search]'), '  '); assert.ok(button('Clear search'));
+  await click(button('Clear search')); assert.equal($('input[type=search]').value, '');
+  assert.equal(document.activeElement, $('input[type=search]'));
+  await click(button('Actions for Runtime classification')); await click(button('Rename'));
+  const field = $('input[aria-label="Session title"]'), save = button('Save rename');
+  assert.equal(save.parentElement, field.parentElement);
+  assert.equal(save.textContent, ''); assert.ok(save.querySelector('svg'));
 });
 
 test('project filtering counts folded matches rather than claiming none or Ready caught up', async () => {

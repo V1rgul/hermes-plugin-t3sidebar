@@ -15,7 +15,19 @@ export const control = {};
 export const storageData = new Map();
 const clone = value => JSON.parse(JSON.stringify(value));
 const now = () => Math.floor(Date.now() / 1000);
+// Public composer.getDraft is ID-addressed: mounted unsaved text wins over stash.
+// Fixtures expose text only; attachment-only drafts do not imply textual content.
+const composer = {
+  async getDraft(sessionId) {
+    calls.push(['getDraft', sessionId]);
+    if (control.draftError) throw new Error('fixture draft unavailable');
+    if (control.readDraft) return control.readDraft(sessionId);
+    if (Object.hasOwn(control.mountedDrafts, sessionId)) return control.mountedDrafts[sessionId];
+    return control.drafts[sessionId] ?? null;
+  }
+};
 export const host = {
+  composer,
   state: { connectionId: atom('source-a'), profile: atom('default'), gateway: atom('open'), activeSessionId: atom('runtime-design'), focusedStoredSessionId: atom('design'), focusedSessionOwner: atom({ connectionId: 'source-a', profile: 'default' }) },
   profileRoutes: async () => [{ connectionId: host.state.connectionId.get(), profile: host.state.profile.get(), targetProfile: host.state.profile.get(), mode: 'remote' }],
   async listPersistedSessions(route, options) { calls.push(['list', route, options]); if (control.listError) throw new Error('fixture list unavailable'); return { sessions: clone(control.rows), total: control.total || control.rows.length, limit: 500, offset: 0 }; },
@@ -127,9 +139,9 @@ export const ctx = {
   onEvent(type, listener) { control.listener = listener; return () => { control.listener = null; }; }, onDispose(fn) { control.disposers.push(fn); }
 };
 export function reset() {
-  epoch = 1; queryClient.clear(); calls.length = 0; storageData.clear();
+  epoch = 1; queryClient.clear(); calls.length = 0; storageData.clear(); host.composer = composer;
   for (const key of Object.keys(control)) delete control[key];
-  Object.assign(control, { projects: [{ id: 'p_fixture', label: 'Synthetic Sidebar', path: '/projects/hermes-t3sidebar', icon: 'tools', color: 'var(--ui-accent)', repos: [{ path: '/projects/hermes-t3sidebar' }] }], contributions: [], disposers: [], rows: [
+  Object.assign(control, { drafts: {}, mountedDrafts: {}, projects: [{ id: 'p_fixture', label: 'Synthetic Sidebar', path: '/projects/hermes-t3sidebar', icon: 'tools', color: 'var(--ui-accent)', repos: [{ path: '/projects/hermes-t3sidebar' }] }], contributions: [], disposers: [], rows: [
     { id: 'approval', title: 'Approval request', cwd: '/projects/hermes-t3sidebar', last_active: now() - 200 },
     { id: 'design', title: 'Sidebar layout', cwd: '/projects/hermes-t3sidebar', git_branch: 'feature/sidebar', last_active: now() - 180 },
     { id: 'readme', title: 'Release notes', cwd: '/projects/docs', last_active: now() - 1300, unread: true },

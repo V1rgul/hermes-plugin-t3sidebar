@@ -36,6 +36,11 @@ try {
   await page.getByRole('searchbox').fill('Runtime classification');
   await page.locator('[data-session-id="root"]').waitFor();
   check('search temporarily reveals persisted folded category without catch-up text', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'false' && !await page.getByText('All caught up', { exact: true }).count());
+  await page.locator('.sf-search input').evaluate(el => el.blur());
+  await page.mouse.move(1100, 850);
+  check('search clear cross stays visible without hover or focus', await page.getByRole('button', { name: 'Clear search', exact: true }).isVisible() && await page.getByRole('button', { name: 'Clear search', exact: true }).evaluate(el => getComputedStyle(el).opacity === '1'));
+  await page.getByRole('button', { name: 'Clear search', exact: true }).click();
+  check('clear cross empties search and returns keyboard focus', await page.getByRole('searchbox').inputValue() === '' && await page.getByRole('searchbox').evaluate(el => el === document.activeElement));
   await page.getByRole('searchbox').fill('');
   await page.locator('[data-session-id="root"]').waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: 'Switch mock source', exact: true }).click();
@@ -48,7 +53,14 @@ try {
   await page.reload();
   await page.locator('[data-session-id="root"]').waitFor();
   check('explicitly unfolded categories survive another browser reload', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'false' && await page.locator('[data-section="snoozed"]').getAttribute('data-closed') === 'false');
+  await page.getByRole('button', { name: 'Archived (1)', exact: true }).click();
+  await page.getByRole('searchbox').fill('SDK inventory');
+  check('search never unfolds Archived or reports a false no-match', await page.locator('[data-section="archived"]').getAttribute('data-closed') === 'true' && !await page.getByText('No matching sessions', { exact: true }).count() && !await page.locator('[data-session-id="archived"]').isVisible());
+  await page.getByRole('button', { name: 'Archived (1)', exact: true }).click();
+  check('search still allows explicitly unfolding matching archives', await page.locator('[data-session-id="archived"]').isVisible());
+  await page.getByRole('button', { name: 'Clear search', exact: true }).click();
   check('all five shelves rendered', await page.locator('.sf-section').count() === 5);
+  check('Working with one card has no spare vertical space', await page.locator('[data-section="working"]').evaluate(el => el.getBoundingClientRect().height <= 24 + el.querySelectorAll('.sf-row').length * 56 + 1));
   check('waiting approval remains Ready despite archival and pin metadata', await page.locator('section[aria-label="Ready"] [data-session-id="approval"]').count() === 1);
   check('Working is visually dimmed', Number(await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity)) < 1);
   check('Working card text uses the native blue theme token', await page.locator('[data-session-id="root"] .sf-time').evaluate(el => {
@@ -81,6 +93,7 @@ try {
     return project === time && provider === tokens && project !== tokens;
   }));
   await page.mouse.move(1100, 850);
+  check('Input, Working and Done labels are bold', await page.locator('.sf-status').evaluateAll(labels => ['input', 'working', 'done'].every(status => labels.some(el => el.dataset.status === status && Number(getComputedStyle(el).fontWeight) >= 600))));
   const workingOpacity = await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity);
   for (const id of ['snoozed', 'archived']) {
     const card = page.locator(`[data-session-id="${id}"]`);
@@ -244,9 +257,29 @@ try {
   await design.click({ button: 'right' });
   await page.getByRole('button', { name: 'Rename', exact: true }).click();
   await page.getByRole('textbox', { name: 'Session title', exact: true }).fill('Renamed sidebar thread');
+  check('rename submit is a checkmark beside the field, without Save rename text', await page.getByRole('button', { name: 'Save rename', exact: true }).evaluate(el => {
+    const field = el.parentElement.querySelector('input'), button = el.getBoundingClientRect(), input = field.getBoundingClientRect();
+    return el.textContent === '' && el.querySelector('svg') !== null && button.left >= input.right && Math.abs(button.top + button.height / 2 - input.top - input.height / 2) < 2;
+  }));
   await page.getByRole('button', { name: 'Save rename', exact: true }).click();
   await design.locator('.sf-row-title').filter({ hasText: 'Renamed sidebar thread' }).waitFor();
   check('live-thread Rename saves and exact native title readback renders', await page.evaluate(() => window.hermesT3SidebarHarness.calls.filter(call => call[2] === 'session.title' && call[3].session_id === 'runtime-design').length === 2));
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.drafts = { design: 'SYNTHETIC unsent composer text' };
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-drafts'] });
+  });
+  await page.waitForFunction(() => document.querySelector('[data-session-id="design"]')?.dataset.hasDraft === 'true');
+  await page.mouse.move(1100, 850);
+  check('unsent composer text gives the card a dim orange background off hover', await design.evaluate(el => {
+    const probe = document.createElement('span'); probe.style.backgroundColor = 'color-mix(in srgb,var(--ui-orange) 10%,transparent)'; el.append(probe);
+    const expected = getComputedStyle(probe).backgroundColor, actual = getComputedStyle(el).backgroundColor; probe.remove();
+    return actual === expected;
+  }));
+  check('draft query cache retains booleans, never composer text', await page.evaluate(() => window.hermesT3SidebarHarness.queryClient.getQueryCache().findAll({ queryKey: ['hermes-t3sidebar-drafts'] }).every(query => query.state.data === undefined || typeof query.state.data === 'boolean')));
+  await page.evaluate(() => { window.hermesT3SidebarHarness.control.drafts.design = ''; });
+  await page.waitForFunction(() => document.querySelector('[data-session-id="design"]')?.dataset.hasDraft === 'false');
+  check('focused composer polling removes the tint after its text is cleared', true);
   // Exercise the real Archived pagination control without expanding active history.
   await page.evaluate(() => window.hermesT3SidebarHarness.loadArchivePaginationFixtures());
   await page.locator('[data-session-id="synthetic-page-active-0"]').waitFor();
@@ -335,6 +368,21 @@ try {
     console.log(`LAYOUT ${height}: ${JSON.stringify(layout)}`);
   }
 
+  for (const count of [0, 1, 2]) {
+    await page.locator('.harness-sidebar').evaluate(el => { el.style.height = '1000px'; });
+    await page.evaluate(async count => {
+      const fixture = window.hermesT3SidebarHarness; fixture.loadDenseFixtures();
+      fixture.control.rows = fixture.control.rows.filter(row => !row.id.startsWith('synthetic-working-') || Number(row.id.slice(-3)) < count);
+      const ids = new Set(fixture.control.rows.map(row => row.id));
+      fixture.control.live = fixture.control.live.filter(row => ids.has(row.session_key));
+      fixture.switchScope(`sparse-working-${count}`);
+      await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+    }, count);
+    await page.waitForFunction(count => document.querySelector('[data-section="working"]')?.querySelectorAll('.sf-row').length === count, count);
+    check(`Working with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="working"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - (24 + count * 56)) <= 1, count));
+  }
+  await page.evaluate(() => window.hermesT3SidebarHarness.loadDenseFixtures());
+  await page.waitForFunction(() => document.querySelector('[data-section="working"]')?.querySelectorAll('.sf-row').length === 20);
   // Banners consume real pane height: category headers must survive that reduction.
   for (const banner of ['none', 'undo', 'undo-error']) {
     const withUndo = banner !== 'none';

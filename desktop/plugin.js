@@ -158,6 +158,26 @@ export function createController(ctx, client = queryClient, env = { capture: cap
   }
   return {
     dispose() { disposed = true; generation++; }, check,
+    async hasDraft(scope, row) {
+      check(scope);
+      // The public getter is ID-addressed, not route-qualified. Use the same tip as open().
+      const composer = env.host.composer, id = row.resolved_id || row.id;
+      if (typeof composer?.getDraft !== 'function' || !id) return false;
+      const ownerMatches = () => {
+        if (!aliases(row).includes(env.host.state?.focusedStoredSessionId?.get())) return true;
+        const owner = env.host.state?.focusedSessionOwner?.get();
+        return owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile;
+      };
+      if (!ownerMatches()) return false;
+      try {
+        // Reduce at the SDK boundary: no composer text enters QueryCache or plugin storage.
+        const present = await fenced(scope, async () => {
+          const text = await composer.getDraft(id);
+          return typeof text === 'string' && text.trim().length > 0;
+        });
+        return ownerMatches() && present;
+      } catch (_) { check(scope); return false; }
+    },
     async list(scope) {
       const ticket = generation, route = await routeFor(scope);
       try {
@@ -337,12 +357,15 @@ const CSS = `
 .sf-icon:hover,.sf-row:hover,.sf-row:focus-within,.sf-section-toggle:hover{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
 .sf-search{display:flex;align-items:center;gap:8px;flex:1;min-width:0;color:var(--ui-text-tertiary)}.sf-search svg{flex-shrink:0;width:18px;height:18px}
 .sf-search input{width:100%;min-width:0;padding:0;border:0;background:transparent;color:var(--ui-text-primary);outline:none}
+.sf-search input::-webkit-search-cancel-button{-webkit-appearance:none}.sf-search .sf-clear{width:20px;height:20px;padding:2px;visibility:visible;opacity:1}
 .sf-header input{font-size:14px}.sf-menu select{max-width:260px;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary)}
 .sf-scroll{overflow:hidden;flex:1;min-height:0;display:grid;padding:0 6px;gap:1px;transition:grid-template-rows .22s ease}
 /* Fixed header minima survive short panes; Archives gets most of the flexible space. */
 .sf-section{display:flex;flex-direction:column;min-height:0;overflow:hidden}.sf-section[data-section=pinned]{grid-row:1}.sf-section[data-section=active]{grid-row:2}.sf-section[data-section=working]{grid-row:3}.sf-section[data-section=snoozed]{grid-row:4}.sf-section[data-section=archived]{grid-row:5}
 .sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:24px;min-height:24px;padding:3px 6px;border:0;background:transparent;color:var(--ui-text-tertiary);font-size:11px;text-align:left}.sf-count{color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums}.sf-section-label,.sf-count,.sf-section-chevron{flex-shrink:0}.sf-section-line{flex:1;min-width:0;height:1px;background:var(--ui-stroke-secondary)}.sf-section-chevron{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px}
 .sf-row{position:relative;height:56px;flex-shrink:0;padding:0 10px;border-radius:5px}.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
+.sf-row[data-has-draft=true]{background:color-mix(in srgb,var(--ui-orange,#db704b) 10%,transparent)}
+.sf-row[data-has-draft=true]:hover,.sf-row[data-has-draft=true]:focus-within{background:color-mix(in srgb,var(--ui-orange,#db704b) 14%,transparent)}
 .sf-row[data-dimmed=true]{opacity:.55}.sf-row[data-dimmed=true]:hover,.sf-row[data-dimmed=true]:focus-within{opacity:1}
 /* Native semantic blue is independent of the user's configurable accent. */
 .sf-row[data-working=true] .sf-time{color:var(--ui-blue,#0053fd)}
@@ -353,6 +376,7 @@ const CSS = `
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}
 .sf-menu>div:not(.sf-menu-title),.sf-menu form{display:flex;flex-direction:column;gap:4px}
+.sf-status{font-weight:600}
 .sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--ui-orange,#db704b)}.sf-status[data-status=input]{color:var(--ui-purple,#9e94d5)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
 .sf-section-body{transition:opacity .18s ease,visibility 0s}.sf-section[data-closed=true] .sf-section-body{opacity:0;visibility:hidden;transition:opacity .18s ease,visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:opacity .16s ease,background-color .16s ease,box-shadow .16s ease}.sf-hover{transition:opacity .12s ease;opacity:0}.sf-row:hover .sf-hover{opacity:1}.sf-custom-time{display:flex;align-items:center;gap:4px}.sf-custom-time input{min-width:0}.sf-custom-time .sf-icon{flex-shrink:0}
 @media(prefers-reduced-motion:reduce){.sf-scroll,.sf-section-body,.sf-section-chevron,.sf-row,.sf-hover{transition:none!important}}
@@ -420,8 +444,9 @@ function RowActions({ row, scope, controller, filterProject, mutate, disabled, c
         h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy || !row.runtimeId, onClick: () => setRenaming(true) }, 'Rename'),
         !row.runtimeId ? h('p', null, 'Rename requires a live runtime. Open the thread and retry.') : null,
         renaming ? h('form', { onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
+          h('span', { className: 'sf-custom-time' },
           h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
-          h(sdk.Button, { type: 'submit', variant: 'ghost', disabled: busy || !title.trim() }, 'Save rename')) : null,
+          h(IconButton, { type: 'submit', label: 'Save rename', name: 'Check', glyph: '✓', disabled: busy || !title.trim() }))) : null,
         h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy, onClick: () => void perform(() => controller.copyId(scope, row)) }, 'Copy session ID'),
         h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy || projectCwd === null || row._limited, onClick: () => {
           try { controller.check(scope); filterProject(projectCwd); close(); } catch (err) { setError(err.message); }
@@ -431,8 +456,20 @@ function RowActions({ row, scope, controller, filterProject, mutate, disabled, c
 export function cardStatus(row) {
   return row.status === 'waiting' ? 'input' : row.status === 'working' ? 'working' : row.woke ? 'woke' : row.unread === true ? 'done' : null;
 }
-function SessionRow({ row, active, controller, scope, mutate, filterProject, disabled, onFocus, onNavigate, rowRef }) {
+function SessionRow({ row, active, hidden, controller, scope, mutate, filterProject, disabled, onFocus, onNavigate, rowRef }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
+  const draft = useQuery({
+    queryKey: ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, durableId(row), row.resolved_id || row.id],
+    queryFn: () => controller.hasDraft(scope, row), enabled: !hidden, retry: false, staleTime: 0,
+    refetchOnMount: 'always', refetchOnWindowFocus: false, refetchOnReconnect: false, refetchInterval: active && !hidden ? 2000 : false
+  });
+  const previousDraftView = useRef({ active, hidden });
+  useEffect(() => {
+    const previous = previousDraftView.current;
+    previousDraftView.current = { active, hidden };
+    // Enabling a shelf refetches its stale query automatically; avoid a second read here.
+    if (!hidden && !previous.hidden && previous.active !== active) void draft.refetch();
+  }, [active, hidden, draft.refetch]);
   const attention = row.status === 'waiting', badge = cardStatus(row);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
@@ -441,7 +478,7 @@ function SessionRow({ row, active, controller, scope, mutate, filterProject, dis
     else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
-  return h('div', { className: 'sf-row', 'data-current': active, 'data-working': row.section === 'working', 'data-unread': row.unread === true || row.woke || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
+  return h('div', { className: 'sf-row', 'data-current': active, 'data-has-draft': draft.data === true && !draft.isError, 'data-working': row.section === 'working', 'data-unread': row.unread === true || row.woke || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
     h('button', { type: 'button', className: 'sf-open', ref: rowRef, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${row.title || 'Untitled session'}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
@@ -523,9 +560,17 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const runtimeKnown = !!runtime.data && !runtime.isError;
   const sections = buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, query, project });
   const searching = !!query.trim();
+  const isClosed = section => !!collapsed[section] && !(searching && section !== 'archived');
+  const sectionTrack = section => {
+    const count = sections[section].length;
+    // Fit Working to its cards, capped by pane space so long lists still scroll.
+    if (section === 'working') return !isClosed(section) && count ? `minmax(25px,clamp(25px,18%,${24 + count * 56}px))` : 'minmax(24px,24px)';
+    if (isClosed(section)) return 'minmax(24px,0fr)';
+    return `minmax(25px,${section === 'archived' && count ? 3 : count ? .65 : .25}fr)`;
+  };
   const filtering = searching || project !== '*';
   const hasMatches = SECTIONS.some(section => sections[section].length > 0);
-  const visible = SECTIONS.flatMap(section => collapsed[section] && !searching && !(section === 'active' && sections.active.some(row => row.status === 'waiting' || row.status === 'unknown')) ? [] : sections[section]);
+  const visible = SECTIONS.flatMap(section => isClosed(section) && !(section === 'active' && sections.active.some(row => row.status === 'waiting' || row.status === 'unknown')) ? [] : sections[section]);
   const projects = [...new Set(rows.filter(row => !row._limited).map(row => row.cwd || ''))].sort();
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
   useEffect(() => {
@@ -574,12 +619,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
   useEffect(() => {
     if (focused.current && !visible.some(row => row.key === focused.current)) { focused.current = visible[0]?.key; rowRefs.current.get(focused.current)?.focus(); }
   });
-  const renderRow = row => h(SessionRow, { key: row.key, row, scope, controller, mutate, filterProject: cwd => { controller.check(scope); setProject(cwd); }, disabled: latest.current.disabled || row._liveOnly,
+  const renderRow = row => h(SessionRow, { key: row.key, row, scope, controller, mutate, hidden: isClosed(row.section), filterProject: cwd => { controller.check(scope); setProject(cwd); }, disabled: latest.current.disabled || row._liveOnly,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: id => { focused.current = id; }, onNavigate: navigate,
     rowRef: element => { if (element) rowRefs.current.set(row.key, element); else rowRefs.current.delete(row.key); } });
   const renderSection = section => {
-    const entries = sections[section], force = searching || section === 'active' && entries.some(row => ['waiting', 'unknown'].includes(row.status));
-    const closed = !!collapsed[section] && !force;
+    const entries = sections[section], closed = isClosed(section);
     const items = entries.map(renderRow);
     const headerless = section === 'active' || section === 'pinned';
     if (section === 'pinned' && !entries.length) return null;
@@ -604,7 +648,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
   } }, h('style', null, CSS),
     h('header', { className: 'sf-header' },
-      h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) })),
+      h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) }),
+        query ? h(IconButton, { label: 'Clear search', name: 'X', glyph: '×', className: 'sf-clear', onClick: () => { setQuery(''); search.current?.focus(); } }) : null),
       h(sdk.Popover, { open: filterOpen, onOpenChange: setFilterOpen },
         h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Filter sessions', name: 'ListFilter', glyph: '≡' })),
         h(sdk.PopoverContent, { align: 'end', 'aria-label': 'Session filters' }, h('div', { className: 'sf-menu' },
@@ -621,7 +666,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     metadata.isError ? h(Note, { error: true }, `hermes-t3sidebar backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback. `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,
-    h('div', { className: 'sf-scroll', style: { gridTemplateRows: `minmax(0,${sections.pinned.length ? .65 : 0}fr) minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(section => `minmax(${collapsed[section] && !searching ? 24 : 25}px,${collapsed[section] && !searching ? 0 : section === 'archived' && sections.archived.length ? 3 : sections[section].length ? .65 : .25}fr)`).join(' ')}` } }, ...SECTIONS.map(renderSection),
+    h('div', { className: 'sf-scroll', style: { gridTemplateRows: `minmax(0,${sections.pinned.length ? .65 : 0}fr) minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(sectionTrack).join(' ')}` } }, ...SECTIONS.map(renderSection),
       !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,
@@ -641,6 +686,6 @@ export default {
         void queryClient.invalidateQueries({ queryKey: scopeKey(captureScope()) });
       }
     });
-    ctx.onDispose(() => { controller.dispose(); disposeEvent(); void queryClient.cancelQueries({ queryKey: ['hermes-t3sidebar'] }); queryClient.removeQueries({ queryKey: ['hermes-t3sidebar'] }); });
+    ctx.onDispose(() => { controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts']) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
   }
 };
