@@ -4,6 +4,7 @@ The host mounts ``router`` in its authenticated /api/plugins/hermes-t3sidebar na
 This module is self-contained because Hermes loads it directly via importlib.
 """
 
+import asyncio
 import json
 import math
 from pathlib import Path
@@ -86,10 +87,10 @@ def default_state_path() -> Path:
 class HermesT3SidebarStore:
 	"""Short-lived per-operation connections; SQLite serializes writers.
 
-	Every read/mutation and due-wakeup sweep shares one IMMEDIATE transaction.
-	Exact wake acknowledgments skip the sweep and only clear their own marker.
-	There are no threads or timers owned by the plugin. Wake eligibility is
-	computed from UTC epoch seconds even after the app/backend was closed.
+	Current-schema reads with no due wake use a read-only snapshot. Migrations,
+	mutations and due sweeps serialize in an IMMEDIATE transaction and recheck
+	time/state there. Exact wake acknowledgments never sweep other snoozes.
+	Wake eligibility uses UTC epoch seconds even after the app/backend closed.
 	"""
 
 	def __init__(self, path: Path, clock: Callable[[], float] = time.time):
@@ -97,7 +98,43 @@ class HermesT3SidebarStore:
 		self.clock = clock
 
 	def state(self) -> dict:
+		# Probe the complete current schema and rows in ONE read-only snapshot.
+		# An established, not-due GET must not queue behind an unrelated writer.
+		# Close the reader before escalating: never upgrade a stale read snapshot.
+		if self.path.is_file():
+			connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30, isolation_level=None)
+			connection.row_factory = sqlite3.Row
+			try:
+				connection.execute("BEGIN")
+				try:
+					rows = connection.execute("""
+						SELECT session_id, state, settled_at, wake_at, pinned, updated_at, woke_at
+						FROM session_metadata ORDER BY session_id
+					""").fetchall()
+				except sqlite3.OperationalError as exc:
+					# Only absent/legacy schema needs a writer; do not hide IO/lock errors.
+					if not str(exc).startswith(("no such table:", "no such column:")):
+						raise
+				else:
+					now = float(self.clock())
+					if not math.isfinite(now):
+						raise ValueError("clock must return a finite UTC epoch timestamp")
+					if not any(row["state"] == "snoozed" and row["wake_at"] <= now for row in rows):
+						connection.execute("COMMIT")
+						return self._state_rows(rows)
+			finally:
+				connection.close()
 		return self._transaction()
+
+	@staticmethod
+	def _state_rows(rows) -> dict:
+		result = {"version": 1, "sessions": {}}
+		for row in rows:
+			metadata = dict(row)
+			key = metadata.pop("session_id")
+			metadata["pinned"] = bool(metadata["pinned"])
+			result["sessions"][key] = metadata
+		return result
 
 	def mutate(self, session_id: str, body: SessionAction) -> dict:
 		if not isinstance(session_id, str) or re.fullmatch(SESSION_ID_PATTERN, session_id) is None:
@@ -182,12 +219,7 @@ class HermesT3SidebarStore:
 						UPDATE session_metadata SET pinned = ?, updated_at = ? WHERE session_id = ?
 					""", (int(body.action == "pin"), now, session_id))
 			rows = connection.execute("SELECT * FROM session_metadata ORDER BY session_id").fetchall()
-			result = {"version": 1, "sessions": {}}
-			for row in rows:
-				metadata = dict(row)
-				key = metadata.pop("session_id")
-				metadata["pinned"] = bool(metadata["pinned"])
-				result["sessions"][key] = metadata
+			result = self._state_rows(rows)
 			connection.execute("COMMIT")
 			return result
 		except BaseException:
@@ -221,9 +253,12 @@ def standalone_subagent_count(server, row, snapshot, db, home):
 		from gateway.session_ancillary import subagent_records
 
 		session, parent = snapshot
-		with server._sessions_lock:
+
+		def admitted_db():
+			# Called only under the registry lock, before and after native IO.
 			if (server._sessions.get(row["id"]) is not session or session.get("_finalized")
 				or parent is None or session.get("agent") is not parent
+				or session.get("session_key") != row["session_key"]
 				or getattr(parent, "session_id", None) != row["session_key"]
 				or Path(session.get("profile_home") or server._launch_home()).resolve() != home):
 				return None
@@ -233,11 +268,18 @@ def standalone_subagent_count(server, row, snapshot, db, home):
 				or Path(owner_path).resolve() != Path(expected_path).resolve()
 				or getattr(parent, "gateway_session_key", None) not in (None, row["id"])):
 				return None
-			# The qualified runtime id is the standalone route, the session_key is
-			# durable. Pass the actual parent's DB so native fallback identity and
-			# file-qualified compression-lineage ownership retain their semantics.
-			return running_subagent_count(subagent_records(parent, session_id=row["session_key"],
-				session_db=owner_db, route=row["id"], include_fallback_evicted=True))
+			return owner_db
+
+		with server._sessions_lock:
+			owner_db = admitted_db()
+		if owner_db is None:
+			return None
+		# Native lineage reads may wait for token flushing. Never hold the global
+		# registry lock across them, and retain the actual DB object's fallback identity.
+		count = running_subagent_count(subagent_records(parent, session_id=row["session_key"],
+			session_db=owner_db, route=row["id"], include_fallback_evicted=True))
+		with server._sessions_lock:
+			return count if admitted_db() is owner_db else None
 	except Exception:
 		# Older cores, stale objects and failed projections are unknown per row.
 		return None
@@ -327,7 +369,9 @@ async def native_runtime(request, profile):
 
 	authority, actor = _session_mutation_context(request, profile)
 	if authority is None:
-		return standalone_runtime(request, profile, actor)
+		# Copy the profile context into the worker; no new registry, loop or DB
+		# authority is created. Native mapper/lineage waits must not stall HTTP.
+		return await asyncio.to_thread(standalone_runtime, request, profile, actor)
 	reader = Principal(actor.subject, actor.profile_id, frozenset({"session:read"}), actor.transport_id)
 	connection = SimpleNamespace(authority=authority, actor=reader)
 	value = await active_list(connection, None, {})
@@ -475,9 +519,14 @@ def native_sessions(profile, offset, limit, organized_ids, archived_only=False):
 	try:
 		page = db.list_sessions_rich(limit=limit, offset=offset, compact_rows=True, order_by_last_active=True, include_archived=False, archived_only=archived_only, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
 		rows = {row.get("_lineage_root_id") or row["id"]: row for row in page}
+		# Organization may be stored under any native compression/reset alias,
+		# not only the root used to deduplicate output. Cover newly backfilled
+		# aliases too, so multiple organized segments do not repeat rich queries.
+		covered = {sid for row in page for sid in
+			(row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])) if sid}
 		if offset == 0 and not archived_only:
 			for sid in organized_ids:
-				if sid in rows:
+				if sid in covered:
 					continue
 				# id_query is a substring query. Page its matches until the exact
 				# alias is found; never silently lose a short/colliding stored ID.
@@ -489,6 +538,7 @@ def native_sessions(profile, offset, limit, organized_ids, archived_only=False):
 						ids = {row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])}
 						if sid in ids:
 							rows[row.get("_lineage_root_id") or row["id"]] = row
+							covered.update(value for value in ids if value)
 							found = True
 					if found or len(matches) < 500:
 						break

@@ -28,6 +28,10 @@ Archive/Unarchive calls Hermes’s profile-routed `session.archive` operation wi
 
 Earlier versions used a plugin-only settlement shelf. Existing settlement metadata is retained for compatibility but does not count as native archival and is not automatically converted by bulk-writing session history. Those conversations rejoin the ordinary list unless another current condition (such as a pin, snooze or running job) places them elsewhere. Archive them explicitly to move them into Hermes’s real archive.
 
+## Performance
+
+Local toolbar interactions avoid rebuilding every card, history lineage merges use an index, and verified actions no longer wait for an unrelated full-list refresh. Scoped lifecycle events refresh runtime only; history changes trigger broader reconciliation. The companion avoids writer transactions for ordinary metadata reads and keeps blocking standalone runtime reads off the event loop and outside the global session lock. Before/after measurements, regression coverage and remaining limitations are documented in [the performance report](docs/performance.md).
+
 ## Package
 
 ```text

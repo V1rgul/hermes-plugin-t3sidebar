@@ -100,7 +100,7 @@ test('waiting retains priority over running children and unrelated sessions cann
   assert.equal(sections.working.length, 0);
 });
 
-test('subagent lifecycle events refresh snapshots but streamed text does not fan out reads', () => {
+test('subagent lifecycle events refresh snapshots but streamed text does not fan out reads', async () => {
   plugin.register(mock.ctx);
   const scope = flow.captureScope(), key = [...flow.scopeKey(scope), 'runtime'];
   const draftKey = ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, 'design'];
@@ -112,6 +112,7 @@ test('subagent lifecycle events refresh snapshots but streamed text does not fan
   }
   for (const type of ['subagent.start', 'subagent.complete']) {
     mock.control.listener({ type });
+    await Promise.resolve();
     assert.equal(mock.queryClient.getQueryState(key).isInvalidated, true);
     assert.equal(mock.queryClient.getQueryState(draftKey).isInvalidated, false);
     mock.queryClient.setQueryData(key, { sessions: [] });

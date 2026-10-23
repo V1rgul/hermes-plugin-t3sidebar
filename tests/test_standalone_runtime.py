@@ -210,6 +210,51 @@ class StandaloneRuntime(unittest.TestCase):
 		self.registry["runtime-a"]["agent"] = None
 		self.assertIsNone(self.runtime_row()["running_subagents"])
 
+	def test_blocking_native_projection_releases_global_lock_and_revalidates_identity(self):
+		from concurrent.futures import ThreadPoolExecutor
+		from threading import Event
+		parent, db = self.attach_subagents()
+		row = {"id": "runtime-a", "session_key": "collision"}
+		session = self.registry["runtime-a"]
+		request_snapshot = (session, parent)
+		# Each mutation can happen while native fallback/lineage IO is blocked.
+		changes = {
+			"registry": lambda: self.registry.__setitem__("runtime-a", self.session("collision", self.current)),
+			"finalized": lambda: session.__setitem__("_finalized", True),
+			"agent": lambda: session.__setitem__("agent", SimpleNamespace(session_id="collision")),
+			"home": lambda: session.__setitem__("profile_home", str(self.homes["other-profile"])),
+			"durable": lambda: setattr(parent, "session_id", "changed"),
+			"route": lambda: setattr(parent, "gateway_session_key", "changed"),
+			"db_object": lambda: setattr(parent, "_session_db", SimpleNamespace(db_path=db.db_path)),
+		}
+		for name, change in changes.items():
+			with self.subTest(change=name):
+				self.registry["runtime-a"] = session
+				session.update(_finalized=False, agent=parent, profile_home=str(self.current))
+				parent.session_id, parent.gateway_session_key, parent._session_db = "collision", "runtime-a", db
+				entered, release = Event(), Event()
+				def blocked(actual_parent, **kwargs):
+					self.assertIs(actual_parent, parent)
+					self.assertIs(kwargs["session_db"], db)
+					entered.set()
+					if not release.wait(1):
+						raise TimeoutError("test release timeout")
+					return [{"status": "running", "goal": "private-never-publish"}]
+				with patch.object(ancillary, "subagent_records", blocked), ThreadPoolExecutor(max_workers=1) as pool:
+					future = pool.submit(backend.standalone_subagent_count, native_server, row, request_snapshot, db, self.current)
+					try:
+						self.assertTrue(entered.wait(1))
+						acquired = native_server._sessions_lock.acquire(timeout=.1)
+						try:
+							self.assertTrue(acquired, "native projection must not hold the global sessions lock")
+							change()
+						finally:
+							if acquired:
+								native_server._sessions_lock.release()
+					finally:
+						release.set()
+					self.assertIsNone(future.result(timeout=2))
+
 	def test_snapshot_parent_replacement_cannot_lend_stale_subagent_count(self):
 		parent, db = self.attach_subagents()
 		self.child("one", parent, db)

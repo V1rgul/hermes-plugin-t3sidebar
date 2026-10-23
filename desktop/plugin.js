@@ -1,11 +1,14 @@
 // hermes-t3sidebar — independent T3-inspired session browser; plain disk-plugin ESM.
 import * as sdk from '@hermes/plugin-sdk';
-import { createElement as h, useEffect, useRef, useState } from 'react';
+import { createElement as h, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const { host, useValue, useQuery, useMutation, useQueryClient, queryClient, gatewayActivationEpoch } = sdk;
 export const SECTIONS = ['pinned', 'active', 'working', 'snoozed', 'archived'];
 const LABELS = { active: 'Ready', pinned: 'Pinned', working: 'Working', snoozed: 'Snoozed', archived: 'Archived' };
 const EMPTY_STATE = { version: 1, sessions: {} };
+const EMPTY_ROWS = [];
+const DEFAULT_META = { state: 'active', pinned: false };
+const tokenFormatter = Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 const activationEpoch = sdk.atom(gatewayActivationEpoch());
 export const durableId = row => row._lineage_root_id || row.id;
 export const aliases = row => [...new Set([row.id, row.resolved_id, durableId(row), ...(row._lineage_ids || [])].filter(Boolean))];
@@ -53,7 +56,7 @@ export const visibleSource = row => !['cron', 'tool', 'oneshot', 'kanban'].inclu
 export function compactTokens(row) {
   const valid = value => Number.isFinite(value) && value >= 0;
   const total = valid(row.total_tokens) ? row.total_tokens : valid(row.input_tokens) && valid(row.output_tokens) ? row.input_tokens + row.output_tokens : null;
-  return total === null ? '—' : Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(total);
+  return total === null ? '—' : tokenFormatter.format(total);
 }
 export function isEmptySession(row, runtimes = []) {
   if (aliases(row).length > 1) return false; // Native counts describe only the tip, not ancestor history.
@@ -66,14 +69,42 @@ export function isEmptySession(row, runtimes = []) {
   return count === 0 && !runtimeCounts.some(value => value > 0) && ![row, ...runtimes].some(contentful);
 }
 export const sessionTitle = row => row.newSession ? 'New session' : row.title || 'Untitled session';
+function matchesFilters(row, query, project) {
+  if (project !== '*' && (row._limited || (row.cwd || '') !== project)) return false;
+  if (!query) return true;
+  const text = [sessionTitle(row), row.preview, row.cwd, row.git_branch, ...aliases(row)].filter(Boolean).join(' ').toLowerCase();
+  return query.trim().toLowerCase().split(/\s+/).every(token => text.includes(token));
+}
 export function mergeRows(rich, extra = [], live = [], extraRich = false, archives = []) {
-  const rows = new Map();
+  const rows = new Map(), aliasIndex = new Map(), order = new Map();
+  let sequence = 0;
   // Archive feed wins over stale active pages, and remains rich/project-filterable.
   for (const row of [...extra.map(r => ({ ...r, _limited: !extraRich })), ...rich.map(r => ({ ...r, _limited: false })), ...archives.map(r => ({ ...r, _limited: false }))]) {
-    const key = durableId(row), previousKey = rows.has(key) ? key : [...rows.keys()].find(id => aliases(rows.get(id)).some(alias => aliases(row).includes(alias))), previous = rows.get(previousKey);
+    const key = durableId(row);
     if (!key || !visibleSource(row)) continue;
-    if (previousKey && previousKey !== key) rows.delete(previousKey);
-    rows.set(key, { ...previous, ...row, _lineage_ids: [...new Set([...(previous ? aliases(previous) : []), ...aliases(row)])] });
+    const incoming = aliases(row);
+    let previousKey = rows.has(key) ? key : undefined;
+    if (previousKey === undefined) {
+      // Index aliases once; retain the original first-insertion match when an
+      // unusual overlapping lineage refers to more than one existing card.
+      for (const alias of incoming) for (const candidate of aliasIndex.get(alias) || []) {
+        if (previousKey === undefined || order.get(candidate) < order.get(previousKey)) previousKey = candidate;
+      }
+    }
+    const previous = rows.get(previousKey), previousAliases = previous ? aliases(previous) : [];
+    for (const alias of previousAliases) {
+      const owners = aliasIndex.get(alias);
+      owners.delete(previousKey);
+      if (!owners.size) aliasIndex.delete(alias);
+    }
+    if (previousKey && previousKey !== key) { rows.delete(previousKey); order.delete(previousKey); }
+    const lineage = [...new Set([...previousAliases, ...incoming])];
+    if (!rows.has(key)) order.set(key, sequence++);
+    rows.set(key, { ...previous, ...row, _lineage_ids: lineage });
+    for (const alias of lineage) {
+      if (!aliasIndex.has(alias)) aliasIndex.set(alias, new Set());
+      aliasIndex.get(alias).add(key);
+    }
   }
   const known = new Set([...rows.values()].flatMap(aliases));
   for (const item of live) {
@@ -87,7 +118,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
   const result = Object.fromEntries(SECTIONS.map(section => [section, []]));
   for (const row of rows) {
     if (!visibleSource(row)) continue;
-    const meta = metadata.sessions[durableId(row)] || { state: 'active', pinned: false };
+    const meta = metadata.sessions[durableId(row)] || DEFAULT_META;
     const ids = new Set(aliases(row));
     const matches = live.filter(item => ids.has(item.session_key) || ids.has(item.id));
     // Waiting wins over every metadata shelf and working signal, across the entire lineage.
@@ -102,9 +133,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
       : status === 'working' ? 'working'
       : meta.pinned ? 'pinned' : 'active';
     const newSession = isEmptySession(row, runtimeKnown ? matches : []);
-    const text = [sessionTitle({ ...row, newSession }), row.preview, row.cwd, row.git_branch, ...aliases(row)].filter(Boolean).join(' ').toLowerCase();
-    if (query && !query.trim().toLowerCase().split(/\s+/).every(token => text.includes(token))) continue;
-    if (project !== '*' && (row._limited || (row.cwd || '') !== project)) continue;
+    if (!matchesFilters({ ...row, newSession }, query, project)) continue;
     // Runtime last_active is also a resume/reattach clock, not conversation progress.
     const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
     const runtimes = matches.filter(item => typeof item.id === 'string' && item.id && item.id !== item.session_key);
@@ -151,10 +180,19 @@ export function verifyAction(state, id, payload) {
 // Read generations + React Query cancellation prevent an old poll overwriting a write.
 export function createController(ctx, client = queryClient, env = { capture: captureScope, routes: () => host.profileRoutes(), host }) {
   let disposed = false, writing = false, generation = 0;
+  let pendingRoutes = null;
   const wakeAcks = new Map(), deleteRequests = new Map();
   function check(scope) { if (disposed || !sameScope(scope, env.capture())) throw new Error('Source/profile changed; refresh before trying again.'); }
   async function fenced(scope, fn) { check(scope); const result = await fn(); check(scope); return result; }
-  async function routeFor(scope) { return currentRoute(scope, await fenced(scope, () => env.routes())); }
+  async function routeFor(scope) {
+    check(scope);
+    // profileRoutes refreshes native profile inventory. Share concurrent work,
+    // but never retain settled route authority for a later read or user action.
+    if (!pendingRoutes || !sameScope(pendingRoutes.scope, scope)) pendingRoutes = { scope: { ...scope }, work: fenced(scope, () => env.routes()) };
+    const pending = pendingRoutes;
+    try { return currentRoute(scope, await fenced(scope, () => pending.work)); }
+    finally { if (pendingRoutes === pending) pendingRoutes = null; }
+  }
   function qualified(value, scope, route) {
     if (value?.profile !== (route?.targetProfile || scope.profile) || !Array.isArray(value?.sessions)) throw new Error('Invalid current-profile listing response.');
     return value;
@@ -177,8 +215,34 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     }
     return value;
   }
+  function refresh(scope, filters) {
+    if (disposed || !sameScope(scope, env.capture())) return;
+    // Exact readback confirms an action; full-list refresh is background work.
+    // Query errors must not replace the write result or escape unhandled.
+    try { void Promise.resolve(client.invalidateQueries(filters)).catch(() => {}); } catch (_) { /* background refresh */ }
+  }
+  function updateRows(scope, ids, patch, archived) {
+    check(scope);
+    if (typeof client.getQueriesData !== 'function') return; // Minimal cache adapters may have no loaded lists.
+    const matches = row => aliases(row).some(id => ids.has(id)) || ids.has(row.session_key);
+    const queries = client.getQueriesData({ queryKey: scopeKey(scope) })
+      .filter(([key, data]) => ['sessions', 'expanded', 'archives', 'page', 'runtime'].includes(key[4]) && Array.isArray(data?.sessions));
+    // Transfer only an already-loaded native row, never manufacture a rich row
+    // from a runtime or metadata record. Preserve project/history richness.
+    const known = queries.filter(([key]) => key[4] !== 'runtime').flatMap(([, data]) => data.sessions).find(matches);
+    for (const [key, data] of queries) {
+      const destination = archived === undefined || key[4] === 'runtime' ? null : archived ? 'archives' : 'sessions';
+      let sessions = data.sessions.flatMap(row => {
+        if (!matches(row)) return [row];
+        if (patch === null || destination && key[4] !== destination) return [];
+        return [{ ...row, ...patch }];
+      });
+      if (destination === key[4] && known && !sessions.some(matches)) sessions = [...sessions, { ...known, ...patch }];
+      if (sessions.length !== data.sessions.length || sessions.some((row, i) => row !== data.sessions[i])) client.setQueryData(key, { ...data, sessions });
+    }
+  }
   return {
-    dispose() { disposed = true; generation++; deleteRequests.clear(); }, check,
+    dispose() { disposed = true; generation++; pendingRoutes = null; deleteRequests.clear(); }, check,
     async hasDraft(scope, row) {
       check(scope);
       // The public getter is ID-addressed, not route-qualified. Use the same tip as open().
@@ -258,6 +322,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           const before = await archiveFlag(scope, route, id); // Unsupported/missing durable rows cannot be written.
           await fenced(scope, () => env.host.requestProfile(route, 'session.archive', { session_id: id, archived }));
           if (await archiveFlag(scope, route, id) !== archived) throw new Error('The server did not confirm this native archive change. Refresh and retry.');
+          updateRows(scope, new Set([id]), { archived }, archived);
           let state;
           try {
             state = validState(await fenced(scope, () => ctx.rest('/state')));
@@ -284,7 +349,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         writing = false;
         if (!disposed && sameScope(scope, env.capture())) {
           if (native) client.removeQueries({ predicate: query => sameScope({ connectionId: query.queryKey[1], profile: query.queryKey[2], epoch: query.queryKey[3] }, scope) && query.queryKey[0] === 'hermes-t3sidebar' && query.queryKey[4] === 'page' });
-          await client.invalidateQueries({ queryKey: native ? scopeKey(scope) : key, exact: !native });
+          refresh(scope, { queryKey: native ? scopeKey(scope) : key, exact: !native });
         }
       }
     },
@@ -305,12 +370,13 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         if (result?.pending) throw new Error('Rename is pending; it has not been confirmed saved. Refresh before retrying.');
         const saved = await fenced(scope, () => env.host.requestProfile(route, 'session.title', { session_id: row.runtimeId }));
         if (result?.title !== title || saved?.title !== title || !ids.has(saved?.session_key)) throw new Error('The server did not confirm this session title. Refresh and retry.');
+        updateRows(scope, ids, { title });
         return title;
       } finally {
         writing = false;
         if (!disposed && sameScope(scope, env.capture())) {
           client.removeQueries({ queryKey: [...scopeKey(scope), 'page'] });
-          await client.invalidateQueries({ queryKey: scopeKey(scope) });
+          refresh(scope, { queryKey: scopeKey(scope) });
         }
       }
     },
@@ -333,6 +399,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
             deleteRequests.set(requestKey, payload);
           }
         }
+        let deletedIds = [id];
         if (payload) {
           // Retain the exact request/fences after an ambiguous failure; never repeat
           // an irreversible mutation under a fresh identity merely because it timed out.
@@ -345,8 +412,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           for (const deletedId of result.deleted_ids) {
             if ((await deleteSnapshot(scope, route, deletedId)).exists) throw new Error('Deletion was acknowledged, but stored history still exists. Retry to verify.');
           }
+          deletedIds = result.deleted_ids;
         }
         check(scope);
+        updateRows(scope, new Set(deletedIds), null);
         const owner = env.host.state?.focusedSessionOwner?.get();
         if (owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile && aliases(row).includes(env.host.state?.focusedStoredSessionId?.get())) {
           await fenced(scope, () => env.host.newChat(route));
@@ -356,7 +425,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         writing = false;
         if (!disposed && sameScope(scope, env.capture())) {
           client.removeQueries({ queryKey: [...scopeKey(scope), 'page'] });
-          await client.invalidateQueries({ queryKey: scopeKey(scope) });
+          refresh(scope, { queryKey: scopeKey(scope) });
         }
       }
     },
@@ -378,7 +447,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const route = await routeFor(scope); check(scope);
       await fenced(scope, () => env.host.openSession(row.resolved_id || row.id, { route, profile: route?.profile || scope.profile, intent: 'in-place' }));
       await this.ackWake(scope, row);
-      check(scope); await client.invalidateQueries({ queryKey: [...scopeKey(scope), 'sessions'] });
+      check(scope); refresh(scope, { queryKey: [...scopeKey(scope), 'sessions'] });
     },
     async projects(scope) {
       const route = await routeFor(scope);
@@ -525,11 +594,14 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
 export function cardStatus(row) {
   return row.status === 'waiting' ? 'input' : row.status === 'working' ? 'working' : row.woke ? 'woke' : row.unread === true ? 'done' : null;
 }
-function SessionRow({ row, active, hidden, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef }) {
+function SessionRow({ row, active, hidden, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
+  const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
   const draft = useQuery({
     queryKey: ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, durableId(row), row.resolved_id || row.id],
-    queryFn: () => controller.hasDraft(scope, row), enabled: !hidden, retry: false, staleTime: 0,
+    // Neutral boolean seed avoids a second card render for the common empty
+    // draft result; mount still performs the same fresh, fenced composer read.
+    queryFn: () => controller.hasDraft(scope, row), enabled: !hidden, retry: false, staleTime: 0, initialData: false,
     refetchOnMount: 'always', refetchOnWindowFocus: false, refetchOnReconnect: false, refetchInterval: active && !hidden ? 2000 : false
   });
   const previousDraftView = useRef({ active, hidden });
@@ -540,6 +612,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
     if (!hidden && !previous.hidden && previous.active !== active) void draft.refetch();
   }, [active, hidden, draft.refetch]);
   const attention = row.status === 'waiting', badge = cardStatus(row);
+  const tokens = compactTokens(row);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
     if (event.target !== event.currentTarget) return;
@@ -549,7 +622,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
   };
   return h('div', { className: 'sf-row', 'data-current': active, 'data-has-draft': draft.data === true && !draft.isError, 'data-working': row.section === 'working', 'data-unread': row.unread === true || row.woke || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
-    h('button', { type: 'button', className: 'sf-open', ref: rowRef, 'aria-current': active ? 'page' : undefined,
+    h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${sessionTitle(row)}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
       onClick: open, onFocus: () => onFocus(row.key), onKeyDown: keyDown,
       title: [sessionTitle(row), row.cwd, row.git_branch, row.status === 'waiting' ? 'Waiting for approval or answer' : row.status].filter(Boolean).join('\n') },
@@ -560,10 +633,10 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
           row.project?.name || !row.newSession ? h('span', { className: 'sf-project-name' }, row.project?.name || 'Project unavailable') : null),
         row.status === 'unknown' ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': 'Status unknown' }, '?') : null,
         h('span', { className: 'sf-provider', role: 'img', 'aria-label': row.provider ? `Provider: ${row.provider}` : 'Provider unavailable', title: row.provider || 'Provider unavailable' }, providerMark(row.provider)),
-        h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${compactTokens(row)}` }, compactTokens(row)),
+        h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${tokens}` }, tokens),
         h('span', { className: 'sf-time' }, badge ? h('span', { className: 'sf-status', 'data-status': badge },
           badge === 'input' ? h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('path', { d: 'M4 4h16v12H9l-5 4V4M10 8a2 2 0 0 1 4 0c0 2-2 1-2 3M12 13v1' })) : badge !== 'working' ? icon(badge === 'done' ? 'CircleCheck' : 'AlarmClock', badge === 'done' ? '✓' : '◷') : null,
-          { done: 'Done', woke: 'Woke', input: 'Input', working: 'Working' }[badge]) : relative(row.activity))),
+          { done: 'Done', woke: 'Woke', input: 'Input', working: 'Working' }[badge]) : age)),
       h('span', { className: 'sf-row-title' }, sessionTitle(row))),
     h('div', { className: 'sf-hover' },
       row.archived !== true ? h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },
@@ -576,11 +649,24 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
       h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { ref: trigger, className: 'sf-context-trigger', label: `Actions for ${sessionTitle(row)}`, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog' })),
       h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Session actions' }, h(RowActions, { row, scope, controller, filterProject, deleteSession, mutate, disabled, close: () => setMenuOpen(false) }))));
 }
+// Query structural sharing preserves nested native/project/metadata values. The
+// derived row and its lineage array can be new without changing a card. Compare
+// every field (including handler inputs), not just its visible title/status.
+function sameCard(a, b) {
+  if (a === b) return true;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every(key => key === '_lineage_ids'
+    ? a[key]?.length === b[key]?.length && (a[key] || EMPTY_ROWS).every((id, index) => id === b[key][index])
+    : Object.is(a[key], b[key]));
+}
+const MemoSessionRow = memo(SessionRow, (previous, next) => Object.keys(next).every(key =>
+  key === 'row' ? sameCard(previous.row, next.row) : Object.is(previous[key], next[key])));
 export function HermesT3Sidebar({ ctx, controller }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
   useValue(host.state.gateway);
   useValue(activationEpoch);
-  const scope = { connectionId, profile: profile || 'default', epoch: gatewayActivationEpoch() };
+  const epoch = gatewayActivationEpoch();
+  const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
   return h(ScopedSidebar, { key: JSON.stringify(scopeKey(scope)), scope, controller, ctx });
 }
 export function ProjectPicker({ controller, scope, close }) {
@@ -624,10 +710,17 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const metadata = useQuery({ ...opts, queryKey: [...key, 'metadata'], queryFn: () => controller.metadata(scope), enabled: !mutation.isPending });
   const expanded = useQuery({ ...opts, staleTime: Infinity, refetchInterval: false, queryKey: [...key, 'expanded', limit], enabled: limit > 0, queryFn: () => controller.expanded(scope, limit) });
   const archives = useQuery({ ...opts, queryKey: [...key, 'archives', archiveLimit], queryFn: () => controller.archives(scope, archiveLimit) });
-  const live = runtime.isError ? [] : runtime.data?.sessions || [];
-  const rows = mergeRows(sessions.data?.sessions || [], sessions.data?.capped ? [] : expanded.data?.sessions || [], live, true, archives.isError ? [] : archives.data?.sessions || []);
+  const live = runtime.isError ? EMPTY_ROWS : runtime.data?.sessions || EMPTY_ROWS;
+  const rich = sessions.data?.sessions || EMPTY_ROWS, extra = sessions.data?.capped ? EMPTY_ROWS : expanded.data?.sessions || EMPTY_ROWS;
+  const archivedRows = archives.isError ? EMPTY_ROWS : archives.data?.sessions || EMPTY_ROWS;
+  const rows = useMemo(() => mergeRows(rich, extra, live, true, archivedRows), [rich, extra, live, archivedRows]);
   const runtimeKnown = !!runtime.data && !runtime.isError;
-  const sections = buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, query, project });
+  // Successful polls still advance ages and due snoozes when Query structural
+  // sharing keeps data references unchanged. Use existing polls, no extra timer.
+  const now = useMemo(() => Date.now() / 1000, [sessions.dataUpdatedAt, runtime.dataUpdatedAt, metadata.dataUpdatedAt, archives.dataUpdatedAt]);
+  const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, now }), [rows, metadata.data, live, runtimeKnown, now]);
+  const sections = useMemo(() => Object.fromEntries(SECTIONS.map(section => [section,
+    classified[section].filter(row => matchesFilters(row, query, project))])), [classified, query, project]);
   const searching = !!query.trim();
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
   const sectionTrack = section => {
@@ -640,19 +733,22 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const filtering = searching || project !== '*';
   const hasMatches = SECTIONS.some(section => sections[section].length > 0);
   const visible = SECTIONS.flatMap(section => isClosed(section) && !(section === 'active' && sections.active.some(row => row.status === 'waiting' || row.status === 'unknown')) ? [] : sections[section]);
-  const projectChoices = new Map();
-  for (const row of rows) {
-    if (row._limited) continue;
-    const cwd = typeof row.cwd === 'string' ? row.cwd : row.project?.is_home ? '' : null;
-    if (cwd === null) continue;
-    const previous = projectChoices.get(cwd);
-    if (!previous || (!previous.nativeName && row.project?.name)) projectChoices.set(cwd, {
-      ...row.project, cwd, nativeName: !!row.project?.name, name: row.project?.name || cwd || 'No project'
-    });
-  }
-  const projects = [...projectChoices.values()].sort((a, b) => a.name.localeCompare(b.name) || a.cwd.localeCompare(b.cwd));
+  const projectChoices = useMemo(() => {
+    const choices = new Map();
+    for (const row of rows) {
+      if (row._limited) continue;
+      const cwd = typeof row.cwd === 'string' ? row.cwd : row.project?.is_home ? '' : null;
+      if (cwd === null) continue;
+      const previous = choices.get(cwd);
+      if (!previous || (!previous.nativeName && row.project?.name)) choices.set(cwd, {
+        ...row.project, cwd, nativeName: !!row.project?.name, name: row.project?.name || cwd || 'No project'
+      });
+    }
+    return choices;
+  }, [rows]);
+  const projects = useMemo(() => [...projectChoices.values()].sort((a, b) => a.name.localeCompare(b.name) || a.cwd.localeCompare(b.cwd)), [projectChoices]);
   const selectedProject = projectChoices.get(project) || { name: project || 'No project' };
-  const selectProject = cwd => { controller.check(scope); setProject(cwd); setFilterOpen(false); };
+  const selectProject = useCallback(cwd => { controller.check(scope); setProject(cwd); setFilterOpen(false); }, [controller, scope]);
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
   useEffect(() => {
     if (!metadata.data || metadata.isError || mutation.isPending || !activeId || activeOwner?.connectionId !== (scope.connectionId ?? 'local') || activeOwner?.profile !== scope.profile) return;
@@ -667,7 +763,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     });
   }, [activeId, activeOwner, metadata.data, metadata.isError, mutation.isPending, rows, controller, scope]);
   const refresh = () => { try { controller.check(scope); void client.invalidateQueries({ queryKey: key }); } catch (_) { /* old pane */ } };
-  const mutate = async (row, input, isUndo = false) => {
+  const mutate = useCallback(async (row, input, isUndo = false) => {
     try {
       controller.check(scope);
       if (latest.current.disabled) throw new Error('hermes-t3sidebar backend unavailable or another change is saving.');
@@ -687,8 +783,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
       }
       return true;
     } catch (error) { if (sameScope(scope, captureScope())) setActionError(error.message); return false; }
-  };
-  const navigate = (event, id) => {
+  }, [controller, scope, mutation.mutateAsync]);
+  const navigate = useCallback((event, id) => {
     const keys = latest.current.visible.map(row => row.key), index = keys.indexOf(id);
     let target;
     if (event.key === 'ArrowDown') target = keys[Math.min(keys.length - 1, index + 1)];
@@ -696,13 +792,15 @@ function ScopedSidebar({ ctx, controller, scope }) {
     if (event.key === 'Home') target = keys[0];
     if (event.key === 'End') target = keys.at(-1);
     if (target) { event.preventDefault(); const element = rowRefs.current.get(target); element?.focus({ preventScroll: true }); const body = element?.closest('.sf-section-body'); if (body) { const r = element.getBoundingClientRect(), b = body.getBoundingClientRect(); if (r.top < b.top) body.scrollTop -= b.top - r.top; else if (r.bottom > b.bottom) body.scrollTop += r.bottom - b.bottom; } }
-  };
+  }, []);
   useEffect(() => {
     if (focused.current && !visible.some(row => row.key === focused.current)) { focused.current = visible[0]?.key; rowRefs.current.get(focused.current)?.focus(); }
   });
-  const renderRow = row => h(SessionRow, { key: row.key, row, scope, controller, mutate, hidden: isClosed(row.section), filterProject: cwd => { controller.check(scope); setProject(cwd); }, deleteSession: setDeleteTarget, disabled: latest.current.disabled || row._liveOnly,
-    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: id => { focused.current = id; }, onNavigate: navigate,
-    rowRef: element => { if (element) rowRefs.current.set(row.key, element); else rowRefs.current.delete(row.key); } });
+  const focusRow = useCallback(id => { focused.current = id; }, []);
+  const rowRef = useCallback((id, element) => { if (element) rowRefs.current.set(id, element); else rowRefs.current.delete(id); }, []);
+  const disabled = latest.current.disabled;
+  const renderRow = row => h(MemoSessionRow, { key: row.key, row, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
+    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: relative(row.activity, now) });
   const renderSection = section => {
     const entries = sections[section], closed = isClosed(section);
     const items = entries.map(renderRow);
@@ -719,6 +817,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
         section === 'archived' && !archives.isError && archives.data?.has_more ? h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: archives.isFetching, onClick: () => setArchiveLimit(previous => previous + 1) }, 'Browse older archives') : null));
 
   };
+  // Toolbar/popover/error state is not a list input: retain its element tree,
+  // not only the cards, so these interactions never walk thousands of rows.
+  const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, activeId, activeOwner,
+    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now,
+    archives.isError, archives.error, archives.isLoading, archives.isFetching, archives.data?.has_more]);
   const total = sessions.data?.total;
   const knownTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0;
   const fallbackCount = knownTotal && total > 500 ? ` is capped at 500 of ${total}`
@@ -750,7 +853,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     metadata.isError ? h(Note, { error: true }, `hermes-t3sidebar backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback. `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,
-    h('div', { className: 'sf-scroll', style: { gridTemplateRows: `minmax(0,${sections.pinned.length ? .65 : 0}fr) minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(sectionTrack).join(' ')}` } }, ...SECTIONS.map(renderSection),
+    h('div', { className: 'sf-scroll', style: { gridTemplateRows: `minmax(0,${sections.pinned.length ? .65 : 0}fr) minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(sectionTrack).join(' ')}` } }, ...renderedSections,
       !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,
@@ -767,12 +870,33 @@ export default {
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
     ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings) });
+    let disposed = false, pending = null;
     const disposeEvent = ctx.onEvent('*', event => {
+      if (disposed) return;
       activationEpoch.set(gatewayActivationEpoch());
-      if (/^(session\.|gateway\.|approval\.|question\.|server_request\.|message\.complete)|^subagent\.(start|complete)$/.test(event.type || '')) {
-        void queryClient.invalidateQueries({ queryKey: scopeKey(captureScope()) });
-      }
+      const scope = captureScope();
+      if (event.connectionId != null && event.connectionId !== (scope.connectionId ?? 'local')
+        || event.profile != null && event.profile !== scope.profile) return;
+      const type = event.type || '';
+      // Streaming and usage ticks never invalidate history, runtime or drafts.
+      if (/\.(delta|text|thinking|usage)$/.test(type)) return;
+      const history = /^(message\.complete|gateway\.(ready|connected|reconnected)|sessions\.changed|session\.(title|created|deleted|archived|unarchived|stored|saved|compressed|reset|imported))$/.test(type)
+        || type === 'session.updated' && !!event.payload?.operation;
+      const runtime = history || /^(session\.|approval\.|question\.|server_request\.)/.test(type)
+        || /^(message\.start|subagent\.(start|complete))$/.test(type);
+      if (!runtime) return;
+      if (pending && sameScope(pending.scope, scope)) { pending.history ||= history; return; }
+      const work = pending = { scope, history };
+      // Coalesce a turn's lifecycle burst without a timer. Query dedupes a
+      // still-running read instead of cancelling/restarting it on the next burst.
+      void Promise.resolve().then(() => {
+        if (disposed || pending !== work) return;
+        pending = null;
+        if (!sameScope(scope, captureScope())) return;
+        const resources = work.history ? ['sessions', 'expanded', 'page', 'archives', 'metadata', 'runtime'] : ['runtime'];
+        return queryClient.invalidateQueries({ queryKey: scopeKey(scope), predicate: query => resources.includes(query.queryKey[4]), refetchType: 'active' }, { cancelRefetch: false });
+      }).catch(() => { /* Query retains errors for the pane's normal recovery UI. */ });
     });
-    ctx.onDispose(() => { controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts']) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
+    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts']) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
   }
 };

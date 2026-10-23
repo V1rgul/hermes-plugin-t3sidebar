@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --import ./tests/register-loader.mjs --test tests/frontend.test.mjs tests/integration.test.mjs",
+    "test": "node --import ./tests/register-loader.mjs --test tests/*.test.mjs",
     "test:backend": "python -W error::ResourceWarning -m unittest discover -s tests -v",
     "test:all": "npm test && npm run test:backend && npm run test:browser",
     "test:browser": "node tests/browser-smoke.mjs",

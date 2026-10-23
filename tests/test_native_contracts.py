@@ -155,6 +155,37 @@ class NativeContracts(unittest.TestCase):
 			"provider": None, "model": None, "source": None, "input_tokens": None, "output_tokens": None, "total_tokens": None}])
 		self.assertEqual([c["offset"] for c in calls], [0, 0, 500])
 
+	def test_loaded_root_tip_and_segment_aliases_do_not_repeat_rich_listing(self):
+		fake = ModuleType("hermes_cli.web_server_sessions")
+		calls = []
+		row = {"id": "tip", "_lineage_root_id": "root", "_lineage_ids": ["root", "middle", "tip"]}
+		class DB:
+			def list_sessions_rich(self, **options):
+				calls.append(options)
+				return [row]
+			def close(self):
+				pass
+		setattr(fake, "_open_session_db_for_profile", lambda *args, **kwargs: DB())
+		with patch.dict(sys.modules, {fake.__name__: fake}), patch.object(backend, "card_rows", side_effect=lambda db, rows: list(rows)):
+			value = backend.native_sessions("exact-profile", 0, 500, ("root", "tip", "middle", "tip"))
+		self.assertEqual(value["sessions"], [row])
+		self.assertEqual(len(calls), 1)
+
+	def test_backfilled_aliases_also_cover_later_organized_ids(self):
+		fake = ModuleType("hermes_cli.web_server_sessions")
+		calls = []
+		class DB:
+			def list_sessions_rich(self, **options):
+				calls.append(options)
+				return [{"id": "tip", "_lineage_root_id": "root", "_lineage_ids": ["root", "tip"]}] if options.get("id_query") else []
+			def close(self):
+				pass
+		setattr(fake, "_open_session_db_for_profile", lambda *args, **kwargs: DB())
+		with patch.dict(sys.modules, {fake.__name__: fake}), patch.object(backend, "card_rows", side_effect=lambda db, rows: list(rows)):
+			value = backend.native_sessions("exact-profile", 0, 500, ("tip", "root", "tip"))
+		self.assertEqual(len(value["sessions"]), 1)
+		self.assertEqual(len(calls), 2)
+
 	def test_native_internal_sources_excluded_from_pages_and_organized_backfill(self):
 		from hermes_state_sessions import INTERNAL_LISTING_SOURCES
 

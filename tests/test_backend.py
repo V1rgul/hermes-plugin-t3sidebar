@@ -378,7 +378,7 @@ class BackendTests(unittest.TestCase):
 				imports.update(alias.name for alias in node.names)
 			elif isinstance(node, ast.ImportFrom):
 				imports.add(node.module)
-		self.assertEqual(imports, {"json", "math", "pathlib", "re", "sqlite3", "sys", "time", "typing", "types", "fastapi", "pydantic", "hermes_constants", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.ws_legacy_fallback"})
+		self.assertEqual(imports, {"asyncio", "json", "math", "pathlib", "re", "sqlite3", "sys", "time", "typing", "types", "fastapi", "pydantic", "hermes_constants", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.ws_legacy_fallback"})
 		# Native access is read-only listing only; mutation stays in plugin-owned SQLite.
 		self.assertNotIn("import tui_gateway.server", source)
 		parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
