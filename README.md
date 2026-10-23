@@ -13,6 +13,8 @@ A T3 Code-inspired replacement session sidebar for Hermes Desktop. It opens exis
 - Project glyphs have transparent backgrounds in both cards and the new-session picker. The picker closes through the normal popover dismissal without a Cancel button. Searches with no loaded matches show “No matching sessions”, never “All caught up”.
 - Reverse actions through ordinary controls: Archive/Unarchive, Pin/Unpin and Restore to Ready. No action creates an Undo toast or button; Delete retains its confirmation modal.
 - Menu buttons stay highlighted until their popover closes. Snooze also keeps its hover controls visible and its anchor stable when the pointer leaves the card.
+- Provider icons appear only when concrete metadata identifies a supported logo. Missing, automatic or unrecognized providers have no placeholder icon or empty spacer; the logo appears when metadata arrives.
+- Search retains keyboard focus as filtering removes cards. Row-focus recovery only applies while the card actually owns focus; background list updates do not reclaim focus from search, menus or the composer.
 - The pane tab is named **t3sidebar**; the plugin ID and storage namespace remain `hermes-t3sidebar`.
 - Cards show green **Done** for backend unread, orange **Woke** after snooze expiry until the thread is opened/read, and purple **Input** for a question or approval awaiting attention. Each has a leading status icon and a bold title; Working remains blue. Project names, glyphs and ordinary ages have stronger contrast while provider/token metadata stays subdued.
 - Expanded Archives receives a larger share of list height. Categories animate open/closed without moving their headers into the scroll bodies; reduced-motion preferences disable these transitions.

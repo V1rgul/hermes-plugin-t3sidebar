@@ -525,7 +525,7 @@ const PROVIDER_PATHS = {
 function providerMark(provider) {
   const slug = typeof provider === 'string' ? provider.toLowerCase() : '';
   const path = PROVIDER_PATHS[slug === 'openai-codex' ? 'openai' : slug === 'gemini' ? 'google' : slug];
-  return path ? h('svg', { viewBox: '0 0 24 24', fill: 'currentColor', 'aria-hidden': true, 'data-provider-mark': slug }, h('path', { d: path })) : icon('HelpCircle', '?');
+  return typeof path === 'string' ? h('svg', { viewBox: '0 0 24 24', fill: 'currentColor', 'aria-hidden': true, 'data-provider-mark': slug }, h('path', { d: path })) : null;
 }
 function projectMark(project) {
   const value = typeof project?.icon === 'string' ? project.icon.trim() : '';
@@ -611,7 +611,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
     if (!hidden && !previous.hidden && previous.active !== active) void draft.refetch();
   }, [active, hidden, draft.refetch]);
   const attention = row.status === 'waiting', badge = cardStatus(row);
-  const tokens = compactTokens(row);
+  const tokens = compactTokens(row), provider = providerMark(row.provider);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
     if (event.target !== event.currentTarget) return;
@@ -623,7 +623,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
     onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
     h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${sessionTitle(row)}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
-      onClick: open, onFocus: () => onFocus(row.key), onKeyDown: keyDown,
+      onClick: open, onFocus: () => onFocus(row.key), onBlur: () => onFocus(null), onKeyDown: keyDown,
       title: [sessionTitle(row), row.cwd, row.git_branch, row.status === 'waiting' ? 'Waiting for approval or answer' : row.status].filter(Boolean).join('\n') },
       h('span', { className: 'sf-card-meta' },
         h('span', { className: 'sf-project' },
@@ -631,7 +631,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
           row.meta.pinned ? h('span', { className: 'sf-pin', 'aria-label': 'Pinned' }, icon('Pin', '♧')) : null,
           row.project?.name || !row.newSession ? h('span', { className: 'sf-project-name' }, row.project?.name || 'Project unavailable') : null),
         row.status === 'unknown' ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': 'Status unknown' }, '?') : null,
-        h('span', { className: 'sf-provider', role: 'img', 'aria-label': row.provider ? `Provider: ${row.provider}` : 'Provider unavailable', title: row.provider || 'Provider unavailable' }, providerMark(row.provider)),
+        provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, title: row.provider }, provider) : null,
         h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${tokens}` }, tokens),
         h('span', { className: 'sf-time' }, badge ? h('span', { className: 'sf-status', 'data-status': badge },
           badge === 'input' ? h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('path', { d: 'M4 4h16v12H9l-5 4V4M10 8a2 2 0 0 1 4 0c0 2-2 1-2 3M12 13v1' })) : badge !== 'working' ? icon(badge === 'done' ? 'CircleCheck' : 'AlarmClock', badge === 'done' ? '✓' : '◷') : null,
@@ -788,6 +788,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     if (target) { event.preventDefault(); const element = rowRefs.current.get(target); element?.focus({ preventScroll: true }); const body = element?.closest('.sf-section-body'); if (body) { const r = element.getBoundingClientRect(), b = body.getBoundingClientRect(); if (r.top < b.top) body.scrollTop -= b.top - r.top; else if (r.bottom > b.bottom) body.scrollTop += r.bottom - b.bottom; } }
   }, []);
   useEffect(() => {
+    // Only recover a card's own focus; blur relinquishes ownership to search, menus or the composer.
     if (focused.current && !visible.some(row => row.key === focused.current)) { focused.current = visible[0]?.key; rowRefs.current.get(focused.current)?.focus(); }
   });
   const focusRow = useCallback(id => { focused.current = id; }, []);

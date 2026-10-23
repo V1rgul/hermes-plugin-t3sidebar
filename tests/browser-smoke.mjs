@@ -54,6 +54,38 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator('[data-session-id="approval"]').waitFor();
   await page.waitForFunction(() => document.querySelector('[data-session-id="root"]')?.dataset.working === 'true');
+  await page.locator('[data-session-id="readme"] .sf-open').focus();
+  await page.getByRole('searchbox').click();
+  await page.keyboard.type('s');
+  check('first typed search character retains keyboard focus and the previous card still matches', await page.getByRole('searchbox').evaluate(el => el === document.activeElement && el.value === 's') && await page.locator('[data-session-id="readme"]').count() === 1);
+  await page.keyboard.type('i');
+  check('second typed search character filters out the previous card without losing keyboard focus', await page.getByRole('searchbox').evaluate(el => el === document.activeElement && el.value === 'si') && !await page.locator('[data-session-id="readme"]').count());
+  await page.keyboard.type('debar');
+  check('continued keystrokes remain in search instead of going to a card or composer', await page.getByRole('searchbox').evaluate(el => el === document.activeElement && el.value === 'sidebar'));
+  await page.getByRole('button', { name: 'Clear search', exact: true }).click();
+  const removedCard = await page.evaluate(() => window.hermesT3SidebarHarness.control.rows.find(row => row.id === 'readme'));
+  await page.locator('[data-session-id="readme"] .sf-open').focus();
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.rows = fixture.control.rows.filter(row => row.id !== 'readme');
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  await page.locator('[data-session-id="readme"]').waitFor({ state: 'detached' });
+  check('removal of the actually focused card still recovers keyboard focus to another visible card', await page.evaluate(() => !!document.activeElement?.closest('.sf-row') && !document.activeElement.closest('[data-closed=true]')));
+  await page.evaluate(async row => {
+    const fixture = window.hermesT3SidebarHarness; fixture.control.rows.push(row);
+    fixture.control.rows.find(row => row.id === 'design').provider = null;
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  }, removedCard);
+  await page.waitForFunction(() => !document.querySelector('[data-session-id="design"] .sf-provider'));
+  check('unknown provider has no question-mark icon or empty provider spacer', !await page.locator('[data-session-id="design"] .sf-provider').count() && await page.locator('[data-session-id="design"] .sf-token').textContent() === '1.5K');
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.rows.find(row => row.id === 'design').provider = 'openai-codex';
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  await page.locator('[data-session-id="design"] [data-provider-mark="openai-codex"]').waitFor();
+  check('provider icon appears normally when concrete provider metadata arrives', await page.locator('[data-session-id="design"] .sf-provider').getAttribute('aria-label') === 'Provider: openai-codex');
   for (const section of ['Working', 'Snoozed']) await page.getByRole('button', { name: `${section} (1)`, exact: true }).click();
   await page.reload();
   await page.locator('[data-session-id="approval"]').waitFor();

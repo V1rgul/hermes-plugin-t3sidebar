@@ -320,6 +320,35 @@ test('React search and exact project filter stay flat with keyboard navigation',
   assert.equal(document.activeElement?.closest('[data-session-id]')?.dataset.sessionId, 'legacy');
 });
 
+test('search keeps focus after its second character filters out the previously focused card', async () => {
+  await mount();
+  await act(async () => row('readme').querySelector('.sf-open').focus());
+  const search = $('input[type=search]');
+  await act(async () => search.focus());
+  await input(search, 's');
+  assert.ok(row('readme')); assert.equal(document.activeElement === search, true);
+  await input(search, 'si');
+  assert.equal(row('readme'), null);
+  assert.equal($('input[type=search]') === search, true, 'search was not remounted');
+  assert.equal(document.activeElement === search, true, 'filtering must not move focus to a card or composer');
+  await input(search, 'sidebar'); assert.equal(document.activeElement === search, true);
+  await input(search, 'no such session'); assert.equal(document.activeElement === search, true);
+  await input(search, ''); assert.equal(document.activeElement === search, true);
+});
+
+test('a background refresh cannot steal composer focus when an earlier sidebar card disappears', async () => {
+  await mount();
+  const composer = document.createElement('textarea'); document.body.append(composer);
+  try {
+    await act(async () => row('readme').querySelector('.sf-open').focus());
+    await act(async () => composer.focus());
+    mock.control.rows = mock.control.rows.filter(item => item.id !== 'readme');
+    await refresh();
+    assert.equal(row('readme'), null);
+    assert.equal(document.activeElement === composer, true);
+  } finally { composer.remove(); }
+});
+
 test('card Snooze opens time choices and confirms organization without opening the session', async () => {
   await mount();
   await click(row('design').querySelector('[aria-label="Snooze session"]'));
@@ -658,9 +687,24 @@ test('missing project/provider/tokens remain neutral even when model resembles a
   Object.assign(mock.control.rows[1], { project: null, provider: null, model: 'openai/gpt-fixture', total_tokens: null, input_tokens: null, output_tokens: null });
   await mount(); const card = row('design');
   assert.equal(card.querySelector('.sf-project-name').textContent, 'Project unavailable');
-  assert.equal(card.querySelector('.sf-provider').getAttribute('aria-label'), 'Provider unavailable');
+  assert.equal(card.querySelector('.sf-provider') === null, true);
   assert.equal(card.querySelector('.sf-token').textContent, '—');
   assert.equal(card.querySelector('[data-provider-mark]'), null);
+});
+
+test('provider icons stay absent until a supported concrete provider arrives and clear when it is lost', async () => {
+  mock.control.rows[1].provider = null;
+  await mount();
+  for (const provider of [null, '', 'auto', 'unknown', 'unsupported-provider', 'constructor', '__proto__', 'openai-codex', 'anthropic', 'gemini', null]) {
+    mock.control.rows[1].provider = provider;
+    await refresh();
+    const mark = row('design').querySelector('.sf-provider');
+    if (['openai-codex', 'anthropic', 'gemini'].includes(provider)) {
+      assert.equal(mark.getAttribute('aria-label'), `Provider: ${provider}`);
+      assert.ok(mark.querySelector(`[data-provider-mark="${provider}"]`));
+    } else assert.equal(mark === null, true, `no placeholder or spacer for ${provider}`);
+    assert.equal(row('design').querySelector('.sf-token').textContent, '1.5K');
+  }
 });
 
 test('cron excluded from recent, extra, organized, runtime and SDK fallback rows', async () => {
