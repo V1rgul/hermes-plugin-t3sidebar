@@ -215,9 +215,17 @@ class CardMetadata(unittest.TestCase):
 			self.assertIsNone(rows[1][field])
 
 	def test_authority_runtime_cron_cannot_reappear(self):
-		actor = Principal("owner", "scratch-profile", frozenset({"session:read"}), "http")
+		from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+		with closing(SessionDB(self.db_path)) as db:
+			db.create_session("human", "cli")
+		token = set_hermes_home_override(str(self.root))
+		self.addCleanup(reset_hermes_home_override, token)
+		actor = Principal("owner", str(self.root), frozenset({"session:read"}), "http")
+		authority = SimpleNamespace(profile_id=str(self.root), db=SimpleNamespace(db_path=self.db_path))
 		async def active(*args):
 			return {"sessions": [{"id": "human", "source": "cli"}, {"id": "job", "source": "cron"}]}
-		with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(object(), actor)), patch("gateway.session_active_list.active_list", active):
+		with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(authority, actor)), patch("gateway.session_active_list.active_list", active):
 			result = asyncio.run(backend.native_runtime(SimpleNamespace(state=SimpleNamespace()), "scratch-profile"))
-		self.assertEqual(result["sessions"], [{"id": "human", "source": "cli", "running_subagents": None}])
+		self.assertEqual([row["id"] for row in result["sessions"]], ["human"])
+		self.assertIsNone(result["sessions"][0]["running_subagents"])

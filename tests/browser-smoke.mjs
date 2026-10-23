@@ -610,7 +610,31 @@ try {
   check('focused composer polling still tracks draft clearing without highlighting editor', true);
   await page.evaluate(async () => {
     const fixture = window.hermesT3SidebarHarness;
+    fixture.control.live.push({ id: 'runtime-synthetic-draft', session_key: 'synthetic-runtime-draft', source: 'desktop', status: 'idle', message_count: 0,
+      cwd: '/synthetic/robot', project: { id: 'robot', name: 'Draft robot', icon: 'tools', color: '#ff6000', cwd: '/synthetic/robot' }, provider: 'anthropic' });
+    fixture.host.state.focusedStoredSessionId.set('synthetic-runtime-draft');
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  const runtimeDraft = page.locator('[data-session-id="synthetic-runtime-draft"]');
+  check('new runtime-only empty session stays hidden with no draft prompt', !await runtimeDraft.count());
+  await page.evaluate(() => { window.hermesT3SidebarHarness.control.mountedDrafts['synthetic-runtime-draft'] = 'PRIVATE unsent robot prompt'; });
+  await runtimeDraft.waitFor();
+  check('typing in a hidden empty session reveals its card through ordinary focused composer polling', await runtimeDraft.getAttribute('data-has-draft') === 'true' && await runtimeDraft.locator('.sf-row-title').textContent() === 'New session');
+  check('zero-message draft card has its exact project name, native icon/color and provider', await runtimeDraft.locator('.sf-project-name').textContent() === 'Draft robot' && await runtimeDraft.locator('[data-codicon="tools"]').count() === 1 && await runtimeDraft.locator('[data-provider-mark="anthropic"]').count() === 1 && await runtimeDraft.locator('.sf-project-icon').evaluate(el => getComputedStyle(el).color === 'rgb(255, 96, 0)'));
+  check('draft contents never enter sidebar DOM or plugin query cache', !/PRIVATE unsent robot/.test(await page.locator('.sf').innerText()) && await page.evaluate(() => !JSON.stringify(window.hermesT3SidebarHarness.queryClient.getQueryCache().getAll().map(query => query.state.data)).includes('PRIVATE unsent robot')));
+  await page.evaluate(() => { window.hermesT3SidebarHarness.control.mountedDrafts['synthetic-runtime-draft'] = ''; });
+  await runtimeDraft.waitFor({ state: 'detached' });
+  check('clearing the focused draft removes its otherwise empty card without deleting or closing the session', await page.evaluate(() => window.hermesT3SidebarHarness.control.live.some(row => row.session_key === 'synthetic-runtime-draft')));
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.live = fixture.control.live.filter(row => row.session_key !== 'synthetic-runtime-draft');
+    fixture.host.state.focusedStoredSessionId.set('design');
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
     fixture.control.rows.push({ id: 'synthetic-new-empty', title: 'Untitled session', message_count: 0, preview: '', project: null, source: 'desktop' });
+    fixture.control.drafts['synthetic-new-empty'] = 'Unsent fixture task';
     await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
   });
   const empty = page.locator('[data-session-id="synthetic-new-empty"]');

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 from gateway.config import Platform
 from gateway.session_contract import Principal, SessionRef
 from hermes_state import SessionDB
+from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 from hermes_state_runtime import RuntimeStoreError
 import gateway.session_ancillary as ancillary
 import tools.delegate_tool_registry as registry
@@ -23,6 +24,8 @@ class AuthoritySubagents(unittest.TestCase):
 		self.temp = tempfile.TemporaryDirectory(prefix="flow-subagents-")
 		self.addCleanup(self.temp.cleanup)
 		self.home = Path(self.temp.name)
+		token = set_hermes_home_override(str(self.home))
+		self.addCleanup(reset_hermes_home_override, token)
 		with closing(SessionDB(self.home / "native.sqlite3")) as db:
 			db.create_session("durable", "cli")
 		self.db = SessionDB(self.home / "native.sqlite3", read_only=True)
@@ -37,7 +40,7 @@ class AuthoritySubagents(unittest.TestCase):
 			db=self.db, runner=SimpleNamespace(session_store=store), agent=lambda ref: self.parent,
 			authorize=self.authorize)
 		self.authorizations = []
-		self.rows = [{"id": "durable", "session_key": "durable", "status": "idle", "source": "cli"}]
+		self.rows: list[dict] = [{"id": "durable", "session_key": "durable", "status": "idle", "source": "cli"}]
 		self.children = {}
 		self.start_patch(patch.object(registry, "_active_subagents", self.children))
 		self.start_patch(patch.object(registry, "_active_subagents_lock", RLock()))
@@ -128,6 +131,82 @@ class AuthoritySubagents(unittest.TestCase):
 		with patch.object(ancillary, "read", AsyncMock(side_effect=asyncio.CancelledError())):
 			with self.assertRaises(asyncio.CancelledError):
 				self.runtime()
+
+	def test_retired_ghost_is_excluded_before_ancillary_read_but_absent_draft_is_not_deleted(self):
+		import hermes_state_mutation_retirement as retirement
+
+		with closing(SessionDB(self.home / "native.sqlite3")) as db:
+			assert db._conn is not None
+			with db._conn:
+				retirement.retire_routes(db._conn, ["retired"])
+		self.rows.extend([
+			{"id": "stale-route", "session_key": "retired", "source": "desktop", "message_count": 0},
+			{"id": "draft", "session_key": "never-persisted", "source": "desktop", "message_count": 0},
+		])
+		before = (self.home / "native.sqlite3").read_bytes()
+		with patch.object(ancillary, "read", AsyncMock(return_value={"subagents": []})) as read:
+			for _ in range(2):
+				rows = self.runtime()["sessions"]
+				self.assertEqual([row["id"] for row in rows], ["durable", "draft"])
+				self.assertEqual(rows[1]["message_count"], 0)
+				self.assertIsNone(rows[1]["project"])
+				self.assertIsNone(rows[1]["provider"])
+			self.assertEqual([call.args[1].session_id for call in read.call_args_list], ["durable", "draft"] * 2)
+		self.assertEqual((self.home / "native.sqlite3").read_bytes(), before)
+
+	def test_authority_zero_message_stored_metadata_is_allowlisted_and_never_borrows_registry(self):
+		from hermes_cli import projects_db
+
+		with closing(SessionDB(self.home / "native.sqlite3")) as db:
+			db.update_session_cwd("durable", "/repo/sub")
+			assert db._conn is not None
+			with db._conn:
+				db._conn.execute("UPDATE sessions SET model_config=? WHERE id='durable'",
+					('{"provider":"openai-codex","secret":"private-config"}',))
+		with closing(projects_db.connect(self.home / "projects.db")) as conn:
+			pid = projects_db.create_project(conn, name="Native project", folders=["/repo"], icon="tools", color="#abcdef")
+		self.rows[0].update(message_count=0, preview="private-prompt", model_config={"secret": "private-config"})
+		before = {path: path.read_bytes() for path in [self.home / "native.sqlite3", self.home / "projects.db"]}
+		with patch.object(backend, "standalone_runtime", side_effect=AssertionError("no unrelated registry")), patch.object(projects_db, "connect", side_effect=AssertionError("no schema write")):
+			row = self.runtime()["sessions"][0]
+		self.assertEqual(row["message_count"], 0)
+		self.assertEqual(row["cwd"], "/repo/sub")
+		self.assertEqual(row["project"], {"id": pid, "name": "Native project", "cwd": "/repo", "icon": "tools", "color": "#abcdef", "is_home": False})
+		self.assertEqual(row["provider"], "openai-codex")
+		self.assertEqual(row["preview"], "")
+		self.assertNotIn("private-", str(row))
+		self.assertNotIn("model_config", row)
+		for path, content in before.items():
+			self.assertEqual(path.read_bytes(), content)
+
+	def test_authority_actor_store_and_native_grant_must_match_exact_home_before_read(self):
+		for mismatch in ("actor", "authority", "store", "grant", "capabilities"):
+			with self.subTest(mismatch=mismatch):
+				foreign = str(self.home / "foreign")
+				actor = self.actor
+				authority = SimpleNamespace(**vars(self.authority))
+				request = SimpleNamespace(state=SimpleNamespace())
+				if mismatch == "actor":
+					actor = Principal("owner", foreign, frozenset({"session:read"}), "http")
+				elif mismatch == "authority":
+					authority.profile_id = foreign
+				elif mismatch == "store":
+					authority.db = SimpleNamespace(db_path=Path(foreign) / "native.sqlite3")
+				elif mismatch == "grant":
+					request.state.native_http_principal = {"profile_id": foreign}
+				else:
+					actor = Principal("owner", str(self.home), frozenset({"session:control"}), "http")
+				with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(authority, actor)), patch("gateway.session_active_list.active_list", AsyncMock()) as read:
+					with self.assertRaises(backend.HTTPException) as exc:
+						asyncio.run(backend.native_runtime(request, "exact-profile"))
+					self.assertEqual(exc.exception.status_code, 403)
+					read.assert_not_called()
+
+	def test_persisted_history_is_not_erased_by_authority_runtime_zero(self):
+		with closing(SessionDB(self.home / "native.sqlite3")) as db:
+			db.append_message("durable", "user", "private-history")
+		self.rows[0]["message_count"] = 0
+		self.assertEqual(self.runtime()["sessions"][0]["message_count"], 1)
 
 	def test_active_listing_failure_does_not_return_partial_snapshot(self):
 		with patch("gateway.session_active_list.active_list", AsyncMock(side_effect=RuntimeStoreError("permission_denied"))), patch.object(ancillary, "read", AsyncMock()) as read:

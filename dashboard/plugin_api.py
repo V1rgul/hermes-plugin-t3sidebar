@@ -320,6 +320,68 @@ def standalone_subagent_count(server, row, snapshot, db, home):
 		return None
 
 
+def runtime_retired(db, row):
+	"""A missing row can be an unsaved draft; only native retirement proves deletion."""
+	from hermes_state_mutation_retirement import retired_session
+
+	return any(retired_session(db, sid) for sid in {row.get("session_key"), row.get("id")} if sid)
+
+
+def runtime_session_facts(session):
+	"""Copy only per-session display evidence, never history, prompts or credentials.
+
+	Call under the registry lock; native route/default resolution and catalog IO
+	happen later, against this copy, with ownership revalidated before publication.
+	"""
+	facts = {key: session[key] for key in ("session_key", "source", "cwd", "explicit_cwd", "profile_home") if key in session}
+	for key, fields in (("model_override", ("model", "provider")),
+		("pending_model_switch", ("display_model", "display_provider")),
+		("_metadata_mirror", ("model", "provider"))):
+		value = session.get(key)
+		facts[key] = {field: value[field] for field in fields if field in value} if isinstance(value, dict) else {}
+	from agent.voice_turn_route import session_runtime_view
+
+	agent = session_runtime_view(session.get("agent"))
+	facts["agent"] = {key: getattr(agent, key, None) for key in ("model", "provider")}
+	facts["history_known"] = isinstance(session.get("history"), list)
+	return facts
+
+
+def runtime_display_metadata(server, facts, projects):
+	item: dict = {"cwd": None, "project": None, "provider": None}
+	if "cwd" in facts:
+		cwd = facts["cwd"]
+		# Desktop's implicit launch directory is not a chosen workspace. A
+		# missing cwd is unknown; an explicit empty/null cwd is detached/Home.
+		if facts.get("source") == "desktop" and facts.get("explicit_cwd") is False:
+			cwd = None
+		if cwd is None or isinstance(cwd, str):
+			item["cwd"] = cwd if isinstance(cwd, str) and cwd.strip() else None
+			item["project"] = card_project(item["cwd"], projects)
+			item["project"].setdefault("is_home", False)
+	try:
+		# Never pass the real agent or call _session_info: that broad projection
+		# reads prompts, credentials and process-wide workspace defaults.
+		snapshot = {**facts, "agent": SimpleNamespace(**facts["agent"])}
+		item["provider"] = provider_name(server._live_session_identity(snapshot)[1])
+	except Exception:
+		# Older cores may lack the read helper. Explicit evidence is still safe;
+		# a failed default resolver is unknown, never a model-name inference.
+		candidates = (facts["pending_model_switch"].get("display_provider"),
+			facts["_metadata_mirror"].get("provider"), facts["agent"].get("provider"),
+			facts["model_override"].get("provider"))
+		# A higher-priority automatic/unknown selection masks older evidence.
+		item["provider"] = provider_name(next((value for value in candidates
+			if isinstance(value, str) and value.strip()), None))
+	return item
+
+
+def runtime_message_count(live_count, stored_count=None):
+	# Do not let a lazy resume's empty in-memory history erase persisted history.
+	counts = [value for value in (live_count, stored_count) if type(value) is int and value >= 0]
+	return max(counts) if counts else None
+
+
 def standalone_runtime(request, profile, actor):
 	# Version-sensitive standalone seam: use ONLY this process's already-loaded
 	# server and the native exact-home snapshot, never import a fresh registry or
@@ -347,21 +409,39 @@ def standalone_runtime(request, profile, actor):
 	from hermes_cli.web_server_sessions import _open_session_db_for_profile
 	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
 
-	provenance, parents = {}, {}
+	facts, parents = {}, {}
 
 	def profile_home(name):
 		resolved = server._profile_home(name)
 		# Native None means the launch home, not an unresolved profile.
 		return Path(server._launch_home()) if resolved is None else resolved
 
+	def admitted(sid, session, parent, key):
+		return (server._sessions.get(sid) is session and not session.get("_finalized")
+			and session.get("agent") is parent
+			and str(getattr(parent, "session_id", None) or session.get("session_key") or sid) == key
+			and Path(session.get("profile_home") or server._launch_home()).resolve() == home)
+
 	def live_item(sid, session, current):
-		parent = session.get("agent")
+		with server._sessions_lock:
+			parent = session.get("agent")
+			key = str(getattr(parent, "session_id", None) or session.get("session_key") or sid)
+			if not admitted(sid, session, parent, key):
+				raise HTTPException(503, "standalone_snapshot_changed")
+			captured = runtime_session_facts(session)
+		# The native mapper can read titles from SQLite. It must run outside
+		# the global registry lock, just like catalog/default-route/lineage IO.
 		item = server._session_live_item(sid, session, current)
-		provenance[(item["id"], item["session_key"])] = session.get("source")
-		parents[(item["id"], item["session_key"])] = (session, parent)
+		with server._sessions_lock:
+			if (not admitted(sid, session, parent, key) or item["session_key"] != key
+				or runtime_session_facts(session) != captured):
+				raise HTTPException(503, "standalone_snapshot_changed")
+		facts[(item["id"], key)] = captured
+		parents[(item["id"], key)] = (session, parent)
 		return item
 
-	# Adapt only the native launch sentinel and capture source while the native helper maps its exact-home snapshot; never walk another registry.
+	# Adapt only the native launch sentinel; capture metadata during the same
+	# exact-home native mapping, never walk another registry.
 	scoped_server = SimpleNamespace(_profile_home=profile_home, _launch_home=server._launch_home,
 		_sessions_lock=server._sessions_lock, _sessions=server._sessions, _session_live_item=live_item)
 	snapshot = _own_profile_read(scoped_server, {"jsonrpc": "2.0", "id": "hermes-t3sidebar-runtime",
@@ -374,23 +454,73 @@ def standalone_runtime(request, profile, actor):
 	# Persisted source facts win; native empty drafts have no DB row yet, so retain their source captured during the same exact-home native mapping.
 	db = _open_session_db_for_profile(profile, read_only=True)
 	try:
+		if Path(db.db_path).resolve().parent != home:
+			raise HTTPException(403, "profile_mismatch")
+		stored = db._get_session_rich_rows_batch({row["session_key"] for row in rows}, compact_rows=True)
+		projects = card_projects(db)
 		visible = []
 		for row in rows:
-			record = db.get_session(row["session_key"])
-			source = record.get("source") if record is not None else provenance.get((row["id"], row["session_key"]))
+			if runtime_retired(db, row):
+				continue
+			identity = (row["id"], row["session_key"])
+			captured = facts[identity]
+			record = stored.get(row["session_key"])
+			source = record.get("source") if record is not None else captured.get("source")
 			if not isinstance(source, str) or not source.strip():
 				raise HTTPException(503, "standalone_session_source_unavailable")
 			if source.strip().lower() in {*INTERNAL_LISTING_SOURCES, "cron"}:
 				continue
-			item = {k: row[k] for k in ("id", "session_key", "status", "current", "last_active", "started_at", "message_count", "model", "title")}
+			item = {k: row[k] for k in ("id", "session_key", "status", "current", "last_active", "started_at", "model", "title")}
+			item["message_count"] = runtime_message_count(
+				row.get("message_count") if captured["history_known"] else None,
+				record.get("message_count") if record else None)
+			metadata = runtime_display_metadata(server, captured, projects)
 			# Native legacy previews may contain pending prompts. Runtime needs
 			# liveness/identity only; do not return that text or any extra fields.
 			item["running_subagents"] = standalone_subagent_count(server, row,
-				parents.get((row["id"], row["session_key"])), db, home)
+				parents[identity], db, home)
+			# All catalog/default-route/lineage IO ran outside the registry lock.
+			# An object/owner/identity change cannot publish stale workspace picks.
+			session, parent = parents[identity]
+			with server._sessions_lock:
+				valid = (admitted(row["id"], session, parent, row["session_key"])
+					and runtime_session_facts(session) == captured)
+			item.update(metadata if valid else {"cwd": None, "project": None, "provider": None})
 			visible.append({**item, "preview": "", "source": source.strip().lower()})
 		return {"sessions": visible}
 	finally:
 		db.close()
+
+
+def authority_runtime_rows(db_path, rows):
+	"""Read only the admitted authority's store, never another runtime registry."""
+	from hermes_state import SessionDB
+	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+
+	with_db = SessionDB(db_path, read_only=True)
+	try:
+		rows = [row for row in rows if row.get("source") not in {*INTERNAL_LISTING_SOURCES, "cron"}
+			and not runtime_retired(with_db, row)]
+		stored = with_db._get_session_rich_rows_batch(
+			{row.get("session_key") or row["id"] for row in rows}, compact_rows=True)
+		projects = card_projects(with_db) if rows else []
+		result = []
+		for row in rows:
+			record = stored.get(row.get("session_key") or row["id"], {})
+			item = {k: v for k, v in row.items() if k in RUNTIME_FIELDS}
+			item.update(cwd=None, project=None, provider=card_provider(record.get("model_config")), preview="")
+			if "cwd" in record:
+				item["cwd"] = record["cwd"]
+				item["project"] = card_project(record["cwd"], projects)
+				item["project"].setdefault("is_home", False)
+			item["message_count"] = runtime_message_count(row.get("message_count"), record.get("message_count"))
+			result.append(item)
+		return result
+	finally:
+		with_db.close()
+
+
+RUNTIME_FIELDS = frozenset({"id", "session_key", "status", "current", "last_active", "started_at", "message_count", "model", "title", "source"})
 
 
 async def native_runtime(request, profile):
@@ -407,10 +537,23 @@ async def native_runtime(request, profile):
 		# Copy the profile context into the worker; no new registry, loop or DB
 		# authority is created. Native mapper/lineage waits must not stall HTTP.
 		return await asyncio.to_thread(standalone_runtime, request, profile, actor)
+	from hermes_constants import get_hermes_home
+
+	home = get_hermes_home().resolve()
+	db_path = Path(authority.db.db_path).resolve()
+	if (actor is None or not Path(actor.profile_id).is_absolute()
+		or Path(actor.profile_id).resolve() != home or authority.profile_id != str(home)
+		or db_path.parent != home):
+		raise HTTPException(403, "profile_mismatch")
+	native = getattr(request.state, "native_http_principal", None)
+	if native is not None and native.get("profile_id") != str(home):
+		raise HTTPException(403, "profile_mismatch")
+	if "session:read" not in actor.capabilities:
+		raise HTTPException(403, "permission_denied")
 	reader = Principal(actor.subject, actor.profile_id, frozenset({"session:read"}), actor.transport_id)
 	connection = SimpleNamespace(authority=authority, actor=reader)
 	value = await active_list(connection, None, {})
-	value["sessions"] = [row for row in value["sessions"] if row.get("source") != "cron"]
+	value["sessions"] = await asyncio.to_thread(authority_runtime_rows, db_path, value["sessions"])
 	for row in value["sessions"]:
 		row["running_subagents"] = None
 		try:

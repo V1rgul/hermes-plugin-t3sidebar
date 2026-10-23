@@ -630,7 +630,7 @@ test('empty-session runtime evidence must match the qualified row and be availab
   assert.equal(flow.buildSections(rows, { sessions: {} }, live, { query: 'New session' }).active[0].id, 'fresh');
 });
 
-test('confirmed empty cards use New session consistently and retain genuine projects and later history', async () => {
+test('draft-bearing empty cards use New session consistently and retain genuine projects and later history', async () => {
   mock.control.rows = [
     { id: 'empty', title: 'Untitled Session', message_count: 0 },
     { id: 'project-empty', message_count: 0, cwd: '/docs', project: { name: 'Docs', icon: 'tools' } },
@@ -640,6 +640,7 @@ test('confirmed empty cards use New session consistently and retain genuine proj
     { id: 'compressed', message_count: 0, _lineage_root_id: 'ancestor', _lineage_ids: ['ancestor', 'compressed'] }
   ];
   mock.control.live = []; mock.control.metadata = { version: 1, sessions: {} };
+  mock.control.drafts.empty = 'Unsent task'; mock.control.drafts['project-empty'] = 'Unsent project task';
   await mount();
   const fresh = row('empty');
   assert.equal(fresh.querySelector('.sf-row-title').textContent, 'New session');

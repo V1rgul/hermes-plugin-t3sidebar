@@ -69,11 +69,17 @@ class NativeContracts(unittest.TestCase):
 	def test_runtime_uses_native_waiting_and_read_only_principal(self):
 		# The authority/principal resolver is injected, the active_list implementation is real.
 		fake = ModuleType("hermes_cli.web_server_sessions")
-		authority = object()
-		actor = Principal("authenticated-subject", "profile-authority", frozenset({"session:read", "session:control"}), "http")
+		from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+		token = set_hermes_home_override(str(self.path))
+		self.addCleanup(reset_hermes_home_override, token)
+		db_path = self.path / "native.sqlite3"
+		with closing(SessionDB(db_path)) as db:
+			db.create_session("collision", "cli")
+		authority = SimpleNamespace(profile_id=str(self.path), db=SimpleNamespace(db_path=db_path))
+		actor = Principal("authenticated-subject", str(self.path), frozenset({"session:read", "session:control"}), "http")
 		setattr(fake, "_session_mutation_context", lambda request, profile: (authority, actor))
 		controls = SimpleNamespace(snapshot=lambda sid, generation: [{"kind": "approval"}])
-		entry = LiveEntry("collision", SimpleNamespace(controls=controls), SessionHandle(SessionRef("profile-authority", "collision"), "instance", 1, 0, 1, "running"), {"source": "cli", "title": "Owned", "started_at": 1}, [], False)
+		entry = LiveEntry("collision", SimpleNamespace(controls=controls), SessionHandle(SessionRef(str(self.path), "collision"), "instance", 1, 0, 1, "running"), {"source": "cli", "title": "Owned", "started_at": 1}, [], False)
 		async def entries(owner, principal):
 			self.assertIs(owner, authority)
 			self.assertEqual(principal.subject, actor.subject)

@@ -87,8 +87,11 @@ export function isEmptySession(row, runtimes = []) {
   return count === 0 && !runtimeCounts.some(value => value > 0) && ![row, ...runtimes].some(contentful);
 }
 export const sessionTitle = row => row.newSession ? 'New session' : row.title || 'Untitled session';
+const draftIdentity = row => JSON.stringify([durableId(row), row.resolved_id || row.id]);
+const draftKey = (scope, row) => ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, durableId(row), row.resolved_id || row.id];
+const knownWorkspace = row => typeof row.cwd === 'string' || row.project?.is_home === true;
 function matchesFilters(row, query, project) {
-  if (project !== '*' && (row._limited || (row.cwd || '') !== project)) return false;
+  if (project !== '*' && ((row._limited && !knownWorkspace(row)) || (row.cwd || '') !== project)) return false;
   if (!query) return true;
   const text = [sessionTitle(row), row.preview, row.cwd, row.git_branch, ...aliases(row)].filter(Boolean).join(' ').toLowerCase();
   return query.trim().toLowerCase().split(/\s+/).every(token => text.includes(token));
@@ -124,13 +127,25 @@ export function mergeRows(rich, extra = [], live = [], extraRich = false, archiv
       aliasIndex.get(alias).add(key);
     }
   }
-  const known = new Set([...rows.values()].flatMap(aliases));
+  const known = new Set([...rows.values()].flatMap(aliases)), byStoredId = new Map();
   for (const item of live) {
-    if (!visibleSource(item) || !item.session_key || known.has(item.session_key)) continue;
-    const row = { ...item, id: item.session_key, _limited: true, _liveOnly: true };
+    if (!visibleSource(item) || !item.session_key) continue;
+    // Ambiguous runtimes cannot lend one another workspace/provider metadata.
+    byStoredId.set(item.session_key, byStoredId.has(item.session_key) ? null : item);
+    if (known.has(item.session_key)) continue;
+    const row = { ...item, id: item.session_key, _limited: !knownWorkspace(item), _liveOnly: true };
     rows.set(row.id, row); known.add(row.id);
   }
-  return [...rows.values()];
+  return [...rows.values()].map(row => {
+    const runtime = byStoredId.get(row.id);
+    if (!runtime || !isEmptySession(row, [runtime])) return row;
+    // Unknown runtime evidence must not erase stored facts. Workspace is one
+    // projection: an explicit Home object proves detachment; null alone does not.
+    const fields = {};
+    if (knownWorkspace(runtime) && runtime.project) Object.assign(fields, { cwd: runtime.cwd ?? null, project: runtime.project });
+    if (typeof runtime.provider === 'string' && runtime.provider.trim() && !/^(auto|unknown|default|none)$/i.test(runtime.provider.trim())) fields.provider = runtime.provider;
+    return { ...row, ...fields };
+  });
 }
 export function buildSections(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown = true, query = '', project = '*' } = {}) {
   const result = Object.fromEntries(SECTIONS.map(section => [section, []]));
@@ -920,12 +935,9 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
 export function cardStatus(row, active = false) {
   return row.status === 'waiting' ? 'input' : row.status === 'working' ? 'working' : row.archived === true ? null : row.woke ? 'woke' : ((!active && row.completion?.done_token) || row.unread === true) ? 'done' : null;
 }
-function SessionRow({ row, active, hidden, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain, presetTime, snoozeDetail }) {
-  const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
-  useEffect(() => { retain?.(row.key, menuOpen || snoozeOpen); return () => retain?.(row.key, false); }, [retain, row.key, menuOpen, snoozeOpen]);
-  const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
+function useSessionDraft({ row, active, hidden, controller, scope }) {
   const draft = useQuery({
-    queryKey: ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, durableId(row), row.resolved_id || row.id],
+    queryKey: draftKey(scope, row),
     // Neutral boolean seed avoids a second card render for the common empty
     // draft result; mount still performs the same fresh, fenced composer read.
     queryFn: () => controller.hasDraft(scope, row), enabled: !hidden, retry: false, staleTime: 0, initialData: false,
@@ -938,6 +950,27 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
     // Enabling a shelf refetches its stale query automatically; avoid a second read here.
     if (!hidden && !previous.hidden && previous.active !== active) void draft.refetch();
   }, [active, hidden, draft.refetch]);
+  return draft;
+}
+function EmptySessionDraft({ row, active, controller, scope, onPresence, refreshAt }) {
+  // Keep observing even while its card is absent: otherwise typing into a
+  // hidden empty session could never make it appear in the sidebar.
+  const draft = useSessionDraft({ row, active, hidden: false, controller, scope });
+  const id = draftIdentity(row), present = draft.data === true && !draft.isError;
+  useEffect(() => { onPresence(id, present); }, [id, present, onPresence]);
+  const previousRefresh = useRef(refreshAt);
+  useEffect(() => {
+    if (previousRefresh.current !== refreshAt && !active) void draft.refetch();
+    previousRefresh.current = refreshAt;
+  }, [refreshAt, active, draft.refetch]);
+  return null;
+}
+function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain, presetTime, snoozeDetail }) {
+  const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
+  useEffect(() => { retain?.(row.key, menuOpen || snoozeOpen); return () => retain?.(row.key, false); }, [retain, row.key, menuOpen, snoozeOpen]);
+  const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
+  const draft = useSessionDraft({ row, active, hidden: hidden || row.newSession, controller, scope });
+  const hasDraft = row.newSession ? draftPresent : draft.data === true && !draft.isError;
   const attention = row.status === 'waiting', snoozed = row.section === 'snoozed', badge = snoozed ? null : cardStatus(row, active);
   const tokens = compactTokens(row), provider = providerMark(row.provider);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
@@ -947,7 +980,7 @@ function SessionRow({ row, active, hidden, controller, scope, mutate, filterProj
     else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
-  return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': draft.data === true && !draft.isError, 'data-working': row.status === 'working', 'data-unread': row.archived !== true && (!!(!active && row.completion?.done_token) || row.unread === true || row.woke) || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
+  return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': hasDraft, 'data-working': row.status === 'working', 'data-unread': row.archived !== true && (!!(!active && row.completion?.done_token) || row.unread === true || row.woke) || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
     h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${sessionTitle(row)}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
@@ -1143,6 +1176,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false), [deleteTarget, setDeleteTarget] = useState(null);
   const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [actionError, setActionError] = useState('');
+  const [emptyDrafts, setEmptyDrafts] = useState(() => new Set());
+  const onDraftPresence = useCallback((id, present) => setEmptyDrafts(previous => {
+    if (previous.has(id) === present) return previous;
+    const next = new Set(previous); if (present) next.add(id); else next.delete(id); return next;
+  }), []);
   const preferenceKey = foldStorageKey(scope);
   useEffect(() => {
     try { ctx.storage.set(preferenceKey, collapsed); } catch (_) { /* Folding still works when persistence is unavailable. */ }
@@ -1167,8 +1205,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // sharing keeps data references unchanged. Use existing polls, no extra timer.
   const now = useMemo(() => Date.now() / 1000, [sessions.dataUpdatedAt, runtime.dataUpdatedAt, metadata.dataUpdatedAt, archives.dataUpdatedAt]);
   const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, now }), [rows, metadata.data, live, runtimeKnown, now]);
+  const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession), [classified]);
   const sections = useMemo(() => Object.fromEntries(SECTIONS.map(section => [section,
-    classified[section].filter(row => matchesFilters(row, query, project))])), [classified, query, project]);
+    classified[section].filter(row => (!row.newSession || emptyDrafts.has(draftIdentity(row)) || ['waiting', 'working'].includes(row.status)) && matchesFilters(row, query, project))])), [classified, emptyDrafts, query, project]);
   const searching = !!query.trim();
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
   const sectionTrack = section => {
@@ -1258,6 +1297,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const rowRef = useCallback((id, element) => { if (element) rowRefs.current.set(id, element); else rowRefs.current.delete(id); }, []);
   const disabled = latest.current.disabled;
   const renderRow = (row, retain) => h(MemoSessionRow, { key: row.key, row, retain, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
+    draftPresent: row.newSession && emptyDrafts.has(draftIdentity(row)),
     presetTime, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
   const renderSection = section => {
@@ -1279,7 +1319,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // Toolbar/popover/error state is not a list input: retain its element tree,
   // not only the cards, so these interactions never walk thousands of rows.
   const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, activeId, activeOwner,
-    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime,
+    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, emptyDrafts,
     archives.isError, archives.error, archives.isLoading, archives.isFetching, archives.data?.has_more]);
   const total = sessions.data?.total;
   const knownTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0;
@@ -1289,7 +1329,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
   return h('aside', { className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); search.current?.focus(); }
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
-  } }, h('style', null, CSS),
+  } }, ...emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
+    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId) })), h('style', null, CSS),
     h('header', { className: 'sf-header' },
       h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) }),
         query ? h(IconButton, { label: 'Clear search', name: 'X', glyph: '×', className: 'sf-clear', onClick: () => { setQuery(''); search.current?.focus(); } }) : null),

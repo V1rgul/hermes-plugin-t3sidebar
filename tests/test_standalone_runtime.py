@@ -292,6 +292,211 @@ class StandaloneRuntime(unittest.TestCase):
 		with closing(SessionDB(self.current / "native.sqlite3", read_only=True)) as db:
 			self.assertIsNone(db.get_session("unpersisted-draft"))
 
+	def test_retired_runtime_ghosts_stay_excluded_but_absent_drafts_survive_polling(self):
+		import hermes_state_mutation_retirement as retirement
+		import hermes_state_runtime as runtime
+
+		with closing(SessionDB(self.current / "native.sqlite3")) as db:
+			db.create_session("deleted", "desktop")
+			epoch = runtime.begin_runtime_epoch(db, instance_id="scratch-owner")
+			with patch("hermes_state_common.emit_session_deleted"):
+				receipt = runtime.mutate_runtime_session(db, epoch=epoch, principal_id="scratch-human",
+					session_id="deleted", request_id="delete-once", expected_revision=0,
+					expected_generation=0, operation="delete", payload={})
+			self.assertEqual(receipt["deleted_ids"], ["deleted"])
+			self.assertTrue(retirement.retired_session(db, "deleted"))
+			self.assertIsNone(db.get_session("deleted"))
+		self.registry["ghost"] = {**self.session("deleted", None), "source": "desktop", "history": [], "agent": None}
+		self.registry["draft"] = {**self.registry["ghost"], "session_key": "never-persisted"}
+		# A runtime ID can itself be the retired identity, independent of its key.
+		self.registry["deleted"] = {**self.registry["draft"], "session_key": "another-draft"}
+		before = (self.current / "native.sqlite3").read_bytes()
+		with patch.object(retirement, "retired_session", wraps=retirement.retired_session) as retired:
+			for _ in range(2):
+				response = self.client.get("/runtime")
+				self.assertEqual(response.status_code, 200, response.text)
+				self.assertEqual({row["id"] for row in response.json()["sessions"]}, {"runtime-a", "draft"})
+			self.assertTrue(retired.called)
+		self.assertEqual((self.current / "native.sqlite3").read_bytes(), before)
+		# A same-ID tombstone in the OTHER home cannot retire this home's draft.
+		with closing(SessionDB(self.homes["other-profile"] / "native.sqlite3")) as db:
+			assert db._conn is not None
+			with db._conn:
+				retirement.retire_routes(db._conn, ["never-persisted"])
+		self.assertEqual({row["id"] for row in self.client.get("/runtime").json()["sessions"]}, {"runtime-a", "draft"})
+
+	def test_zero_message_runtime_project_and_override_are_scoped_allowlisted_and_read_only(self):
+		from hermes_cli import projects_db
+
+		with closing(projects_db.connect(self.current / "projects.db")) as conn:
+			outer = projects_db.create_project(conn, name="Outer", folders=["/repo"], icon="tools", color="#123456")
+			inner = projects_db.create_project(conn, name="Chosen project", folders=["/repo/nested", "/second"], icon="beaker", color="#abcdef")
+		with closing(projects_db.connect(self.homes["other-profile"] / "projects.db")) as conn:
+			projects_db.create_project(conn, name="Wrong profile project", folders=["/repo/nested"], icon="bug")
+		self.registry.clear()
+		self.registry["draft"] = {**self.session("unsaved", None), "source": "desktop", "history": [], "agent": None,
+			"running": False, "cwd": "/repo/nested/src", "explicit_cwd": True,
+			"model_override": {"model": "picked-model", "provider": " OpenAI-Codex ", "api_key": "private-key"},
+			"system_prompt": "private-system", "queued_prompt": "private-composer"}
+		before = {path: path.read_bytes() for path in [self.current / "native.sqlite3", self.current / "projects.db"]}
+		with patch.object(projects_db, "connect", side_effect=AssertionError("no schema writes")), patch.object(native_server, "_session_default_route", side_effect=AssertionError("override must win")), patch.object(backend, "card_projects", wraps=backend.card_projects) as catalog, patch.object(native_server, "_live_session_identity", wraps=native_server._live_session_identity) as identity:
+			row = self.runtime_row()
+			catalog.assert_called_once()
+			captured = identity.call_args.args[0]
+			self.assertNotIn("private-", str(captured))
+			self.assertEqual(set(captured["model_override"]), {"model", "provider"})
+			self.assertEqual(set(vars(captured["agent"])), {"model", "provider"})
+		self.assertEqual(row["message_count"], 0)
+		self.assertEqual(row["cwd"], "/repo/nested/src")
+		self.assertEqual(row["project"], {"id": inner, "name": "Chosen project", "icon": "beaker", "color": "#abcdef", "cwd": "/repo/nested", "is_home": False})
+		self.assertNotEqual(row["project"]["id"], outer)
+		self.assertEqual(row["provider"], "openai-codex")
+		self.assertEqual(row["preview"], "")
+		for path, content in before.items():
+			self.assertEqual(path.read_bytes(), content)
+		with closing(SessionDB(self.current / "native.sqlite3", read_only=True)) as db:
+			self.assertIsNone(db.get_session("unsaved"))
+
+	def test_native_provider_precedence_and_default_route_evidence_before_first_message(self):
+		self.registry.clear()
+		draft = {**self.session("draft", self.current), "source": "desktop", "history": [], "agent": None, "running": False}
+		self.registry["draft"] = draft
+		observed = []
+		@contextmanager
+		def profile_scope(session, *, hydrate_secrets):
+			self.assertFalse(hydrate_secrets)
+			observed.append(session["profile_home"])
+			yield
+		with patch.object(native_server, "_session_profile_runtime_scope", profile_scope), patch.object(native_server, "_resolve_startup_runtime", return_value=("native-default", None)), patch("hermes_cli.anon_auth.free_tier_route", return_value=True):
+			# Actual native precedence + native free-tier default projection.
+			self.assertEqual(self.runtime_row()["provider"], "nous")
+		self.assertEqual(observed, [str(self.current)])
+		with patch.object(native_server, "_session_default_route", side_effect=AssertionError("picked model must not borrow global default")):
+			draft["model_override"] = {"model": "anthropic/not-evidence"}
+			self.assertIsNone(self.runtime_row()["provider"])
+			draft["model_override"]["provider"] = "composer-provider"
+			self.assertEqual(self.runtime_row()["provider"], "composer-provider")
+			draft["agent"] = SimpleNamespace(session_id="draft", model="built-model", provider="agent-provider")
+			self.assertEqual(self.runtime_row()["provider"], "agent-provider")
+			draft["_metadata_mirror"] = {"model": "mirror", "provider": "mirror-provider", "system_prompt": "private-mirror"}
+			self.assertEqual(self.runtime_row()["provider"], "mirror-provider")
+			draft["pending_model_switch"] = {"display_model": "queued", "display_provider": "pending-provider", "api_key": "private-switch"}
+			self.assertEqual(self.runtime_row()["provider"], "pending-provider")
+			draft["pending_model_switch"]["display_provider"] = "auto"
+			self.assertIsNone(self.runtime_row()["provider"])
+
+	def test_missing_provider_helper_keeps_precedence_and_voice_route_preserves_session_provider(self):
+		self.registry.clear()
+		draft = {**self.session("draft", None), "source": "desktop", "history": [], "running": False,
+			"agent": SimpleNamespace(session_id="draft", model="voice-model", provider="voice-provider",
+				_voice_route_state={"snapshot": {"model": "chat-model", "provider": "chat-provider", "base_url": "private-endpoint"}}),
+			"model_override": {"model": "override", "provider": "override-provider"}}
+		self.registry["draft"] = draft
+		self.assertEqual(self.runtime_row()["provider"], "chat-provider")
+		with patch.object(native_server, "_live_session_identity", None):
+			self.assertEqual(self.runtime_row()["provider"], "chat-provider")
+			draft["pending_model_switch"] = {"display_provider": "auto"}
+			self.assertIsNone(self.runtime_row()["provider"])
+			draft["agent"], draft["model_override"], draft["pending_model_switch"] = None, {}, {}
+			self.assertIsNone(self.runtime_row()["provider"])
+
+	def test_detached_home_and_missing_workspace_remain_distinct_without_global_cwd(self):
+		self.registry.clear()
+		draft = {**self.session("draft", None), "source": "desktop", "history": [], "agent": None, "running": False,
+			"model_override": {"model": "model", "provider": "auto"}}
+		self.registry["draft"] = draft
+		# The native mapper can resolve model/title, but metadata must not ask the
+		# global completion directory or the broad _session_info scanner.
+		with patch.object(native_server, "_completion_cwd", side_effect=AssertionError("global cwd forbidden")), patch.object(native_server, "_session_info", side_effect=AssertionError("broad projection forbidden")):
+			row = self.runtime_row()
+			self.assertIsNone(row["cwd"])
+			self.assertIsNone(row["project"])
+			for cwd, explicit in [(None, True), ("", True), ("/launch-artifact", False)]:
+				draft.update(cwd=cwd, explicit_cwd=explicit)
+				row = self.runtime_row()
+				self.assertIsNone(row["cwd"])
+				self.assertTrue(row["project"]["is_home"])
+				draft.update(cwd="/chosen", explicit_cwd=True)
+				row = self.runtime_row()
+				self.assertEqual(row["project"]["name"], "chosen")
+				self.assertFalse(row["project"]["is_home"])
+
+	def test_persisted_positive_history_survives_lazy_runtime_zero_and_unknown_is_not_empty(self):
+		with closing(SessionDB(self.current / "native.sqlite3")) as db:
+			db.append_message("collision", "user", "private-stored-content")
+		self.registry["runtime-a"]["history"] = []
+		self.assertEqual(self.runtime_row()["message_count"], 1)
+		self.registry.clear()
+		self.registry["unknown"] = {"session_key": "unsaved", "source": "desktop", "agent": None}
+		self.assertIsNone(self.runtime_row()["message_count"])
+
+	def test_missing_retirement_helper_fails_unavailable_instead_of_resurrecting_unknown_ids(self):
+		import hermes_state_mutation_retirement as retirement
+
+		with patch.object(retirement, "retired_session", None):
+			response = self.client.get("/runtime")
+		self.assertEqual(response.status_code, 503, response.text)
+
+	def test_wrong_opened_store_is_refused_before_retirement_or_catalog_reads(self):
+		with patch.object(native_sessions, "_open_session_db_for_profile", side_effect=lambda *args, **kwargs: SessionDB(self.homes["other-profile"] / "native.sqlite3", read_only=True)), patch.object(backend, "runtime_retired") as retired, patch.object(backend, "card_projects") as projects:
+			response = self.client.get("/runtime")
+		self.assertEqual(response.status_code, 403, response.text)
+		retired.assert_not_called()
+		projects.assert_not_called()
+
+	def test_metadata_io_releases_lock_and_revalidates_snapshot_before_publication(self):
+		from concurrent.futures import ThreadPoolExecutor
+		from threading import Event
+
+		self.registry.clear()
+		draft = {**self.session("draft", self.current), "source": "desktop", "history": [], "agent": None, "running": False,
+			"cwd": "/chosen", "explicit_cwd": True, "model_override": {"model": "selected", "provider": "provider"}}
+		self.registry["draft"] = draft
+		actor = Principal("owner", str(self.current), frozenset({"session:read"}), "http")
+		request = SimpleNamespace(state=SimpleNamespace())
+		for seam in ("mapper", "catalog", "provider", "retirement", "stored"):
+			with self.subTest(seam=seam):
+				self.registry["draft"] = draft
+				entered, release = Event(), Event()
+				def blocked(fn):
+					def read(*args, **kwargs):
+						entered.set()
+						if not release.wait(2):
+							raise TimeoutError("test IO release")
+						return fn(*args, **kwargs)
+					return read
+				owner, name = {"mapper": (native_server, "_session_live_item"), "catalog": (backend, "card_projects"),
+					"provider": (native_server, "_live_session_identity"), "retirement": (backend, "runtime_retired"),
+					"stored": (SessionDB, "_get_session_rich_rows_batch")}[seam]
+				def run():
+					token = set_hermes_home_override(str(self.current))
+					try:
+						return backend.standalone_runtime(request, "exact-profile", actor)
+					finally:
+						reset_hermes_home_override(token)
+				with patch.object(owner, name, blocked(getattr(owner, name))), ThreadPoolExecutor(max_workers=1) as pool:
+					future = pool.submit(run)
+					try:
+						self.assertTrue(entered.wait(2))
+						acquired = native_server._sessions_lock.acquire(timeout=.2)
+						try:
+							self.assertTrue(acquired, f"{seam} IO held global sessions lock")
+							self.registry["draft"] = {**draft, "cwd": "/replacement"}
+						finally:
+							if acquired:
+								native_server._sessions_lock.release()
+					finally:
+						release.set()
+					if seam == "mapper":
+						with self.assertRaises(backend.HTTPException) as exc:
+							future.result(timeout=3)
+						self.assertEqual(exc.exception.status_code, 503)
+					else:
+						row = future.result(timeout=3)["sessions"][0]
+						self.assertIsNone(row["project"])
+						self.assertIsNone(row["provider"])
+						self.assertIsNone(row["cwd"])
+
 	def test_missing_loaded_server_does_not_import_or_infer_idle(self):
 		with patch.dict(sys.modules, {"tui_gateway.server": None}), patch.object(legacy, "_own_profile_read") as read:
 			response = self.client.get("/runtime")

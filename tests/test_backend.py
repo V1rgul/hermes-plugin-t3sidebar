@@ -392,22 +392,23 @@ class BackendTests(unittest.TestCase):
 				imports.update(alias.name for alias in node.names)
 			elif isinstance(node, ast.ImportFrom):
 				imports.add(node.module)
-		self.assertEqual(imports, {"asyncio", "importlib.util", "json", "math", "pathlib", "re", "sqlite3", "sys", "time", "typing", "types", "fastapi", "pydantic", "hermes_constants", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.ws_legacy_fallback"})
+		self.assertEqual(imports, {"asyncio", "importlib.util", "json", "math", "pathlib", "re", "sqlite3", "sys", "time", "typing", "types", "fastapi", "pydantic", "hermes_constants", "hermes_state", "hermes_state_mutation_retirement", "agent.voice_turn_route", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.ws_legacy_fallback"})
 		# Native reads remain read-only; deletion delegates to the sanctioned HTTP endpoint.
 		self.assertNotIn("import tui_gateway.server", source)
 		parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
 		registry_reads = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "server" and node.attr == "_sessions"]
-		self.assertEqual(len(registry_reads), 2)
+		self.assertEqual(len(registry_reads), 3)
 		projection = [node for node in registry_reads for parent in [parents[node]] if isinstance(parent, ast.keyword) and parent.arg == "_sessions"]
-		guard = [node for node in registry_reads for parent in [parents[node]] if isinstance(parent, ast.Attribute) and parent.attr == "get"]
-		self.assertEqual((len(projection), len(guard)), (1, 1))
-		# The only direct registry lookup validates the exact object already admitted
-		# by the native scoped snapshot; it never walks another profile's entries.
-		lookup = parents[parents[guard[0]]]
-		assert isinstance(lookup, ast.Call)
-		self.assertEqual(len(lookup.args), 1)
-		self.assertEqual(ast.dump(lookup.args[0]), ast.dump(ast.parse('row["id"]', mode="eval").body))
-		self.assertEqual(lookup.keywords, [])
+		guards = [node for node in registry_reads for parent in [parents[node]] if isinstance(parent, ast.Attribute) and parent.attr == "get"]
+		self.assertEqual((len(projection), len(guards)), (1, 2))
+		# Direct lookups only revalidate an exact object from the native scoped
+		# mapper (sid) or its ancillary projection (row id), never scan entries.
+		lookups = [lookup for guard in guards for lookup in [parents[parents[guard]]]
+			if isinstance(lookup, ast.Call)]
+		self.assertEqual(len(lookups), 2)
+		self.assertTrue(all(len(lookup.args) == 1 and lookup.keywords == [] for lookup in lookups))
+		self.assertEqual({ast.dump(lookup.args[0]) for lookup in lookups},
+			{ast.dump(ast.parse(expr, mode="eval").body) for expr in ('row["id"]', 'sid')})
 		self.assertTrue(all(isinstance(node.ctx, ast.Load) for node in registry_reads))
 		self.assertNotIn("session_mutations", source)
 		self.assertNotIn("read_only=False", source)
