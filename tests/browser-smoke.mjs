@@ -421,8 +421,20 @@ try {
   await projectMenu.getByRole('button', { name: 'Close session actions', exact: true }).click();
   await context.getByRole('button', { name: 'Close session actions', exact: true }).click();
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
+  await page.evaluate(() => {
+    window.fixtureFallbackMenus = 0;
+    window.fixtureContextCoordinator = event => {
+      const trigger = event.target.closest('[data-hermes-context-menu-trigger], [data-slot="context-menu-trigger"]');
+      if (trigger && !trigger.hasAttribute('data-zone-body')) return;
+      event.stopPropagation(); window.fixtureFallbackMenus++;
+    };
+    window.addEventListener('contextmenu', window.fixtureContextCoordinator, true);
+  });
+  // Native Button overwrites data-slot; the SDK's independent marker must survive.
+  await filters.getByRole('button', { name: 'Filter by docs', exact: true }).evaluate(el => el.setAttribute('data-slot', 'button'));
   await filters.getByRole('button', { name: 'Filter by docs', exact: true }).click({ button: 'right' });
   await projectMenu.waitFor();
+  check('filter right-click claims ownership before the native capture-phase fallback', await page.evaluate(() => window.fixtureFallbackMenus === 0));
   check('filter project right-click opens the shared menu without selecting a filter', await projectMenu.locator('.sf-menu-title').textContent() === 'docs' && await filters.getByRole('button', { name: 'All projects', exact: true }).getAttribute('aria-pressed') === 'true' && await design.count() === 1);
   await projectMenu.getByRole('button', { name: 'Project icon: law', exact: true }).click();
   await page.locator('[data-session-id="readme"] [data-codicon="law"]').waitFor();
@@ -452,6 +464,7 @@ try {
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   await filters.getByRole('button', { name: 'Filter by docs', exact: true }).click({ button: 'right' }); await projectMenu.waitFor();
   await projectMenu.getByRole('button', { name: 'Default icon', exact: true }).click();
+  await page.evaluate(() => window.removeEventListener('contextmenu', window.fixtureContextCoordinator, true));
   await openProject(); await projectMenu.getByRole('button', { name: 'No color', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('[data-session-id="design"] .sf-project-icon').style.color);
   await openProject(); await projectMenu.getByRole('button', { name: 'Project icon: rocket', exact: true }).click();

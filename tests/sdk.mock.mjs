@@ -282,8 +282,11 @@ export function Codicon({ name, size, ...props }) {
   return h('svg', { ...props, 'data-codicon': name, 'aria-hidden': true, width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor' }, h('path', { d: path }));
 }
 const PopoverContext = createContext(null);
+export function ContextMenu({ children }) { return h(React.Fragment, null, children); }
+// Public trigger marks ownership even when an asChild control has its own data-slot.
+export function ContextMenuTrigger({ children }) { return React.cloneElement(children, { 'data-slot': 'context-menu-trigger', 'data-hermes-context-menu-trigger': '' }); }
 export function Popover({ open, onOpenChange, children }) { const anchor = useRef(null); return h(PopoverContext.Provider, { value: { open, onOpenChange, anchor } }, children); }
-export function PopoverTrigger({ children }) { const value = useContext(PopoverContext); return React.cloneElement(children, { ref: node => { value.anchor.current = node; }, onClick: event => { children.props.onClick?.(event); if (!event.defaultPrevented) value.onOpenChange(!value.open); }, 'aria-expanded': value.open }); }
+export function PopoverTrigger({ children, asChild, ...props }) { const value = useContext(PopoverContext); return React.cloneElement(children, { ...props, ref: node => { value.anchor.current = node; }, onClick: event => { children.props.onClick?.(event); if (!event.defaultPrevented) value.onOpenChange(!value.open); }, 'aria-expanded': value.open }); }
 export function PopoverContent({ align, side, children, style, onKeyDown, ...props }) {
   const value = useContext(PopoverContext), content = useRef(null);
   // Native Radix repositions content by its measured size, including larger pickers.

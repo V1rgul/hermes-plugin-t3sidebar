@@ -1006,12 +1006,14 @@ function FilterProjectChoice({ choice, selected, scope, controller, filterProjec
   const [open, setOpen] = useState(false);
   const openMenu = event => { event.preventDefault(); event.stopPropagation(); controller.check(scope); setOpen(true); };
   return h(sdk.Popover, { open, onOpenChange: setOpen },
-    h(sdk.PopoverTrigger, { asChild: true }, h(sdk.Button, { type: 'button', variant: 'ghost', className: 'sf-project-choice', 'aria-label': `Filter by ${choice.name}`, 'aria-pressed': selected,
+    // Declare ownership before Hermes's window-capture fallback intercepts the gesture.
+    h(sdk.ContextMenu, null, h(sdk.ContextMenuTrigger, { asChild: true },
+      h(sdk.PopoverTrigger, { asChild: true }, h(sdk.Button, { type: 'button', variant: 'ghost', className: 'sf-project-choice', 'aria-label': `Filter by ${choice.name}`, 'aria-pressed': selected,
       // Prevent the trigger's normal toggle: left click filters; right click edits.
       onClick: event => { event.preventDefault(); filterProject(choice.cwd); }, onContextMenu: openMenu,
       onKeyDown: event => { if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') openMenu(event); } },
       h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)),
-      h('span', { className: 'sf-project-name' }, choice.name), selected ? icon('Check', '✓') : null)),
+      h('span', { className: 'sf-project-name' }, choice.name), selected ? icon('Check', '✓') : null)))),
     h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
       onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: choice, cwd: choice.cwd }, scope, controller, filterProject, close }) : null));
 }

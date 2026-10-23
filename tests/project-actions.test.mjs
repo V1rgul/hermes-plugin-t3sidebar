@@ -261,3 +261,24 @@ test('filter project edit failure remains visible and scope changes discard its 
   assert.equal(dialog(), null);
   assert.equal(document.querySelector('[aria-label="Session filters"]'), null);
 });
+
+test('filter project context menu owns its gesture before the native window capture coordinator', async () => {
+  await mountSidebar();
+  await click(button('Filter sessions'));
+  let fallbackMenus = 0;
+  // AppContextMenu resolves ownership at window capture, before React handlers.
+  const coordinator = event => {
+    const trigger = event.target.closest('[data-hermes-context-menu-trigger], [data-slot="context-menu-trigger"]');
+    if (trigger && !trigger.hasAttribute('data-zone-body')) return;
+    event.stopPropagation(); fallbackMenus++;
+  };
+  window.addEventListener('contextmenu', coordinator, true);
+  try {
+    const choice = button('Filter by docs');
+    await context(choice.querySelector('.sf-project-name'));
+    assert.equal(fallbackMenus, 0);
+    assert.ok(dialog());
+    assert.equal(dialog().querySelector('.sf-menu-title').textContent, 'docs');
+    assert.equal(button('All projects').getAttribute('aria-pressed'), 'true');
+  } finally { window.removeEventListener('contextmenu', coordinator, true); }
+});
