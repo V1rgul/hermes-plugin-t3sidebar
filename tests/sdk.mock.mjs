@@ -11,6 +11,8 @@ export let epoch = 1;
 export const gatewayActivationEpoch = () => epoch;
 export const calls = [];
 export const control = {};
+// Public PluginStorage is synchronous JSON persistence, independent of mounts.
+export const storageData = new Map();
 const clone = value => JSON.parse(JSON.stringify(value));
 const now = () => Math.floor(Date.now() / 1000);
 export const host = {
@@ -42,6 +44,19 @@ export const host = {
 };
 export function switchScope(source = 'source-b', profile = 'default') { epoch++; host.state.connectionId.set(source); host.state.profile.set(profile); host.state.gateway.set('open'); }
 export const ctx = {
+  storage: {
+    get(key, fallback) {
+      if (control.storageReadError) throw new Error('fixture storage read failed');
+      const raw = storageData.get(key);
+      if (raw === undefined) return fallback;
+      try { return JSON.parse(raw); } catch { return fallback; }
+    },
+    set(key, value) {
+      if (control.storageWriteError) throw new Error('fixture storage write failed');
+      storageData.set(key, JSON.stringify(value));
+    },
+    remove(key) { storageData.delete(key); }
+  },
   async rest(path, options) {
     calls.push(['rest', path, options]); if (control.backendMissing) throw new Error('404 backend not enabled');
     if (path === '/state') return clone(control.metadata);
@@ -85,7 +100,7 @@ export const ctx = {
   onEvent(type, listener) { control.listener = listener; return () => { control.listener = null; }; }, onDispose(fn) { control.disposers.push(fn); }
 };
 export function reset() {
-  epoch = 1; queryClient.clear(); calls.length = 0;
+  epoch = 1; queryClient.clear(); calls.length = 0; storageData.clear();
   for (const key of Object.keys(control)) delete control[key];
   Object.assign(control, { projects: [{ id: 'p_fixture', label: 'Synthetic Sidebar', path: '/projects/hermes-t3sidebar', icon: 'tools', color: 'var(--ui-accent)', repos: [{ path: '/projects/hermes-t3sidebar' }] }], contributions: [], disposers: [], rows: [
     { id: 'approval', title: 'Approval request', cwd: '/projects/hermes-t3sidebar', last_active: now() - 200 },
@@ -150,7 +165,7 @@ export function PopoverContent({ align, side, children, style, ...props }) {
 export const icons = Object.fromEntries(Object.entries({
   SquarePen: 'M12 5v14M5 12h14', Search: 'M21 21l-6-6M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0',
   Settings2: 'M4 7h16M4 17h16M8 4v6M16 14v6', List: 'M4 6h16M4 12h16M4 18h16', FolderTree: 'M4 4v16h16M4 12h10M14 9h6v6h-6',
-  ListFilter: 'M4 5h16M7 12h10M10 19h4', ChevronDown: 'M6 9l6 6 6-6', ChevronRight: 'M9 6l6 6-6 6',
+  ListFilter: 'M4 5h16M7 12h10M10 19h4', ChevronUp: 'M6 15l6-6 6 6', ChevronDown: 'M6 9l6 6 6-6', ChevronRight: 'M9 6l6 6-6 6',
   HelpCircle: 'M12 8v5M12 16v1M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0', LoaderCircle: 'M20 12a8 8 0 1 1-8-8',
   Clock: 'M12 7v5l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
   AlarmClock: 'M12 8v5l3 2M3 3l3 3M21 3l-3 3M21 13a9 9 0 1 1-18 0 9 9 0 0 1 18 0',

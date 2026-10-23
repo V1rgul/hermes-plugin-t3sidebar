@@ -4,6 +4,12 @@ import { createRoot } from 'react-dom/client';
 import { QueryClientProvider } from '@tanstack/react-query';
 import plugin, { captureScope, scopeKey } from '../desktop/plugin.js';
 import * as mock from '../tests/sdk.mock.mjs';
+// Model the public SDK's namespaced JSON storage across real browser reloads.
+mock.ctx.storage = {
+  get(key, fallback) { try { const value = localStorage.getItem(`hermes.plugin.hermes-t3sidebar.${key}`); return value === null ? fallback : JSON.parse(value); } catch (_) { return fallback; } },
+  set(key, value) { localStorage.setItem(`hermes.plugin.hermes-t3sidebar.${key}`, JSON.stringify(value)); },
+  remove(key) { localStorage.removeItem(`hermes.plugin.hermes-t3sidebar.${key}`); }
+};
 plugin.register(mock.ctx);
 window.hermesT3SidebarHarness = mock;
 function Workspace() {

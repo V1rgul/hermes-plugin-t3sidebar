@@ -181,10 +181,11 @@ test('card Snooze opens time choices and confirms organization without opening t
   assert.equal(row('approval').querySelector('[aria-label="Snooze session"]').disabled, true);
 });
 
-test('React settles and restores with Undo and readback, and settle-and-advance opens next', async () => {
+test('React archives and unarchives without Undo; archive-and-advance opens next', async () => {
   await mount(); await click(row('design').querySelector('[aria-label="Archive session"]'));
-  assert.equal(row('design').closest('section'), shelf('Archived')); assert.ok(button('Undo'));
-  await click(button('Undo')); assert.equal(row('design').closest('section'), shelf('Ready'));
+  assert.equal(row('design').closest('section'), shelf('Archived')); assert.equal(button('Undo'), undefined);
+  await click(row('design').querySelector('[aria-label="Unarchive session"]')); assert.equal(row('design').closest('section'), shelf('Ready'));
+  assert.equal(button('Undo'), undefined);
   await click(button('Actions for Sidebar layout')); await click(button('Archive and advance'));
   assert.equal(row('design').closest('section'), shelf('Archived'));
   assert.ok(mock.calls.some(c => c[0] === 'open' && c[1] === 'approval'));
@@ -244,8 +245,7 @@ test('scope change after POST prevents wrong-source readback or cache publicatio
 });
 
 test('React route switch clears undo and scoped metadata; no cross-source cache collision', async () => {
-  await mount(); await click(row('design').querySelector('[aria-label="Archive session"]')); assert.ok(button('Undo'));
-  mock.control.rows.find(row => row.id === 'design').archived = false;
+  await mount(); await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Snooze · In 1 hour')); assert.ok(button('Undo'));
   await act(async () => { mock.control.metadata = { version: 1, sessions: {} }; mock.switchScope('source-b', 'default'); }); await tick(); await tick();
   assert.equal(button('Undo'), undefined); assert.equal(row('design').closest('section'), shelf('Ready'));
   const keys = mock.queryClient.getQueryCache().getAll().map(q => q.queryKey); assert.ok(keys.some(key => key[1] === 'source-b'));
@@ -412,7 +412,8 @@ test('unsupported Add project is absent while the existing-project picker remain
   await click(button('New session')); await click(button('New session in Home'));
   assert.match(document.body.textContent, /Home creation is unavailable/);
   assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.create'), false);
-  await click(button('Cancel'));
+  assert.equal(button('Cancel'), undefined);
+  await click(button('Close session actions'));
 });
 
 test('named project uses real route create/open/cwd contract and stable key, not native newChat or a prompt', async () => {
@@ -466,7 +467,8 @@ test('archives created elsewhere appear without plugin metadata and retain rich 
   await click(row('external').querySelector('[aria-label="Unarchive session"]'));
   assert.equal(row('external').closest('section')?.getAttribute('aria-label'), 'Ready');
   assert.equal(mock.control.metadata.sessions.external.state, 'active');
-  await click(button('Undo'));
+  assert.equal(button('Undo'), undefined);
+  await click(row('external').querySelector('[aria-label="Archive session"]'));
   assert.equal(row('external').closest('section')?.getAttribute('aria-label'), 'Archived');
 });
 
@@ -530,17 +532,18 @@ test('archive readback validates backend target profile instead of display alias
   assert.deepEqual(effects[1], [route, 'session.archive', { session_id: 'root', archived: true }]);
 });
 
-test('Unarchive restores Ready/pin, Undo rearchives and preserves previous future snooze and pin', async () => {
+test('Unarchive restores Ready/pin; rearchive uses controls without Undo or reviving old snooze', async () => {
   const wake_at = Math.floor(Date.now() / 1000) + 7200;
   mock.control.metadata.sessions.archived = { state: 'snoozed', pinned: true, wake_at };
   await mount();
   await click(row('archived').querySelector('[aria-label="Unarchive session"]'));
   assert.equal(row('archived').closest('section')?.getAttribute('aria-label'), 'Pinned');
   assert.equal(mock.control.metadata.sessions.archived.state, 'active');
-  await click(button('Undo'));
+  assert.equal(button('Undo'), undefined);
+  await click(row('archived').querySelector('[aria-label="Archive session"]'));
   assert.equal(row('archived').closest('section')?.getAttribute('aria-label'), 'Archived');
-  assert.equal(mock.control.metadata.sessions.archived.state, 'snoozed');
-  assert.equal(mock.control.metadata.sessions.archived.wake_at, wake_at);
+  assert.equal(mock.control.metadata.sessions.archived.state, 'active');
+  assert.equal(mock.control.metadata.sessions.archived.wake_at, null);
   assert.equal(mock.control.metadata.sessions.archived.pinned, true);
   assert.equal(row('archived').querySelector('[aria-label="Snooze session"]').disabled, true);
 });
@@ -605,4 +608,139 @@ test('picker retry keeps the same idempotency key after failed create', async ()
   await click(button('New session in Synthetic Sidebar'));
   const creates = mock.calls.filter(c => c[0] === 'requestProfile' && c[2] === 'session.create');
   assert.equal(creates.length, 2); assert.equal(creates[0][3].idempotency_key, creates[1][3].idempotency_key);
+});
+
+async function remount() {
+  await act(async () => root.unmount()); root = null; controller.dispose(); mock.queryClient.clear();
+  await mount();
+}
+
+test('fold preferences survive remount/reconnect but remain source and profile scoped', async () => {
+  await mount();
+  for (const label of ['Working', 'Snoozed', 'Archived']) await click(button(`${label} (1)`));
+  assert.equal(mock.storageData.size, 1);
+  const [key, raw] = [...mock.storageData][0];
+  assert.deepEqual(JSON.parse(raw), { working: true, snoozed: true, archived: true });
+  await remount();
+  for (const id of ['root', 'snoozed', 'archived']) assert.equal(row(id), null);
+  await act(async () => mock.switchScope('source-a')); await tick(); await tick();
+  assert.equal(row('root'), null); assert.equal(mock.storageData.get(key), raw);
+  await act(async () => mock.switchScope('source-b')); await tick(); await tick();
+  assert.ok(row('root'));
+  await click(button('Snoozed (1)'));
+  await act(async () => mock.switchScope('source-b', 'other')); await tick(); await tick();
+  assert.ok(row('snoozed'));
+  await act(async () => mock.switchScope('source-a')); await tick(); await tick();
+  assert.equal(row('root'), null); assert.equal(row('snoozed'), null); assert.equal(row('archived'), null);
+  await click(button('Working (1)')); await remount(); assert.ok(row('root'));
+  assert.equal(row('snoozed'), null); assert.equal(row('archived'), null);
+});
+
+test('fold storage accepts only secondary-shelf booleans and tolerates read/write failures', async () => {
+  await mount(); const key = [...mock.storageData.keys()][0];
+  for (const value of [null, [], 'bad', { working: 'true', snoozed: 1, archived: true, active: true, pinned: true }]) {
+    mock.ctx.storage.set(key, value); await remount();
+    assert.ok(row('root')); assert.ok(row('snoozed')); assert.ok(row('pinned')); assert.ok(row('design'));
+    assert.equal(!!row('archived'), value?.archived !== true);
+  }
+  mock.control.storageReadError = true; mock.control.storageWriteError = true;
+  await remount(); assert.ok(row('archived'));
+  await click(button('Working (1)')); assert.equal(row('root'), null);
+  assert.equal($('[role=alert]'), null);
+});
+
+test('search temporarily expands saved folds without persisting expansion or showing catch-up', async () => {
+  await mount(); await click(button('Archived (1)'));
+  const before = [...mock.storageData];
+  await input($('input[type=search]'), 'SDK inventory'); assert.ok(row('archived'));
+  assert.doesNotMatch(document.body.textContent, /All caught up|No matching sessions/);
+  assert.deepEqual([...mock.storageData], before);
+  await input($('input[type=search]'), 'no such session');
+  assert.match(document.body.textContent, /No matching sessions/);
+  assert.doesNotMatch(document.body.textContent, /All caught up/);
+  await input($('input[type=search]'), ''); assert.equal(row('archived'), null);
+});
+
+test('project filtering counts folded matches rather than claiming none or Ready caught up', async () => {
+  mock.control.rows.find(r => r.id === 'archived').cwd = '/only-archive';
+  await mount(); await click(button('Archived (1)')); await click(button('Filter sessions'));
+  await act(async () => { $('select').value = '/only-archive'; $('select').dispatchEvent(new Event('change', { bubbles: true })); }); await tick();
+  assert.equal(all('.sf-row').length, 0);
+  assert.equal(button('Archived (1)').getAttribute('aria-expanded'), 'false');
+  assert.doesNotMatch(document.body.textContent, /No matching sessions|All caught up/);
+  await click(button('Archived (1)')); assert.ok(row('archived'));
+});
+
+test('secondary headers contain label, parenthesized filtered count, line and right-edge up/right chevron', async () => {
+  await mount();
+  for (const name of ['Working', 'Snoozed', 'Archived']) {
+    const header = shelf(name).querySelector('.sf-section-toggle');
+    assert.deepEqual([...header.children].map(node => node.className), ['sf-section-label', 'sf-count', 'sf-section-line', 'sf-section-chevron']);
+    assert.equal(header.querySelector('.sf-count').textContent, `(${shelf(name).querySelectorAll('.sf-row').length})`);
+    assert.equal(header.querySelector('.sf-section-chevron path').getAttribute('d'), 'M6 15l6-6 6 6');
+  }
+  await click(button('Working (1)'));
+  assert.equal(shelf('Working').querySelector('.sf-section-chevron path').getAttribute('d'), 'M9 6l6 6-6 6');
+  await input($('input[type=search]'), 'SDK inventory');
+  for (const name of ['Working', 'Snoozed', 'Archived']) {
+    assert.equal(shelf(name).querySelector('.sf-count').textContent, `(${shelf(name).querySelectorAll('.sf-row').length})`);
+  }
+});
+
+test('shared actions omit obsolete footer; picker omits Cancel; hidden card controls retain layout', async () => {
+  await mount();
+  const css = $('style').textContent;
+  assert.match(css, /\.sf-hover\{[^}]*display:flex[^}]*visibility:hidden/);
+  assert.match(css, /\.sf-row:hover \.sf-hover\{visibility:visible\}/);
+  assert.doesNotMatch(css, /focus-within \.sf-hover|focus-visible \.sf-hover/);
+  assert.match(css, /\.sf-project-icon\{[^}]*background:transparent/);
+  assert.match(css, /\.sf-row\[data-working=true\] \.sf-time[^}]*var\(--ui-blue,#0053fd\)/);
+  for (const label of ['Snooze session', 'Actions for Sidebar layout']) {
+    await click(row('design').querySelector(`[aria-label="${label}"]`));
+    assert.doesNotMatch($('[role=dialog]').textContent, /History kept · never stops the agent\./);
+    await click(button('Close session actions'));
+  }
+  await click(button('New session')); assert.equal(button('Cancel'), undefined);
+});
+
+test('archive and unarchive clear previous pin Undo even when native readback fails', async () => {
+  await mount();
+  for (const id of ['design', 'archived']) {
+    await click(button('Actions for Sidebar layout')); await click(button(mock.control.metadata.sessions.design?.pinned ? 'Unpin' : 'Pin'));
+    assert.ok(button('Undo'));
+    await click(row(id).querySelector(`[aria-label="${id === 'design' ? 'Archive' : 'Unarchive'} session"]`));
+    assert.equal(button('Undo'), undefined);
+  }
+  await click(button('Actions for Sidebar layout')); await click(button('Pin')); assert.ok(button('Undo'));
+  mock.control.archiveReadError = true;
+  await click(row('design').querySelector('[aria-label="Unarchive session"]'));
+  assert.equal(button('Undo'), undefined); assert.match($('[role=alert]').textContent, /unavailable/);
+});
+
+test('pin and Restore retain exact Undo behavior; archiving clears a stale snooze Undo', async () => {
+  await mount();
+  await click(button('Actions for Sidebar layout')); await click(button('Pin'));
+  assert.equal(row('design').closest('section'), shelf('Pinned'));
+  await click(button('Undo')); assert.equal(row('design').closest('section'), shelf('Ready'));
+  await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Snooze · In 1 hour'));
+  const wake = mock.control.metadata.sessions.design.wake_at;
+  await click(button('Actions for Sidebar layout')); await click(button('Restore to Ready'));
+  assert.equal(row('design').closest('section'), shelf('Ready'));
+  await click(button('Undo')); assert.equal(row('design').closest('section'), shelf('Snoozed'));
+  assert.equal(mock.control.metadata.sessions.design.wake_at, wake);
+  await click(row('readme').querySelector('[aria-label="Snooze session"]')); await click(button('Snooze · In 1 hour'));
+  assert.ok(button('Undo'));
+  await click(row('readme').querySelector('[aria-label="Archive session"]'));
+  assert.equal(button('Undo'), undefined);
+});
+
+test('unfiltered empty Ready keeps catch-up while a no-match project filter suppresses it', async () => {
+  mock.control.rows = mock.control.rows.filter(r => r.id === 'archived'); mock.control.live = [];
+  await mount(); assert.match(shelf('Ready').textContent, /All caught up/);
+  await click(button('Filter sessions'));
+  // A known project disappears from the loaded data after it has been selected.
+  await act(async () => { $('select').value = '/projects/hermes-t3sidebar'; $('select').dispatchEvent(new Event('change', { bubbles: true })); }); await tick();
+  mock.control.rows = []; await refresh();
+  assert.match(document.body.textContent, /No matching sessions/);
+  assert.doesNotMatch(document.body.textContent, /All caught up/);
 });

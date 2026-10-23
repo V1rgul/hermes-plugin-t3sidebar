@@ -5,10 +5,13 @@ A T3 Code-inspired replacement session sidebar for Hermes Desktop. It opens exis
 ## Workflow
 
 - **Ready:** headerless conversations ready for your attention. Pending approvals and questions remain visible here rather than disappearing into a background shelf.
-- **Working:** running jobs separated from attention items and visually subdued.
+- **Working:** running jobs separated from attention items and visually subdued, with blue Working text.
 - **Snoozed:** conversations put aside until a chosen time, with presets and a custom date/time.
 - **Archived:** Hermes’s real archived sessions, including conversations archived outside this plugin. Archive and Unarchive use native session archival; history is retained. The shelf is ordered by last activity, not an invented archival timestamp.
 - Headerless Pinned cards above Ready, two-line session cards, search, project filtering and hover-only Snooze/Archive actions. Category bodies scroll independently while secondary headers remain visible.
+- Working, Snoozed and Archived headings show a parenthesized session count, a divider and a right-aligned chevron. Fold preferences persist locally through Desktop restarts, separately for each source and profile; searching reveals matching folded categories temporarily.
+- Project glyphs have transparent backgrounds in both cards and the new-session picker. The picker closes through the normal popover dismissal without a Cancel button. Searches with no loaded matches show “No matching sessions”, never “All caught up”.
+- Reverse archival directly through Archive/Unarchive; these actions do not add an Undo banner. Snooze, restore and pin actions retain Undo.
 
 Archive/Unarchive calls Hermes’s profile-routed `session.archive` operation with an explicit boolean and verifies the exact stored session’s flag through the read-only companion before confirming success. Archival applies to the native compression lineage; it is not deletion, an agent-stop operation or a hidden prompt. Pins and snoozing remain plugin-owned organization metadata. Snooze eligibility is based on an absolute server timestamp: closing Desktop does not reset the deadline. Due items become Ready on the next metadata refresh; no background agent is resumed.
 

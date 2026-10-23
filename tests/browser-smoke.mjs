@@ -28,9 +28,40 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator('[data-session-id="approval"]').waitFor();
   await page.waitForFunction(() => document.querySelector('[data-session-id="root"]')?.dataset.working === 'true');
+  for (const section of ['Working', 'Snoozed']) await page.getByRole('button', { name: `${section} (1)`, exact: true }).click();
+  await page.reload();
+  await page.locator('[data-session-id="approval"]').waitFor();
+  check('folded categories survive a full browser reload', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'true' && await page.locator('[data-section="snoozed"]').getAttribute('data-closed') === 'true' && await page.locator('[data-section="archived"]').getAttribute('data-closed') === 'false');
+  await page.getByRole('searchbox').fill('Runtime classification');
+  await page.locator('[data-session-id="root"]').waitFor();
+  check('search temporarily reveals persisted folded category without catch-up text', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'false' && !await page.getByText('All caught up', { exact: true }).count());
+  await page.getByRole('searchbox').fill('');
+  await page.locator('[data-session-id="root"]').waitFor({ state: 'detached' });
+  await page.getByRole('button', { name: 'Switch mock source', exact: true }).click();
+  await page.locator('[data-session-id="root"]').waitFor();
+  check('fold preferences do not leak to another source', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'false' && await page.locator('[data-section="snoozed"]').getAttribute('data-closed') === 'false');
+  await page.getByRole('button', { name: 'Switch mock source', exact: true }).click();
+  await page.locator('[data-session-id="root"]').waitFor({ state: 'detached' });
+  check('reconnecting restores original source fold preferences', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'true' && await page.locator('[data-section="snoozed"]').getAttribute('data-closed') === 'true');
+  for (const section of ['Working', 'Snoozed']) await page.getByRole('button', { name: `${section} (1)`, exact: true }).click();
+  await page.reload();
+  await page.locator('[data-session-id="root"]').waitFor();
+  check('explicitly unfolded categories survive another browser reload', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'false' && await page.locator('[data-section="snoozed"]').getAttribute('data-closed') === 'false');
   check('all five shelves rendered', await page.locator('.sf-section').count() === 5);
   check('waiting approval remains Ready despite archival and pin metadata', await page.locator('section[aria-label="Ready"] [data-session-id="approval"]').count() === 1);
   check('Working is visually dimmed', Number(await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity)) < 1);
+  check('Working card text uses the native blue theme token', await page.locator('[data-session-id="root"] .sf-time').evaluate(el => {
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; el.append(probe);
+    const expected = getComputedStyle(probe).color, actual = getComputedStyle(el).color; probe.remove();
+    return actual === expected && actual !== getComputedStyle(el.parentElement).color;
+  }));
+  check('category headings place parenthesized counts and divider before right-aligned chevron', await page.locator('.sf-section-toggle').evaluateAll(headers => headers.every(header => {
+    const count = header.querySelector('.sf-count'), line = header.querySelector('.sf-section-line'), chevron = header.querySelector('.sf-section-chevron');
+    if (!count || !line || !chevron || !/^\(\d+\)$/.test(count.textContent)) return false;
+    const c = count.getBoundingClientRect(), l = line.getBoundingClientRect(), a = chevron.getBoundingClientRect(), h = header.getBoundingClientRect();
+    return c.right <= l.left && l.width > 30 && l.right <= a.left && a.right >= h.right - 8 && h.height === 24;
+  })));
+  check('sidebar project icons have no filled background', await page.locator('.sf-row .sf-project-icon').evaluateAll(icons => icons.every(icon => getComputedStyle(icon).backgroundColor === 'rgba(0, 0, 0, 0)')));
   await page.mouse.move(1100, 850);
   const workingOpacity = await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity);
   for (const id of ['snoozed', 'archived']) {
@@ -55,6 +86,18 @@ try {
   await page.screenshot({ path: join(screenshotDir, 'hovered.png'), fullPage: true });
   await snooze.click();
   await page.getByRole('dialog', { name: 'Snooze session', exact: true }).waitFor();
+  const snoozeDialog = page.getByRole('dialog', { name: 'Snooze session', exact: true });
+  const snoozeAnchor = design.locator('[aria-label="Snooze session"]');
+  const anchorBefore = await snoozeAnchor.evaluate(el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; });
+  const menuBefore = await snoozeDialog.boundingBox();
+  await page.mouse.move(1100, 850);
+  const anchorAfter = await snoozeAnchor.evaluate(el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; });
+  check('open Snooze retains its measurable anchor after pointer leaves sidebar', JSON.stringify(anchorAfter) === JSON.stringify(anchorBefore) && anchorAfter.width > 0 && anchorAfter.height > 0);
+  check('open Snooze stays positioned after pointer leaves sidebar', JSON.stringify(await snoozeDialog.boundingBox()) === JSON.stringify(menuBefore));
+  check('open Snooze does not force off-hover card buttons visible', !await snooze.isVisible() && !await archive.isVisible());
+  await design.hover();
+  check('Snooze does not jump when pointer re-enters sidebar', JSON.stringify(await snoozeDialog.boundingBox()) === JSON.stringify(menuBefore));
+  check('Snooze menu omits redundant history/agent footer', !await snoozeDialog.innerText().then(text => /History kept|never stops the agent/i.test(text)));
   await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('hover Snooze saves the selected time', true);
@@ -63,8 +106,8 @@ try {
   await design.hover();
   await archive.click();
   await page.locator('section[aria-label="Archived"] [data-session-id="design"]').waitFor();
-  check('hover Archive saves reversible archival', true);
-  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  check('hover Archive saves without a redundant Undo banner', !await page.getByRole('button', { name: 'Undo', exact: true }).count());
+  await design.hover(); await design.getByRole('button', { name: 'Unarchive session', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   await page.mouse.move(1100, 850);
   check('buttons hide again after pointer leaves', !await snooze.isVisible() && !await archive.isVisible());
@@ -76,9 +119,9 @@ try {
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
   await page.locator('section[aria-label="Archived"] [data-session-id="design"]').waitFor();
   check('archival and server-readback rendered', true);
-  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await design.hover(); await design.getByRole('button', { name: 'Unarchive session', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
-  check('Undo restores Active', true);
+  check('Archived list Unarchive restores Ready without an Undo banner', !await page.getByRole('button', { name: 'Undo', exact: true }).count());
   await page.locator('[data-session-id="design"]').click({ button: 'right' });
   await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
@@ -89,6 +132,9 @@ try {
   await page.getByRole('searchbox').fill('release');
   await page.waitForFunction(() => !document.querySelector('[data-session-id="design"]'));
   check('search filters real React rows', await page.locator('[data-session-id="readme"]').count() === 1);
+  await page.getByRole('searchbox').fill('no-such-synthetic-session-8917');
+  await page.getByText('No matching sessions', { exact: true }).waitFor();
+  check('no-match search never displays All caught up', !await page.getByText('All caught up', { exact: true }).count() && !await page.locator('.sf-row').count());
   await page.getByRole('searchbox').fill('');
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   await page.getByRole('combobox', { name: 'Filter by project' }).selectOption('/projects/docs');
@@ -116,12 +162,19 @@ try {
   check('native archived Unarchive remains enabled during runtime outage; Snooze disabled', !await page.locator('[data-session-id="archived"] [aria-label="Unarchive session"]').isDisabled() && await page.locator('[data-session-id="archived"] [aria-label="Snooze session"]').isDisabled());
   await page.locator('[data-session-id="archived"] [aria-label="Unarchive session"]').click();
   await page.locator('section[aria-label="Ready"] [data-session-id="archived"]').waitFor();
-  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  check('Unarchive during runtime outage has no Undo banner', !await page.getByRole('button', { name: 'Undo', exact: true }).count());
+  await page.getByRole('button', { name: 'Restore runtime status', exact: true }).click();
+  await page.locator('[data-session-id="archived"] [aria-label="Archive session"]').waitFor({ state: 'attached' });
+  await page.waitForFunction(() => !document.querySelector('[data-session-id="archived"] [aria-label="Archive session"]').disabled);
+  await page.locator('[data-session-id="archived"]').hover();
+  await page.locator('[data-session-id="archived"] [aria-label="Archive session"]').click();
   await page.locator('section[aria-label="Archived"] [data-session-id="archived"]').waitFor();
-  check('Unarchive Undo returns to native Archived even with unknown runtime', true);
+  check('native archival remains available after runtime recovers', true);
   check('no user-visible legacy settlement words', !await page.locator('body').innerText().then(text => /\bsettle(?:d)?\b/i.test(text)));
   await page.getByRole('button', { name: 'New session', exact: true }).click();
   await page.getByRole('button', { name: 'New session in Home', exact: true }).waitFor();
+  check('project picker has no Cancel button', !await page.getByRole('button', { name: 'Cancel', exact: true }).count());
+  check('project picker icons have no filled background', await page.locator('.sf-project-choice .sf-project-icon').evaluateAll(icons => icons.length > 0 && icons.every(icon => getComputedStyle(icon).backgroundColor === 'rgba(0, 0, 0, 0)')));
   check('new-session picker renders the Home glyph', await page.getByRole('button', { name: 'New session in Home', exact: true }).locator('[data-codicon="home"]').count() === 1);
   const projectChoice = page.getByRole('button', { name: 'New session in Synthetic Sidebar', exact: true });
   check('new-session picker renders the native project glyph, not its identifier', await projectChoice.locator('[data-codicon="tools"]').count() === 1 && await projectChoice.textContent() === 'Synthetic Sidebar');
@@ -151,9 +204,9 @@ try {
   const oldArchive = page.locator('[data-session-id="synthetic-page-archive-500"]');
   await oldArchive.hover(); await oldArchive.getByRole('button', { name: 'Unarchive session', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="synthetic-page-archive-500"]').waitFor();
-  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await oldArchive.hover(); await oldArchive.getByRole('button', { name: 'Archive session', exact: true }).click();
   await page.locator('section[aria-label="Archived"] [data-session-id="synthetic-page-archive-500"]').waitFor();
-  check('501st archive Unarchive and Undo re-read both shelves', true);
+  check('501st archive Unarchive and rearchive re-read both shelves without banners', !await page.getByRole('button', { name: 'Undo', exact: true }).count());
   // Reset into large labeled synthetic data, never a live history.
   await page.evaluate(() => window.hermesT3SidebarHarness.loadDenseFixtures());
   await page.locator('[data-session-id="synthetic-active-000"]').waitFor();
@@ -221,7 +274,8 @@ try {
       await page.locator('.sf-section-body').evaluateAll(els => els.forEach(el => { el.scrollTop = 0; }));
       const card = page.locator('[data-session-id="synthetic-active-000"]');
       await card.hover();
-      await card.getByRole('button', { name: 'Archive session', exact: true }).click();
+      await card.getByRole('button', { name: 'Snooze session', exact: true }).click();
+      await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
       await page.getByRole('button', { name: 'Undo', exact: true }).waitFor();
     }
     for (const height of [300, 350, 400]) {

@@ -23,6 +23,14 @@ export function relative(value, now = Date.now() / 1000) {
   return delta < -60 ? `in ${text}` : text;
 }
 export function scopeKey(scope) { return ['hermes-t3sidebar', scope.connectionId, scope.profile, scope.epoch]; }
+// Reconnect epochs fence requests, but must not reset durable UI preferences.
+const foldStorageKey = scope => JSON.stringify(['folds', scope.connectionId, scope.profile]);
+function readFolds(ctx, scope) {
+  try {
+    const value = ctx.storage.get(foldStorageKey(scope), {});
+    return Object.fromEntries(['working', 'snoozed', 'archived'].filter(key => typeof value?.[key] === 'boolean').map(key => [key, value[key]]));
+  } catch (_) { return {}; }
+}
 export function sameScope(a, b) { return a.connectionId === b.connectionId && a.profile === b.profile && a.epoch === b.epoch; }
 export function captureScope() {
   return { connectionId: host.state.connectionId.get(), profile: host.state.profile.get() || 'default', epoch: gatewayActivationEpoch() };
@@ -286,10 +294,12 @@ const CSS = `
 .sf-scroll{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column;padding:0 6px;gap:1px;--sf-body-min:clamp(0px,calc((100% - 76px)/5),56px)}
 /* Reserve three headers and four gaps before sharing the remaining minimum body space; banners can reduce this below a full card. */
 .sf-section{display:flex;flex-direction:column;flex:0 1 auto;max-height:22%;min-height:24px;overflow:hidden}.sf-section[data-populated=true][data-closed=false]{min-height:calc(24px + var(--sf-body-min))}.sf-section[data-section=active]{flex:1 1 0;max-height:none;min-height:var(--sf-body-min)}.sf-section[data-section=pinned][data-populated=true],.sf-section[data-section=active][data-populated=true]{min-height:var(--sf-body-min)}
-.sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:24px;min-height:24px;padding:3px 6px;border:0;background:transparent;color:var(--ui-text-tertiary);font-size:11px;text-align:left}.sf-count{margin-left:auto;color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums}
+.sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:24px;min-height:24px;padding:3px 6px;border:0;background:transparent;color:var(--ui-text-tertiary);font-size:11px;text-align:left}.sf-count{color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums}.sf-section-label,.sf-count,.sf-section-chevron{flex-shrink:0}.sf-section-line{flex:1;min-width:0;height:1px;background:var(--ui-stroke-secondary)}.sf-section-chevron{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px}
 .sf-row{position:relative;height:56px;flex-shrink:0;padding:0 10px;border-radius:5px}.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
 .sf-row[data-dimmed=true]{opacity:.55}.sf-row[data-dimmed=true]:hover,.sf-row[data-dimmed=true]:focus-within{opacity:1}
-.sf-open{display:flex;flex-direction:column;justify-content:center;gap:5px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:var(--ui-bg-quaternary);flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:none;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{display:flex}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
+/* Native semantic blue is independent of the user's configurable accent. */
+.sf-row[data-working=true] .sf-time{color:var(--ui-blue,#0053fd)}
+.sf-open{display:flex;flex-direction:column;justify-content:center;gap:5px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
 .sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
 .sf-undo{display:flex;align-items:center;gap:6px}.sf-undo span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
@@ -348,8 +358,7 @@ function RowActions({ row, scope, mutate, disabled, close, snoozeOnly = false })
     } }, 'Snooze until chosen time'),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null,
     waiting ? h('p', null, 'Archive and snooze require confirmed idle status. Waiting stays visible in Ready; Unarchive remains available.') : null,
-    archived ? h('p', null, 'Unarchive before snoozing this conversation.') : null,
-    h('p', null, 'History kept · never stops the agent.'));
+    archived ? h('p', null, 'Unarchive before snoozing this conversation.') : null);
 }
 function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus, onNavigate, rowRef }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
@@ -417,13 +426,16 @@ export function ProjectPicker({ controller, scope, close }) {
     ...entries.filter(project => project.name.toLowerCase().includes(query.toLowerCase())).map(project => h(sdk.Button, { key: project.id, type: 'button', variant: 'ghost', className: 'sf-project-choice', disabled: busy, 'aria-label': `New session in ${project.name}`, onClick: () => void select(project) },
       h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: project.color || undefined } }, projectMark(project)), h('span', { className: 'sf-project-name' }, project.name))),
     busy ? h('div', { role: 'status' }, 'Creating session…') : null,
-    error ? h('div', { role: 'alert' }, error) : null,
-    h(sdk.Button, { type: 'button', variant: 'ghost', onClick: close }, 'Cancel'));
+    error ? h('div', { role: 'alert' }, error) : null);
 }
 function ScopedSidebar({ ctx, controller, scope }) {
   const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [grouped, setGrouped] = useState(false), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState({}), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [undo, setUndo] = useState(null), [actionError, setActionError] = useState('');
+  const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [undo, setUndo] = useState(null), [actionError, setActionError] = useState('');
+  const preferenceKey = foldStorageKey(scope);
+  useEffect(() => {
+    try { ctx.storage.set(preferenceKey, collapsed); } catch (_) { /* Folding still works when persistence is unavailable. */ }
+  }, [ctx, preferenceKey, collapsed]);
   const search = useRef(null), rowRefs = useRef(new Map()), focused = useRef(null), latest = useRef(null);
   const key = scopeKey(scope);
   const mutation = useMutation({ mutationFn: async ({ id, payload }) => controller.mutate(scope, id, payload) });
@@ -438,6 +450,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const runtimeKnown = !!runtime.data && !runtime.isError;
   const sections = buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, query, project });
   const searching = !!query.trim();
+  const filtering = searching || project !== '*';
+  const hasMatches = SECTIONS.some(section => sections[section].length > 0);
   const visible = SECTIONS.flatMap(section => collapsed[section] && !searching && !(section === 'active' && sections.active.some(row => row.status === 'waiting' || row.status === 'unknown')) ? [] : sections[section]);
   const projects = [...new Set(rows.filter(row => !row._limited).map(row => row.cwd || ''))].sort();
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
@@ -447,13 +461,14 @@ function ScopedSidebar({ ctx, controller, scope }) {
       controller.check(scope);
       if (latest.current.disabled) throw new Error('hermes-t3sidebar backend unavailable or another change is saving.');
       const { advance, ...payload } = input;
+      const native = payload.action === 'archive' || payload.action === 'unarchive';
+      if (native) setUndo(null);
       const before = latest.current.metadata.sessions[row.key] || { state: 'active', pinned: false };
       if (!isUndo && ['archive', 'snooze'].includes(payload.action) && row.status !== 'idle') throw new Error('Archive and snooze require confirmed idle status.');
       if (row._liveOnly) throw new Error('This session has no confirmed stored history yet.');
       setActionError('');
-      const result = await mutation.mutateAsync({ id: row.key, payload }); controller.check(scope);
-      const native = payload.action === 'archive' || payload.action === 'unarchive';
-      if (!isUndo) setUndo({ row, payload: native ? { action: result.before ? 'archive' : 'unarchive', restoreMetadata: before } : inverseAction(payload.action, before), label: payload.action === 'archive' ? 'Archived' : payload.action === 'unarchive' ? 'Unarchived' : payload.action === 'snooze' ? 'Snoozed' : payload.action === 'restore' ? 'Restored' : payload.action === 'pin' ? 'Pinned' : 'Unpinned' });
+      await mutation.mutateAsync({ id: row.key, payload }); controller.check(scope);
+      if (!isUndo && !native) setUndo({ row, payload: inverseAction(payload.action, before), label: payload.action === 'snooze' ? 'Snoozed' : payload.action === 'restore' ? 'Restored' : payload.action === 'pin' ? 'Pinned' : 'Unpinned' });
       else setUndo(null);
       if (advance) {
         const next = [...latest.current.sections.active, ...latest.current.sections.pinned].find(item => item.key !== row.key && latest.current.visible.some(visible => visible.key === item.key));
@@ -485,9 +500,12 @@ function ScopedSidebar({ ctx, controller, scope }) {
     if (section === 'pinned' && !entries.length) return null;
     return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed },
       !headerless ? h('button', { type: 'button', className: 'sf-section-toggle', 'aria-expanded': !closed, 'aria-label': `${LABELS[section]} (${entries.length})`,
-        onClick: () => setCollapsed(previous => ({ ...previous, [section]: !previous[section] })) }, icon(closed ? 'ChevronRight' : 'ChevronDown', closed ? '›' : '⌄'), LABELS[section], h('span', { className: 'sf-count' }, entries.length)) : null,
+        onClick: () => setCollapsed(previous => ({ ...previous, [section]: !previous[section] })) },
+        h('span', { className: 'sf-section-label' }, LABELS[section]), h('span', { className: 'sf-count' }, `(${entries.length})`),
+        h('span', { className: 'sf-section-line', 'aria-hidden': true }),
+        h('span', { className: 'sf-section-chevron', 'aria-hidden': true }, icon(closed ? 'ChevronRight' : 'ChevronUp', closed ? '›' : '⌃'))) : null,
       !closed ? h('div', { className: 'sf-section-body', 'aria-label': `${section === 'active' ? 'Ready' : LABELS[section]} sessions`, tabIndex: -1 },
-        section === 'archived' && archives.isError ? h('div', { className: 'sf-empty', role: 'alert' }, `Archives unavailable: ${archives.error.message}`) : entries.length ? items : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : section === 'archived' && archives.isLoading ? 'Loading archives…' : 'No sessions'),
+        section === 'archived' && archives.isError ? h('div', { className: 'sf-empty', role: 'alert' }, `Archives unavailable: ${archives.error.message}`) : entries.length ? items : section === 'active' && filtering ? null : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : section === 'archived' && archives.isLoading ? 'Loading archives…' : 'No sessions'),
         section === 'archived' && !archives.isError && archives.data?.has_more ? h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: archives.isFetching, onClick: () => setArchiveLimit(previous => previous + 1) }, 'Browse older archives') : null) : null);
 
   };
@@ -519,7 +537,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,
     h('div', { className: 'sf-scroll' }, ...SECTIONS.map(renderSection),
-      !visible.length && (query || project !== '*') ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null),
+      !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,
     undo ? h('div', { className: 'sf-note sf-undo', role: 'status' }, h('span', null, `${undo.label} · ${undo.row.title || 'session'}`), h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: latest.current.disabled, onClick: () => void mutate(undo.row, undo.payload, true) }, 'Undo'), h(IconButton, { label: 'Dismiss undo', name: 'X', glyph: '×', onClick: () => setUndo(null) })) : null,
