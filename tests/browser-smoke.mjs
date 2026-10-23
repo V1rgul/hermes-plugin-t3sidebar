@@ -140,9 +140,7 @@ try {
     const open = calls.find(c => c[0] === 'open' && c[1] === 'fixture-created');
     return create[3].cwd_explicit && !create[3].close_on_disconnect && open[2].awaitHydration && open[2].expectHistory === false && !calls.some(c => c[0] === 'new' || /prompt/.test(c[2] || ''));
   }));
-  await page.getByRole('button', { name: 'Add project', exact: true }).click();
-  await page.getByRole('alert').filter({ hasText: 'Adding projects is unavailable' }).waitFor();
-  check('folder plus explicitly explains unavailable public action', true);
+  check('unsupported Add project button is absent', await page.getByRole('button', { name: 'Add project', exact: true }).count() === 0);
   // Exercise the real Archived pagination control without expanding active history.
   await page.evaluate(() => window.hermesT3SidebarHarness.loadArchivePaginationFixtures());
   await page.locator('[data-session-id="synthetic-page-active-0"]').waitFor();
@@ -173,7 +171,7 @@ try {
     check(`${height}px: Pinned before headerless Ready, secondary headings fixed and visible`, layout.sections.map(s => s.name).join(',') === 'pinned,active,working,snoozed,archived' && layout.sections.slice(0, 2).every(s => !s.header) && layout.sections.slice(2).every(s => s.header.height === 24 && s.header.top >= layout.list.top && s.header.bottom <= layout.root.bottom && s.body.top >= s.header.bottom));
     check(`${height}px: no whole-list scrolling; all five bodies constrained`, layout.overflow === 'hidden' && layout.listScrollHeight <= layout.listHeight + 1 && layout.sections.every(s => s.body.height >= 56 && s.body.bottom <= layout.list.bottom + 1 && s.scrollHeight > s.body.height));
     check(`${height}px: priority shelf bodies receive space before Ready`, layout.sections.filter(s => s.name !== 'active').every(s => s.rect.height >= 56) && layout.sections.find(s => s.name === 'active').rect.height >= 56);
-    check(`${height}px: toolbar single line and Search left of 3 right actions`, layout.toolbar.length === 4 && layout.toolbar.every(r => Math.abs((r.top + r.bottom) / 2 - (layout.toolbar[0].top + layout.toolbar[0].bottom) / 2) < 2) && layout.toolbar.every((r, i, arr) => !i || arr[i-1].right <= r.left));
+    check(`${height}px: toolbar single line and Search left of Filter and New session`, layout.toolbar.length === 3 && layout.toolbar.every(r => Math.abs((r.top + r.bottom) / 2 - (layout.toolbar[0].top + layout.toolbar[0].bottom) / 2) < 2) && layout.toolbar.every((r, i, arr) => !i || arr[i-1].right <= r.left));
     // Scroll each body in turn: every other category's scrollTop AND geometry stay fixed.
     for (const section of ['pinned', 'active', 'working', 'snoozed', 'archived']) {
       await page.locator('.sf-section-body').evaluateAll(els => els.forEach(el => { el.scrollTop = 0; }));
@@ -211,8 +209,12 @@ try {
   for (const banner of ['none', 'undo', 'undo-error']) {
     const withUndo = banner !== 'none';
     if (banner === 'undo-error') {
-      await page.getByRole('button', { name: 'Add project', exact: true }).click();
-      await page.getByRole('alert').filter({ hasText: 'Adding projects is unavailable' }).waitFor();
+      await page.evaluate(() => { window.hermesT3SidebarHarness.control.archiveError = true; });
+      const card = page.locator('[data-session-id="synthetic-active-001"]');
+      await card.hover();
+      await card.getByRole('button', { name: 'Archive session', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: 'fixture archive RPC unavailable' }).waitFor();
+      await page.evaluate(() => { window.hermesT3SidebarHarness.control.archiveError = false; });
     }
     if (banner === 'undo') {
       await page.locator('.harness-sidebar').evaluate(el => { el.style.height = '400px'; });

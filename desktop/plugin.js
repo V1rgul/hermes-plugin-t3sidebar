@@ -249,10 +249,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       });
       return { projects: [home, ...projects] };
     },
-    async openProjects(scope) {
-      await routeFor(scope);
-      throw new Error('Adding projects is unavailable through the public Desktop plugin API. Use native project management.');
-    },
+
     async newChat(scope, project, idempotencyKey) {
       const route = await routeFor(scope); check(scope);
       if (project === undefined) return env.host.newChat(route); // Preserve archive-and-advance fallback.
@@ -317,7 +314,7 @@ function projectMark(project) {
   return sdk.Codicon ? h(sdk.Codicon, { name, size: 13 }) : icon(name === 'home' ? 'House' : 'Folder', '◇');
 }
 function icon(name, fallback) {
-  const local = { Archive: 'M3 3h18v4H3zM5 7v14h14V7M10 11h4', ArchiveRestore: 'M3 3h18v4H3zM5 7v14h14V7M12 17v-7M9 13l3-3 3 3', FolderPlus: 'M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2M12 10v7M8.5 13.5h7', SquarePen: 'M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7M10 14l1-4 9-9 3 3-9 9-4 1', ListFilter: 'M4 6h16M7 12h10M10 18h4' }[name];
+  const local = { Archive: 'M3 3h18v4H3zM5 7v14h14V7M10 11h4', ArchiveRestore: 'M3 3h18v4H3zM5 7v14h14V7M12 17v-7M9 13l3-3 3 3', SquarePen: 'M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7M10 14l1-4 9-9 3 3-9 9-4 1', ListFilter: 'M4 6h16M7 12h10M10 18h4' }[name];
   if (local) return h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: local }));
   const Component = sdk.icons?.[name]; return Component ? h(Component, { size: 14, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, fallback);
 }
@@ -511,7 +508,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
           h('select', { 'aria-label': 'Filter by project', value: project, onChange: event => setProject(event.target.value) }, h('option', { value: '*' }, 'All projects'), ...projects.map(cwd => h('option', { key: cwd, value: cwd }, cwd || 'No project'))),
           h(sdk.Button, { variant: 'ghost', 'aria-label': grouped ? 'Use flat list' : 'Group by project', 'aria-pressed': grouped, onClick: () => setGrouped(value => !value) }, grouped ? 'Use flat list' : 'Group by project'),
           h(sdk.Button, { variant: 'ghost', onClick: refresh, 'aria-label': 'Refresh sessions' }, 'Refresh sessions')))),
-      h(IconButton, { label: 'Add project', name: 'FolderPlus', glyph: '+', onClick: () => { void Promise.resolve().then(() => controller.openProjects(scope)).catch(error => { if (sameScope(scope, captureScope())) setActionError(error.message); }); } }),
+
       h(sdk.Popover, { open: pickerOpen, onOpenChange: setPickerOpen },
         h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'New session', name: 'SquarePen', glyph: '+' })),
         h(sdk.PopoverContent, { align: 'end', 'aria-label': 'New session project' }, pickerOpen ? h(ProjectPicker, { controller, scope, close: () => setPickerOpen(false) }) : null))),

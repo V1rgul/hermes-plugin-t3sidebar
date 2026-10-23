@@ -406,12 +406,13 @@ test('new-session picker renders native project icons and Home without printing 
   assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.create'), false);
 });
 
-test('project picker explicitly rejects Home without creating a session and Add project explains unavailable', async () => {
-  await mount(); await click(button('New session')); await click(button('New session in Home'));
+test('unsupported Add project is absent while the existing-project picker remains available', async () => {
+  await mount();
+  assert.equal(Boolean(button('Add project')), false);
+  await click(button('New session')); await click(button('New session in Home'));
   assert.match(document.body.textContent, /Home creation is unavailable/);
   assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.create'), false);
-  await click(button('Cancel')); await click(button('Add project'));
-  assert.match(document.body.textContent, /Adding projects is unavailable/);
+  await click(button('Cancel'));
 });
 
 test('named project uses real route create/open/cwd contract and stable key, not native newChat or a prompt', async () => {
