@@ -569,6 +569,19 @@ try {
   }
 
   for (const count of [0, 1, 2]) {
+    await page.locator('.harness-sidebar').evaluate(el => { el.style.height = '1800px'; });
+    await page.evaluate(async count => {
+      const fixture = window.hermesT3SidebarHarness; fixture.loadDenseFixtures();
+      fixture.control.rows = fixture.control.rows.filter(row => !row.id.startsWith('synthetic-pinned-') || Number(row.id.slice(-3)) < count);
+      fixture.switchScope(`sparse-pinned-${count}`);
+      await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+    }, count);
+    await page.waitForFunction(count => (document.querySelector('[data-section="pinned"]')?.querySelectorAll('.sf-row').length || 0) === count, count);
+    if (!count) check('empty Pinned reserves no grid space and Ready starts at the top', !await page.locator('[data-section="pinned"]').count() && await page.locator('.sf-scroll').evaluate(list => Math.abs(list.getBoundingClientRect().top - list.querySelector('[data-section="active"]').getBoundingClientRect().top) <= 1));
+    else check(`Pinned with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="pinned"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - count * 56) <= 1 && Math.abs(el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().bottom - 1) <= 1, count));
+  }
+
+  for (const count of [0, 1, 2]) {
     await page.locator('.harness-sidebar').evaluate(el => { el.style.height = '1000px'; });
     await page.evaluate(async count => {
       const fixture = window.hermesT3SidebarHarness; fixture.loadDenseFixtures();

@@ -805,6 +805,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
   const sectionTrack = section => {
     const count = sections[section].length;
+    // Pinned has no header: fit its cards instead of reserving fractional blank space.
+    if (section === 'pinned') return count ? `minmax(0,clamp(0px,18%,${count * 56}px))` : '0px';
     // Fit Working to its cards, capped by pane space so long lists still scroll.
     if (section === 'working') return !isClosed(section) && count ? `minmax(25px,clamp(25px,18%,${24 + count * 56}px))` : 'minmax(24px,24px)';
     if (isClosed(section)) return 'minmax(24px,0fr)';
@@ -944,7 +946,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     metadata.isError ? h(Note, { error: true }, `hermes-t3sidebar backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback. `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,
-    h('div', { className: 'sf-scroll', style: { gridTemplateRows: `minmax(0,${sections.pinned.length ? .65 : 0}fr) minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(sectionTrack).join(' ')}` } }, ...renderedSections,
+    h('div', { className: 'sf-scroll', style: { gridTemplateRows: `${sectionTrack('pinned')} minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(sectionTrack).join(' ')}` } }, ...renderedSections,
       !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,
