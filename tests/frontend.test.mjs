@@ -367,7 +367,7 @@ test('a pinned working card keeps its Working status, stays undimmed and follows
   mock.control.metadata.sessions.root = { state: 'snoozed', pinned: true, wake_at: Math.floor(Date.now() / 1000) + 3600 };
   await refresh(); assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Snoozed');
   assert.equal(row('root').querySelector('[data-status=working]'), null);
-  assert.equal(row('root').querySelector('.sf-snooze-time')?.textContent, '1h left');
+  assert.equal(row('root').querySelector('.sf-snooze-time')?.textContent, '1h');
   mock.control.metadata.sessions.root = { state: 'active', pinned: true };
   await refresh(); assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Pinned');
   await click(button('Actions for Runtime classification')); await click(button('Unpin'));
@@ -423,10 +423,11 @@ test('card Snooze opens time choices and confirms organization without opening t
   assert.equal(row('approval').querySelector('[aria-label="Snooze session"]').disabled, false);
 });
 
-test('snooze countdown rounds up to minutes and formats compact hours/days without past durations', () => {
-  for (const [seconds, expected] of [[-1, '0m left'], [0, '0m left'], [1, '1m left'], [60, '1m left'], [61, '2m left'],
-    [3600, '1h left'], [5400, '1h 30m left'], [86400, '1d left'], [93600, '1d 2h left']]) {
+test('snooze countdown rounds to one whole unit with no left suffix or past durations', () => {
+  for (const [seconds, expected] of [[-1, '0m'], [0, '0m'], [1, '1m'], [60, '1m'], [61, '1m'], [89, '1m'], [90, '2m'],
+    [3599, '1h'], [3600, '1h'], [5399, '1h'], [5400, '2h'], [86399, '1d'], [86400, '1d'], [93600, '1d'], [129600, '2d'], [2 * 86400 + 16 * 3600, '3d']]) {
     assert.equal(flow.snoozeRemaining(100 + seconds, 100), expected);
+    assert.match(expected, /^\d+[mhd]$/);
   }
 });
 
@@ -447,7 +448,11 @@ for (const status of ['working', 'starting', 'running children', 'waiting', 'unk
   assert.equal(mock.control.metadata.sessions.root.state, 'snoozed');
   if (!['waiting', 'unknown'].includes(status)) {
     assert.equal(row('root').closest('section'), shelf('Snoozed'));
-    assert.equal(row('root').querySelector('.sf-snooze-time').textContent, '1h left');
+    const countdown = row('root').querySelector('.sf-snooze-time');
+    assert.equal(countdown.textContent, '1h');
+    assert.equal(countdown.firstElementChild.tagName.toLowerCase(), 'svg');
+    assert.equal(countdown.firstElementChild.getAttribute('aria-hidden'), 'true');
+    assert.equal(countdown.lastElementChild.className, 'sf-snooze-duration');
     assert.equal(row('root').querySelector('.sf-status'), null, 'countdown replaces Working or attention badge on the Snoozed shelf');
   } else {
     assert.equal(row('root').closest('section'), shelf('Ready'), 'input/unknown safety remains visible');

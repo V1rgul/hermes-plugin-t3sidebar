@@ -241,7 +241,12 @@ try {
   check('snoozed worker shows remaining time in non-bold theme blue instead of Working or age', await worker.locator('.sf-time').evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; el.append(probe);
     const blue = getComputedStyle(probe).color; probe.remove();
-    return el.textContent === '1h left' && !el.querySelector('.sf-status') && getComputedStyle(el).color === blue && getComputedStyle(el).fontWeight === '400' && getComputedStyle(el).visibility === 'visible';
+    return el.textContent === '1h' && !el.querySelector('.sf-status') && getComputedStyle(el).color === blue && getComputedStyle(el).fontWeight === '400' && getComputedStyle(el).visibility === 'visible';
+  }));
+  check('blue snooze icon is left of the rounded duration, with no left suffix', await worker.locator('.sf-snooze-time').evaluate(el => {
+    const icon = el.querySelector('svg'), duration = el.querySelector('.sf-snooze-duration');
+    const i = icon.getBoundingClientRect(), d = duration.getBoundingClientRect(), style = getComputedStyle(el);
+    return el.firstElementChild === icon && icon.getAttribute('aria-hidden') === 'true' && getComputedStyle(icon).color === style.color && getComputedStyle(icon).stroke === style.color && getComputedStyle(duration).color === style.color && i.width === 13 && i.right < d.left && Math.abs(i.top + i.height / 2 - d.top - d.height / 2) < 1 && /^\d+[mhd]$/.test(duration.textContent);
   }));
   check('session-card project icon/name gap is compact at 4px', await worker.locator('.sf-project').evaluate(el => getComputedStyle(el).columnGap === '4px'));
   check('snooze does not stop or alter the live worker', await page.evaluate(() => window.hermesT3SidebarHarness.control.live.find(item => item.id === 'runtime-worker').status === 'working'));
