@@ -1,5 +1,5 @@
 // TEST/HARNESS ONLY. All session data and backend responses are synthetic fixtures.
-import React, { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 export { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { QueryClient } from '@tanstack/react-query';
@@ -283,11 +283,24 @@ export function Codicon({ name, size, ...props }) {
 }
 const PopoverContext = createContext(null);
 export function Popover({ open, onOpenChange, children }) { const anchor = useRef(null); return h(PopoverContext.Provider, { value: { open, onOpenChange, anchor } }, children); }
-export function PopoverTrigger({ children }) { const value = useContext(PopoverContext); return React.cloneElement(children, { ref: node => { value.anchor.current = node; }, onClick: () => value.onOpenChange(!value.open), 'aria-expanded': value.open }); }
+export function PopoverTrigger({ children }) { const value = useContext(PopoverContext); return React.cloneElement(children, { ref: node => { value.anchor.current = node; }, onClick: event => { children.props.onClick?.(event); if (!event.defaultPrevented) value.onOpenChange(!value.open); }, 'aria-expanded': value.open }); }
 export function PopoverContent({ align, side, children, style, onKeyDown, ...props }) {
-  const value = useContext(PopoverContext);
+  const value = useContext(PopoverContext), content = useRef(null);
+  // Native Radix repositions content by its measured size, including larger pickers.
+  useLayoutEffect(() => {
+    if (!value.open || style?.width !== 'max-content') return;
+    const reposition = () => {
+      const node = content.current;
+      if (!node) return;
+      const box = node.getBoundingClientRect();
+      node.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - box.width - 8))}px`;
+      node.style.top = `${Math.max(8, Math.min(box.top, window.innerHeight - box.height - 8))}px`;
+    };
+    reposition(); window.addEventListener('resize', reposition);
+    return () => window.removeEventListener('resize', reposition);
+  });
   const rect = value.anchor.current?.getBoundingClientRect();
-  return value.open ? createPortal(h('div', { ...props, style: { ...style, position: 'fixed', left: Math.min(rect?.right || 280, window.innerWidth - 300) + 6, top: Math.max(10, Math.min(rect?.top || 120, window.innerHeight - 440)) }, role: 'dialog', className: 'mock-popover', onKeyDown: event => { onKeyDown?.(event); if (event.key === 'Escape' && !event.defaultPrevented) value.onOpenChange(false); } }, children,
+  return value.open ? createPortal(h('div', { ...props, ref: content, style: { ...style, ...(style?.width === 'max-content' ? { maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' } : {}), position: 'fixed', left: Math.max(8, Math.min((rect?.right || 280) + 6, window.innerWidth - (style?.width === 'max-content' ? Math.min(510, window.innerWidth - 16) : 300) - 8)), top: Math.max(10, Math.min(rect?.top || 120, window.innerHeight - 440)) }, role: 'dialog', className: 'mock-popover', onKeyDown: event => { onKeyDown?.(event); if (event.key === 'Escape' && !event.defaultPrevented) value.onOpenChange(false); } }, children,
     h('button', { type: 'button', 'aria-label': 'Close session actions', onClick: () => value.onOpenChange(false) }, 'Close')), document.body) : null;
 }
 export const icons = Object.fromEntries(Object.entries({

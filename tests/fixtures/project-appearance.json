@@ -1,0 +1,302 @@
+{
+  "iconGroups": [
+    {
+      "label": "Projects & workspaces",
+      "icons": [
+        "folder-library",
+        "folder",
+        "folder-opened",
+        "repo",
+        "project",
+        "home",
+        "organization",
+        "briefcase"
+      ]
+    },
+    {
+      "label": "Code & development",
+      "icons": [
+        "code",
+        "terminal",
+        "file-code",
+        "git-branch",
+        "git-merge",
+        "extensions",
+        "bug",
+        "json"
+      ]
+    },
+    {
+      "label": "Hardware & robotics",
+      "icons": [
+        "circuit-board",
+        "chip",
+        "tools",
+        "wrench",
+        "settings-gear",
+        "device-desktop",
+        "device-mobile",
+        "robot"
+      ]
+    },
+    {
+      "label": "Infrastructure & networks",
+      "icons": [
+        "server",
+        "server-process",
+        "cloud",
+        "database",
+        "globe",
+        "broadcast",
+        "remote",
+        "plug"
+      ]
+    },
+    {
+      "label": "Research & analysis",
+      "icons": [
+        "beaker",
+        "telescope",
+        "lightbulb",
+        "search",
+        "inspect",
+        "graph",
+        "pulse",
+        "symbol-ruler"
+      ]
+    },
+    {
+      "label": "Documents & legal",
+      "icons": [
+        "book",
+        "library",
+        "file-text",
+        "file-pdf",
+        "notebook",
+        "note",
+        "law",
+        "shield"
+      ]
+    },
+    {
+      "label": "Planning & business",
+      "icons": [
+        "calendar",
+        "checklist",
+        "target",
+        "milestone",
+        "dashboard",
+        "credit-card",
+        "key",
+        "package"
+      ]
+    },
+    {
+      "label": "Personal & creative",
+      "icons": [
+        "rocket",
+        "flame",
+        "star-full",
+        "heart",
+        "zap",
+        "gift",
+        "coffee",
+        "music"
+      ]
+    }
+  ],
+  "colors": [
+    {
+      "name": "Red",
+      "value": "#fc2b3b"
+    },
+    {
+      "name": "Vermilion",
+      "value": "#f95812"
+    },
+    {
+      "name": "Orange",
+      "value": "#e08614"
+    },
+    {
+      "name": "Amber",
+      "value": "#e5b81b"
+    },
+    {
+      "name": "Gold",
+      "value": "#e1e020"
+    },
+    {
+      "name": "Citron",
+      "value": "#bbe51f"
+    },
+    {
+      "name": "Lime",
+      "value": "#78c318"
+    },
+    {
+      "name": "Grass",
+      "value": "#50ca18"
+    },
+    {
+      "name": "Green",
+      "value": "#1bce26"
+    },
+    {
+      "name": "Emerald",
+      "value": "#1ccc58"
+    },
+    {
+      "name": "Mint",
+      "value": "#1cca7f"
+    },
+    {
+      "name": "Turquoise",
+      "value": "#1cc6a2"
+    },
+    {
+      "name": "Cyan",
+      "value": "#1cc2c3"
+    },
+    {
+      "name": "Sky",
+      "value": "#16a1c8"
+    },
+    {
+      "name": "Blue",
+      "value": "#1083df"
+    },
+    {
+      "name": "Royal blue",
+      "value": "#345bfb"
+    },
+    {
+      "name": "Indigo",
+      "value": "#5451fb"
+    },
+    {
+      "name": "Iris",
+      "value": "#7b4afb"
+    },
+    {
+      "name": "Violet",
+      "value": "#ab5bfc"
+    },
+    {
+      "name": "Purple",
+      "value": "#ce39fc"
+    },
+    {
+      "name": "Magenta",
+      "value": "#e819ea"
+    },
+    {
+      "name": "Fuchsia",
+      "value": "#ef18c4"
+    },
+    {
+      "name": "Rose",
+      "value": "#f51799"
+    },
+    {
+      "name": "Crimson",
+      "value": "#fc186c"
+    },
+    {
+      "name": "Dark red",
+      "value": "#af0d21"
+    },
+    {
+      "name": "Dark vermilion",
+      "value": "#9f3507"
+    },
+    {
+      "name": "Brown",
+      "value": "#864e08"
+    },
+    {
+      "name": "Dark amber",
+      "value": "#725b08"
+    },
+    {
+      "name": "Dark gold",
+      "value": "#626208"
+    },
+    {
+      "name": "Dark citron",
+      "value": "#536708"
+    },
+    {
+      "name": "Dark lime",
+      "value": "#406c08"
+    },
+    {
+      "name": "Dark grass",
+      "value": "#297008"
+    },
+    {
+      "name": "Dark green",
+      "value": "#0a7210"
+    },
+    {
+      "name": "Dark emerald",
+      "value": "#0a712d"
+    },
+    {
+      "name": "Dark mint",
+      "value": "#0a7044"
+    },
+    {
+      "name": "Dark turquoise",
+      "value": "#0a6e59"
+    },
+    {
+      "name": "Dark cyan",
+      "value": "#0a6b6b"
+    },
+    {
+      "name": "Dark sky",
+      "value": "#0a6882"
+    },
+    {
+      "name": "Dark blue",
+      "value": "#095fa5"
+    },
+    {
+      "name": "Dark royal blue",
+      "value": "#212efa"
+    },
+    {
+      "name": "Dark indigo",
+      "value": "#4617fa"
+    },
+    {
+      "name": "Dark iris",
+      "value": "#6511e5"
+    },
+    {
+      "name": "Dark violet",
+      "value": "#7d0fca"
+    },
+    {
+      "name": "Dark purple",
+      "value": "#8d0db0"
+    },
+    {
+      "name": "Dark magenta",
+      "value": "#970c99"
+    },
+    {
+      "name": "Dark fuchsia",
+      "value": "#9f0c82"
+    },
+    {
+      "name": "Dark rose",
+      "value": "#a60c66"
+    },
+    {
+      "name": "Dark crimson",
+      "value": "#ac0c47"
+    }
+  ]
+}

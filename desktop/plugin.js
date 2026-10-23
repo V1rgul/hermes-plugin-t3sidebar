@@ -626,11 +626,14 @@ const CSS = `
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-row .sf-project{gap:4px}.sf-row .sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--ui-blue,#0053fd);font-weight:400}.sf-snooze-time svg{width:13px;height:13px;flex-shrink:0}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
 .sf-menu button.sf-snooze-info:disabled{color:var(--ui-blue,#0053fd);opacity:1;font-weight:400;cursor:default}
-.sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}
+.sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}.sf-project-choice[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
 .sf-menu .sf-menu-action{display:flex;align-items:center;gap:8px}.sf-menu-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex-shrink:0}.sf-menu-icon svg{width:14px;height:14px}.sf-menu button.sf-menu-action[data-destructive=true]{color:var(--ui-red)}
 .sf-menu-label{display:flex;align-items:center;flex:1;min-width:0}
 .sf-menu>div:not(.sf-menu-title),.sf-menu form{display:flex;flex-direction:column;gap:4px}
-.sf-project-submenu{width:240px;max-height:calc(100vh - 32px);overflow:auto}.sf-project-submenu fieldset{border:0;padding:0;margin:4px 0;min-width:0}.sf-project-submenu legend{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:7px}.sf-project-submenu fieldset:disabled{opacity:.5}.sf-project-icons{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}.sf-project-icons button{display:flex;align-items:center;justify-content:center;aspect-ratio:1;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary)}.sf-project-icons button:hover,.sf-project-icons button[aria-pressed=true]{background:var(--ui-control-hover-background);color:var(--ui-text-primary)}.sf-submenu-arrow{display:inline-flex;margin-left:auto}
+.sf-project-submenu{box-sizing:border-box;width:508px;max-width:calc(100vw - 18px);max-height:min(calc(100vh - 32px),var(--radix-popover-content-available-height,100vh));overflow:auto}.sf-project-submenu fieldset{border:0;padding:0;margin:4px 0;min-width:0}.sf-project-submenu legend{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:7px}.sf-project-submenu fieldset:disabled{opacity:.5}
+.sf-project-colors{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));gap:4px;width:476px;max-width:100%;padding:3px;box-sizing:border-box}.sf-project-colors button{display:block;box-sizing:border-box;width:100%;aspect-ratio:1/1.618033989;padding:0;border:0;border-radius:4px;cursor:pointer}.sf-project-colors button:hover{box-shadow:0 0 0 1px var(--ui-text-primary)}.sf-project-colors button[aria-pressed=true],.sf-project-colors button:focus-visible{outline:2px solid var(--ui-text-primary);outline-offset:1px}
+.sf-project-icon-categories{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px}.sf-project-submenu .sf-project-icon-category{margin:0}.sf-project-submenu .sf-project-icon-category legend{font-size:10px;margin-bottom:4px}.sf-project-icons{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:2px}.sf-project-icons button{display:flex;align-items:center;justify-content:center;height:25px;min-width:0;padding:3px;border:0;border-radius:4px;background:transparent;color:var(--sf-project-color)}.sf-project-icons button:hover,.sf-project-icons button[aria-pressed=true]{background:var(--ui-control-hover-background);color:var(--sf-project-color)}.sf-submenu-arrow{display:inline-flex;margin-left:auto}
+@media(max-width:520px){.sf-project-icon-categories{grid-template-columns:minmax(0,1fr)}}
 .sf-status{font-weight:600}
 .sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--ui-orange,#db704b)}.sf-status[data-status=input]{color:var(--ui-purple,#9e94d5)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
 .sf-section-body{transition:opacity .18s ease,visibility 0s}.sf-section[data-closed=true] .sf-section-body{opacity:0;visibility:hidden;transition:opacity .18s ease,visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:opacity .16s ease,background-color .16s ease,box-shadow .16s ease}.sf-hover{transition:opacity .12s ease;opacity:0}.sf-row:hover .sf-hover{opacity:1}.sf-custom-time{display:flex;align-items:center;gap:4px}.sf-custom-time input{min-width:0}.sf-custom-time .sf-icon{flex-shrink:0}
@@ -686,8 +689,72 @@ function Settings({ ctx }) {
     h('p', null, 'Keyboard: ↑/↓ or Home/End to focus rows; Enter to open; Shift+F10 for actions; Shift+Enter to archive and advance (only with confirmed idle status).'),
     h('p', null, 'Pins and snoozes belong to this plugin’s backend. Archived includes existing native archives, sorted by last activity, not archive time. Older plugin-only completed entries return to Ready; no history is automatically archived. Missing backend: browsing remains available, organization is read-only.'));
 }
-// Native ProjectAppearancePicker is private; compose its public swatches and Codicons without importing app internals.
-const PROJECT_ICONS = ['folder-library', 'repo', 'rocket', 'beaker', 'flame', 'star-full', 'heart', 'zap', 'target', 'lightbulb', 'tools', 'device-desktop', 'device-mobile', 'terminal', 'dashboard', 'globe', 'broadcast', 'cloud', 'database', 'package', 'book', 'organization', 'bug', 'shield', 'key', 'gift', 'telescope', 'home'];
+// Approved project metadata palette and Codicons; independent of chrome/theme colors.
+export const PROJECT_ICON_GROUPS = [
+  { label: 'Projects & workspaces', icons: ['folder-library', 'folder', 'folder-opened', 'repo', 'project', 'home', 'organization', 'briefcase'] },
+  { label: 'Code & development', icons: ['code', 'terminal', 'file-code', 'git-branch', 'git-merge', 'extensions', 'bug', 'json'] },
+  { label: 'Hardware & robotics', icons: ['circuit-board', 'chip', 'tools', 'wrench', 'settings-gear', 'device-desktop', 'device-mobile', 'robot'] },
+  { label: 'Infrastructure & networks', icons: ['server', 'server-process', 'cloud', 'database', 'globe', 'broadcast', 'remote', 'plug'] },
+  { label: 'Research & analysis', icons: ['beaker', 'telescope', 'lightbulb', 'search', 'inspect', 'graph', 'pulse', 'symbol-ruler'] },
+  { label: 'Documents & legal', icons: ['book', 'library', 'file-text', 'file-pdf', 'notebook', 'note', 'law', 'shield'] },
+  { label: 'Planning & business', icons: ['calendar', 'checklist', 'target', 'milestone', 'dashboard', 'credit-card', 'key', 'package'] },
+  { label: 'Personal & creative', icons: ['rocket', 'flame', 'star-full', 'heart', 'zap', 'gift', 'coffee', 'music'] },
+];
+export const PROJECT_PALETTE = [
+  { name: 'Red', value: '#fc2b3b' },
+  { name: 'Vermilion', value: '#f95812' },
+  { name: 'Orange', value: '#e08614' },
+  { name: 'Amber', value: '#e5b81b' },
+  { name: 'Gold', value: '#e1e020' },
+  { name: 'Citron', value: '#bbe51f' },
+  { name: 'Lime', value: '#78c318' },
+  { name: 'Grass', value: '#50ca18' },
+  { name: 'Green', value: '#1bce26' },
+  { name: 'Emerald', value: '#1ccc58' },
+  { name: 'Mint', value: '#1cca7f' },
+  { name: 'Turquoise', value: '#1cc6a2' },
+  { name: 'Cyan', value: '#1cc2c3' },
+  { name: 'Sky', value: '#16a1c8' },
+  { name: 'Blue', value: '#1083df' },
+  { name: 'Royal blue', value: '#345bfb' },
+  { name: 'Indigo', value: '#5451fb' },
+  { name: 'Iris', value: '#7b4afb' },
+  { name: 'Violet', value: '#ab5bfc' },
+  { name: 'Purple', value: '#ce39fc' },
+  { name: 'Magenta', value: '#e819ea' },
+  { name: 'Fuchsia', value: '#ef18c4' },
+  { name: 'Rose', value: '#f51799' },
+  { name: 'Crimson', value: '#fc186c' },
+  { name: 'Dark red', value: '#af0d21' },
+  { name: 'Dark vermilion', value: '#9f3507' },
+  { name: 'Brown', value: '#864e08' },
+  { name: 'Dark amber', value: '#725b08' },
+  { name: 'Dark gold', value: '#626208' },
+  { name: 'Dark citron', value: '#536708' },
+  { name: 'Dark lime', value: '#406c08' },
+  { name: 'Dark grass', value: '#297008' },
+  { name: 'Dark green', value: '#0a7210' },
+  { name: 'Dark emerald', value: '#0a712d' },
+  { name: 'Dark mint', value: '#0a7044' },
+  { name: 'Dark turquoise', value: '#0a6e59' },
+  { name: 'Dark cyan', value: '#0a6b6b' },
+  { name: 'Dark sky', value: '#0a6882' },
+  { name: 'Dark blue', value: '#095fa5' },
+  { name: 'Dark royal blue', value: '#212efa' },
+  { name: 'Dark indigo', value: '#4617fa' },
+  { name: 'Dark iris', value: '#6511e5' },
+  { name: 'Dark violet', value: '#7d0fca' },
+  { name: 'Dark purple', value: '#8d0db0' },
+  { name: 'Dark magenta', value: '#970c99' },
+  { name: 'Dark fuchsia', value: '#9f0c82' },
+  { name: 'Dark rose', value: '#a60c66' },
+  { name: 'Dark crimson', value: '#ac0c47' },
+];
+const PROJECT_MENU_STYLE = { padding: 0, width: 'max-content', maxWidth: 'calc(100vw - 16px)' };
+function projectMenuKeyDown(event, close) {
+  const editing = ['INPUT', 'TEXTAREA'].includes(event.target.tagName) || event.target.isContentEditable;
+  if (event.key === 'Escape' || event.key === 'ArrowLeft' && !editing) { event.preventDefault(); event.stopPropagation(); close(); }
+}
 export function ProjectActions({ row, scope, controller, filterProject, close }) {
   const [renaming, setRenaming] = useState(false), [name, setName] = useState(row.project?.name || ''), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const alive = useRef(true);
@@ -701,7 +768,7 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
     finally { if (alive.current) setBusy(false); }
   };
   const update = patch => void perform(() => controller.updateProject(scope, project, patch));
-  return h('div', { className: 'sf-menu sf-project-submenu' },
+  return h('div', { className: 'sf-menu sf-project-submenu', style: { '--sf-project-color': project?.color || 'var(--ui-text-tertiary)' } },
     h('div', { className: 'sf-menu-title' }, project?.name || 'Project unavailable'),
     h(MenuAction, { name: 'Pencil', disabled: busy || !editable, onClick: () => setRenaming(true) }, 'Rename'),
     renaming ? h('form', { onSubmit: event => { event.preventDefault(); update({ name }); } },
@@ -713,12 +780,14 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
       onClick: () => void perform(() => filterProject(row.cwd || '')) }, 'Filter for'),
     !editable ? h('p', null, 'Project editing requires a named project with a known folder.') : null,
     h('fieldset', { disabled: busy || !editable, 'aria-label': 'Project color' }, h('legend', null, 'Color'),
-      sdk.ColorSwatches && sdk.PROFILE_SWATCHES ? h(sdk.ColorSwatches, { swatches: sdk.PROFILE_SWATCHES, value: project?.color || null, clearLabel: 'No color', clearIcon: 'circle-slash', onChange: color => update({ color }) })
-        : h('p', null, 'Color selection requires a newer Desktop SDK.')),
+      h('div', { className: 'sf-project-colors' }, ...PROJECT_PALETTE.map(color => h('button', { key: color.value, type: 'button', 'aria-label': `Project color: ${color.name}`, title: color.name,
+        'aria-pressed': project?.color?.toLowerCase() === color.value, style: { backgroundColor: color.value }, onClick: () => update({ color: color.value }) }))),
+      h(MenuAction, { codicon: 'circle-slash', onClick: () => update({ color: null }) }, 'No color')),
     h('fieldset', { disabled: busy || !editable, 'aria-label': 'Project icon' }, h('legend', null, 'Icon'),
-      h('div', { className: 'sf-project-icons' }, ...PROJECT_ICONS.map(icon => h('button', { key: icon, type: 'button', 'aria-label': `Project icon: ${icon}`, title: icon,
-        'aria-pressed': project?.icon === icon, style: project?.icon === icon && project?.color ? { color: project.color } : undefined,
-        onClick: () => update({ icon: project?.icon === icon ? null : icon }) }, projectMark({ icon })))),
+      h('div', { className: 'sf-project-icon-categories' }, ...PROJECT_ICON_GROUPS.map(group => h('fieldset', { key: group.label, className: 'sf-project-icon-category' },
+        h('legend', null, group.label), h('div', { className: 'sf-project-icons' }, ...group.icons.map(icon => h('button', { key: icon, type: 'button', 'aria-label': `Project icon: ${icon}`, title: icon,
+          'aria-pressed': project?.icon === icon,
+          onClick: () => update({ icon: project?.icon === icon ? null : icon }) }, projectMark({ icon }))))))),
       h(MenuAction, { name: 'FolderOpen', onClick: () => update({ icon: null }) }, 'Default icon')),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
@@ -764,9 +833,8 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
         row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null,
         h(sdk.Popover, { open: projectOpen, onOpenChange: setProjectOpen },
           h(sdk.PopoverTrigger, { asChild: true }, h(MenuAction, { name: 'FolderOpen', 'aria-label': 'Project', disabled: busy, onKeyDown: event => { if (event.key === 'ArrowRight') { event.preventDefault(); setProjectOpen(true); } } }, 'Project', h('span', { className: 'sf-submenu-arrow', 'aria-hidden': true }, icon('ChevronRight', '›')))),
-          h(sdk.PopoverContent, { side: 'right', align: 'start', style: { padding: 0 }, 'aria-label': 'Project actions', onKeyDown: event => {
-            if (event.key === 'ArrowLeft' && event.target.tagName !== 'INPUT' && event.target.tagName !== 'TEXTAREA' && !event.target.isContentEditable || event.key === 'Escape') { event.stopPropagation(); setProjectOpen(false); }
-          } }, h(ProjectActions, { row, scope, controller, filterProject, close })))),
+          h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
+            onKeyDown: event => projectMenuKeyDown(event, () => setProjectOpen(false)) }, h(ProjectActions, { row, scope, controller, filterProject, close })))),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
 export function cardStatus(row, active = false) {
@@ -934,6 +1002,19 @@ export function ProjectPicker({ controller, scope, close }) {
     busy ? h('div', { role: 'status' }, 'Creating session…') : null,
     error ? h('div', { role: 'alert' }, error) : null);
 }
+function FilterProjectChoice({ choice, selected, scope, controller, filterProject, close }) {
+  const [open, setOpen] = useState(false);
+  const openMenu = event => { event.preventDefault(); event.stopPropagation(); controller.check(scope); setOpen(true); };
+  return h(sdk.Popover, { open, onOpenChange: setOpen },
+    h(sdk.PopoverTrigger, { asChild: true }, h(sdk.Button, { type: 'button', variant: 'ghost', className: 'sf-project-choice', 'aria-label': `Filter by ${choice.name}`, 'aria-pressed': selected,
+      // Prevent the trigger's normal toggle: left click filters; right click edits.
+      onClick: event => { event.preventDefault(); filterProject(choice.cwd); }, onContextMenu: openMenu,
+      onKeyDown: event => { if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') openMenu(event); } },
+      h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)),
+      h('span', { className: 'sf-project-name' }, choice.name), selected ? icon('Check', '✓') : null)),
+    h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
+      onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: choice, cwd: choice.cwd }, scope, controller, filterProject, close }) : null));
+}
 function ScopedSidebar({ ctx, controller, scope }) {
   const presetTime = useSnoozeTime(ctx);
   const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
@@ -1094,9 +1175,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
         h(sdk.PopoverContent, { align: 'end', 'aria-label': 'Session filters' }, h('div', { className: 'sf-menu' },
           h(sdk.Button, { type: 'button', variant: 'ghost', className: 'sf-project-choice', 'aria-label': 'All projects', 'aria-pressed': project === '*', onClick: () => selectProject('*') },
             icon('ListFilter', '≡'), h('span', { className: 'sf-project-name' }, 'All projects'), project === '*' ? icon('Check', '✓') : null),
-          ...projects.map(choice => h(sdk.Button, { key: choice.cwd, type: 'button', variant: 'ghost', className: 'sf-project-choice', 'aria-label': `Filter by ${choice.name}`, 'aria-pressed': project === choice.cwd, onClick: () => selectProject(choice.cwd) },
-            h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)),
-            h('span', { className: 'sf-project-name' }, choice.name), project === choice.cwd ? icon('Check', '✓') : null))))),
+          ...projects.map(choice => h(FilterProjectChoice, { key: choice.cwd, choice, selected: project === choice.cwd, scope, controller, filterProject: selectProject, close: () => setFilterOpen(false) }))))),
 
       h(sdk.Popover, { open: pickerOpen, onOpenChange: setPickerOpen },
         h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'New session', name: 'SquarePen', glyph: '+' })),

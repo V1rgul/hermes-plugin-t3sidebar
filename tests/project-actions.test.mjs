@@ -1,11 +1,13 @@
 import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { readFileSync } from 'node:fs';
 import React, { act } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as mock from './sdk.mock.mjs';
-import { createController, captureScope, scopeKey, HermesT3Sidebar } from '../desktop/plugin.js';
+import { createController, captureScope, scopeKey, HermesT3Sidebar, PROJECT_ICON_GROUPS, PROJECT_PALETTE } from '../desktop/plugin.js';
 
+const approved = JSON.parse(readFileSync(new URL('./fixtures/project-appearance.json', import.meta.url), 'utf8'));
 const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', { url: 'http://localhost' });
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, MouseEvent: dom.window.MouseEvent, KeyboardEvent: dom.window.KeyboardEvent, IS_REACT_ACT_ENVIRONMENT: true });
 const { createRoot } = await import('react-dom/client');
@@ -153,8 +155,8 @@ test('Project submenu is last; actions have leading icons and selectors persist 
   const actions = [...dialog().querySelectorAll('.sf-menu-action')];
   assert.deepEqual(actions.slice(0, 3).map(action => action.textContent), ['Rename', 'Copy path', 'Filter for']);
   assert.ok(actions.slice(0, 3).every(action => action.firstElementChild.className === 'sf-menu-icon' && action.firstElementChild.querySelector('svg')));
-  assert.equal(dialog().querySelectorAll('.sf-project-icons button').length, 28);
-  assert.equal(dialog().querySelectorAll('[aria-label="Project color"] button').length, 13);
+  assert.equal(dialog().querySelectorAll('.sf-project-icons button').length, 64);
+  assert.equal(dialog().querySelectorAll('[aria-label="Project color"] button').length, 49);
   await click(button('Rename', dialog()));
   const nameInput = dialog().querySelector('[aria-label="Project name"]');
   await act(async () => nameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })));
@@ -162,8 +164,8 @@ test('Project submenu is last; actions have leading icons and selectors persist 
   await click(button('Project icon: rocket', dialog()));
   assert.equal(dialog(), null);
   assert.ok(document.querySelector('[data-session-id="design"] [data-codicon="rocket"]'));
-  await open(); await click(button(mock.PROFILE_SWATCHES[3], dialog()));
-  assert.equal(mock.control.rows.find(row => row.id === 'design').project.color, mock.PROFILE_SWATCHES[3]);
+  await open(); await click(button('Project color: Amber', dialog()));
+  assert.equal(mock.control.rows.find(row => row.id === 'design').project.color, approved.colors[3].value);
   await open(); await click(button('No color', dialog()));
   assert.equal(mock.control.rows.find(row => row.id === 'design').project.color, null);
   await open(); await click(button('Default icon', dialog()));
@@ -185,4 +187,77 @@ test('project write errors stay visible in submenu and do not close or fabricate
   await click(button('Project icon: rocket', dialog()));
   assert.match(dialog().querySelector('[role="alert"]').textContent, /project write unavailable/);
   assert.ok(!document.querySelector('[data-session-id="design"] [data-codicon="rocket"]'));
+});
+
+test('appearance catalog matches the approved 64 categorized Codicons and exact 48-color preview', () => {
+  assert.deepEqual(PROJECT_ICON_GROUPS, approved.iconGroups);
+  assert.deepEqual(PROJECT_PALETTE, approved.colors);
+  assert.equal(new Set(PROJECT_ICON_GROUPS.flatMap(group => group.icons)).size, 64);
+  assert.equal(new Set(PROJECT_PALETTE.map(color => color.value)).size, 48);
+});
+
+async function mountSidebar() {
+  controller = createController(mock.ctx);
+  root = createRoot(document.getElementById('app'));
+  await act(async () => root.render(React.createElement(QueryClientProvider, { client: mock.queryClient }, React.createElement(HermesT3Sidebar, { ctx: mock.ctx, controller }))));
+  await tick(); await tick();
+}
+const context = async node => {
+  const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+  await act(async () => node.dispatchEvent(event)); await tick();
+  assert.equal(event.defaultPrevented, true);
+};
+
+test('filter project right-click opens the same appearance menu without selecting a filter or workspace', async () => {
+  await mountSidebar();
+  await click(button('Filter sessions')); await context(button('Filter by docs'));
+  assert.ok(dialog());
+  assert.equal(dialog().querySelector('.sf-menu-title').textContent, 'docs');
+  assert.equal(dialog().querySelectorAll('.sf-project-colors button').length, 48);
+  assert.deepEqual([...dialog().querySelectorAll('.sf-project-icon-category legend')].map(node => node.textContent), approved.iconGroups.map(group => group.label));
+  assert.equal(document.querySelector('[aria-label="All projects"]').getAttribute('aria-pressed'), 'true');
+  assert.ok(document.querySelector('[data-session-id="design"]'));
+  assert.ok(document.querySelector('[data-session-id="readme"]'));
+  assert.ok(!mock.calls.some(call => ['open', 'newChat'].includes(call[0]) || call[2] === 'session.create'));
+  await click(button('Project icon: law', dialog()));
+  assert.equal(dialog(), null);
+  assert.ok(mock.control.rows.filter(row => row.project.name === 'docs').every(row => row.project.icon === 'law'));
+  assert.ok(mock.control.rows.filter(row => row.project.name !== 'docs').every(row => row.project.icon !== 'law'));
+  assert.deepEqual(rpcCalls().slice(-3).map(call => call[2]), ['projects.list', 'projects.update', 'projects.get']);
+  await click(button('Filter sessions')); await context(button('Filter by docs'));
+  assert.equal(button('Project icon: law', dialog()).getAttribute('aria-pressed'), 'true');
+  await click(button('Project color: Brown', dialog()));
+  const brown = approved.colors.find(color => color.name === 'Brown').value;
+  assert.ok(mock.control.rows.filter(row => row.project.name === 'docs').every(row => row.project.color === brown));
+  await click(button('Filter sessions')); await context(button('Filter by docs'));
+  assert.equal(button('Project color: Brown', dialog()).getAttribute('aria-pressed'), 'true');
+  await click(button('No color', dialog()));
+  assert.ok(mock.control.rows.filter(row => row.project.name === 'docs').every(row => row.project.color === null));
+});
+
+test('filter project normal click still selects directly; keyboard context menu can copy without changing the filter', async () => {
+  await mountSidebar();
+  await click(button('Filter sessions')); await click(button('Filter by docs'));
+  assert.equal(document.querySelector('[data-session-id="design"]'), null);
+  assert.equal(dialog(), null);
+  await click(button('Filter sessions'));
+  const choice = button('Filter by docs');
+  await act(async () => choice.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })));
+  await tick(); assert.ok(dialog());
+  await click(button('Copy path', dialog()));
+  assert.ok(mock.calls.some(call => call[0] === 'clipboard' && call[1] === '/projects/docs'));
+  assert.equal(document.querySelector('[data-session-id="design"]'), null);
+});
+
+test('filter project edit failure remains visible and scope changes discard its menu', async () => {
+  await mountSidebar();
+  await click(button('Filter sessions')); await context(button('Filter by docs'));
+  mock.control.dropProjectWrite = true;
+  await click(button('Project color: Blue', dialog()));
+  assert.match(dialog().querySelector('[role="alert"]').textContent, /did not confirm/);
+  assert.equal(mock.control.rows.find(row => row.id === 'readme').project.color, null);
+  mock.control.dropProjectWrite = false;
+  await act(async () => mock.switchScope()); await tick();
+  assert.equal(dialog(), null);
+  assert.equal(document.querySelector('[aria-label="Session filters"]'), null);
 });
