@@ -278,7 +278,7 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, description, co
 }
 // Test adapter for the public Codicon component; production uses Desktop's icon font.
 export function Codicon({ name, size, ...props }) {
-  const path = { home: 'M3 11l9-8 9 8M5 10v11h14V10M10 21v-7h4v7', tools: 'M14 3a6 6 0 0 0-7 7L2 15l7 7 5-5a6 6 0 0 0 7-7l-4 4-5-5 4-4Z' }[name] || 'M3 5h6l2 3h10v12H3Z';
+  const path = { home: 'M3 11l9-8 9 8M5 10v11h14V10M10 21v-7h4v7', tools: 'M14 3a6 6 0 0 0-7 7L2 15l7 7 5-5a6 6 0 0 0 7-7l-4 4-5-5 4-4Z', discard: 'M3 10l5-5M3 10l5 5M3 10h11a6 6 0 0 1 0 12', calendar: 'M4 5h16v16H4ZM4 10h16M8 2v6M16 2v6M8 14h2M14 14h2M8 18h2' }[name] || 'M3 5h6l2 3h10v12H3Z';
   return h('svg', { ...props, 'data-codicon': name, 'aria-hidden': true, width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor' }, h('path', { d: path }));
 }
 const PopoverContext = createContext(null);
@@ -296,11 +296,12 @@ export const icons = Object.fromEntries(Object.entries({
   ListFilter: 'M4 5h16M7 12h10M10 19h4', ChevronUp: 'M6 15l6-6 6 6', ChevronDown: 'M6 9l6 6 6-6', ChevronRight: 'M9 6l6 6-6 6',
   HelpCircle: 'M12 8v5M12 16v1M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0', LoaderCircle: 'M20 12a8 8 0 1 1-8-8',
   Clock: 'M12 7v5l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
+  Sun: 'M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8M12 2v2M12 20v2M2 12h2M20 12h2M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2',
   AlarmClock: 'M12 8v5l3 2M3 3l3 3M21 3l-3 3M21 13a9 9 0 1 1-18 0 9 9 0 0 1 18 0',
   CircleCheck: 'M6 12l4 4 8-8M22 12a10 10 0 1 1-20 0', Pin: 'M9 3h6l-1 6 4 4H6l4-4-1-6M12 13v8',
   MessageSquare: 'M4 4h16v12H9l-5 4V4', Undo2: 'M3 10l5-5M3 10l5 5M3 10h11a6 6 0 0 1 0 12',
   Check: 'M5 12l5 5L20 7', Ellipsis: 'M5 12h1M11 12h1M17 12h1', X: 'M6 6l12 12M6 18L18 6', RefreshCw: 'M20 4v6h-6M20 10a8 8 0 1 0 0 7',
   Copy: 'M9 9h12v12H9ZM5 15H3V3h12v2', FolderOpen: 'M3 5h6l2 3h10v12H3Z', CornerDownLeft: 'M9 10l-5 5 5 5M4 15h12a4 4 0 0 0 4-4V4',
   Pencil: 'M16 3l5 5-13 13H3v-5ZM14 5l5 5', Trash2: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7'
-}).map(([name, path]) => [name, props => h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: path }))]));
+}).map(([name, path]) => [name, props => h('svg', { 'data-icon': name, width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: path }))]));
 reset();

@@ -264,6 +264,16 @@ try {
     return remaining.disabled && date.disabled && /^\d+d \d+h \d+min left$/.test(remaining.textContent) && unsnooze.textContent === 'Unsnooze' && [remaining, date].every(el => getComputedStyle(el).color === blue && getComputedStyle(el).opacity === '1');
   }));
   check('wake date uses the client locale short date and time in its local timezone', await snoozeDialog.locator('.sf-snooze-info').nth(1).textContent() === await page.evaluate(() => new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(window.hermesT3SidebarHarness.control.metadata.sessions.root.wake_at * 1000))));
+  check('Snooze actions use discard, Clock, Clock, Sun and calendar as aligned leading icons', await snoozeDialog.locator('.sf-menu-action').evaluateAll(actions => {
+    const names = actions.map(el => el.querySelector('[data-codicon]')?.dataset.codicon || el.querySelector('[data-icon]')?.dataset.icon);
+    return JSON.stringify(names) === JSON.stringify(['discard', 'Clock', 'Clock', 'Sun', 'calendar']) && actions.every(el => {
+      const icon = el.querySelector('.sf-menu-icon'), label = el.querySelector('.sf-menu-label');
+      const i = icon.getBoundingClientRect(), l = label.getBoundingClientRect();
+      return el.firstElementChild === icon && icon.getAttribute('aria-hidden') === 'true' && i.width === 14 && i.right < l.left && Math.abs(i.top + i.height / 2 - l.top - l.height / 2) < 1;
+    });
+  }));
+  check('both disabled snooze information rows remain completely icon-free', await snoozeDialog.locator('.sf-snooze-info').evaluateAll(rows => rows.length === 2 && rows.every(el => el.disabled && !el.querySelector('.sf-menu-icon,svg,[data-codicon]'))));
+  check('Unsnooze discard icon inherits the green action color', await unsnooze.evaluate(el => getComputedStyle(el.querySelector('[data-codicon=discard]')).color === getComputedStyle(el).color));
   await unsnooze.hover();
   check('Unsnooze stays green on hover', await unsnooze.evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe);

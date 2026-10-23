@@ -188,10 +188,10 @@ export function snoozePresets(now = Date.now(), presetTime = '09:00') {
   const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(hour, minute, 0, 0);
   // Calendar arithmetic preserves the configured local time across daylight-saving changes.
   const monday = new Date(now); monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7)); monday.setHours(hour, minute, 0, 0);
-  return [{ label: 'In 1 hour', wake_at: Math.floor(now / 1000) + 3600 },
-    { label: 'In 3 hours', wake_at: Math.floor(now / 1000) + 10800 },
-    { label: `Tomorrow at ${labelTime}`, wake_at: Math.floor(tomorrow.getTime() / 1000) },
-    { label: `Next Monday at ${labelTime}`, wake_at: Math.floor(monday.getTime() / 1000) }];
+  return [{ label: 'In 1 hour', icon: 'Clock', wake_at: Math.floor(now / 1000) + 3600 },
+    { label: 'In 3 hours', icon: 'Clock', wake_at: Math.floor(now / 1000) + 10800 },
+    { label: `Tomorrow at ${labelTime}`, icon: 'Sun', wake_at: Math.floor(tomorrow.getTime() / 1000) },
+    { label: `Next Monday at ${labelTime}`, codicon: 'calendar', wake_at: Math.floor(monday.getTime() / 1000) }];
 }
 export function parseLocalWake(value, now = Date.now()) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) throw new Error('Choose a local date and time.');
@@ -659,9 +659,9 @@ function icon(name, fallback) {
   const Component = sdk.icons?.[name]; return Component ? h(Component, { size: 14, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, fallback);
 }
 function IconButton({ label, name, glyph, children, title = label, ...props }) { return h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-xs', ...props, className: `sf-icon ${props.className || ''}`, 'aria-label': label, title }, children ?? icon(name, glyph)); }
-function MenuAction({ name, destructive = false, children, ...props }) {
-  return h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', ...props, className: 'sf-menu-action', 'data-destructive': destructive || undefined },
-    h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, icon(name)), h('span', { className: 'sf-menu-label' }, children));
+function MenuAction({ name, codicon, className = '', destructive = false, children, ...props }) {
+  return h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', ...props, className: `sf-menu-action ${className}`.trim(), 'data-destructive': destructive || undefined },
+    h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, codicon ? h(sdk.Codicon, { name: codicon, size: 14 }) : icon(name)), h('span', { className: 'sf-menu-label' }, children));
 }
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
 function Settings({ ctx }) {
@@ -745,8 +745,8 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
     snoozeOnly ? h('form', { onSubmit: custom },
       row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-info', disabled: true }, snoozeDetail) : null,
       row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-info', disabled: true }, shortDateTime.format(new Date(row.meta.wake_at * 1000))) : null,
-      row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-unsnooze', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'restore' }) }, 'Unsnooze') : null,
-      ...snoozePresets(Date.now(), presetTime).map(preset => h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
+      row.meta.state === 'snoozed' ? h(MenuAction, { codicon: 'discard', className: 'sf-unsnooze', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'restore' }) }, 'Unsnooze') : null,
+      ...snoozePresets(Date.now(), presetTime).map(preset => h(MenuAction, { key: preset.label, name: preset.icon, codicon: preset.codicon, disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
       h('label', null, 'Custom · local time', h('span', { className: 'sf-custom-time' },
         h('input', { type: 'datetime-local', value, disabled: disabled || snoozeDisabled, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
         h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value }))))

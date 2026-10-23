@@ -491,6 +491,22 @@ test('Unsnooze only dismisses and removes the countdown after exact backend conf
   assert.equal(row('snoozed').querySelector('.sf-snooze-time'), null);
 });
 
+test('snooze menu actions use the requested leading icons while both disabled information rows stay icon-free', async () => {
+  await mount();
+  await click(row('snoozed').querySelector('[aria-label="Snooze session"]'));
+  const actions = [...$('[role=dialog]').querySelectorAll('.sf-menu-action')];
+  assert.deepEqual(actions.map(node => node.querySelector('[data-codicon]')?.getAttribute('data-codicon') || node.querySelector('[data-icon]')?.getAttribute('data-icon')),
+    ['discard', 'Clock', 'Clock', 'Sun', 'calendar']);
+  for (const node of actions) {
+    assert.equal(node.firstElementChild.className, 'sf-menu-icon');
+    assert.equal(node.firstElementChild.getAttribute('aria-hidden'), 'true');
+    assert.equal(node.lastElementChild.className, 'sf-menu-label');
+  }
+  const info = [...$('[role=dialog]').querySelectorAll('.sf-snooze-info')];
+  assert.equal(info.length, 2);
+  assert.equal(info.every(node => node.disabled && !node.querySelector('.sf-menu-icon,svg,[data-codicon]')), true);
+});
+
 test('fourth snooze option persists next Monday at 09:00 without a toast or opening a session', async () => {
   await mount();
   const wake = flow.snoozePresets()[3].wake_at;
