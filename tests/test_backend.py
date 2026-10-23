@@ -59,7 +59,7 @@ class BackendTests(unittest.TestCase):
 		self.assertEqual(self.state(), {"version": 1, "sessions": {}})
 		self.assertEqual(self.act("pin"), {
 			"state": "active", "settled_at": None, "wake_at": None,
-			"pinned": True, "updated_at": self.now,
+			"woke_at": None, "pinned": True, "updated_at": self.now,
 		})
 		self.act("settle", "another")
 		self.assertEqual(len(self.state()["sessions"]), 2)
@@ -117,12 +117,145 @@ class BackendTests(unittest.TestCase):
 		self.assertIsNone(active["settled_at"])
 		self.assertTrue(active["pinned"])
 		self.assertEqual(active["updated_at"], wake)
+		self.assertEqual(active["woke_at"], wake)
 		self.now += 86400
 		self.assertEqual(self.state()["sessions"]["durable-1"], active)
+		with TestClient(self.make_app()) as reopened:
+			self.assertEqual(reopened.get("/api/plugins/hermes-t3sidebar/state").json()["sessions"]["durable-1"], active)
+		self.assertEqual(self.act("ack_wake", woke_at=wake + .01), active)
+		acknowledged = self.act("ack_wake", woke_at=wake)
+		self.assertEqual(acknowledged, {**active, "woke_at": None})
+		self.assertEqual(self.act("ack_wake", woke_at=wake), acknowledged)
+		self.assertEqual(self.state()["sessions"]["durable-1"], acknowledged)
 		# No timer ever ran: another due snooze is materialized only on reading.
 		self.act("snooze", "late", wake_at=self.now + 2)
 		self.now += 90000
 		self.assertEqual(self.state()["sessions"]["late"]["state"], "active")
+
+	def test_old_six_column_sqlite_migration(self):
+		self.path.parent.mkdir(parents=True)
+		with closing(sqlite3.connect(self.path)) as connection:
+			connection.execute("""
+				CREATE TABLE session_metadata (
+					session_id TEXT PRIMARY KEY,
+					state TEXT NOT NULL CHECK (state IN ('active', 'settled', 'snoozed')),
+					settled_at REAL, wake_at REAL,
+					pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
+					updated_at REAL NOT NULL,
+					CHECK (
+						(state = 'active' AND settled_at IS NULL AND wake_at IS NULL) OR
+						(state = 'settled' AND settled_at IS NOT NULL AND wake_at IS NULL) OR
+						(state = 'snoozed' AND settled_at IS NULL AND wake_at IS NOT NULL)
+					)
+				)
+			""")
+			connection.executemany("INSERT INTO session_metadata VALUES (?, ?, ?, ?, ?, ?)", [
+				("settled", "settled", self.now - 10, None, 1, self.now - 10),
+				("due", "snoozed", None, self.now, 1, self.now - 20),
+				("future", "snoozed", None, self.now + 10, 0, self.now - 20),
+			])
+			connection.commit()
+		sessions = self.state()["sessions"]
+		self.assertEqual(sessions["settled"], {
+			"state": "settled", "settled_at": self.now - 10, "wake_at": None,
+			"woke_at": None, "pinned": True, "updated_at": self.now - 10,
+		})
+		self.assertEqual(sessions["due"], {
+			"state": "active", "settled_at": None, "wake_at": None,
+			"woke_at": self.now, "pinned": True, "updated_at": self.now,
+		})
+		self.assertEqual(sessions["future"]["wake_at"], self.now + 10)
+		self.assertIsNone(sessions["future"]["woke_at"])
+		self.assertEqual(self.state()["sessions"], sessions)
+		self.assertTrue(self.act("pin", "new")["pinned"])
+		with closing(sqlite3.connect(self.path)) as connection:
+			self.assertEqual(len(connection.execute("PRAGMA table_info(session_metadata)").fetchall()), 7)
+			self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+			with self.assertRaises(sqlite3.IntegrityError):
+				connection.execute("UPDATE session_metadata SET state = 'invalid' WHERE session_id = 'due'")
+
+	def test_stale_ack_cannot_clear_new_wake_or_materialize_due_snooze(self):
+		first = self.now + 1
+		self.act("snooze", wake_at=first)
+		self.now = first
+		self.assertEqual(self.state()["sessions"]["durable-1"]["woke_at"], first)
+		second = self.now + 1
+		self.assertIsNone(self.act("snooze", wake_at=second)["woke_at"])
+		self.now = second
+		pending = self.act("ack_wake", woke_at=first)
+		self.assertEqual(pending["state"], "snoozed")
+		self.assertEqual(pending["wake_at"], second)
+		self.assertIsNone(pending["woke_at"])
+		active = self.state()["sessions"]["durable-1"]
+		self.assertEqual(active["woke_at"], second)
+		self.assertEqual(self.act("ack_wake", woke_at=first), active)
+		self.assertIsNone(self.act("ack_wake", woke_at=second)["woke_at"])
+
+	def test_pin_and_unpin_retain_wake_marker(self):
+		wake = self.now + 1
+		self.act("snooze", wake_at=wake)
+		self.now = wake
+		self.state()
+		for action, pinned in [("pin", True), ("unpin", False)]:
+			self.now += 1
+			metadata = self.act(action)
+			self.assertEqual(metadata["woke_at"], wake)
+			self.assertEqual(metadata["state"], "active")
+			self.assertEqual(metadata["pinned"], pinned)
+			self.assertEqual(metadata["updated_at"], self.now)
+
+	def test_organization_actions_clear_wake_marker(self):
+		for action in ("settle", "restore", "snooze"):
+			with self.subTest(action=action):
+				wake = self.now + 1
+				self.act("snooze", wake_at=wake)
+				self.now = wake
+				self.assertEqual(self.state()["sessions"]["durable-1"]["woke_at"], wake)
+				if action == "snooze":
+					metadata = self.act(action, wake_at=self.now + 10)
+				else:
+					metadata = self.act(action)
+				self.assertIsNone(metadata["woke_at"])
+
+	def test_ack_absent_row_does_not_create_or_sweep(self):
+		response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/absent", json={"action": "ack_wake", "woke_at": self.now})
+		self.assertEqual(response.status_code, 200, response.text)
+		self.assertEqual(response.json(), {"version": 1, "sessions": {}})
+		self.act("snooze", wake_at=self.now + 1)
+		self.now += 2
+		response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/absent", json={"action": "ack_wake", "woke_at": self.now})
+		self.assertEqual(response.status_code, 200, response.text)
+		self.assertEqual(set(response.json()["sessions"]), {"durable-1"})
+		self.assertEqual(response.json()["sessions"]["durable-1"]["state"], "snoozed")
+		with closing(sqlite3.connect(self.path)) as connection:
+			self.assertEqual(connection.execute("SELECT count(*) FROM session_metadata").fetchone()[0], 1)
+
+	def test_invalid_ack_bodies_rejected_without_changes(self):
+		self.act("snooze", wake_at=self.now + 1)
+		self.now += 1
+		expected = self.state()
+		bodies = [
+			{"action": "ack_wake"},
+			*({"action": "ack_wake", "woke_at": value} for value in [None, True, False, "1800000001", [], {}, 0, -1]),
+			{"action": "ack_wake", "woke_at": self.now, "wake_at": None},
+			{"action": "ack_wake", "woke_at": self.now, "profile": "other"},
+			*({"action": action, "woke_at": value} for action in ["pin", "unpin", "settle", "restore", "snooze"] for value in [None, self.now]),
+		]
+		for body in bodies:
+			with self.subTest(body=body):
+				response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/durable-1", json=body)
+				self.assertEqual(response.status_code, 422, response.text)
+				self.assertEqual(self.state(), expected)
+		for value in ["NaN", "Infinity", "-Infinity", "1e9999", "9" * 400]:
+			with self.subTest(value=value):
+				response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/durable-1", content='{"action":"ack_wake","woke_at":' + value + '}', headers={"Content-Type": "application/json"})
+				self.assertEqual(response.status_code, 422, response.text)
+				json.loads(response.text)
+				self.assertEqual(self.state(), expected)
+
+	def test_metadata_woke_at_defaults_to_none(self):
+		metadata = backend.SessionMetadata(state="active", settled_at=None, wake_at=None, pinned=False, updated_at=self.now)
+		self.assertIsNone(metadata.woke_at)
 
 	def test_persistence_across_new_app_and_store(self):
 		self.act("pin")
@@ -210,6 +343,27 @@ class BackendTests(unittest.TestCase):
 			self.assertEqual(client.get("/state").json()["sessions"], {})
 			resolve.return_value = self.path
 			self.assertTrue(client.get("/state").json()["sessions"]["same"]["pinned"])
+
+	def test_wake_ack_isolated_between_profiles(self):
+		app = FastAPI()
+		app.include_router(backend.create_router(clock=lambda: self.now))
+		other = Path(self.temp.name) / "other-profile/plugin-data/hermes-t3sidebar/state.sqlite3"
+		wake = self.now + 1
+		with TestClient(app) as client, patch.object(backend, "default_state_path", return_value=self.path) as resolve:
+			for path in (self.path, other):
+				resolve.return_value = path
+				response = client.post("/sessions/same", json={"action": "snooze", "wake_at": wake})
+				self.assertEqual(response.status_code, 200, response.text)
+			self.now = wake
+			for path in (self.path, other):
+				resolve.return_value = path
+				self.assertEqual(client.get("/state").json()["sessions"]["same"]["woke_at"], wake)
+			resolve.return_value = self.path
+			response = client.post("/sessions/same", json={"action": "ack_wake", "woke_at": wake})
+			self.assertEqual(response.status_code, 200, response.text)
+			self.assertIsNone(client.get("/state").json()["sessions"]["same"]["woke_at"])
+			resolve.return_value = other
+			self.assertEqual(client.get("/state").json()["sessions"]["same"]["woke_at"], wake)
 
 	def test_default_path_uses_profile_home(self):
 		with patch("hermes_constants.get_hermes_home", return_value=Path(self.temp.name)):

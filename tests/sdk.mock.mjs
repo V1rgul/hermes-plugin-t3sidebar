@@ -22,6 +22,19 @@ export const host = {
   async request(method, params) { calls.push([method, params]); if (method === 'session.active_list') { if (control.runtimeError) throw new Error('fixture runtime disconnected'); return { sessions: clone(control.live) }; } if (method === 'session.list') return { sessions: clone(control.extra || []).slice(0, params.limit) }; throw new Error(`Unexpected RPC ${method}`); },
   async requestProfile(route, method, params) {
     calls.push(['requestProfile', route, method, clone(params)]);
+    if (method === 'session.title') {
+      const live = control.live.find(item => item.id === params.session_id);
+      if (!live) throw new Error('fixture live runtime missing');
+      const row = control.rows.find(item => item.id === live.session_key || item._lineage_root_id === live.session_key || item._lineage_ids?.includes(live.session_key));
+      if (!row) throw new Error('fixture stored title missing');
+      if (control.renameError) throw new Error('fixture rename unavailable');
+      if (params.title !== undefined) {
+        control.afterRename?.();
+        if (!control.dropRename && !control.renamePending) row.title = params.title;
+        return { title: params.title, pending: !!control.renamePending };
+      }
+      return { title: row.title, session_key: control.renameWrongId || live.session_key };
+    }
     if (method === 'session.archive') {
       if (control.archiveError) throw new Error('fixture archive RPC unavailable');
       const rows = [...control.rows, ...(control.extra || [])].filter(row => row.id === params.session_id || row._lineage_root_id === params.session_id || row._lineage_ids?.includes(params.session_id));
@@ -40,10 +53,16 @@ export const host = {
     if (method === 'session.cwd.set') { control.composerCwd = params.cwd; return { cwd: params.cwd }; }
     throw new Error(`Unexpected profile RPC ${method}`);
   },
-  openSession(id, options) { calls.push(['open', id, options]); host.state.focusedStoredSessionId.set(id); host.state.focusedSessionOwner.set(options.route); control.afterOpen?.(); }, newChat(route) { calls.push(['new', route]); host.state.focusedStoredSessionId.set(null); }, navigate(path) { calls.push(['navigate', path]); }, notify(value) { calls.push(['notify', value]); }
+  openSession(id, options) {
+    calls.push(['open', id, options]);
+    if (control.openError) throw new Error('fixture open unavailable');
+    for (const row of control.rows) if (row.id === id || row._lineage_root_id === id || row._lineage_ids?.includes(id)) row.unread = false;
+    host.state.focusedStoredSessionId.set(id); host.state.focusedSessionOwner.set(options.route); control.afterOpen?.();
+  }, newChat(route) { calls.push(['new', route]); host.state.focusedStoredSessionId.set(null); }, navigate(path) { calls.push(['navigate', path]); }, notify(value) { calls.push(['notify', value]); }
 };
 export function switchScope(source = 'source-b', profile = 'default') { epoch++; host.state.connectionId.set(source); host.state.profile.set(profile); host.state.gateway.set('open'); }
 export const ctx = {
+  os: { async writeClipboard(text) { calls.push(['clipboard', text]); return !control.clipboardError; } },
   storage: {
     get(key, fallback) {
       if (control.storageReadError) throw new Error('fixture storage read failed');
@@ -59,7 +78,10 @@ export const ctx = {
   },
   async rest(path, options) {
     calls.push(['rest', path, options]); if (control.backendMissing) throw new Error('404 backend not enabled');
-    if (path === '/state') return clone(control.metadata);
+    if (path === '/state') {
+      for (const item of Object.values(control.metadata.sessions)) if (item.state === 'snoozed' && item.wake_at <= Date.now() / 1000) Object.assign(item, { state: 'active', woke_at: item.wake_at, updated_at: item.wake_at, wake_at: null });
+      return clone(control.metadata);
+    }
     if (path === '/runtime') {
       if (control.runtimeError) throw new Error('fixture runtime disconnected');
       return { profile: control.runtimeProfile || host.state.profile.get(), sessions: clone(control.live) };
@@ -84,12 +106,17 @@ export const ctx = {
     const id = decodeURIComponent(path.slice('/sessions/'.length));
     if (!options || options.method !== 'POST') throw new Error('Unexpected REST request');
     if (control.metadataWriteError) throw new Error('fixture metadata write failed');
+    if (options.body.action === 'ack_wake') {
+      const item = control.metadata.sessions[id];
+      if (!control.dropWrite && item?.woke_at === options.body.woke_at) item.woke_at = null;
+      return clone(control.metadata);
+    }
     if (!control.dropWrite) {
       const item = control.metadata.sessions[id] || { state: 'active', settled_at: null, wake_at: null, pinned: false, updated_at: now() };
       const { action, wake_at } = options.body;
-      if (action === 'settle') Object.assign(item, { state: 'settled', settled_at: now(), wake_at: null });
-      if (action === 'restore') Object.assign(item, { state: 'active', settled_at: null, wake_at: null });
-      if (action === 'snooze') Object.assign(item, { state: 'snoozed', settled_at: null, wake_at });
+      if (action === 'settle') Object.assign(item, { state: 'settled', settled_at: now(), wake_at: null, woke_at: null });
+      if (action === 'restore') Object.assign(item, { state: 'active', settled_at: null, wake_at: null, woke_at: null });
+      if (action === 'snooze') Object.assign(item, { state: 'snoozed', settled_at: null, wake_at, woke_at: null });
       if (action === 'pin') item.pinned = true;
       if (action === 'unpin') item.pinned = false;
       item.updated_at = now(); control.metadata.sessions[id] = item;

@@ -23,6 +23,7 @@ const check = (label, condition) => { assert.ok(condition, label); checks.push(l
 try {
   browser = await chromium.launch({ executablePath: await executable(), headless: true, args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   page.setDefaultTimeout(8000);
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`);
@@ -36,12 +37,12 @@ try {
   await page.locator('[data-session-id="root"]').waitFor();
   check('search temporarily reveals persisted folded category without catch-up text', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'false' && !await page.getByText('All caught up', { exact: true }).count());
   await page.getByRole('searchbox').fill('');
-  await page.locator('[data-session-id="root"]').waitFor({ state: 'detached' });
+  await page.locator('[data-session-id="root"]').waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: 'Switch mock source', exact: true }).click();
   await page.locator('[data-session-id="root"]').waitFor();
   check('fold preferences do not leak to another source', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'false' && await page.locator('[data-section="snoozed"]').getAttribute('data-closed') === 'false');
   await page.getByRole('button', { name: 'Switch mock source', exact: true }).click();
-  await page.locator('[data-session-id="root"]').waitFor({ state: 'detached' });
+  await page.locator('[data-session-id="root"]').waitFor({ state: 'hidden' });
   check('reconnecting restores original source fold preferences', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'true' && await page.locator('[data-section="snoozed"]').getAttribute('data-closed') === 'true');
   for (const section of ['Working', 'Snoozed']) await page.getByRole('button', { name: `${section} (1)`, exact: true }).click();
   await page.reload();
@@ -62,6 +63,23 @@ try {
     return c.right <= l.left && l.width > 30 && l.right <= a.left && a.right >= h.right - 8 && h.height === 24;
   })));
   check('sidebar project icons have no filled background', await page.locator('.sf-row .sf-project-icon').evaluateAll(icons => icons.every(icon => getComputedStyle(icon).backgroundColor === 'rgba(0, 0, 0, 0)')));
+  for (const [id, status, label, token] of [['readme', 'done', 'Done', '--ui-green'], ['approval', 'input', 'Input', '--ui-purple']]) {
+    const card = page.locator(`[data-session-id="${id}"]`), badge = card.locator(`.sf-status[data-status="${status}"]`);
+    check(`${label} has a leading icon and the requested semantic color`, await badge.evaluate((el, token) => {
+      const probe = document.createElement('span'); probe.style.color = `var(${token})`; el.append(probe);
+      const color = getComputedStyle(probe).color; probe.remove();
+      return el.querySelector('svg') !== null && getComputedStyle(el).color === color;
+    }, token));
+    check(`${label} is right-aligned after provider/tokens and title is bold`, await card.evaluate(el => {
+      const status = el.querySelector('.sf-status').getBoundingClientRect(), tokens = el.querySelector('.sf-token').getBoundingClientRect();
+      return status.left >= tokens.right && Number(getComputedStyle(el.querySelector('.sf-row-title')).fontWeight) >= 600;
+    }));
+  }
+  check('project and age contrast increased without brightening provider/tokens', await page.locator('[data-session-id="design"]').evaluate(el => {
+    const project = getComputedStyle(el.querySelector('.sf-project-name')).color, time = getComputedStyle(el.querySelector('.sf-time')).color;
+    const provider = getComputedStyle(el.querySelector('.sf-provider')).color, tokens = getComputedStyle(el.querySelector('.sf-token')).color;
+    return project === time && provider === tokens && project !== tokens;
+  }));
   await page.mouse.move(1100, 850);
   const workingOpacity = await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity);
   for (const id of ['snoozed', 'archived']) {
@@ -98,6 +116,7 @@ try {
   await design.hover();
   check('Snooze does not jump when pointer re-enters sidebar', JSON.stringify(await snoozeDialog.boundingBox()) === JSON.stringify(menuBefore));
   check('Snooze menu omits redundant history/agent footer', !await snoozeDialog.innerText().then(text => /History kept|never stops the agent/i.test(text)));
+  check('Snooze menu omits bottom chosen-time text button', !await snoozeDialog.getByRole('button', { name: 'Snooze until chosen time', exact: true }).count());
   await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('hover Snooze saves the selected time', true);
@@ -116,16 +135,28 @@ try {
   await page.getByRole('dialog').waitFor();
   check('actions popover is visible outside sidebar scroll clipping', await page.getByRole('dialog').evaluate(el => { const rect = el.getBoundingClientRect(); return rect.width > 180 && rect.right <= innerWidth && rect.bottom <= innerHeight && el.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + 30)); }));
   await page.screenshot({ path: join(screenshotDir, 'actions.png'), fullPage: true });
-  await page.getByRole('button', { name: 'Archive', exact: true }).click();
+  const context = page.getByRole('dialog', { name: 'Session actions', exact: true });
+  check('context menu omits archive and snooze actions', !await context.getByRole('button', { name: /^(?:Unarchive|Archive|Snooze)/ }).count());
+  check('context menu offers Rename, Copy session ID and row project filter', await context.getByRole('button', { name: 'Rename', exact: true }).count() === 1 && await context.getByRole('button', { name: 'Copy session ID', exact: true }).count() === 1 && await context.getByRole('button', { name: /^Filter by / }).count() === 1);
+  check('stored-only Rename is disabled with an explanation', await context.getByRole('button', { name: 'Rename', exact: true }).isDisabled() && /live|runtime/i.test(await context.innerText()));
+  await context.getByRole('button', { name: 'Copy session ID', exact: true }).click();
+  check('Copy session ID uses the public clipboard with the durable ID', await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'clipboard' && call[1] === 'design')));
+  if (!await context.count()) await design.click({ button: 'right' });
+  await context.getByRole('button', { name: /^Filter by / }).click();
+  check('row project shortcut filters without grouping or changing native workspace', !await page.locator('[data-session-id="readme"]').count() && await page.locator('[data-session-id="design"]').count() === 1 && !await page.locator('.sf-group').count());
+  await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Filter by project' }).selectOption('*');
+  await page.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  await design.hover(); await archive.click();
   await page.locator('section[aria-label="Archived"] [data-session-id="design"]').waitFor();
   check('archival and server-readback rendered', true);
   await design.hover(); await design.getByRole('button', { name: 'Unarchive session', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('Archived list Unarchive restores Ready without an Undo banner', !await page.getByRole('button', { name: 'Undo', exact: true }).count());
-  await page.locator('[data-session-id="design"]').click({ button: 'right' });
+  await design.hover(); await snooze.click();
   await page.getByRole('button', { name: 'Snooze · In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
-  check('context menu snoozes and restores', true);
+  check('direct Snooze control and context Restore remain available', true);
   await page.locator('[data-session-id="design"]').click({ button: 'right' });
   await page.getByRole('button', { name: 'Restore to Ready', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
@@ -139,10 +170,8 @@ try {
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   await page.getByRole('combobox', { name: 'Filter by project' }).selectOption('/projects/docs');
   await page.waitForFunction(() => !document.querySelector('[data-session-id="design"]'));
-  await page.getByRole('button', { name: 'Group by project' }).click();
-  check('project filter independent from optional grouping', await page.locator('.sf-group').count() > 0);
+  check('project filtering remains available without grouping option', !await page.getByRole('button', { name: 'Group by project' }).count() && !await page.getByRole('button', { name: 'Use flat list' }).count() && !await page.locator('.sf-group').count());
   await page.getByRole('combobox', { name: 'Filter by project' }).selectOption('*');
-  await page.getByRole('button', { name: 'Use flat list', exact: true }).click();
   await page.getByRole('button', { name: 'Close session actions', exact: true }).click();
   await page.getByRole('button', { name: 'Simulate missing backend' }).click();
   await page.getByText(/Read-only browsing/).waitFor();
@@ -159,7 +188,7 @@ try {
   await page.getByText(/Runtime status unavailable/).waitFor();
   check('runtime failure explicitly unknown, native archives remain Archived', await page.locator('section[aria-label="Archived"] [data-session-id="archived"]').count() === 1);
   await page.locator('[data-session-id="archived"]').hover();
-  check('native archived Unarchive remains enabled during runtime outage; Snooze disabled', !await page.locator('[data-session-id="archived"] [aria-label="Unarchive session"]').isDisabled() && await page.locator('[data-session-id="archived"] [aria-label="Snooze session"]').isDisabled());
+  check('native archived Unarchive remains enabled during runtime outage; Snooze absent', !await page.locator('[data-session-id="archived"] [aria-label="Unarchive session"]').isDisabled() && !await page.locator('[data-session-id="archived"] [aria-label="Snooze session"]').count());
   await page.locator('[data-session-id="archived"] [aria-label="Unarchive session"]').click();
   await page.locator('section[aria-label="Ready"] [data-session-id="archived"]').waitFor();
   check('Unarchive during runtime outage has no Undo banner', !await page.getByRole('button', { name: 'Undo', exact: true }).count());
@@ -194,6 +223,30 @@ try {
     return create[3].cwd_explicit && !create[3].close_on_disconnect && open[2].awaitHydration && open[2].expectHistory === false && !calls.some(c => c[0] === 'new' || /prompt/.test(c[2] || ''));
   }));
   check('unsupported Add project button is absent', await page.getByRole('button', { name: 'Add project', exact: true }).count() === 0);
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.metadata.sessions.design = { state: 'active', pinned: false, woke_at: Date.now() / 1000 - 60, updated_at: Date.now() / 1000 - 60 };
+    fixture.control.live.push({ id: 'runtime-design', session_key: 'design', status: 'idle', last_active: Date.now() / 1000 });
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  await design.locator('.sf-status[data-status="woke"]').waitFor();
+  check('durable wake marker shows orange Woke with icon and bold title', await design.evaluate(el => {
+    const badge = el.querySelector('.sf-status'), probe = document.createElement('span'); probe.style.color = 'var(--ui-orange)'; badge.append(probe);
+    const expected = getComputedStyle(probe).color; probe.remove();
+    return badge.textContent === 'Woke' && badge.querySelector('svg') !== null && getComputedStyle(badge).color === expected && Number(getComputedStyle(el.querySelector('.sf-row-title')).fontWeight) >= 600;
+  }));
+  await design.locator('.sf-open').click();
+  await design.locator('.sf-status[data-status="woke"]').waitFor({ state: 'detached' });
+  check('reading acknowledges exact wake marker without a new Undo banner', await page.evaluate(() => window.hermesT3SidebarHarness.control.metadata.sessions.design.woke_at === null) && !await page.getByRole('button', { name: 'Undo', exact: true }).count());
+  const ageBeforeReopen = await design.locator('.sf-time').textContent();
+  await design.locator('.sf-open').click();
+  check('opening a thread does not replace its conversation age with runtime resume time', await design.locator('.sf-time').textContent() === ageBeforeReopen && ageBeforeReopen !== 'now');
+  await design.click({ button: 'right' });
+  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Session title', exact: true }).fill('Renamed sidebar thread');
+  await page.getByRole('button', { name: 'Save rename', exact: true }).click();
+  await design.locator('.sf-row-title').filter({ hasText: 'Renamed sidebar thread' }).waitFor();
+  check('live-thread Rename saves and exact native title readback renders', await page.evaluate(() => window.hermesT3SidebarHarness.calls.filter(call => call[2] === 'session.title' && call[3].session_id === 'runtime-design').length === 2));
   // Exercise the real Archived pagination control without expanding active history.
   await page.evaluate(() => window.hermesT3SidebarHarness.loadArchivePaginationFixtures());
   await page.locator('[data-session-id="synthetic-page-active-0"]').waitFor();
@@ -211,6 +264,30 @@ try {
   await page.evaluate(() => window.hermesT3SidebarHarness.loadDenseFixtures());
   await page.locator('[data-session-id="synthetic-active-000"]').waitFor();
   await page.waitForFunction(() => document.querySelector('[data-session-id="synthetic-working-000"]')?.dataset.working === 'true');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const motion = await page.evaluate(async () => {
+    const section = document.querySelector('[data-section="archived"]'), toggle = section.querySelector('.sf-section-toggle');
+    const before = section.getBoundingClientRect().height, samples = [];
+    toggle.click();
+    const start = performance.now();
+    while (performance.now() - start < 320) { await new Promise(requestAnimationFrame); samples.push(section.getBoundingClientRect().height); }
+    const closed = section.getBoundingClientRect().height, inert = section.querySelector('.sf-section-body').inert;
+    toggle.click();
+    const reopened = [];
+    const opening = performance.now();
+    while (performance.now() - opening < 320) { await new Promise(requestAnimationFrame); reopened.push(section.getBoundingClientRect().height); }
+    return { before, closed, inert, closingIntermediate: samples.some(h => h > 25 && h < before - 1), openingIntermediate: reopened.some(h => h > 25 && h < before - 1), final: section.getBoundingClientRect().height };
+  });
+  check('fold and unfold animate real category height, not just the chevron', motion.closingIntermediate && motion.openingIntermediate && Math.abs(motion.closed - 24) < 1 && Math.abs(motion.final - motion.before) < 1 && motion.inert);
+  const rapid = await page.evaluate(async () => {
+    const section = document.querySelector('[data-section="archived"]'), toggle = section.querySelector('.sf-section-toggle');
+    toggle.click(); await new Promise(requestAnimationFrame); toggle.click();
+    const start = performance.now(); while (performance.now() - start < 320) await new Promise(requestAnimationFrame);
+    return section.dataset.closed === 'false' && !section.querySelector('.sf-section-body').inert && section.getBoundingClientRect().height > 24;
+  });
+  check('rapid folding reversal settles expanded without inert or stuck content', rapid);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  check('reduced-motion disables category height transitions', await page.locator('.sf-scroll').evaluate(el => getComputedStyle(el).transitionDuration === '0s'));
   for (const height of [400, 650]) {
     await page.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
     await page.mouse.move(1100, 850);
@@ -222,8 +299,8 @@ try {
     });
     check(`${height}px: 100 Ready plus 20 rows in each priority shelf`, layout.sections.find(s => s.name === 'active').count === 100 && layout.sections.filter(s => s.name !== 'active').every(s => s.count === 20));
     check(`${height}px: Pinned before headerless Ready, secondary headings fixed and visible`, layout.sections.map(s => s.name).join(',') === 'pinned,active,working,snoozed,archived' && layout.sections.slice(0, 2).every(s => !s.header) && layout.sections.slice(2).every(s => s.header.height === 24 && s.header.top >= layout.list.top && s.header.bottom <= layout.root.bottom && s.body.top >= s.header.bottom));
-    check(`${height}px: no whole-list scrolling; all five bodies constrained`, layout.overflow === 'hidden' && layout.listScrollHeight <= layout.listHeight + 1 && layout.sections.every(s => s.body.height >= 56 && s.body.bottom <= layout.list.bottom + 1 && s.scrollHeight > s.body.height));
-    check(`${height}px: priority shelf bodies receive space before Ready`, layout.sections.filter(s => s.name !== 'active').every(s => s.rect.height >= 56) && layout.sections.find(s => s.name === 'active').rect.height >= 56);
+    check(`${height}px: no whole-list scrolling; all five bodies constrained`, layout.overflow === 'hidden' && layout.listScrollHeight <= layout.listHeight + 1 && layout.sections.every(s => s.body.height > 0 && s.body.bottom <= layout.list.bottom + 1 && s.scrollHeight > s.body.height));
+    check(`${height}px: expanded Archived gets a substantially larger share`, layout.sections.find(s => s.name === 'archived').rect.height > layout.list.height * .35 && layout.sections.filter(s => s.name !== 'archived').every(s => s.body.height > 0));
     check(`${height}px: toolbar single line and Search left of Filter and New session`, layout.toolbar.length === 3 && layout.toolbar.every(r => Math.abs((r.top + r.bottom) / 2 - (layout.toolbar[0].top + layout.toolbar[0].bottom) / 2) < 2) && layout.toolbar.every((r, i, arr) => !i || arr[i-1].right <= r.left));
     // Scroll each body in turn: every other category's scrollTop AND geometry stay fixed.
     for (const section of ['pinned', 'active', 'working', 'snoozed', 'archived']) {

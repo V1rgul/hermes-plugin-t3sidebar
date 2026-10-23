@@ -44,7 +44,8 @@ export function validState(value) {
   if (value?.version !== 1 || !value.sessions || typeof value.sessions !== 'object' || Array.isArray(value.sessions)) throw new Error('Unsupported hermes-t3sidebar backend response.');
   for (const item of Object.values(value.sessions)) {
     if (!item || !['active', 'settled', 'snoozed'].includes(item.state) || typeof item.pinned !== 'boolean' ||
-      (item.state === 'snoozed' && !(Number.isFinite(item.wake_at) && item.wake_at > 0))) throw new Error('Invalid hermes-t3sidebar metadata.');
+      (item.state === 'snoozed' && !(Number.isFinite(item.wake_at) && item.wake_at > 0)) ||
+      (item.woke_at != null && !(Number.isFinite(item.woke_at) && item.woke_at > 0))) throw new Error('Invalid hermes-t3sidebar metadata.');
   }
   return value;
 }
@@ -82,7 +83,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     const status = !runtimeKnown ? 'unknown' : matches.some(i => i.status === 'waiting') ? 'waiting'
       : matches.some(i => i.status === 'working' || i.status === 'starting') ? 'working'
       : matches.some(i => !['idle', 'working', 'starting', 'waiting'].includes(i.status)) ? 'unknown' : 'idle';
-    const woke = meta.state === 'snoozed' && meta.wake_at <= now;
+    const woke = Number.isFinite(meta.woke_at) && meta.woke_at > 0 || meta.state === 'snoozed' && meta.wake_at <= now;
     const section = status === 'waiting' ? 'active'
       : row.archived === true ? 'archived'
       : status === 'unknown' ? 'active'
@@ -92,8 +93,11 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     const text = [row.title, row.preview, row.cwd, row.git_branch, ...aliases(row)].filter(Boolean).join(' ').toLowerCase();
     if (query && !query.trim().toLowerCase().split(/\s+/).every(token => text.includes(token))) continue;
     if (project !== '*' && (row._limited || (row.cwd || '') !== project)) continue;
+    // Runtime last_active is also a resume/reattach clock, not conversation progress.
+    const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
+    const runtimes = matches.filter(item => typeof item.id === 'string' && item.id && item.id !== item.session_key);
     result[section].push({ ...row, key: durableId(row), meta, section, status, woke,
-      activity: Math.max(seconds(row.last_active || row.updated_at || row.started_at || row.created_at), ...matches.map(i => seconds(i.last_active))) });
+      runtimeId: runtimes.length === 1 ? runtimes[0].id : null, activity });
   }
   for (const section of SECTIONS) result[section].sort((a, b) => {
     if (section === 'active' && (a.status === 'waiting') !== (b.status === 'waiting')) return a.status === 'waiting' ? -1 : 1;
@@ -124,7 +128,7 @@ export function inverseAction(action, before = { state: 'active', pinned: false 
 }
 export function verifyAction(state, id, payload) {
   const item = state.sessions[id];
-  const expected = payload.action === 'settle' ? item?.state === 'settled'
+  const expected = payload.action === 'ack_wake' ? item?.woke_at !== payload.woke_at : payload.action === 'settle' ? item?.state === 'settled'
     : payload.action === 'restore' ? item?.state === 'active'
     : payload.action === 'snooze' ? item?.state === 'snoozed' && item?.wake_at === payload.wake_at
     : payload.action === 'pin' ? item?.pinned === true : item?.pinned === false;
@@ -135,6 +139,7 @@ export function verifyAction(state, id, payload) {
 // Read generations + React Query cancellation prevent an old poll overwriting a write.
 export function createController(ctx, client = queryClient, env = { capture: captureScope, routes: () => host.profileRoutes(), host }) {
   let disposed = false, writing = false, generation = 0;
+  const wakeAcks = new Map();
   function check(scope) { if (disposed || !sameScope(scope, env.capture())) throw new Error('Source/profile changed; refresh before trying again.'); }
   async function fenced(scope, fn) { check(scope); const result = await fn(); check(scope); return result; }
   async function routeFor(scope) { return currentRoute(scope, await fenced(scope, () => env.routes())); }
@@ -242,9 +247,51 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         }
       }
     },
+    async rename(scope, row, input) {
+      check(scope);
+      const title = input.trim();
+      if (!title) throw new Error('Enter a non-empty session title.');
+      if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
+      writing = true; generation++;
+      try {
+        const route = await routeFor(scope);
+        const live = qualified(await fenced(scope, () => ctx.rest('/runtime')), scope, route);
+        const ids = new Set(aliases(row));
+        const matches = live.sessions.filter(item => ids.has(item.session_key) && typeof item.id === 'string' && item.id !== item.session_key);
+        if (matches.length !== 1 || matches[0].id !== row.runtimeId) throw new Error('Rename requires the same live runtime. Open the thread and retry.');
+        await client.cancelQueries({ queryKey: scopeKey(scope) }); check(scope);
+        const result = await fenced(scope, () => env.host.requestProfile(route, 'session.title', { session_id: row.runtimeId, title }));
+        if (result?.pending) throw new Error('Rename is pending; it has not been confirmed saved. Refresh before retrying.');
+        const saved = await fenced(scope, () => env.host.requestProfile(route, 'session.title', { session_id: row.runtimeId }));
+        if (result?.title !== title || saved?.title !== title || !ids.has(saved?.session_key)) throw new Error('The server did not confirm this session title. Refresh and retry.');
+        return title;
+      } finally {
+        writing = false;
+        if (!disposed && sameScope(scope, env.capture())) {
+          client.removeQueries({ queryKey: [...scopeKey(scope), 'page'] });
+          await client.invalidateQueries({ queryKey: scopeKey(scope) });
+        }
+      }
+    },
+    async copyId(scope, row) {
+      check(scope);
+      const ok = await fenced(scope, () => ctx.os.writeClipboard(durableId(row)));
+      if (!ok) throw new Error('Clipboard access is unavailable. The session ID was not copied.');
+    },
+    async ackWake(scope, row) {
+      const woke_at = row.meta?.woke_at;
+      if (!(Number.isFinite(woke_at) && woke_at > 0)) return;
+      const key = JSON.stringify([...scopeKey(scope), durableId(row), woke_at]);
+      if (wakeAcks.has(key)) return wakeAcks.get(key);
+      const work = this.mutate(scope, durableId(row), { action: 'ack_wake', woke_at });
+      wakeAcks.set(key, work);
+      try { return await work; } finally { wakeAcks.delete(key); }
+    },
     async open(scope, row) {
       const route = await routeFor(scope); check(scope);
-      return env.host.openSession(row.resolved_id || row.id, { route, profile: route?.profile || scope.profile, intent: 'in-place' });
+      await fenced(scope, () => env.host.openSession(row.resolved_id || row.id, { route, profile: route?.profile || scope.profile, intent: 'in-place' }));
+      await this.ackWake(scope, row);
+      check(scope); await client.invalidateQueries({ queryKey: [...scopeKey(scope), 'sessions'] });
     },
     async projects(scope) {
       const route = await routeFor(scope);
@@ -291,9 +338,9 @@ const CSS = `
 .sf-search{display:flex;align-items:center;gap:8px;flex:1;min-width:0;color:var(--ui-text-tertiary)}.sf-search svg{flex-shrink:0;width:18px;height:18px}
 .sf-search input{width:100%;min-width:0;padding:0;border:0;background:transparent;color:var(--ui-text-primary);outline:none}
 .sf-header input{font-size:14px}.sf-menu select{max-width:260px;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary)}
-.sf-scroll{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column;padding:0 6px;gap:1px;--sf-body-min:clamp(0px,calc((100% - 76px)/5),56px)}
-/* Reserve three headers and four gaps before sharing the remaining minimum body space; banners can reduce this below a full card. */
-.sf-section{display:flex;flex-direction:column;flex:0 1 auto;max-height:22%;min-height:24px;overflow:hidden}.sf-section[data-populated=true][data-closed=false]{min-height:calc(24px + var(--sf-body-min))}.sf-section[data-section=active]{flex:1 1 0;max-height:none;min-height:var(--sf-body-min)}.sf-section[data-section=pinned][data-populated=true],.sf-section[data-section=active][data-populated=true]{min-height:var(--sf-body-min)}
+.sf-scroll{overflow:hidden;flex:1;min-height:0;display:grid;padding:0 6px;gap:1px;transition:grid-template-rows .22s ease}
+/* Fixed header minima survive short panes; Archives gets most of the flexible space. */
+.sf-section{display:flex;flex-direction:column;min-height:0;overflow:hidden}.sf-section[data-section=pinned]{grid-row:1}.sf-section[data-section=active]{grid-row:2}.sf-section[data-section=working]{grid-row:3}.sf-section[data-section=snoozed]{grid-row:4}.sf-section[data-section=archived]{grid-row:5}
 .sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:24px;min-height:24px;padding:3px 6px;border:0;background:transparent;color:var(--ui-text-tertiary);font-size:11px;text-align:left}.sf-count{color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums}.sf-section-label,.sf-count,.sf-section-chevron{flex-shrink:0}.sf-section-line{flex:1;min-width:0;height:1px;background:var(--ui-stroke-secondary)}.sf-section-chevron{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px}
 .sf-row{position:relative;height:56px;flex-shrink:0;padding:0 10px;border-radius:5px}.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
 .sf-row[data-dimmed=true]{opacity:.55}.sf-row[data-dimmed=true]:hover,.sf-row[data-dimmed=true]:focus-within{opacity:1}
@@ -305,6 +352,10 @@ const CSS = `
 .sf-undo{display:flex;align-items:center;gap:6px}.sf-undo span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}
+.sf-menu>div:not(.sf-menu-title),.sf-menu form{display:flex;flex-direction:column;gap:4px}
+.sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--ui-orange,#db704b)}.sf-status[data-status=input]{color:var(--ui-purple,#9e94d5)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
+.sf-section-body{transition:opacity .18s ease,visibility 0s}.sf-section[data-closed=true] .sf-section-body{opacity:0;visibility:hidden;transition:opacity .18s ease,visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:opacity .16s ease,background-color .16s ease,box-shadow .16s ease}.sf-hover{transition:opacity .12s ease;opacity:0}.sf-row:hover .sf-hover{opacity:1}.sf-custom-time{display:flex;align-items:center;gap:4px}.sf-custom-time input{min-width:0}.sf-custom-time .sf-icon{flex-shrink:0}
+@media(prefers-reduced-motion:reduce){.sf-scroll,.sf-section-body,.sf-section-chevron,.sf-row,.sf-hover{transition:none!important}}
 `;
 // Monochrome brand paths: Simple Icons 15.20.0 (CC0), fetched from its pinned GitHub tag.
 const PROVIDER_PATHS = {
@@ -339,30 +390,50 @@ function Settings() {
     h('p', null, 'Keyboard: ↑/↓ or Home/End to focus rows; Enter to open; Shift+F10 for actions; Shift+Enter to archive and advance (only with confirmed idle status).'),
     h('p', null, 'Pins and snoozes belong to this plugin’s backend. Archived includes existing native archives, sorted by last activity, not archive time. Older plugin-only completed entries return to Ready; no history is automatically archived. Missing backend: browsing remains available, organization is read-only.'));
 }
-function RowActions({ row, scope, mutate, disabled, close, snoozeOnly = false }) {
-  const [value, setValue] = useState(''), [error, setError] = useState('');
-  const archived = row.archived === true, waiting = row.status !== 'idle', snoozeDisabled = waiting || archived;
-  const run = payload => { void mutate(row, payload).then(ok => { if (ok) close(); }); };
-  const action = (text, payload, extraDisabled = false) => h(sdk.Button, { key: text, type: 'button', variant: 'ghost', size: 'sm', disabled: disabled || extraDisabled,
-    onClick: () => run(payload) }, text);
+function RowActions({ row, scope, controller, filterProject, mutate, disabled, close, snoozeOnly = false }) {
+  const [value, setValue] = useState(''), [error, setError] = useState(''), [renaming, setRenaming] = useState(false), [title, setTitle] = useState(row.title || ''), [busy, setBusy] = useState(false);
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const snoozeDisabled = row.status !== 'idle' || row.archived === true;
+  const run = payload => { void mutate(row, payload).then(ok => { if (ok && alive.current) close(); }); };
+  const perform = async work => {
+    setBusy(true); setError('');
+    try { controller.check(scope); await work(); controller.check(scope); if (alive.current) close(); }
+    catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); }
+    finally { if (alive.current) setBusy(false); }
+  };
+  const action = (text, payload) => h(sdk.Button, { key: text, type: 'button', variant: 'ghost', size: 'sm', disabled: disabled || busy, onClick: () => run(payload) }, text);
+  const projectCwd = typeof row.cwd === 'string' ? row.cwd : row.project?.is_home ? '' : null;
+  const custom = event => {
+    event.preventDefault();
+    try { const wake_at = parseLocalWake(value); setError(''); run({ action: 'snooze', wake_at }); } catch (err) { setError(err.message); }
+  };
   return h('div', { className: 'sf-menu' }, h('div', { className: 'sf-menu-title' }, row.title || 'Untitled session'),
-    !snoozeOnly ? action(row.meta.pinned ? 'Unpin' : 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
-    !snoozeOnly && !archived && row.meta.state === 'snoozed' ? action('Restore to Ready', { action: 'restore' }) : null,
-    !snoozeOnly ? action(archived ? 'Unarchive' : 'Archive', { action: archived ? 'unarchive' : 'archive' }, !archived && waiting) : null,
-    !snoozeOnly && !archived ? action('Archive and advance', { action: 'archive', advance: true }, waiting) : null,
-    ...snoozePresets().map(preset => action(`Snooze · ${preset.label}`, { action: 'snooze', wake_at: preset.wake_at }, snoozeDisabled)),
-    h('label', null, 'Custom snooze · local time', h('input', { type: 'datetime-local', value, disabled: disabled || snoozeDisabled,
-      'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } })),
-    h(sdk.Button, { variant: 'ghost', size: 'sm', disabled: disabled || snoozeDisabled || !value, onClick: () => {
-      try { const wake_at = parseLocalWake(value); setError(''); run({ action: 'snooze', wake_at }); } catch (e) { setError(e.message); }
-    } }, 'Snooze until chosen time'),
-    error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null,
-    waiting ? h('p', null, 'Archive and snooze require confirmed idle status. Waiting stays visible in Ready; Unarchive remains available.') : null,
-    archived ? h('p', null, 'Unarchive before snoozing this conversation.') : null);
+    snoozeOnly ? h('form', { onSubmit: custom },
+      ...snoozePresets().map(preset => h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, `Snooze · ${preset.label}`)),
+      h('label', null, 'Custom snooze · local time', h('span', { className: 'sf-custom-time' },
+        h('input', { type: 'datetime-local', value, disabled: disabled || snoozeDisabled, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
+        h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value }))))
+      : h('div', null,
+        action(row.meta.pinned ? 'Unpin' : 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }),
+        row.archived !== true && row.meta.state === 'snoozed' ? action('Restore to Ready', { action: 'restore' }) : null,
+        h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy || !row.runtimeId, onClick: () => setRenaming(true) }, 'Rename'),
+        !row.runtimeId ? h('p', null, 'Rename requires a live runtime. Open the thread and retry.') : null,
+        renaming ? h('form', { onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
+          h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
+          h(sdk.Button, { type: 'submit', variant: 'ghost', disabled: busy || !title.trim() }, 'Save rename')) : null,
+        h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy, onClick: () => void perform(() => controller.copyId(scope, row)) }, 'Copy session ID'),
+        h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy || projectCwd === null || row._limited, onClick: () => {
+          try { controller.check(scope); filterProject(projectCwd); close(); } catch (err) { setError(err.message); }
+        } }, `Filter by ${row.project?.name || (projectCwd === '' ? 'Home' : 'session project')}`)),
+    error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
-function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus, onNavigate, rowRef }) {
+export function cardStatus(row) {
+  return row.status === 'waiting' ? 'input' : row.status === 'working' ? 'working' : row.woke ? 'woke' : row.unread === true ? 'done' : null;
+}
+function SessionRow({ row, active, controller, scope, mutate, filterProject, disabled, onFocus, onNavigate, rowRef }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
-  const attention = row.status === 'waiting';
+  const attention = row.status === 'waiting', badge = cardStatus(row);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
     if (event.target !== event.currentTarget) return;
@@ -370,7 +441,7 @@ function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus,
     else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
-  return h('div', { className: 'sf-row', 'data-current': active, 'data-working': row.section === 'working', 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
+  return h('div', { className: 'sf-row', 'data-current': active, 'data-working': row.section === 'working', 'data-unread': row.unread === true || row.woke || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
     h('button', { type: 'button', className: 'sf-open', ref: rowRef, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${row.title || 'Untitled session'}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
@@ -381,21 +452,23 @@ function SessionRow({ row, active, controller, scope, mutate, disabled, onFocus,
           h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: row.project?.color || undefined } }, projectMark(row.project)),
           row.meta.pinned ? h('span', { className: 'sf-pin', 'aria-label': 'Pinned' }, icon('Pin', '♧')) : null,
           h('span', { className: 'sf-project-name' }, row.project?.name || 'Project unavailable')),
-        attention || row.status === 'unknown' || row.woke || row.unread ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': attention ? 'Waiting for approval or answer' : row.status === 'unknown' ? 'Status unknown' : row.woke ? 'Snooze ended' : 'Unread' }, attention ? 'Waiting' : row.status === 'unknown' ? '?' : row.woke ? 'Woke' : '•') : null,
+        row.status === 'unknown' ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': 'Status unknown' }, '?') : null,
         h('span', { className: 'sf-provider', role: 'img', 'aria-label': row.provider ? `Provider: ${row.provider}` : 'Provider unavailable', title: row.provider || 'Provider unavailable' }, providerMark(row.provider)),
         h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${compactTokens(row)}` }, compactTokens(row)),
-        h('span', { className: 'sf-time' }, row.status === 'working' ? 'Working' : relative(row.activity))),
+        h('span', { className: 'sf-time' }, badge ? h('span', { className: 'sf-status', 'data-status': badge },
+          badge === 'input' ? h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('path', { d: 'M4 4h16v12H9l-5 4V4M10 8a2 2 0 0 1 4 0c0 2-2 1-2 3M12 13v1' })) : badge !== 'working' ? icon(badge === 'done' ? 'CircleCheck' : 'AlarmClock', badge === 'done' ? '✓' : '◷') : null,
+          { done: 'Done', woke: 'Woke', input: 'Input', working: 'Working' }[badge]) : relative(row.activity))),
       h('span', { className: 'sf-row-title' }, row.title || 'Untitled session')),
     h('div', { className: 'sf-hover' },
-      h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },
+      row.archived !== true ? h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },
         h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Snooze session', name: 'Clock', glyph: '◷', disabled: disabled || row.status !== 'idle' || row.archived === true, 'aria-haspopup': 'dialog' })),
         h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Snooze session' },
-          h(RowActions, { row, scope, mutate, disabled, snoozeOnly: true, close: () => setSnoozeOpen(false) }))),
+          h(RowActions, { row, scope, controller, mutate, disabled, snoozeOnly: true, close: () => setSnoozeOpen(false) }))) : null,
       h(sdk.Button, { type: 'button', variant: 'ghost', size: 'xs', className: 'sf-icon sf-archive', 'aria-label': row.archived === true ? 'Unarchive session' : 'Archive session', disabled: disabled || (row.archived !== true && row.status !== 'idle'),
         onClick: () => void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive' }) }, icon(row.archived === true ? 'ArchiveRestore' : 'Archive', '▤'), row.archived === true ? 'Unarchive' : 'Archive')),
     h(sdk.Popover, { open: menuOpen, onOpenChange: setMenuOpen },
       h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { ref: trigger, className: 'sf-context-trigger', label: `Actions for ${row.title || 'Untitled session'}`, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog' })),
-      h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Session actions' }, h(RowActions, { row, scope, mutate, disabled, close: () => setMenuOpen(false) }))));
+      h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Session actions' }, h(RowActions, { row, scope, controller, filterProject, mutate, disabled, close: () => setMenuOpen(false) }))));
 }
 export function HermesT3Sidebar({ ctx, controller }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
@@ -430,13 +503,13 @@ export function ProjectPicker({ controller, scope, close }) {
 }
 function ScopedSidebar({ ctx, controller, scope }) {
   const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
-  const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [grouped, setGrouped] = useState(false), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [undo, setUndo] = useState(null), [actionError, setActionError] = useState('');
   const preferenceKey = foldStorageKey(scope);
   useEffect(() => {
     try { ctx.storage.set(preferenceKey, collapsed); } catch (_) { /* Folding still works when persistence is unavailable. */ }
   }, [ctx, preferenceKey, collapsed]);
-  const search = useRef(null), rowRefs = useRef(new Map()), focused = useRef(null), latest = useRef(null);
+  const search = useRef(null), rowRefs = useRef(new Map()), focused = useRef(null), latest = useRef(null), readWakes = useRef(new Set());
   const key = scopeKey(scope);
   const mutation = useMutation({ mutationFn: async ({ id, payload }) => controller.mutate(scope, id, payload) });
   const opts = { refetchInterval: 5000, staleTime: 2000, retry: false };
@@ -455,6 +528,18 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const visible = SECTIONS.flatMap(section => collapsed[section] && !searching && !(section === 'active' && sections.active.some(row => row.status === 'waiting' || row.status === 'unknown')) ? [] : sections[section]);
   const projects = [...new Set(rows.filter(row => !row._limited).map(row => row.cwd || ''))].sort();
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
+  useEffect(() => {
+    if (!metadata.data || metadata.isError || mutation.isPending || !activeId || activeOwner?.connectionId !== (scope.connectionId ?? 'local') || activeOwner?.profile !== scope.profile) return;
+    const row = rows.find(item => aliases(item).includes(activeId));
+    const meta = row && metadata.data.sessions[durableId(row)];
+    if (!(meta?.woke_at > 0)) return;
+    const marker = JSON.stringify([durableId(row), meta.woke_at]);
+    if (readWakes.current.has(marker)) return;
+    readWakes.current.add(marker);
+    void controller.ackWake(scope, { ...row, meta }).catch(error => {
+      if (sameScope(scope, captureScope())) setActionError(`Thread opened, but its Woke marker could not be acknowledged: ${error.message}`);
+    });
+  }, [activeId, activeOwner, metadata.data, metadata.isError, mutation.isPending, rows, controller, scope]);
   const refresh = () => { try { controller.check(scope); void client.invalidateQueries({ queryKey: key }); } catch (_) { /* old pane */ } };
   const mutate = async (row, input, isUndo = false) => {
     try {
@@ -489,13 +574,13 @@ function ScopedSidebar({ ctx, controller, scope }) {
   useEffect(() => {
     if (focused.current && !visible.some(row => row.key === focused.current)) { focused.current = visible[0]?.key; rowRefs.current.get(focused.current)?.focus(); }
   });
-  const renderRow = row => h(SessionRow, { key: row.key, row, scope, controller, mutate, disabled: latest.current.disabled || row._liveOnly,
+  const renderRow = row => h(SessionRow, { key: row.key, row, scope, controller, mutate, filterProject: cwd => { controller.check(scope); setProject(cwd); }, disabled: latest.current.disabled || row._liveOnly,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: id => { focused.current = id; }, onNavigate: navigate,
     rowRef: element => { if (element) rowRefs.current.set(row.key, element); else rowRefs.current.delete(row.key); } });
   const renderSection = section => {
     const entries = sections[section], force = searching || section === 'active' && entries.some(row => ['waiting', 'unknown'].includes(row.status));
     const closed = !!collapsed[section] && !force;
-    const items = grouped ? [...Map.groupBy(entries, row => row.cwd || (row._limited ? 'Project unavailable' : 'No project'))].flatMap(([cwd, entries]) => [h('div', { className: 'sf-group', key: `project:${cwd}`, title: cwd }, cwd.split(/[\\/]/).filter(Boolean).pop() || cwd), ...entries.map(renderRow)]) : entries.map(renderRow);
+    const items = entries.map(renderRow);
     const headerless = section === 'active' || section === 'pinned';
     if (section === 'pinned' && !entries.length) return null;
     return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed },
@@ -504,9 +589,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
         h('span', { className: 'sf-section-label' }, LABELS[section]), h('span', { className: 'sf-count' }, `(${entries.length})`),
         h('span', { className: 'sf-section-line', 'aria-hidden': true }),
         h('span', { className: 'sf-section-chevron', 'aria-hidden': true }, icon(closed ? 'ChevronRight' : 'ChevronUp', closed ? '›' : '⌃'))) : null,
-      !closed ? h('div', { className: 'sf-section-body', 'aria-label': `${section === 'active' ? 'Ready' : LABELS[section]} sessions`, tabIndex: -1 },
+      h('div', { className: 'sf-section-body', 'aria-label': `${section === 'active' ? 'Ready' : LABELS[section]} sessions`, 'aria-hidden': closed || undefined, inert: closed || undefined, tabIndex: -1 },
         section === 'archived' && archives.isError ? h('div', { className: 'sf-empty', role: 'alert' }, `Archives unavailable: ${archives.error.message}`) : entries.length ? items : section === 'active' && filtering ? null : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : section === 'archived' && archives.isLoading ? 'Loading archives…' : 'No sessions'),
-        section === 'archived' && !archives.isError && archives.data?.has_more ? h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: archives.isFetching, onClick: () => setArchiveLimit(previous => previous + 1) }, 'Browse older archives') : null) : null);
+        section === 'archived' && !archives.isError && archives.data?.has_more ? h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: archives.isFetching, onClick: () => setArchiveLimit(previous => previous + 1) }, 'Browse older archives') : null));
 
   };
   const total = sessions.data?.total;
@@ -524,7 +609,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
         h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Filter sessions', name: 'ListFilter', glyph: '≡' })),
         h(sdk.PopoverContent, { align: 'end', 'aria-label': 'Session filters' }, h('div', { className: 'sf-menu' },
           h('select', { 'aria-label': 'Filter by project', value: project, onChange: event => setProject(event.target.value) }, h('option', { value: '*' }, 'All projects'), ...projects.map(cwd => h('option', { key: cwd, value: cwd }, cwd || 'No project'))),
-          h(sdk.Button, { variant: 'ghost', 'aria-label': grouped ? 'Use flat list' : 'Group by project', 'aria-pressed': grouped, onClick: () => setGrouped(value => !value) }, grouped ? 'Use flat list' : 'Group by project'),
+
           h(sdk.Button, { variant: 'ghost', onClick: refresh, 'aria-label': 'Refresh sessions' }, 'Refresh sessions')))),
 
       h(sdk.Popover, { open: pickerOpen, onOpenChange: setPickerOpen },
@@ -536,7 +621,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     metadata.isError ? h(Note, { error: true }, `hermes-t3sidebar backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback. `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,
-    h('div', { className: 'sf-scroll' }, ...SECTIONS.map(renderSection),
+    h('div', { className: 'sf-scroll', style: { gridTemplateRows: `minmax(0,${sections.pinned.length ? .65 : 0}fr) minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(section => `minmax(${collapsed[section] && !searching ? 24 : 25}px,${collapsed[section] && !searching ? 0 : section === 'archived' && sections.archived.length ? 3 : sections[section].length ? .65 : .25}fr)`).join(' ')}` } }, ...SECTIONS.map(renderSection),
       !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,
@@ -547,7 +632,7 @@ export default {
   id: 'hermes-t3sidebar', name: 'hermes-t3sidebar', defaultEnabled: false,
   register(ctx) {
     const controller = createController(ctx);
-    ctx.register({ id: 'sidebar', area: 'panes', title: 'hermes-t3sidebar', order: 0,
+    ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
     ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings) });
     const disposeEvent = ctx.onEvent('*', event => {

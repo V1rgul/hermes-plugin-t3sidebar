@@ -13,7 +13,7 @@ let root, controller;
 const tick = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 12)); }); };
 const $ = selector => document.querySelector(selector);
 const all = selector => [...document.querySelectorAll(selector)];
-const row = id => $(`[data-session-id="${id}"]`);
+const row = id => { const element = $(`[data-session-id="${id}"]`); return element?.closest('[data-closed=true]') ? null : element; };
 const shelf = name => $(`section[aria-label="${name}"]`);
 const button = label => all('button').find(node => node.getAttribute('aria-label') === label || node.textContent === label);
 async function click(node) { assert.ok(node, 'button exists'); await act(async () => { node.click(); }); await tick(); }
@@ -40,7 +40,7 @@ test('only supported import specifiers; opt-in left-pane registration and dispos
   assert.doesNotMatch(source, /setInterval|document\.|window\.|localStorage|__reactFiber|restartGateway/);
   plugin.register(mock.ctx);
   assert.equal(mock.control.contributions[0].data.placement, 'left');
-  assert.equal(mock.control.contributions[0].title, plugin.name); assert.equal(mock.control.settings.title, plugin.name);
+  assert.equal(mock.control.contributions[0].title, 't3sidebar'); assert.equal(mock.control.settings.title, plugin.name);
   assert.equal(mock.control.contributions[0].id, 'sidebar'); assert.equal(typeof mock.control.settings.render, 'function');
   mock.control.disposers.forEach(fn => fn()); assert.equal(mock.control.listener, null);
 });
@@ -69,6 +69,18 @@ test('working and starting dim shelf; idle pins; snooze wake; native archives by
 test('unknown runtime never silently classifies idle or hides in settled', () => {
   const result = flow.buildSections([{ id: 's' }], { sessions: { s: { state: 'settled' } } }, [], { runtimeKnown: false });
   assert.equal(result.active[0].status, 'unknown'); assert.equal(result.archived.length, 0);
+});
+
+test('opening or resuming a stored session does not reset its activity or ordering', () => {
+  const rows = [{ id: 'older', last_active: 100 }, { id: 'newer', last_active: 200 }];
+  for (const status of ['idle', 'working', 'waiting']) {
+    const sections = flow.buildSections(rows, { sessions: {} }, [{ id: 'runtime-older', session_key: 'older', status, last_active: 9999 }]);
+    const older = Object.values(sections).flat().find(row => row.id === 'older');
+    assert.equal(older.activity, 100);
+    if (status === 'idle') assert.deepEqual(sections.active.map(row => row.id), ['newer', 'older']);
+  }
+  const next = flow.buildSections([{ id: 'older', last_active: 300 }, rows[1]], { sessions: {} }, []);
+  assert.deepEqual(next.active.map(row => row.id), ['older', 'newer']);
 });
 
 test('waiting sorts first; ties stable; project filtering independent from grouping', () => {
@@ -153,14 +165,13 @@ test('React mounts headerless Ready and Pinned, waiting stays Ready, dim working
   assert.equal(mock.calls.some(c => c[0] === 'new'), false); assert.doesNotMatch(document.body.textContent, /native workspace selection/);
 });
 
-test('React search, project filter, optional local grouping and keyboard navigation', async () => {
+test('React search and exact project filter stay flat with keyboard navigation', async () => {
   await mount(); await input($('input[type=search]'), 'Sidebar'); assert.ok(row('design')); assert.equal(row('readme'), null);
   await input($('input[type=search]'), '');
   if (!$('select')) await click(button('Filter sessions'));
   await act(async () => { $('select').value = '/projects/docs'; $('select').dispatchEvent(new Event('change', { bubbles: true })); }); await tick();
   assert.ok(row('readme')); assert.equal(row('design'), null);
-  await click(button('Group by project')); assert.ok($('.sf-group'));
-  await click(button('Use flat list')); assert.equal($('.sf-group'), null);
+  assert.equal(button('Group by project'), undefined); assert.equal(button('Use flat list'), undefined); assert.equal($('.sf-group'), null);
   assert.equal(button('Show project details'), undefined); assert.equal($('.sf-row-detail'), null);
   const first = row('readme').querySelector('.sf-open'); first.focus();
   await act(async () => first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
@@ -186,19 +197,22 @@ test('React archives and unarchives without Undo; archive-and-advance opens next
   assert.equal(row('design').closest('section'), shelf('Archived')); assert.equal(button('Undo'), undefined);
   await click(row('design').querySelector('[aria-label="Unarchive session"]')); assert.equal(row('design').closest('section'), shelf('Ready'));
   assert.equal(button('Undo'), undefined);
-  await click(button('Actions for Sidebar layout')); await click(button('Archive and advance'));
+  await act(async () => row('design').querySelector('.sf-open').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }))); await tick();
   assert.equal(row('design').closest('section'), shelf('Archived'));
   assert.ok(mock.calls.some(c => c[0] === 'open' && c[1] === 'approval'));
 });
 
-test('React context menu snooze preset and custom validation, Restore', async () => {
+test('React hover snooze preset and custom validation, context Restore', async () => {
   await mount(); await act(async () => row('design').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))); await tick();
-  assert.ok($('[role=dialog]')); await click(button('Snooze · In 1 hour'));
+  assert.ok($('[role=dialog]')); assert.equal(button('Snooze · In 1 hour'), undefined);
+  await click(button('Close session actions')); await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Snooze · In 1 hour'));
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
   await click(button('Actions for Sidebar layout')); await click(button('Restore to Ready')); assert.equal(row('design').closest('section'), shelf('Ready'));
-  await click(button('Actions for Sidebar layout')); await input($('input[type=datetime-local]'), '2020-01-01T12:00');
-  await click(button('Snooze until chosen time')); assert.match($('[role=alert]').textContent, /future/);
-  await input($('input[type=datetime-local]'), '2030-01-01T12:00'); await click(button('Snooze until chosen time'));
+  await click(row('design').querySelector('[aria-label="Snooze session"]')); await input($('input[type=datetime-local]'), '2020-01-01T12:00');
+  assert.equal(button('Snooze until chosen time'), undefined);
+  await click(button('Apply custom snooze')); assert.match($('[role=alert]').textContent, /future/);
+  await input($('input[type=datetime-local]'), '2030-01-01T12:00');
+  await act(async () => $('input[type=datetime-local]').closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))); await tick();
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
 });
 
@@ -206,8 +220,7 @@ test('React waiting stays in headerless Ready and cannot be settled; secondary s
   await mount(); assert.equal(button('Active (3)'), undefined); assert.ok(row('approval'));
   assert.equal(row('approval').querySelector('[aria-label="Archive session"]').disabled, true);
   await click(button('Actions for Approval request'));
-  assert.equal([...$('[role=dialog]').querySelectorAll('button')].find(node => node.textContent === 'Archive').disabled, true);
-  assert.equal(button('Snooze · In 1 hour').disabled, true);
+  assert.equal([...$('[role=dialog]').querySelectorAll('button')].some(node => /^(?:Archive|Snooze)/.test(node.textContent)), false);
   await click(button('Close session actions')); await click(button('Archived (1)')); assert.equal(row('archived'), null);
 });
 
@@ -463,7 +476,7 @@ test('archives created elsewhere appear without plugin metadata and retain rich 
   assert.equal(row('external').closest('section')?.getAttribute('aria-label'), 'Archived');
   assert.equal(row('external').querySelector('.sf-project-name').textContent, 'External project');
   assert.equal(mock.control.metadata.sessions.external, undefined);
-  assert.equal(row('external').querySelector('[aria-label="Snooze session"]').disabled, true);
+  assert.equal(row('external').querySelector('[aria-label="Snooze session"]'), null);
   await click(row('external').querySelector('[aria-label="Unarchive session"]'));
   assert.equal(row('external').closest('section')?.getAttribute('aria-label'), 'Ready');
   assert.equal(mock.control.metadata.sessions.external.state, 'active');
@@ -545,7 +558,7 @@ test('Unarchive restores Ready/pin; rearchive uses controls without Undo or revi
   assert.equal(mock.control.metadata.sessions.archived.state, 'active');
   assert.equal(mock.control.metadata.sessions.archived.wake_at, null);
   assert.equal(mock.control.metadata.sessions.archived.pinned, true);
-  assert.equal(row('archived').querySelector('[aria-label="Snooze session"]').disabled, true);
+  assert.equal(row('archived').querySelector('[aria-label="Snooze session"]'), null);
 });
 
 test('native confirmed unarchive with metadata restore failure reports partial state, not success or false Undo', async () => {
@@ -610,6 +623,115 @@ test('picker retry keeps the same idempotency key after failed create', async ()
   assert.equal(creates.length, 2); assert.equal(creates[0][3].idempotency_key, creates[1][3].idempotency_key);
 });
 
+test('backend unread shows Done and clears on successful native open; Input and Working outrank it', async () => {
+  await mount();
+  assert.equal(row('readme').querySelector('.sf-status').dataset.status, 'done');
+  assert.equal(row('readme').dataset.unread, 'true');
+  assert.equal(row('approval').querySelector('.sf-status').dataset.status, 'input');
+  assert.equal(row('root').querySelector('.sf-status').dataset.status, 'working');
+  assert.equal(flow.cardStatus({ unread: 'true', status: 'idle' }), null);
+  assert.equal(flow.cardStatus({ unread: true, woke: true, status: 'waiting' }), 'input');
+  assert.equal(flow.cardStatus({ unread: true, woke: true, status: 'working' }), 'working');
+  await click(row('readme').querySelector('.sf-open'));
+  assert.equal(row('readme').querySelector('.sf-status'), null);
+  assert.equal(row('readme').dataset.unread, 'false');
+});
+
+test('Woke survives remount until read, while pin Undo remains available after acknowledgment', async () => {
+  const wake = Math.floor(Date.now() / 1000) - 60;
+  mock.control.metadata.sessions.readme = { state: 'active', pinned: false, woke_at: wake, updated_at: wake };
+  await mount(); assert.equal(row('readme').querySelector('.sf-status').dataset.status, 'woke');
+  await remount(); assert.equal(row('readme').querySelector('.sf-status').dataset.status, 'woke');
+  await click(button('Actions for Sidebar layout')); await click(button('Pin')); assert.ok(button('Undo'));
+  await click(row('readme').querySelector('.sf-open'));
+  assert.equal(mock.control.metadata.sessions.readme.woke_at, null);
+  assert.equal(row('readme').querySelector('.sf-status'), null);
+  assert.ok(button('Undo'));
+  assert.equal(mock.calls.filter(call => call[0] === 'rest' && call[2]?.body?.action === 'ack_wake').length, 1);
+});
+
+test('failed open never acknowledges Woke; a foreign focused owner never acknowledges it', async () => {
+  const wake = Math.floor(Date.now() / 1000) - 60;
+  mock.control.metadata.sessions.readme = { state: 'active', pinned: false, woke_at: wake };
+  mock.control.openError = true;
+  await mount(); await click(row('readme').querySelector('.sf-open'));
+  assert.equal(mock.control.metadata.sessions.readme.woke_at, wake);
+  assert.equal(mock.calls.some(call => call[2]?.body?.action === 'ack_wake'), false);
+  await act(async () => {
+    mock.host.state.focusedStoredSessionId.set('readme');
+    mock.host.state.focusedSessionOwner.set({ connectionId: 'foreign', profile: 'default' });
+  }); await tick();
+  assert.equal(mock.control.metadata.sessions.readme.woke_at, wake);
+  await act(async () => mock.host.state.focusedSessionOwner.set({ connectionId: 'source-a', profile: 'default' })); await tick(); await tick();
+  assert.equal(mock.control.metadata.sessions.readme.woke_at, null);
+});
+
+test('wake acknowledgments compare exact generations and do not clear newer markers', async () => {
+  const wake = Math.floor(Date.now() / 1000) - 60;
+  mock.control.metadata.sessions.readme = { state: 'active', pinned: true, woke_at: wake + 1, updated_at: wake + 1 };
+  controller = flow.createController(mock.ctx);
+  await controller.ackWake(flow.captureScope(), { id: 'readme', meta: { woke_at: wake } });
+  assert.equal(mock.control.metadata.sessions.readme.woke_at, wake + 1);
+  assert.equal(mock.control.metadata.sessions.readme.pinned, true);
+  const stale = flow.captureScope(); mock.switchScope();
+  await assert.rejects(controller.ackWake(stale, { id: 'readme', meta: { woke_at: wake + 1 } }), /Source\/profile changed/);
+});
+
+test('context menu copies durable ID and filters by exact session project without archive or snooze options', async () => {
+  await mount(); await click(button('Actions for Runtime classification'));
+  const text = $('[role=dialog]').textContent;
+  assert.doesNotMatch(text, /Archive|Snooze ·|Custom snooze/);
+  await click(button('Copy session ID')); assert.ok(mock.calls.some(call => call[0] === 'clipboard' && call[1] === 'root'));
+  await click(button('Actions for Release notes')); await click(button('Filter by docs'));
+  assert.ok(row('readme')); assert.equal(row('design'), null);
+  assert.equal(mock.calls.some(call => call[0] === 'new' || call[2] === 'session.cwd.set'), false);
+});
+
+test('clipboard failure stays visible without falsely closing context; stale copy never writes', async () => {
+  mock.control.clipboardError = true;
+  await mount(); await click(button('Actions for Sidebar layout')); await click(button('Copy session ID'));
+  assert.match($('[role=alert]').textContent, /not copied/);
+  const scope = flow.captureScope(); mock.switchScope();
+  const count = mock.calls.filter(call => call[0] === 'clipboard').length;
+  await assert.rejects(controller.copyId(scope, { id: 'design' }), /Source\/profile changed/);
+  assert.equal(mock.calls.filter(call => call[0] === 'clipboard').length, count);
+});
+
+test('Rename is available only for live runtime and verifies the title with exact lineage readback', async () => {
+  await mount(); await click(button('Actions for Sidebar layout')); assert.equal(button('Rename').disabled, true);
+  assert.match($('[role=dialog]').textContent, /live runtime/); await click(button('Close session actions'));
+  await click(button('Actions for Runtime classification')); assert.equal(button('Rename').disabled, false);
+  await click(button('Rename')); await input($('input[aria-label="Session title"]'), 'Renamed runtime'); await click(button('Save rename'));
+  assert.equal(row('root').querySelector('.sf-row-title').textContent, 'Renamed runtime');
+  const writes = mock.calls.filter(call => call[0] === 'requestProfile' && call[2] === 'session.title');
+  assert.deepEqual(writes.map(call => call[3]), [{ session_id: 'runtime-worker', title: 'Renamed runtime' }, { session_id: 'runtime-worker' }]);
+  assert.equal(writes[0][1].connectionId, 'source-a');
+});
+
+test('Rename refuses dropped, pending, wrong-lineage and switched-source confirmations', async () => {
+  controller = flow.createController(mock.ctx);
+  const item = { ...mock.control.rows.find(row => row.id === 'tip'), runtimeId: 'runtime-worker' };
+  for (const [flag, value, message] of [['dropRename', true, /did not confirm/], ['renamePending', true, /pending/], ['renameWrongId', 'foreign', /did not confirm/]]) {
+    mock.control[flag] = value;
+    await assert.rejects(controller.rename(flow.captureScope(), item, 'New title'), message);
+    delete mock.control[flag];
+  }
+  mock.control.afterRename = () => mock.switchScope();
+  await assert.rejects(controller.rename(flow.captureScope(), item, 'Other title'), /Source\/profile changed/);
+});
+
+test('Rename rechecks runtime ownership before writing and collapsed bodies are inert for animation', async () => {
+  controller = flow.createController(mock.ctx);
+  const item = { ...mock.control.rows.find(row => row.id === 'tip'), runtimeId: 'stale-runtime' };
+  await assert.rejects(controller.rename(flow.captureScope(), item, 'New title'), /same live runtime/);
+  assert.equal(mock.calls.some(call => call[2] === 'session.title'), false);
+  controller.dispose(); await mount(); await click(button('Archived (1)'));
+  const body = shelf('Archived').querySelector('.sf-section-body');
+  assert.equal(body.hasAttribute('inert'), true); assert.equal(body.getAttribute('aria-hidden'), 'true');
+  assert.match($('style').textContent, /transition:grid-template-rows/);
+  assert.match($('style').textContent, /prefers-reduced-motion:reduce/);
+});
+
 async function remount() {
   await act(async () => root.unmount()); root = null; controller.dispose(); mock.queryClient.clear();
   await mount();
@@ -665,7 +787,8 @@ test('project filtering counts folded matches rather than claiming none or Ready
   mock.control.rows.find(r => r.id === 'archived').cwd = '/only-archive';
   await mount(); await click(button('Archived (1)')); await click(button('Filter sessions'));
   await act(async () => { $('select').value = '/only-archive'; $('select').dispatchEvent(new Event('change', { bubbles: true })); }); await tick();
-  assert.equal(all('.sf-row').length, 0);
+  assert.equal(all('.sf-row').filter(node => !node.closest('[data-closed=true]')).length, 0);
+  assert.equal(shelf('Archived').querySelector('.sf-section-body').hasAttribute('inert'), true);
   assert.equal(button('Archived (1)').getAttribute('aria-expanded'), 'false');
   assert.doesNotMatch(document.body.textContent, /No matching sessions|All caught up/);
   await click(button('Archived (1)')); assert.ok(row('archived'));

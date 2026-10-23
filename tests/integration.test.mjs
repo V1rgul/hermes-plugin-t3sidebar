@@ -87,6 +87,14 @@ test('frontend controller interoperates with real FastAPI and persistent SQLite 
 		const woke = await controller.metadata(scope);
 		assert.equal(woke.sessions.durable.state, 'active');
 		assert.equal(woke.sessions.durable.updated_at, wake_at);
+		assert.equal(woke.sessions.durable.woke_at, wake_at);
+		await controller.mutate(scope, 'durable', { action: 'ack_wake', woke_at: wake_at - 1 });
+		assert.equal((await controller.metadata(scope)).sessions.durable.woke_at, wake_at);
+		await controller.mutate(scope, 'durable', { action: 'ack_wake', woke_at: wake_at });
+		const acknowledged = (await controller.metadata(scope)).sessions.durable;
+		assert.equal(acknowledged.woke_at, null);
+		assert.equal(acknowledged.updated_at, wake_at);
+		assert.equal(acknowledged.pinned, true);
 		const awakeSections = buildSections((await controller.list(scope)).sessions, woke, live.sessions, { project: '/old-project' });
 		assert.equal([...awakeSections.active, ...awakeSections.pinned][0].id, 'durable');
 		await controller.mutate(scope, 'durable', { action: 'restore' });

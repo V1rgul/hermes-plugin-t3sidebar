@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 SESSION_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
 SessionId = Annotated[str, PathParameter(pattern=SESSION_ID_PATTERN, max_length=256)]
-Action = Literal["settle", "restore", "snooze", "pin", "unpin"]
+Action = Literal["settle", "restore", "snooze", "pin", "unpin", "ack_wake"]
 
 
 class SessionAction(BaseModel):
@@ -27,10 +27,11 @@ class SessionAction(BaseModel):
 
 	action: Action
 	wake_at: float | None = None
+	woke_at: float | None = None
 
-	@field_validator("wake_at", mode="before")
+	@field_validator("wake_at", "woke_at", mode="before")
 	@classmethod
-	def numeric_timestamp(cls, value):
+	def numeric_timestamp(cls, value, info):
 		if value is None:
 			return value
 		# Reject booleans and numeric strings; avoid non-finite values appearing
@@ -40,7 +41,9 @@ class SessionAction(BaseModel):
 		except (OverflowError, TypeError):
 			valid = False
 		if not valid:
-			raise HTTPException(422, "wake_at must be a finite JSON number")
+			raise HTTPException(422, f"{info.field_name} must be a finite JSON number")
+		if info.field_name == "woke_at" and value <= 0:
+			raise HTTPException(422, "woke_at must be positive")
 		return value
 
 	@model_validator(mode="after")
@@ -50,6 +53,11 @@ class SessionAction(BaseModel):
 				raise ValueError("snooze requires wake_at")
 		elif "wake_at" in self.model_fields_set:
 			raise ValueError("wake_at is only valid for snooze")
+		if self.action == "ack_wake":
+			if self.woke_at is None:
+				raise ValueError("ack_wake requires woke_at")
+		elif "woke_at" in self.model_fields_set:
+			raise ValueError("woke_at is only valid for ack_wake")
 		return self
 
 
@@ -57,6 +65,7 @@ class SessionMetadata(BaseModel):
 	state: Literal["active", "settled", "snoozed"]
 	settled_at: float | None
 	wake_at: float | None
+	woke_at: float | None = None
 	pinned: bool
 	updated_at: float
 
@@ -78,6 +87,7 @@ class HermesT3SidebarStore:
 	"""Short-lived per-operation connections; SQLite serializes writers.
 
 	Every read/mutation and due-wakeup sweep shares one IMMEDIATE transaction.
+	Exact wake acknowledgments skip the sweep and only clear their own marker.
 	There are no threads or timers owned by the plugin. Wake eligibility is
 	computed from UTC epoch seconds even after the app/backend was closed.
 	"""
@@ -115,6 +125,7 @@ class HermesT3SidebarStore:
 					wake_at REAL,
 					pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
 					updated_at REAL NOT NULL,
+					woke_at REAL,
 					CHECK (
 						(state = 'active' AND settled_at IS NULL AND wake_at IS NULL) OR
 						(state = 'settled' AND settled_at IS NOT NULL AND wake_at IS NULL) OR
@@ -122,33 +133,50 @@ class HermesT3SidebarStore:
 					)
 				)
 			""")
+			# Additive migration preserves existing organization and constraints.
+			# The same writer lock serializes concurrent first requests/upgrades.
+			columns = {row["name"] for row in connection.execute("PRAGMA table_info(session_metadata)")}
+			if "woke_at" not in columns:
+				connection.execute("ALTER TABLE session_metadata ADD COLUMN woke_at REAL")
 			# updated_at is the wake instant, not the time somebody next opens
 			# Desktop. Reading late does not change effective wake chronology.
-			connection.execute("""
-				UPDATE session_metadata
-				SET state = 'active', settled_at = NULL, updated_at = wake_at, wake_at = NULL
-				WHERE state = 'snoozed' AND wake_at <= ?
-			""", (now,))
-			if body is not None:
+			# Acknowledgment must not materialize a different, newly due snooze.
+			if body is None or body.action != "ack_wake":
 				connection.execute("""
-					INSERT INTO session_metadata VALUES (?, 'active', NULL, NULL, 0, ?)
-					ON CONFLICT(session_id) DO NOTHING
-				""", (session_id, now))
+					UPDATE session_metadata
+					SET state = 'active', settled_at = NULL, updated_at = wake_at,
+					woke_at = wake_at, wake_at = NULL
+					WHERE state = 'snoozed' AND wake_at <= ?
+				""", (now,))
+			if body is not None:
+				if body.action != "ack_wake":
+					connection.execute("""
+						INSERT INTO session_metadata (session_id, state, settled_at, wake_at, pinned, updated_at)
+						VALUES (?, 'active', NULL, NULL, 0, ?)
+						ON CONFLICT(session_id) DO NOTHING
+					""", (session_id, now))
 				if body.action == "settle":
 					connection.execute("""
 						UPDATE session_metadata SET state = 'settled', settled_at = ?,
-						wake_at = NULL, updated_at = ? WHERE session_id = ?
+						wake_at = NULL, woke_at = NULL, updated_at = ? WHERE session_id = ?
 					""", (now, now, session_id))
 				elif body.action == "restore":
 					connection.execute("""
 						UPDATE session_metadata SET state = 'active', settled_at = NULL,
-						wake_at = NULL, updated_at = ? WHERE session_id = ?
+						wake_at = NULL, woke_at = NULL, updated_at = ? WHERE session_id = ?
 					""", (now, session_id))
 				elif body.action == "snooze":
 					connection.execute("""
 						UPDATE session_metadata SET state = 'snoozed', settled_at = NULL,
-						wake_at = ?, updated_at = ? WHERE session_id = ?
+						wake_at = ?, woke_at = NULL, updated_at = ? WHERE session_id = ?
 					""", (body.wake_at, now, session_id))
+				elif body.action == "ack_wake":
+					# Compare-and-clear: a delayed read cannot acknowledge a newer wake.
+					# Do not create absent rows or alter organization/updated_at.
+					connection.execute("""
+						UPDATE session_metadata SET woke_at = NULL
+						WHERE session_id = ? AND woke_at = ?
+					""", (session_id, body.woke_at))
 				else:
 					connection.execute("""
 						UPDATE session_metadata SET pinned = ?, updated_at = ? WHERE session_id = ?

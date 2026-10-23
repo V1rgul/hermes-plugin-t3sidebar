@@ -12,6 +12,12 @@ A T3 Code-inspired replacement session sidebar for Hermes Desktop. It opens exis
 - Working, Snoozed and Archived headings show a parenthesized session count, a divider and a right-aligned chevron. Fold preferences persist locally through Desktop restarts, separately for each source and profile; searching reveals matching folded categories temporarily.
 - Project glyphs have transparent backgrounds in both cards and the new-session picker. The picker closes through the normal popover dismissal without a Cancel button. Searches with no loaded matches show “No matching sessions”, never “All caught up”.
 - Reverse archival directly through Archive/Unarchive; these actions do not add an Undo banner. Snooze, restore and pin actions retain Undo.
+- The pane tab is named **t3sidebar**; the plugin ID and storage namespace remain `hermes-t3sidebar`.
+- Cards show green **Done** for backend unread, orange **Woke** after snooze expiry until the thread is opened/read, and purple **Input** for a question or approval awaiting attention. Each has a leading status icon and a bold title; Working remains blue. Project names, glyphs and ordinary ages have stronger contrast while provider/token metadata stays subdued.
+- Expanded Archives receives a larger share of list height. Categories animate open/closed without moving their headers into the scroll bodies; reduced-motion preferences disable these transitions.
+- Right-click offers Pin/Unpin, Restore when snoozed, Rename, Copy session ID and an exact project-filter shortcut. Rename is available only for a confirmed live runtime and verifies the saved title; stored-only threads explain the limitation. Archive and Snooze stay on their direct hover controls, and archived cards omit Snooze. Lists are always flat; project filtering does not group them.
+- Custom snooze uses the date/time field with Enter or its adjacent checkmark; there is no bottom “Snooze until chosen time” button.
+- Opening a thread marks it read but does not change its displayed conversation age or recency order. Stored conversation activity, not the runtime's resume/reattach clock, drives those values.
 
 Archive/Unarchive calls Hermes’s profile-routed `session.archive` operation with an explicit boolean and verifies the exact stored session’s flag through the read-only companion before confirming success. Archival applies to the native compression lineage; it is not deletion, an agent-stop operation or a hidden prompt. Pins and snoozing remain plugin-owned organization metadata. Snooze eligibility is based on an absolute server timestamp: closing Desktop does not reset the deadline. Due items become Ready on the next metadata refresh; no background agent is resumed.
 
@@ -45,7 +51,7 @@ For an unpublished local artifact:
 1. Put the package in the backend’s profile-local `plugins/hermes-t3sidebar/` and enable it through Hermes’s native plugin management.
 2. The backend process serving Desktop must load its new API routes. Restart it only when an interruption is acceptable.
 3. On the computer running Electron, use **Capabilities → Plugins → Open folder**. Copy the contents of `desktop/` into `<that folder>/hermes-t3sidebar/` and enable **hermes-t3sidebar**. The file watcher hot-loads the UI; no client restart is normally required.
-4. Open the hermes-t3sidebar pane. Hide the built-in **Sessions** pane using Hermes’s normal layout controls. The replacement is a normal movable/resizable pane; it never overrides the native pane ID or mutates its DOM.
+4. Open the **t3sidebar** pane. Hide the built-in **Sessions** pane using Hermes’s normal layout controls. The replacement is a normal movable/resizable pane; it never overrides the native pane ID or mutates its DOM.
 
 Installing files, enabling configuration, loading API routes and seeing the UI are separate verification steps. This repository does not restart services or change configuration automatically.
 
