@@ -59,6 +59,16 @@ class BackendTests(unittest.TestCase):
 		self.assertEqual(set(response.json()), {"version", "sessions", "completions"})
 		return response.json()["sessions"][session]
 
+	def test_environment_reports_owning_home_not_profile_home_and_checks_profile_assertions(self):
+		with patch.object(backend, "served_profile", return_value="workspace"), patch.object(backend.Path, "home", return_value=Path("/home/backend-user")):
+			response = self.client.get("/api/plugins/hermes-t3sidebar/environment?profile=workspace")
+			self.assertEqual(response.status_code, 200, response.text)
+			self.assertEqual(response.json(), {"profile": "workspace", "home": "/home/backend-user"})
+			self.assertEqual(response.headers["cache-control"], "no-store")
+			for query in ("profile=foreign", "profile=workspace&profile=foreign", "home=/other", "path=/other"):
+				self.assertEqual(self.client.get(f"/api/plugins/hermes-t3sidebar/environment?{query}").status_code, 422)
+		self.assertFalse(self.path.exists(), "environment lookup must not create metadata storage")
+
 	def test_empty_and_full_response_shape(self):
 		self.assertEqual(self.state(), {"version": 1, "sessions": {}, "completions": {}})
 		self.assertEqual(self.act("pin"), {
@@ -422,7 +432,7 @@ class BackendTests(unittest.TestCase):
 		self.assertEqual(manifest["name"], "hermes-t3sidebar")
 		self.assertEqual(manifest["api"], "plugin_api.py")
 		self.assertTrue(manifest["tab"]["hidden"])
-		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/runtime", "/sessions", "/archives", "/sessions/{session_id}/archive", "/sessions/{session_id}/snapshot", "/sessions/{session_id}/workspace", "/sessions/{session_id}/delete", "/sessions/{session_id}"})
+		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/environment", "/runtime", "/sessions", "/archives", "/sessions/{session_id}/archive", "/sessions/{session_id}/snapshot", "/sessions/{session_id}/workspace", "/sessions/{session_id}/delete", "/sessions/{session_id}"})
 
 
 if __name__ == "__main__":

@@ -663,6 +663,8 @@ test('confirmed empty cards use New session consistently and retain genuine proj
 test('project filter opens direct native-icon choices, marks selection and restores the default icon', async () => {
   for (const row of mock.control.rows.filter(item => item.cwd === '/projects/docs')) row.project = { name: 'Docs', icon: 'tools', color: '#123456' };
   mock.control.rows.push({ id: 'fallback', cwd: '/unregistered/folder' }, { id: 'unknown' });
+  Object.assign(mock.control.projects.find(project => project.path === '/projects/docs'), { label: 'Docs', icon: 'tools', color: '#123456' });
+  mock.control.projects.push({ id: '/unregistered/folder', label: '/unregistered/folder', path: '/unregistered/folder' });
   await mount();
   const trigger = button('Filter sessions');
   assert.equal(trigger.dataset.filtered, 'false'); assert.equal(trigger.querySelector('.sf-project-icon'), null);
@@ -671,8 +673,8 @@ test('project filter opens direct native-icon choices, marks selection and resto
   assert.equal($('[role=dialog]').getAttribute('aria-label'), 'Session filters');
   assert.equal($('select'), null); assert.equal(button('Refresh sessions'), undefined);
   assert.equal(button('All projects').getAttribute('aria-pressed'), 'true');
-  assert.equal(button('Filter by Docs').textContent, 'Docs');
-  assert.equal(button('Filter by /unregistered/folder').textContent, '/unregistered/folder');
+  assert.equal(button('Filter by Docs').querySelector('.sf-project-name').textContent, 'Docs');
+  assert.equal(button('Filter by /unregistered/folder').querySelector('.sf-project-name').textContent, '/unregistered/folder');
   assert.equal(button('Filter by No project'), undefined, 'unknown workspace is not a detached project');
   assert.ok(button('Filter by Docs').querySelector('[data-codicon="tools"]'));
   assert.equal(all('[role=dialog] [aria-label="Filter by Docs"]').length, 1);
@@ -690,6 +692,7 @@ test('project filter opens direct native-icon choices, marks selection and resto
 
 test('project filter uses emoji glyphs and cwd fallbacks and resets on source changes', async () => {
   mock.control.rows = [{ id: 'emoji', cwd: '/emoji', project: { name: 'Emoji project', icon: '🌿' } }, { id: 'fallback', cwd: '/only/path' }];
+  mock.control.projects = [{ id: '/emoji', label: 'Emoji project', path: '/emoji', icon: '🌿' }, { id: '/only/path', label: '/only/path', path: '/only/path' }];
   mock.control.live = []; await mount();
   await click(button('Filter sessions')); await click(button('Filter by Emoji project'));
   assert.equal(button('Filter sessions').querySelector('.sf-project-icon').textContent, '🌿');
@@ -770,6 +773,7 @@ test('search reveals collapsed shelf hits and preserves collapsed preference on 
 test('501st organized session survives remount and keeps rich project filtering after due wake', async () => {
   mock.control.rows = Array.from({ length: 500 }, (_, i) => ({ id: `recent${i}`, title: `Recent ${i}` }));
   mock.control.extra = [{ id: 'old-tip', _lineage_root_id: 'old-root', _lineage_ids: ['old-root', 'old-tip'], title: 'Old project session', cwd: '/old-project', git_branch: 'retained' }];
+  mock.control.projects.push({ id: '/old-project', label: '/old-project', path: '/old-project' });
   await mount(); await click(button('Browse older sessions'));
   await click(row('old-root').querySelector('[aria-label="Archive session"]'));
   await act(async () => root.unmount()); root = null; controller.dispose(); mock.queryClient.clear();
@@ -878,7 +882,8 @@ test('new-session picker renders native project icons without Home or its warnin
   await mount(); await click(button('New session'));
   const infra = button('New session in Infra');
   assert.ok(infra.querySelector('.sf-project-icon [data-codicon="tools"]'));
-  assert.equal(infra.textContent, 'Infra');
+  assert.equal(infra.querySelector('.sf-project-name').textContent, 'Infra');
+  assert.equal(infra.querySelector('.sf-project-path').textContent, '/fixture/infra');
   assert.equal(button('New session in Home'), undefined);
   assert.doesNotMatch($('[role=dialog]').textContent, /Home|detached|unavailable/);
   assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.create'), false);
@@ -1522,6 +1527,7 @@ test('search clear control is present for any text and rename uses an adjacent i
 
 test('project filtering counts folded matches rather than claiming none or Ready caught up', async () => {
   Object.assign(mock.control.rows.find(r => r.id === 'archived'), { cwd: '/only-archive', project: { name: 'Archive only' } });
+  mock.control.projects.push({ id: '/only-archive', label: 'Archive only', path: '/only-archive' });
   await mount(); await click(button('Archived (1)')); await click(button('Filter sessions'));
   await click(button('Filter by Archive only'));
   assert.equal(all('.sf-row').filter(node => !node.closest('[data-closed=true]')).length, 0);
@@ -1599,7 +1605,7 @@ test('unfiltered empty Ready keeps catch-up while a no-match project filter supp
   await mount(); assert.match(shelf('Ready').textContent, /All caught up/);
   await click(button('Filter sessions'));
   // A known project disappears from the loaded data after it has been selected.
-  await click(button('Filter by hermes-t3sidebar'));
+  await click(button('Filter by Synthetic Sidebar'));
   mock.control.rows = []; await refresh();
   assert.match(document.body.textContent, /No matching sessions/);
   assert.doesNotMatch(document.body.textContent, /All caught up/);

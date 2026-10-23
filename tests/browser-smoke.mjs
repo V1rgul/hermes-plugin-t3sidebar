@@ -373,8 +373,9 @@ try {
   await checkPersistentTrigger('Filter sessions', 'Session filters');
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   const filters = page.getByRole('dialog', { name: 'Session filters', exact: true });
+  await filters.getByRole('button', { name: 'Filter by docs', exact: true }).waitFor();
   check('one filter click exposes project choices directly without intermediate select', await filters.getByRole('button', { name: 'All projects', exact: true }).isVisible() && await filters.getByRole('button', { name: 'Filter by docs', exact: true }).isVisible() && !await filters.getByRole('combobox').count());
-  check('direct filter list identifies selected project', await filters.getByRole('button', { name: 'Filter by hermes-t3sidebar', exact: true }).getAttribute('aria-pressed') === 'true');
+  check('direct filter list identifies selected project', await filters.getByRole('button', { name: 'Filter by Synthetic Sidebar', exact: true }).getAttribute('aria-pressed') === 'true');
   await filters.getByRole('button', { name: 'All projects', exact: true }).click();
   check('All projects clears active icon and closes filter picker', !await filters.count() && await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'false');
   const openProject = async () => { await design.click({ button: 'right' }); await context.getByRole('button', { name: 'Project', exact: true }).click(); await projectMenu.waitFor(); };
@@ -414,6 +415,7 @@ try {
   check('icon category headings retain all approved groups', await projectMenu.locator('.sf-project-icon-category legend').allTextContents().then(labels => labels.join('|') === 'Projects & workspaces|Code & development|Hardware & robotics|Infrastructure & networks|Research & analysis|Documents & legal|Planning & business|Personal & creative'));
   await projectMenu.screenshot({ path: join(screenshotDir, 'project-appearance.png') });
   await page.setViewportSize({ width: 480, height: 400 });
+  await projectMenu.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   check('appearance menu remains inside a narrow short viewport with no horizontal clipping', await projectMenu.evaluate(el => { const r = el.getBoundingClientRect(), body = el.querySelector('.sf-project-submenu'); return r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight && body.scrollWidth <= body.clientWidth; }));
   await projectMenu.getByRole('button', { name: 'Default icon', exact: true }).scrollIntoViewIfNeeded();
   check('categorized icon picker stays scrollable through its final row on a short viewport', await projectMenu.getByRole('button', { name: 'Project icon: music', exact: true }).isVisible() && await projectMenu.getByRole('button', { name: 'Default icon', exact: true }).isVisible());
@@ -534,18 +536,18 @@ try {
   check('no user-visible legacy settlement words', !await page.locator('body').innerText().then(text => /\bsettle(?:d)?\b/i.test(text)));
   await checkPersistentTrigger('New session', 'New session project');
   await page.getByRole('button', { name: 'New session', exact: true }).click();
-  await page.getByRole('button', { name: 'New session in Synthetic Sidebar', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'New session in hermes-t3sidebar', exact: true }).waitFor();
   check('project picker has no Cancel button', !await page.getByRole('button', { name: 'Cancel', exact: true }).count());
   check('project picker icons have no filled background', await page.locator('.sf-project-choice .sf-project-icon').evaluateAll(icons => icons.length > 0 && icons.every(icon => getComputedStyle(icon).backgroundColor === 'rgba(0, 0, 0, 0)')));
   check('new-session picker omits unsupported Home and its explanatory text', !await page.getByRole('button', { name: 'New session in Home', exact: true }).count() && !await page.getByText(/Home remains listed/).count());
-  const projectChoice = page.getByRole('button', { name: 'New session in Synthetic Sidebar', exact: true });
-  check('new-session picker renders the native project glyph, not its identifier', await projectChoice.locator('[data-codicon="tools"]').count() === 1 && await projectChoice.textContent() === 'Synthetic Sidebar');
+  const projectChoice = page.getByRole('button', { name: 'New session in hermes-t3sidebar', exact: true });
+  check('new-session picker renders the updated native project name and glyph, not its identifier', await projectChoice.locator('[data-codicon="folder"]').count() === 1 && await projectChoice.locator('.sf-project-name').textContent() === 'hermes-t3sidebar');
   check('project picker aligns icon before project name', await projectChoice.evaluate(el => {
-    const icon = el.querySelector('.sf-project-icon').getBoundingClientRect(), name = el.querySelector('.sf-project-name').getBoundingClientRect();
+    const icon = el.querySelector('.sf-project-icon').getBoundingClientRect(), name = el.querySelector('.sf-project-details').getBoundingClientRect();
     return icon.right <= name.left && Math.abs(icon.top + icon.height / 2 - name.top - name.height / 2) < 2;
   }));
   check('project picker does not create a session until a supported project is selected', !await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'requestProfile' && call[2] === 'session.create')));
-  await page.getByRole('button', { name: 'New session in Synthetic Sidebar', exact: true }).click();
+  await page.getByRole('button', { name: 'New session in hermes-t3sidebar', exact: true }).click();
   await page.waitForFunction(() => window.hermesT3SidebarHarness.control.composerCwd === '/projects/hermes-t3sidebar');
   check('named project public create/open/cwd handoff; no hidden prompt', await page.evaluate(() => {
     const calls = window.hermesT3SidebarHarness.calls;
@@ -929,6 +931,46 @@ try {
   await moveDialog.getByRole('button', { name: 'Move to Move target', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[data-session-id="design"] .sf-project-name')?.textContent === 'Move target');
   check('project move changes native workspace and verified card metadata', await page.evaluate(() => window.hermesT3SidebarHarness.control.rows.find(row => row.id === 'design').cwd === '/move-target'));
+  await page.reload();
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.home = '/home/fixture';
+    fixture.control.projects = [
+      { id: 'p_multi', label: 'Multi workspace', path: '/home/fixture/main', icon: 'tools', repos: [{ path: '/home/fixture/main' }, { path: '/home/fixture/second' }] },
+      { id: 'p_single', label: 'Single workspace', path: '/srv/shared', icon: 'repo' }
+    ];
+    fixture.control.projectCatalog = [{ id: 'p_multi', name: 'Multi workspace', icon: 'tools', color: null, archived: false, folders: [{ path: '/home/fixture/main' }, { path: '/home/fixture/second' }] }];
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  const pickerShapes = [];
+  for (const [trigger, dialogName, prefix] of [['Filter sessions', 'Session filters', 'Filter by'], ['New session', 'New session project', 'New session in']]) {
+    await page.getByRole('button', { name: trigger, exact: true }).click();
+    const picker = page.getByRole('dialog', { name: dialogName, exact: true });
+    await picker.getByRole('button', { name: `${prefix} Multi workspace: ~/second`, exact: true }).waitFor();
+    check(`${trigger} always has search and only Filter has All projects`, await picker.getByRole('searchbox', { name: 'Search projects' }).isVisible() && await picker.getByRole('button', { name: 'All projects', exact: true }).count() === (prefix === 'Filter by' ? 1 : 0));
+    pickerShapes.push(await picker.locator('.sf-project-options .sf-project-name,.sf-project-path').allTextContents().then(values => values.filter(value => value !== 'All projects')));
+    check(`${trigger} groups multiple paths beneath one project name`, await picker.locator('.sf-project-group .sf-project-name').allTextContents().then(names => names.join() === 'Multi workspace') && await picker.locator('.sf-project-group .sf-project-folder .sf-project-path').allTextContents().then(paths => paths.join('|') === '~/main|~/second'));
+    check(`${trigger} paths use the dimmed theme color`, await picker.locator('.sf-project-path').evaluateAll(nodes => nodes.every(node => {
+      const probe = document.createElement('span'); probe.style.color = 'var(--ui-text-tertiary)'; node.append(probe);
+      const expected = getComputedStyle(probe).color; probe.remove();
+      return getComputedStyle(node).color === expected && getComputedStyle(node).fontWeight === '400';
+    })));
+    const heading = picker.getByRole('button', { name: 'Project Multi workspace', exact: true });
+    const beforeCreate = await page.evaluate(() => window.hermesT3SidebarHarness.calls.filter(call => call[2] === 'session.create').length);
+    const box = await heading.boundingBox(); await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await heading.focus(); await page.keyboard.press('Enter'); await page.keyboard.press('Space');
+    check(`${trigger} multi-path heading cannot select by mouse or keyboard`, await picker.isVisible() && await heading.getAttribute('aria-disabled') === 'true' && await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'false' && await page.evaluate(() => window.hermesT3SidebarHarness.calls.filter(call => call[2] === 'session.create').length) === beforeCreate);
+    await heading.locator('.sf-project-name').click({ button: 'right', force: true });
+    await projectMenu.waitFor();
+    check(`${trigger} non-selectable heading still opens its project menu`, await projectMenu.locator('.sf-menu-title').textContent() === 'Multi workspace' && await projectMenu.getByRole('button', { name: 'Rename', exact: true }).isEnabled() && await projectMenu.getByRole('button', { name: 'Copy path', exact: true }).isDisabled() && await projectMenu.getByRole('button', { name: 'Filter for', exact: true }).isDisabled());
+    await projectMenu.getByRole('button', { name: 'Close session actions', exact: true }).click();
+    await picker.getByRole('searchbox', { name: 'Search projects' }).fill('~/second');
+    check(`${trigger} path search preserves the non-selectable parent and matching folder only`, await picker.locator('.sf-project-folder').count() === 1 && await heading.count() === 1 && !await picker.getByRole('button', { name: `${prefix} Single workspace`, exact: true }).count());
+    await picker.getByRole('searchbox', { name: 'Search projects' }).fill('');
+    await picker.screenshot({ path: join(screenshotDir, `${prefix === 'Filter by' ? 'filter' : 'new-session'}-project-picker.png`) });
+    await picker.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  }
+  check('Filter and New session render the same project list and grouped paths', JSON.stringify(pickerShapes[0]) === JSON.stringify(pickerShapes[1]));
   check('no browser page errors', errors.length === 0);
   console.log(`Browser smoke: ${checks.length} checks passed; screenshots ${screenshotDir}/{frontend,hovered,actions,dense-400,dense-650,short-300-error}.png`);
 } finally { await browser?.close(); server.close(); }

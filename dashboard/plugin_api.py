@@ -731,6 +731,11 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise HTTPException(422, "Only current-profile listing parameters are accepted")
 		return profile
 
+	@api.get("/environment")
+	def get_environment(request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		return {"profile": listing_profile(request), "home": str(Path.home())}
+
 	@api.get("/runtime")
 	async def get_runtime(request: Request, response: Response):
 		response.headers["Cache-Control"] = "no-store"

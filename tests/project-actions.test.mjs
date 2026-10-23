@@ -208,6 +208,25 @@ const context = async node => {
   assert.equal(event.defaultPrevented, true);
 };
 
+test('active filter keeps native project name and icon when that project has no loaded sessions', async () => {
+  mock.control.projects.push({ id: 'p_unused', label: 'Unused workspace', path: '/unused', icon: 'rocket', color: '#78c318' });
+  await mountSidebar();
+  await click(button('Filter sessions')); await click(button('Filter by Unused workspace'));
+  assert.equal(button('Filter sessions').title, 'Filter sessions: Unused workspace');
+  assert.ok(button('Filter sessions').querySelector('[data-codicon="rocket"]'));
+  assert.match(document.body.textContent, /No matching sessions/);
+  assert.ok(!mock.calls.some(call => call[2] === 'session.create' || call[0] === 'open'));
+});
+
+test('shared native project names leave multi-folder move targets distinguishable', async () => {
+  mock.control.projects.push({ id: 'p_multi', label: 'Multi', path: '/multi/first', repos: [{ path: '/multi/first' }, { path: '/multi/second' }] });
+  await mountSidebar();
+  await click(button('Actions for Sidebar layout')); await click(button('Move to project'));
+  assert.ok(button('Move to Multi · /multi/first'));
+  assert.ok(button('Move to Multi · /multi/second'));
+  assert.equal(mock.calls.some(call => call[2] === 'session.workspace.move'), false);
+});
+
 test('filter project right-click opens the same appearance menu without selecting a filter or workspace', async () => {
   await mountSidebar();
   await click(button('Filter sessions')); await context(button('Filter by docs'));
@@ -223,7 +242,7 @@ test('filter project right-click opens the same appearance menu without selectin
   assert.equal(dialog(), null);
   assert.ok(mock.control.rows.filter(row => row.project.name === 'docs').every(row => row.project.icon === 'law'));
   assert.ok(mock.control.rows.filter(row => row.project.name !== 'docs').every(row => row.project.icon !== 'law'));
-  assert.deepEqual(rpcCalls().slice(-3).map(call => call[2]), ['projects.list', 'projects.update', 'projects.get']);
+  assert.deepEqual(rpcCalls().filter(call => call[2] !== 'projects.tree').slice(-3).map(call => call[2]), ['projects.list', 'projects.update', 'projects.get']);
   await click(button('Filter sessions')); await context(button('Filter by docs'));
   assert.equal(button('Project icon: law', dialog()).getAttribute('aria-pressed'), 'true');
   await click(button('Project color: Brown', dialog()));

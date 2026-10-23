@@ -608,9 +608,16 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const home = { id: '__no_project__', name: 'Home', path: null, isNoProject: true };
       const projects = value.projects.filter(p => p.id !== home.id && !p.isNoProject).flatMap(p => {
         const paths = [...new Set([p.path, ...(p.repos || []).map(repo => repo.path)].filter(path => typeof path === 'string' && path))];
-        return paths.map(path => ({ id: `${p.id}:${path}`, name: `${p.label || p.name || p.id}${paths.length > 1 ? ` · ${path}` : ''}`, path, icon: p.icon || null, color: p.color || null, isNoProject: false }));
+        return paths.map(path => ({ id: `${p.id}:${path}`, projectId: p.id, name: p.label || p.name || p.id, path, icon: p.icon || null, color: p.color || null, isNoProject: false }));
       });
       return { projects: [home, ...projects] };
+    },
+
+    async projectHome(scope) {
+      const route = await routeFor(scope);
+      const value = await fenced(scope, () => ctx.rest('/environment'));
+      if (value?.profile !== (route?.targetProfile || scope.profile) || typeof value.home !== 'string' || !value.home) throw new Error('Current-profile backend home path unavailable.');
+      return value.home;
     },
 
     async newChat(scope, project, idempotencyKey) {
@@ -669,6 +676,8 @@ const CSS = `
 .sf-row .sf-project{gap:4px}.sf-row .sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--ui-blue,#0053fd);font-weight:400}.sf-snooze-time svg{width:13px;height:13px;flex-shrink:0}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
 .sf-menu button.sf-snooze-info:disabled{color:var(--ui-blue,#0053fd);opacity:1;font-weight:400;cursor:default}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}.sf-project-choice[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
+.sf-project-picker{width:290px;max-width:calc(100vw - 32px)}.sf-project-options{display:flex;flex-direction:column;gap:4px;max-height:min(360px,55vh);overflow-y:auto;min-height:0}.sf-project-options>.sf-project-choice{flex-shrink:0;width:100%;height:auto;min-height:38px}.sf-project-details{display:flex;flex-direction:column;align-items:flex-start;flex:1;min-width:0;text-align:left}.sf-project-details>.sf-project-name,.sf-project-path{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-path{font-size:10px;font-weight:400;line-height:1.4;color:var(--ui-text-tertiary)}
+.sf-project-group{display:flex;flex-direction:column;gap:2px;flex-shrink:0}.sf-project-group>.sf-project-choice{width:100%;height:auto;min-height:30px;flex-shrink:0}.sf-project-group>.sf-project-folder{padding-left:29px}.sf-project-heading[aria-disabled=true]{opacity:1;cursor:default}
 .sf-menu .sf-menu-action{display:flex;align-items:center;gap:8px}.sf-menu-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex-shrink:0}.sf-menu-icon svg{width:14px;height:14px}.sf-menu button.sf-menu-action[data-destructive=true]{color:var(--ui-red)}
 .sf-menu-label{display:flex;align-items:center;flex:1;min-width:0}
 .sf-menu>div:not(.sf-menu-title),.sf-menu form{display:flex;flex-direction:column;gap:4px}
@@ -817,8 +826,8 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
       h('span', { className: 'sf-custom-time' },
         h('input', { value: name, autoFocus: true, 'aria-label': 'Project name', disabled: busy, onChange: event => setName(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
         h(IconButton, { type: 'submit', label: 'Save project rename', name: 'Check', glyph: '✓', disabled: busy || !name.trim() }))) : null,
-    h(MenuAction, { name: 'Copy', disabled: busy || !project?.cwd || project.is_home || row._limited, onClick: () => void perform(() => controller.copyProjectPath(scope, project)) }, 'Copy path'),
-    h(MenuAction, { name: 'ListFilter', disabled: busy || row._limited || typeof row.cwd !== 'string' && !project?.is_home,
+    h(MenuAction, { name: 'Copy', disabled: busy || !project?.cwd || project.is_home || row._limited || row._multiplePaths, onClick: () => void perform(() => controller.copyProjectPath(scope, project)) }, 'Copy path'),
+    h(MenuAction, { name: 'ListFilter', disabled: busy || row._limited || row._multiplePaths || typeof row.cwd !== 'string' && !project?.is_home,
       onClick: () => void perform(() => filterProject(row.cwd || '')) }, 'Filter for'),
     !editable ? h('p', null, 'Project editing requires a named project with a known folder.') : null,
     h('fieldset', { disabled: busy || !editable, 'aria-label': 'Project color' }, h('legend', null, 'Color'),
@@ -846,11 +855,14 @@ function MoveProjectActions({ row, scope, controller, close }) {
     finally { if (alive.current) setBusy(false); }
   };
   const choices = (projects.data?.projects || EMPTY_ROWS).filter(project => !project.isNoProject);
+  const folderCounts = new Map();
+  for (const project of choices) folderCounts.set(project.projectId, (folderCounts.get(project.projectId) || 0) + 1);
+  const folderLabel = project => `${project.name}${folderCounts.get(project.projectId) > 1 ? ` · ${project.path}` : ''}`;
   return h('div', { className: 'sf-menu' },
     h('div', { className: 'sf-menu-title' }, 'Move to project'),
     ...choices.map(project => h(sdk.Button, { key: project.id, variant: 'ghost', size: 'sm', disabled: busy || row.cwd === project.path,
-      'aria-label': `Move to ${project.name}`, onClick: () => void move(project) },
-      h('span', { className: 'sf-menu-icon', 'aria-hidden': true, style: { color: project.color || undefined } }, projectMark(project)), project.name)),
+      'aria-label': `Move to ${folderLabel(project)}`, onClick: () => void move(project) },
+      h('span', { className: 'sf-menu-icon', 'aria-hidden': true, style: { color: project.color || undefined } }, projectMark(project)), folderLabel(project))),
     projects.isLoading ? h('p', null, 'Loading projects…') : !choices.length && !projects.isError ? h('p', null, 'No project folders available.') : null,
     projects.isError || error ? h('div', { role: 'alert', className: 'sf-error' }, error || projects.error.message) : null);
 }
@@ -1046,44 +1058,85 @@ export function HermesT3Sidebar({ ctx, controller }) {
   const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
   return h(ScopedSidebar, { key: JSON.stringify(scopeKey(scope)), scope, controller, ctx });
 }
-export function ProjectPicker({ controller, scope, close }) {
+export function projectDisplayPath(path, home) {
+  if (typeof path !== 'string') return '';
+  if (typeof home !== 'string' || !home) return path;
+  const root = home.replace(/[/\\]+$/, '');
+  if (!root) return path;
+  const windows = /^[A-Za-z]:[/\\]/.test(root) || root.startsWith('\\\\');
+  const normalize = value => windows ? value.replaceAll('\\', '/').toLowerCase() : value;
+  const value = normalize(path), prefix = normalize(root);
+  return value === prefix ? '~' : value.startsWith(`${prefix}/`) ? `~${path.slice(root.length)}` : path;
+}
+export function projectChoiceGroups(entries, query = '', home) {
+  const groups = new Map(), needle = query.trim().toLowerCase();
+  for (const choice of entries) {
+    if (choice.isNoProject || choice.id === '__no_project__' || typeof choice.path !== 'string' || !choice.path) continue;
+    const id = choice.projectId || choice.id;
+    if (!groups.has(id)) groups.set(id, { id, name: choice.name, choices: [] });
+    const group = groups.get(id);
+    if (!group.choices.some(item => item.path === choice.path)) group.choices.push(choice);
+  }
+  return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map(group => ({
+    ...group, multiple: group.choices.length > 1,
+    choices: group.choices.sort((a, b) => a.path.localeCompare(b.path)).filter(choice =>
+      [group.name, choice.path, projectDisplayPath(choice.path, home)].some(value => value.toLowerCase().includes(needle)))
+  })).filter(group => group.choices.length);
+}
+export function ProjectPicker({ controller, scope, close, mode = 'new', selected = '*', filterProject }) {
   const [query, setQuery] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const alive = useRef(true), creationKeys = useRef(new Map());
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const projects = useQuery({ queryKey: [...scopeKey(scope), 'projects'], queryFn: () => controller.projects(scope), retry: false });
+  const home = useQuery({ queryKey: [...scopeKey(scope), 'project-home'], queryFn: () => controller.projectHome(scope), retry: false, staleTime: Infinity });
+  const filtering = mode === 'filter';
   const select = async project => {
     if (busy) return;
     setBusy(true); setError('');
-    try { controller.check(scope); await controller.newChat(scope, project, creationKeys.current.get(project.id) || (() => { const key = `hermes-t3sidebar:${globalThis.crypto.randomUUID()}`; creationKeys.current.set(project.id, key); return key; })()); controller.check(scope); if (alive.current) close(); }
+    try {
+      controller.check(scope);
+      if (filtering) filterProject(project.path);
+      else await controller.newChat(scope, project, creationKeys.current.get(project.id) || (() => { const key = `hermes-t3sidebar:${globalThis.crypto.randomUUID()}`; creationKeys.current.set(project.id, key); return key; })());
+      controller.check(scope); if (alive.current) close();
+    }
     catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); }
     finally { if (alive.current) setBusy(false); }
   };
-  const entries = (projects.data?.projects || []).filter(project => !project.isNoProject && project.id !== '__no_project__');
-  return h('div', { className: 'sf-menu', 'aria-label': 'Choose project for new session' },
-    h('strong', null, 'New session in…'),
-    entries.length > 8 ? h('input', { type: 'search', 'aria-label': 'Search projects', placeholder: 'Search projects', value: query, onChange: event => setQuery(event.target.value) }) : null,
+  const entries = projects.data?.projects || EMPTY_ROWS;
+  const groups = projectChoiceGroups(entries, query, home.data);
+  const choiceProps = { scope, controller, filterProject, close, busy };
+  const renderChoice = (choice, pathOnly = false) => h(ProjectChoice, { ...choiceProps, key: choice.id, choice, pathOnly,
+    selected: filtering && selected === choice.path, label: `${filtering ? 'Filter by' : 'New session in'} ${choice.name}${pathOnly ? `: ${projectDisplayPath(choice.path, home.data)}` : ''}`,
+    displayPath: projectDisplayPath(choice.path, home.data), onSelect: () => void select(choice) });
+  return h('div', { className: 'sf-menu sf-project-picker', 'aria-label': filtering ? 'Choose project filter' : 'Choose project for new session' },
+    h('strong', null, filtering ? 'Filter by project' : 'New session in…'),
+    h('input', { type: 'search', 'aria-label': 'Search projects', placeholder: 'Search projects', value: query, onChange: event => setQuery(event.target.value) }),
+    h('div', { className: 'sf-project-options' },
+      filtering ? h(sdk.Button, { type: 'button', variant: 'ghost', className: 'sf-project-choice', 'aria-label': 'All projects', 'aria-pressed': selected === '*', disabled: busy,
+        onClick: () => { controller.check(scope); filterProject('*'); close(); } }, icon('ListFilter', '≡'), h('span', { className: 'sf-project-name' }, 'All projects'), selected === '*' ? icon('Check', '✓') : null) : null,
+      ...groups.map(group => group.multiple ? h('div', { key: group.id, className: 'sf-project-group', role: 'group', 'aria-label': group.name },
+        h(ProjectChoice, { ...choiceProps, choice: group.choices[0], heading: true, label: `Project ${group.name}` }),
+        ...group.choices.map(choice => renderChoice(choice, true))) : renderChoice(group.choices[0]))),
     projects.isLoading ? h('div', { role: 'status' }, 'Loading projects…') : null,
     projects.isError ? h('div', { role: 'alert' }, projects.error.message, h(sdk.Button, { onClick: () => projects.refetch() }, 'Retry projects')) : null,
-    projects.data && !entries.length ? h('div', { role: 'status' }, 'No projects available') : null,
-    ...entries.filter(project => project.name.toLowerCase().includes(query.toLowerCase())).map(project => h(sdk.Button, { key: project.id, type: 'button', variant: 'ghost', className: 'sf-project-choice', disabled: busy, 'aria-label': `New session in ${project.name}`, onClick: () => void select(project) },
-      h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: project.color || undefined } }, projectMark(project)), h('span', { className: 'sf-project-name' }, project.name))),
+    projects.data && !groups.length ? h('div', { role: 'status' }, projectChoiceGroups(entries).length ? 'No matching projects' : 'No projects available') : null,
     busy ? h('div', { role: 'status' }, 'Creating session…') : null,
     error ? h('div', { role: 'alert' }, error) : null);
 }
-function FilterProjectChoice({ choice, selected, scope, controller, filterProject, close }) {
+function ProjectChoice({ choice, selected, scope, controller, filterProject, close, busy, label, displayPath, onSelect, heading = false, pathOnly = false }) {
   const [open, setOpen] = useState(false);
-  const openMenu = event => { event.preventDefault(); event.stopPropagation(); controller.check(scope); setOpen(true); };
+  const openMenu = event => { event.preventDefault(); event.stopPropagation(); if (busy) return; controller.check(scope); setOpen(true); };
   return h(sdk.Popover, { open, onOpenChange: setOpen },
     // Declare ownership before Hermes's window-capture fallback intercepts the gesture.
     h(sdk.ContextMenu, null, h(sdk.ContextMenuTrigger, { asChild: true },
-      h(sdk.PopoverTrigger, { asChild: true }, h(sdk.Button, { type: 'button', variant: 'ghost', className: 'sf-project-choice', 'aria-label': `Filter by ${choice.name}`, 'aria-pressed': selected,
-      // Prevent the trigger's normal toggle: left click filters; right click edits.
-      onClick: event => { event.preventDefault(); filterProject(choice.cwd); }, onContextMenu: openMenu,
+      h(sdk.PopoverTrigger, { asChild: true }, h(sdk.Button, { type: 'button', variant: 'ghost', className: `sf-project-choice${heading ? ' sf-project-heading' : pathOnly ? ' sf-project-folder' : ''}`, disabled: busy, 'aria-disabled': heading || undefined, 'aria-label': label, 'aria-pressed': heading ? undefined : selected, title: heading ? undefined : choice.path,
+      // Prevent the trigger's normal toggle: left click selects; right click edits.
+      onClick: event => { event.preventDefault(); if (!heading) onSelect(); }, onContextMenu: openMenu,
       onKeyDown: event => { if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') openMenu(event); } },
-      h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)),
-      h('span', { className: 'sf-project-name' }, choice.name), selected ? icon('Check', '✓') : null)))),
+      !pathOnly ? h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)) : null,
+      h('span', { className: 'sf-project-details' }, !pathOnly ? h('span', { className: 'sf-project-name' }, choice.name) : null, !heading ? h('span', { className: 'sf-project-path' }, displayPath) : null), selected ? icon('Check', '✓') : null)))),
     h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
-      onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: choice, cwd: choice.cwd }, scope, controller, filterProject, close }) : null));
+      onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject, close }) : null));
 }
 function ScopedSidebar({ ctx, controller, scope }) {
   const presetTime = useSnoozeTime(ctx);
@@ -1099,6 +1152,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const mutation = useMutation({ mutationFn: async ({ id, payload }) => controller.mutate(scope, id, payload) });
   const opts = { refetchInterval: 5000, staleTime: 2000, retry: false };
   const sessions = useQuery({ ...opts, queryKey: [...key, 'sessions'], queryFn: () => controller.list(scope) });
+  // Observe picker data lazily so projects without loaded sessions retain their native filter name/icon.
+  const projectCatalog = useQuery({ queryKey: [...key, 'projects'], queryFn: () => controller.projects(scope), enabled: false, retry: false });
   const runtime = useQuery({ ...opts, queryKey: [...key, 'runtime'], queryFn: () => controller.runtime(scope) });
   const metadata = useQuery({ ...opts, queryKey: [...key, 'metadata'], queryFn: () => controller.metadata(scope), enabled: !mutation.isPending });
   const expanded = useQuery({ ...opts, staleTime: Infinity, refetchInterval: false, queryKey: [...key, 'expanded', limit], enabled: limit > 0, queryFn: () => controller.expanded(scope, limit) });
@@ -1139,8 +1194,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     }
     return choices;
   }, [rows]);
-  const projects = useMemo(() => [...projectChoices.values()].sort((a, b) => a.name.localeCompare(b.name) || a.cwd.localeCompare(b.cwd)), [projectChoices]);
-  const selectedProject = projectChoices.get(project) || { name: project || 'No project' };
+  const selectedProject = projectCatalog.data?.projects.find(choice => choice.path === project) || projectChoices.get(project) || { name: project || 'No project' };
   const selectProject = useCallback(cwd => { controller.check(scope); setProject(cwd); setFilterOpen(false); }, [controller, scope]);
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
   useEffect(() => {
@@ -1242,14 +1296,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
       h(sdk.Popover, { open: filterOpen, onOpenChange: setFilterOpen },
         h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Filter sessions', name: 'ListFilter', glyph: '≡', 'data-filtered': project !== '*', title: project === '*' ? 'Filter sessions' : `Filter sessions: ${selectedProject.name}` },
           project !== '*' ? h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: selectedProject.color || undefined } }, projectMark(selectedProject)) : null)),
-        h(sdk.PopoverContent, { align: 'end', 'aria-label': 'Session filters' }, h('div', { className: 'sf-menu' },
-          h(sdk.Button, { type: 'button', variant: 'ghost', className: 'sf-project-choice', 'aria-label': 'All projects', 'aria-pressed': project === '*', onClick: () => selectProject('*') },
-            icon('ListFilter', '≡'), h('span', { className: 'sf-project-name' }, 'All projects'), project === '*' ? icon('Check', '✓') : null),
-          ...projects.map(choice => h(FilterProjectChoice, { key: choice.cwd, choice, selected: project === choice.cwd, scope, controller, filterProject: selectProject, close: () => setFilterOpen(false) }))))),
+        h(sdk.PopoverContent, { align: 'end', 'aria-label': 'Session filters' }, filterOpen ? h(ProjectPicker, { mode: 'filter', selected: project, controller, scope, filterProject: selectProject, close: () => setFilterOpen(false) }) : null)),
 
       h(sdk.Popover, { open: pickerOpen, onOpenChange: setPickerOpen },
         h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'New session', name: 'SquarePen', glyph: '+' })),
-        h(sdk.PopoverContent, { align: 'end', 'aria-label': 'New session project' }, pickerOpen ? h(ProjectPicker, { controller, scope, close: () => setPickerOpen(false) }) : null))),
+        h(sdk.PopoverContent, { align: 'end', 'aria-label': 'New session project' }, pickerOpen ? h(ProjectPicker, { controller, scope, filterProject: selectProject, close: () => setPickerOpen(false) }) : null))),
     sessions.isLoading ? h(Note, null, 'Loading sessions…') : null,
     sessions.isError ? h(Note, { error: true }, `Session list failed: ${sessions.error.message} `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     !runtimeKnown ? h(Note, { error: runtime.isError }, runtime.isError ? `Runtime status unavailable: ${runtime.error.message}. Native archives remain Archived; other sessions stay accessible in Ready.` : 'Checking runtime status…') : null,

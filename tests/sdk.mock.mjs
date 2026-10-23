@@ -93,6 +93,7 @@ export const host = {
         }
       }
       control.afterProjectWrite?.();
+      if (!control.dropProjectWrite) for (const item of control.projects) if (item.id === project.id) Object.assign(item, { label: project.name, name: project.name, icon: project.icon, color: project.color });
       if (control.projectLostReply) { control.projectLostReply = false; throw new Error('fixture project reply lost after commit'); }
       return { project: clone(project) };
     }
@@ -130,6 +131,7 @@ export const ctx = {
   },
   async rest(path, options) {
     calls.push(['rest', path, options]); if (control.backendMissing) throw new Error('404 backend not enabled');
+    if (path === '/environment') return { profile: control.homeProfile || host.state.profile.get(), home: control.home || '/home/fixture' };
     if (path === '/state') {
       for (const item of Object.values(control.metadata.sessions)) if (item.state === 'snoozed' && item.wake_at <= Date.now() / 1000) Object.assign(item, { state: 'active', woke_at: item.wake_at, updated_at: item.wake_at, wake_at: null });
       return clone(control.metadata);
@@ -248,6 +250,7 @@ export function reset() {
     row.provider = 'openai-codex'; row.input_tokens = 1200; row.output_tokens = 300; row.total_tokens = 1500;
   }
   control.projectCatalog = [...new Map(control.rows.map(row => [row.project.id, { ...row.project, folders: [{ path: row.project.cwd }], archived: false }])).values()];
+  control.projects = control.projectCatalog.map(project => ({ id: project.id, label: project.cwd === '/projects/hermes-t3sidebar' ? 'Synthetic Sidebar' : project.name, path: project.cwd, icon: project.cwd === '/projects/hermes-t3sidebar' ? 'tools' : project.icon, color: project.color }));
   host.state.connectionId.set('source-a'); host.state.profile.set('default'); host.state.gateway.set('open'); host.state.activeSessionId.set('runtime-design'); host.state.focusedStoredSessionId.set('design'); host.state.focusedSessionOwner.set({ connectionId: 'source-a', profile: 'default' });
 }
 export function loadArchivePaginationFixtures() {
