@@ -52,6 +52,22 @@ The runtime request itself still waits for a blocked native token read; the opti
 
 The integrated `npm run test:all` gate passed 144 frontend/integration tests, 94 backend tests and 137 Chromium checks. Added deterministic tests cover linear lineage visits, differential merge parity, verified completion before gated background refresh, scoped route coalescing, card render isolation/freshness, event-domain/burst behavior, read-only metadata under contention, alias-covered backfill, runtime replacement during blocked projection and profile context propagation.
 
+## Frontend follow-up
+
+The follow-up starts at `f37acfb335b27d66e6dd544928f1874ae5c2303f`. These changes eliminate deterministic work and duplicate reads; they do not establish new browser, Windows/Electron or network latency measurements:
+
+- Unchanged polls without snoozes no longer rebuild/sort classification, while ages keep advancing; adding a snooze restores deadline-driven classification.
+- Query tokens normalize once, and each searchable row's lowercase text is prepared on demand and reused across keystrokes until the classified snapshot changes. Whitespace, AND-token semantics, lineage search, changed titles and project visibility remain unchanged.
+- Toolbar/dialog state reuses the logical visible-row list; membership/order changes still drive owned-focus recovery across virtualized sections.
+- Project-picker grouping, sorting, display paths and search fields are prepared per catalog/home snapshot rather than per keystroke. Multi-folder identity, exact raw selection paths and context-menu ownership are preserved.
+- Verified non-native metadata actions keep the independent readback but omit their immediate duplicate state-query invalidation. Active and mutation-disabled/re-enabled observers consume the published snapshot; failures, ambiguous writes, native operations, later events and ordinary polling retain recovery.
+- Identical cached archive-tail references bypass order serialization; head changes, changed tails, shifted offsets and bounded recovery still reconcile normally.
+- A workspace move discovers its route once and reuses it for project validation, without retaining authority across operations.
+
+Regressions in `tests/frontend-derivation.test.mjs`, `tests/project-picker.test.mjs`, `tests/controller-optimization.test.mjs`, `tests/pagination-cache.test.mjs` and `tests/session-card-fixes.test.mjs` exercise the real React/controller code with synthetic SDK data. The new render-work tests were observed failing on the starting implementation before the production changes. Existing age/snooze-menu, empty-draft, classification-parity, menu/focus and viewport-bound tests remain applicable.
+
+The follow-up's complete `npm run test:all` gate passed 274 frontend/integration tests, 185 backend tests and 291 Chromium checks; syntax checks and `git diff --check` also passed. Browser data remains explicitly synthetic, not live Electron or a deployed backend. No dependency, backend/core, installation or service changes are part of this follow-up.
+
 ## Preserved contracts
 
 Optimizations must retain profile/source/activation-epoch fences, native archive/delete/title verification, exact deletion retry identity, rich older-history recovery, native archive membership, Waiting precedence, running-subagent ownership, atomic snooze wake materialization and exact wake acknowledgments. Composer text remains read-only and immediately reduced to boolean presence; draft text must not enter plugin caches, logs, storage or backend requests. Polling remains a recovery mechanism rather than relying on event replay.

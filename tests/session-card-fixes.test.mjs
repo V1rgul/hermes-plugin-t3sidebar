@@ -90,6 +90,50 @@ test('move requires exact workspace readback and fences profile switches', async
 	assert.equal(mock.queryClient.getQueryData(key).sessions[0].cwd, row.cwd);
 });
 
+test('move reuses one asynchronously discovered route but later project reads and moves discover independently', async () => {
+	const project = target(), scope = captureScope(), row = { ...mock.control.rows.find(row => row.id === 'design'), status: 'idle' };
+	let discoveries = 0;
+	controller = createController(mock.ctx, mock.queryClient, { capture: captureScope, routes: async () => {
+		discoveries++; await Promise.resolve(); return mock.host.profileRoutes();
+	}, host: mock.host });
+	await controller.moveProject(scope, row, project);
+	assert.equal(discoveries, 1, 'the move operation must reuse its route for projects.tree');
+	const tree = mock.calls.find(call => call[2] === 'projects.tree');
+	const move = mock.calls.find(call => call[2] === 'session.workspace.move');
+	assert.equal(tree[1], move[1], 'tree and move use the same operation authority');
+	await controller.projects(scope);
+	assert.equal(discoveries, 2, 'public projects() must discover its own fresh route');
+	await controller.moveProject(scope, row, project);
+	assert.equal(discoveries, 3, 'another move must not reuse a settled route');
+});
+
+test('move route discovery failure retries and tree reads remain scope/epoch fenced', async () => {
+	for (const stop of ['discovery', 'scope', 'epoch']) {
+		mock.reset();
+		const project = target(), scope = captureScope(), row = { ...mock.control.rows.find(row => row.id === 'design'), status: 'idle' };
+		let discoveries = 0;
+		controller = createController(mock.ctx, mock.queryClient, { capture: captureScope, routes: async () => {
+			discoveries++; await Promise.resolve();
+			if (stop === 'discovery' && discoveries === 1) throw new Error('route discovery unavailable');
+			return mock.host.profileRoutes();
+		}, host: { ...mock.host, async requestProfile(route, method, params) {
+			const value = await mock.host.requestProfile(route, method, params);
+			if (method === 'projects.tree' && stop !== 'discovery') {
+				mock.switchScope(); if (stop === 'epoch') mock.switchScope('source-a');
+			}
+			return value;
+		} } });
+		await assert.rejects(controller.moveProject(scope, row, project), stop === 'discovery' ? /route discovery unavailable/ : /Source\/profile changed/);
+		assert.equal(discoveries, 1);
+		assert.equal(mock.calls.some(call => call[2] === 'session.workspace.move'), false);
+		if (stop === 'discovery') {
+			await controller.moveProject(scope, row, project);
+			assert.equal(discoveries, 2, 'a failed discovery must not survive into retry');
+		}
+		controller.dispose();
+	}
+});
+
 test('compressed conversation move targets its surfaced resume tip rather than the ended root', async () => {
 	const project = target(), scope = captureScope(); controller = createController(mock.ctx);
 	mock.control.live = [];

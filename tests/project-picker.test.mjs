@@ -125,6 +125,27 @@ for (const mode of ['filter', 'new']) {
 	});
 }
 
+test('picker search reuses sorted groups and prepared paths until catalog or home changes', async () => {
+	groupedFixture(); await mount();
+	const compare = String.prototype.localeCompare, lower = String.prototype.toLowerCase;
+	let comparisons = 0, pathPreparations = 0;
+	String.prototype.localeCompare = function (...args) { comparisons++; return compare.apply(this, args); };
+	String.prototype.toLowerCase = function () { if (String(this).startsWith('/home/fixture/')) pathPreparations++; return lower.call(this); };
+	try {
+		await input('~/second'); await input('Multi'); await input('no-such-project');
+		assert.equal(comparisons, 0, 'query changes do not sort the catalog again');
+		assert.equal(pathPreparations, 0, 'query changes reuse prepared path search fields');
+		assert.match(document.body.textContent, /No matching projects/);
+		const prefix = scopeKey(captureScope());
+		await act(async () => mock.queryClient.setQueryData([...prefix, 'project-home'], '/home/fixture/second')); await tick();
+		await input('~');
+		assert.ok(button('Filter by Multi: ~'), 'home changes rebuild shortened paths');
+		await act(async () => mock.queryClient.setQueryData([...prefix, 'projects'], { projects: [{ id: 'p_new:/new', projectId: 'p_new', name: 'Renamed', path: '/new' }] })); await tick();
+		await input('Renamed'); assert.ok(button('Filter by Renamed'));
+		await input('Multi'); assert.match(document.body.textContent, /No matching projects/);
+	} finally { String.prototype.localeCompare = compare; String.prototype.toLowerCase = lower; }
+});
+
 test('home lookup is routed, profile-qualified and rejects source/profile drift', async () => {
 	controller = createController(mock.ctx);
 	const scope = captureScope();

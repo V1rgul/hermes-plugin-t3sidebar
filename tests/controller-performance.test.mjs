@@ -73,7 +73,7 @@ function track(promise) {
 }
 
 for (const action of ['pin', 'snooze', 'restore', 'archive', 'unarchive', 'rename', 'delete', 'open', 'open-wake']) {
-  test(`${action} waits for exact verification but not an unrelated observed refresh`, { timeout: 3000 }, async t => {
+  test(`${action} waits for exact verification and reconciles only resources without verified publication`, { timeout: 3000 }, async t => {
     const f = fixture(t, action), before = f.client.getQueriesData({ queryKey: f.prefix }), operation = track(f.run());
     await f.verification.started;
     assert.equal(operation.settled, false, 'unverified work must remain pending');
@@ -83,7 +83,7 @@ for (const action of ['pin', 'snooze', 'restore', 'archive', 'unarchive', 'renam
     await turn();
     assert.equal(operation.settled, true, 'verified work must settle while refresh is gated');
     assert.equal(operation.error, undefined);
-    assert.equal(f.refreshStarted, true, 'background refresh is still scheduled');
+    assert.equal(f.refreshStarted, !['pin', 'snooze', 'restore', 'open-wake'].includes(action), 'verified metadata stays fresh; native/history refresh still runs');
     assert.equal(f.refreshFinished, false);
     await operation.done;
   });
@@ -171,10 +171,10 @@ test('ambiguous delete rejects promptly and retries exact request identity befor
 });
 
 test('a rejected background invalidation cannot replace a confirmed result or escape unhandled', async t => {
-  const f = fixture(t, 'pin', { verify: false });
+  const f = fixture(t, 'archive', { verify: false });
   f.client.invalidateQueries = () => Promise.reject(new Error('background refresh failed'));
   await f.run(); await turn();
-  assert.equal(f.client.getQueryData([...f.prefix, 'metadata']).sessions.design.pinned, true);
+  assert.equal(f.client.getQueryData([...f.prefix, 'archives']).sessions.some(row => row.id === 'design'), true);
 });
 
 function routedFixture(t, routes) {

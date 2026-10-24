@@ -94,11 +94,16 @@ export const sessionTitle = row => row.newSession ? 'New session' : row.title ||
 const draftIdentity = row => JSON.stringify([durableId(row), row.resolved_id || row.id]);
 const draftKey = (scope, row) => ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, durableId(row), row.resolved_id || row.id];
 const knownWorkspace = row => typeof row.cwd === 'string' || row.project?.is_home === true;
-function matchesFilters(row, query, project) {
+const searchTokens = query => query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+function matchesFilters(row, tokens, project, index) {
   if (project !== '*' && ((row._limited && !knownWorkspace(row)) || (row.cwd || '') !== project)) return false;
-  if (!query) return true;
-  const text = [sessionTitle(row), row.preview, row.cwd, row.git_branch, ...aliases(row)].filter(Boolean).join(' ').toLowerCase();
-  return query.trim().toLowerCase().split(/\s+/).every(token => text.includes(token));
+  if (!tokens.length) return true;
+  let text = index?.get(row);
+  if (text === undefined) {
+    text = [sessionTitle(row), row.preview, row.cwd, row.git_branch, ...aliases(row)].filter(Boolean).join(' ').toLowerCase();
+    index?.set(row, text);
+  }
+  return tokens.every(token => text.includes(token));
 }
 export function mergeRows(rich, extra = [], live = [], extraRich = false, archives = []) {
   const rows = new Map(), aliasIndex = new Map(), order = new Map();
@@ -153,6 +158,7 @@ export function mergeRows(rich, extra = [], live = [], extraRich = false, archiv
 }
 export function buildSections(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown = true, query = '', project = '*' } = {}) {
   const result = Object.fromEntries(SECTIONS.map(section => [section, []]));
+  const tokens = searchTokens(query);
   const runtimeIndex = new Map();
   for (let index = 0; index < live.length; index++) {
     for (const id of new Set([live[index].session_key, live[index].id])) {
@@ -180,7 +186,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
       : meta.pinned ? 'pinned'
       : status === 'working' ? 'working' : 'active';
     const newSession = isEmptySession(row, runtimeKnown ? matches : []);
-    if (!matchesFilters({ ...row, newSession }, query, project)) continue;
+    if (!matchesFilters({ ...row, newSession }, tokens, project)) continue;
     // Runtime last_active is also a resume/reattach clock, not conversation progress.
     const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
     const runtimes = matches.filter(item => typeof item.id === 'string' && item.id && item.id !== item.session_key);
@@ -250,6 +256,16 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     const pending = pendingRoutes;
     try { return currentRoute(scope, await fenced(scope, () => pending.work)); }
     finally { if (pendingRoutes === pending) pendingRoutes = null; }
+  }
+  async function projectsFor(scope, route) {
+    const value = await fenced(scope, () => env.host.requestProfile(route, 'projects.tree', { preview_limit: 0 }));
+    if (!Array.isArray(value?.projects)) throw new Error('Invalid native project tree.');
+    const home = { id: '__no_project__', name: 'Home', path: null, isNoProject: true };
+    const projects = value.projects.filter(p => p.id !== home.id && !p.isNoProject).flatMap(p => {
+      const paths = [...new Set([p.path, ...(p.repos || []).map(repo => repo.path)].filter(path => typeof path === 'string' && path))];
+      return paths.map(path => ({ id: `${p.id}:${path}`, projectId: p.id, name: p.label || p.name || p.id, path, icon: p.icon || null, color: p.color || null, isNoProject: false }));
+    });
+    return { projects: [home, ...projects] };
   }
   function qualified(value, scope, route) {
     if (value?.profile !== (route?.targetProfile || scope.profile) || !Array.isArray(value?.sessions)) throw new Error('Invalid current-profile listing response.');
@@ -364,11 +380,13 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         const value = page ? await fenced(scope, () => client.fetchQuery({ queryKey: pageKey,
           staleTime: ARCHIVE_TAIL_STALE_MS, gcTime: HISTORY_PAGE_GC_MS, queryFn: read })) : await read();
         readTicket(scope, ticket);
-        const signature = archiveOrder(value);
-        const priorSignature = page ? previous && archiveOrder(previous) : archiveHead && sameScope(archiveHead.scope, scope) && archiveHead.signature;
-        // Offset pagination shifts every later boundary after an insertion/removal.
-        if (priorSignature !== signature) await invalidateArchiveTail(scope, offset, ticket);
-        if (!page) archiveHead = { scope, signature };
+        if (!page || previous !== value) {
+          const signature = archiveOrder(value);
+          const priorSignature = page ? previous && archiveOrder(previous) : archiveHead && sameScope(archiveHead.scope, scope) && archiveHead.signature;
+          // Offset pagination shifts every later boundary after an insertion/removal.
+          if (priorSignature !== signature) await invalidateArchiveTail(scope, offset, ticket);
+          if (!page) archiveHead = { scope, signature };
+        }
         sessions.push(...value.sessions); has_more = value.has_more;
       }
       return { sessions, has_more };
@@ -404,6 +422,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       writing = true; generation++;
       const key = [...scopeKey(scope), 'metadata'];
       const native = payload.action === 'archive' || payload.action === 'unarchive';
+      let confirmed = false;
       try {
         await client.cancelQueries({ queryKey: native ? scopeKey(scope) : key, exact: !native }); check(scope);
         if (native) {
@@ -437,12 +456,13 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         const value = verifyAction(validState(await fenced(scope, () => ctx.rest('/state'))), id, payload);
         await client.cancelQueries({ queryKey: key, exact: true }); check(scope);
         client.setQueryData(key, value);
+        confirmed = true;
         return value;
       } finally {
         writing = false;
         if (!disposed && sameScope(scope, env.capture())) {
           if (native) client.removeQueries({ predicate: query => sameScope({ connectionId: query.queryKey[1], profile: query.queryKey[2], epoch: query.queryKey[3] }, scope) && query.queryKey[0] === 'hermes-t3sidebar' && query.queryKey[4] === 'page' });
-          refresh(scope, { queryKey: native ? scopeKey(scope) : key, exact: !native });
+          if (native || !confirmed) refresh(scope, { queryKey: native ? scopeKey(scope) : key, exact: !native });
         }
       }
     },
@@ -533,7 +553,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         // Native workspace.move updates one stored segment, not the whole lineage.
         // Move the same surfaced tip that open() resumes, never an ended root.
         const route = await routeFor(scope), id = row.resolved_id || row.id;
-        const choices = await this.projects(scope);
+        const choices = await projectsFor(scope, route);
         const target = choices.projects.find(item => item.id === project.id && item.path === project.path && !item.isNoProject);
         if (!target) throw new Error('This project changed or was removed. Refresh and retry.');
         const live = qualified(await fenced(scope, () => ctx.rest('/runtime')), scope, route);
@@ -667,15 +687,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       check(scope); refresh(scope, { queryKey: [...scopeKey(scope), 'sessions'] });
     },
     async projects(scope) {
-      const route = await routeFor(scope);
-      const value = await fenced(scope, () => env.host.requestProfile(route, 'projects.tree', { preview_limit: 0 }));
-      if (!Array.isArray(value?.projects)) throw new Error('Invalid native project tree.');
-      const home = { id: '__no_project__', name: 'Home', path: null, isNoProject: true };
-      const projects = value.projects.filter(p => p.id !== home.id && !p.isNoProject).flatMap(p => {
-        const paths = [...new Set([p.path, ...(p.repos || []).map(repo => repo.path)].filter(path => typeof path === 'string' && path))];
-        return paths.map(path => ({ id: `${p.id}:${path}`, projectId: p.id, name: p.label || p.name || p.id, path, icon: p.icon || null, color: p.color || null, isNoProject: false }));
-      });
-      return { projects: [home, ...projects] };
+      return projectsFor(scope, await routeFor(scope));
     },
 
     async projectHome(scope) {
@@ -1151,8 +1163,8 @@ export function projectDisplayPath(path, home) {
   const value = normalize(path), prefix = normalize(root);
   return value === prefix ? '~' : value.startsWith(`${prefix}/`) ? `~${path.slice(root.length)}` : path;
 }
-export function projectChoiceGroups(entries, query = '', home) {
-  const groups = new Map(), needle = query.trim().toLowerCase();
+function prepareProjectGroups(entries, home) {
+  const groups = new Map(), paths = new Map(), text = new Map();
   for (const choice of entries) {
     if (choice.isNoProject || choice.id === '__no_project__' || typeof choice.path !== 'string' || !choice.path) continue;
     const id = choice.projectId || choice.id;
@@ -1160,11 +1172,25 @@ export function projectChoiceGroups(entries, query = '', home) {
     const group = groups.get(id);
     if (!group.choices.some(item => item.path === choice.path)) group.choices.push(choice);
   }
-  return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map(group => ({
+  const ordered = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map(group => ({
     ...group, multiple: group.choices.length > 1,
-    choices: group.choices.sort((a, b) => a.path.localeCompare(b.path)).filter(choice =>
-      [group.name, choice.path, projectDisplayPath(choice.path, home)].some(value => value.toLowerCase().includes(needle)))
+    choices: group.choices.sort((a, b) => a.path.localeCompare(b.path))
+  }));
+  for (const group of ordered) for (const choice of group.choices) {
+    const path = projectDisplayPath(choice.path, home);
+    paths.set(choice, path);
+    text.set(choice, [group.name, choice.path, path].map(value => value.toLowerCase()));
+  }
+  return { groups: ordered, paths, text };
+}
+function filterProjectGroups(prepared, query) {
+  const needle = query.trim().toLowerCase();
+  return prepared.groups.map(group => ({ ...group,
+    choices: group.choices.filter(choice => prepared.text.get(choice).some(value => value.includes(needle)))
   })).filter(group => group.choices.length);
+}
+export function projectChoiceGroups(entries, query = '', home) {
+  return filterProjectGroups(prepareProjectGroups(entries, home), query);
 }
 export function ProjectPicker({ controller, scope, close, mode = 'new', selected = '*', filterProject }) {
   const [query, setQuery] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('');
@@ -1186,11 +1212,12 @@ export function ProjectPicker({ controller, scope, close, mode = 'new', selected
     finally { if (alive.current) setBusy(false); }
   };
   const entries = projects.data?.projects || EMPTY_ROWS;
-  const groups = projectChoiceGroups(entries, query, home.data);
+  const prepared = useMemo(() => prepareProjectGroups(entries, home.data), [entries, home.data]);
+  const groups = useMemo(() => filterProjectGroups(prepared, query), [prepared, query]);
   const choiceProps = { scope, controller, filterProject, close, busy };
   const renderChoice = (choice, pathOnly = false) => h(ProjectChoice, { ...choiceProps, key: choice.id, choice, pathOnly,
-    selected: filtering && selected === choice.path, label: `${filtering ? 'Filter by' : 'New session in'} ${choice.name}${pathOnly ? `: ${projectDisplayPath(choice.path, home.data)}` : ''}`,
-    displayPath: projectDisplayPath(choice.path, home.data), onSelect: () => void select(choice) });
+    selected: filtering && selected === choice.path, label: `${filtering ? 'Filter by' : 'New session in'} ${choice.name}${pathOnly ? `: ${prepared.paths.get(choice)}` : ''}`,
+    displayPath: prepared.paths.get(choice), onSelect: () => void select(choice) });
   return h('div', { className: 'sf-menu sf-project-picker', 'aria-label': filtering ? 'Choose project filter' : 'Choose project for new session' },
     h('strong', null, filtering ? 'Filter by project' : 'New session in…'),
     h('input', { type: 'search', 'aria-label': 'Search projects', placeholder: 'Search projects', value: query, onChange: event => setQuery(event.target.value) }),
@@ -1202,7 +1229,7 @@ export function ProjectPicker({ controller, scope, close, mode = 'new', selected
         ...group.choices.map(choice => renderChoice(choice, true))) : renderChoice(group.choices[0]))),
     projects.isLoading ? h('div', { role: 'status' }, 'Loading projects…') : null,
     projects.isError ? h('div', { role: 'alert' }, projects.error.message, h(sdk.Button, { onClick: () => projects.refetch() }, 'Retry projects')) : null,
-    projects.data && !groups.length ? h('div', { role: 'status' }, projectChoiceGroups(entries).length ? 'No matching projects' : 'No projects available') : null,
+    projects.data && !groups.length ? h('div', { role: 'status' }, prepared.groups.length ? 'No matching projects' : 'No projects available') : null,
     busy ? h('div', { role: 'status' }, 'Creating session…') : null,
     error ? h('div', { role: 'alert' }, error) : null);
 }
@@ -1261,10 +1288,16 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // Successful polls still advance ages and due snoozes when Query structural
   // sharing keeps data references unchanged. Use existing polls, no extra timer.
   const now = useMemo(() => Date.now() / 1000, [sessions.dataUpdatedAt, runtime.dataUpdatedAt, metadata.dataUpdatedAt, archives.dataUpdatedAt]);
-  const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, now }), [rows, metadata.data, live, runtimeKnown, now]);
+  const hasSnoozes = useMemo(() => Object.values(metadata.data?.sessions || EMPTY_STATE.sessions).some(meta => meta.state === 'snoozed'), [metadata.data]);
+  // Only snooze eligibility depends on the clock; unchanged ordinary history keeps its classification while displayed ages still advance.
+  const classificationNow = hasSnoozes ? now : 0;
+  const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, now: classificationNow }), [rows, metadata.data, live, runtimeKnown, classificationNow]);
   const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession), [classified]);
+  const tokens = useMemo(() => searchTokens(query), [query]);
+  // Populate text only for rows actually searched; replacing the classified snapshot also replaces its search index.
+  const searchIndex = useMemo(() => new WeakMap(), [classified]);
   const sections = useMemo(() => Object.fromEntries(SECTIONS.map(section => [section,
-    classified[section].filter(row => (!row.newSession || emptyDrafts.has(draftIdentity(row)) || ['waiting', 'working'].includes(row.status)) && matchesFilters(row, query, project))])), [classified, emptyDrafts, query, project]);
+    classified[section].filter(row => (!row.newSession || emptyDrafts.has(draftIdentity(row)) || ['waiting', 'working'].includes(row.status)) && matchesFilters(row, tokens, project, searchIndex))])), [classified, emptyDrafts, tokens, project, searchIndex]);
   const searching = !!query.trim();
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
   const sectionTrack = section => {
@@ -1276,7 +1309,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
   };
   const filtering = searching || project !== '*';
   const hasMatches = SECTIONS.some(section => sections[section].length > 0);
-  const visible = SECTIONS.flatMap(section => isClosed(section) && !(section === 'active' && sections.active.some(row => row.status === 'waiting' || row.status === 'unknown')) ? [] : sections[section]);
+  const visible = useMemo(() => SECTIONS.flatMap(section => !!collapsed[section] && !(searching && section === 'working')
+    && !(section === 'active' && sections.active.some(row => row.status === 'waiting' || row.status === 'unknown')) ? [] : sections[section]), [sections, collapsed, searching]);
   const projectChoices = useMemo(() => {
     const choices = new Map();
     for (const row of rows) {
@@ -1349,7 +1383,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
       const target = visible[0]; focused.current = target?.key;
       if (target) navigators.current.get(target.section)?.(target.key);
     }
-  });
+  }, [visible]);
   const focusRow = useCallback(id => { focused.current = id; }, []);
   const rowRef = useCallback((id, element) => { if (element) rowRefs.current.set(id, element); else rowRefs.current.delete(id); }, []);
   const disabled = latest.current.disabled;

@@ -42,6 +42,48 @@ test('archive first page is 100; each expansion fetches only a fresh head and th
 	assert.deepEqual(requests(), ['/archives?offset=0&limit=100'], 'ordinary polls must not replay older archive reads');
 });
 
+test('fresh cached archive tails skip order mapping and signatures while the head is still checked', async () => {
+	const scope = fixture(); await controller.archives(scope, 2);
+	let mappedRows = 0, signatures = 0;
+	const arrays = [100, 600].map(offset => client.getQueryData([...scopeKey(scope), 'archive-page', offset]).sessions);
+	for (const rows of arrays) Object.defineProperty(rows, 'map', { configurable: true, value(callback, ...args) {
+		return Array.prototype.map.call(this, (...values) => { mappedRows++; return callback(...values); }, ...args);
+	} });
+	const stringify = JSON.stringify;
+	JSON.stringify = function(value, ...args) {
+		if (Array.isArray(value) && typeof value[0] === 'boolean' && Array.isArray(value[1])) signatures++;
+		return stringify(value, ...args);
+	};
+	try {
+		mock.calls.length = 0;
+		assert.equal((await controller.archives(scope, 2)).sessions.length, 1100);
+		assert.equal(mappedRows, 0, 'identical cached references must never walk tail IDs');
+		assert.equal(signatures, 1, 'only the freshly read head needs an order signature');
+		assert.deepEqual(requests(), ['/archives?offset=0&limit=100']);
+	} finally {
+		JSON.stringify = stringify;
+		for (const rows of arrays) delete rows.map;
+	}
+});
+
+test('changed tail references with unchanged order preserve the fresh suffix; has_more changes invalidate it', async () => {
+	const scope = fixture(); await controller.archives(scope, 2);
+	const firstKey = [...scopeKey(scope), 'archive-page', 100];
+	await client.invalidateQueries({ queryKey: firstKey, exact: true, refetchType: 'none' });
+	mock.control.extra[150].title = 'Updated title, same archive order';
+	mock.calls.length = 0;
+	const updated = await controller.archives(scope, 2);
+	assert.equal(updated.sessions.find(row => row.id === 'archive-150').title, 'Updated title, same archive order');
+	assert.deepEqual(requests(), ['/archives?offset=0&limit=100', '/archives?offset=100&limit=500']);
+	const key = [...scopeKey(scope), 'archive-page', 600];
+	client.setQueryData(firstKey, old => ({ ...old, has_more: false }));
+	await client.invalidateQueries({ queryKey: firstKey, exact: true, refetchType: 'none' });
+	mock.calls.length = 0;
+	assert.equal((await controller.archives(scope, 2)).sessions.length, 1100);
+	assert.deepEqual(requests(), ['/archives?offset=0&limit=100', '/archives?offset=100&limit=500', '/archives?offset=600&limit=500']);
+	assert.equal(client.getQueryState(key).isInvalidated, false, 'changed boundary is reconciled before publication');
+});
+
 test('a changed head refreshes every loaded offset and an exhausted head drops the old tail', async () => {
 	const scope = fixture(); await controller.archives(scope, 2);
 	mock.control.extra.unshift({ id: 'new-archive', archived: true, title: 'New archive' });
