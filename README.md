@@ -2,11 +2,9 @@
 
 A T3 Code-inspired session sidebar for [Hermes Desktop](https://hermes-agent.nousresearch.com/docs/user-guide/desktop). Keep conversations that need your attention up front, and running jobs out of the way.
 
-| Session overview | Snooze a conversation |
-| --- | --- |
-| ![Session sidebar with pinned conversations, Input and Done badges, and separate Working, Snoozed and Archived shelves](docs/images/sidebar.png) | ![Snooze menu with one-hour, three-hour, tomorrow, next-Monday and custom date options](docs/images/snooze.png) |
+![Session right-click menu with the Project submenu expanded, showing project actions, colors and icons; Archived remains folded](docs/images/session-project.png)
 
-*Previews use sample data in the development harness, not a live Desktop connection.*
+*Midnight theme, dark mode. Previews render the current plugin with sample data and a development SDK adapter, not a live Desktop connection. Archived stays folded throughout.*
 
 ## What it does
 
@@ -24,6 +22,26 @@ Pins, snoozes and completion markers are stored by the backend companion and sha
 3. Enable both halves, open the **t3sidebar** pane, and hide the built-in **Sessions** pane using the normal layout controls.
 
 Using a remote backend or upgrading an existing installation? See the [installation guide](docs/installation.md), including when a backend restart is needed.
+
+## Screenshots
+
+### New session
+
+Choose a project before starting a conversation.
+
+![New session menu with searchable projects, colored native icons and workspace paths](docs/images/new-session.png)
+
+### Filter by project
+
+Narrow the session list without changing your workspace.
+
+![Project filter menu with search, All projects and project choices](docs/images/filter.png)
+
+### Snooze
+
+Pick a preset or a custom local date and time.
+
+![Snooze menu with one-hour, three-hour, tomorrow, next-Monday and custom date options](docs/images/snooze.png)
 
 ## Documentation
 
