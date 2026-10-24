@@ -18,6 +18,8 @@ npm run harness
 
 Open `http://127.0.0.1:4173`. The right-hand panel is a labeled test workspace, not an alternative chat implementation. Browser tests write screenshots to `t3-sidebar-ui-verification/` under `TMPDIR` (or the Hermes scratch directory when unset). The README's maintained screenshots live in `docs/images/`.
 
+README screenshots render the current plugin with sample sessions and a development SDK adapter, using the Midnight dark palette and native Codicon font. They are not captures of a live Desktop connection.
+
 The production plugin itself needs none of these Node development dependencies or generated bundles.
 
 SDK reference: https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk
