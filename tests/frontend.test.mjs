@@ -1063,13 +1063,13 @@ test('archive pagination is independent from active expansion and invalidates ca
   assert.equal(mock.calls.some(c => c[0] === 'rest' && c[1].startsWith('/sessions?')), false);
   const expanded = await controller.expanded(scope, 2); assert.equal(expanded.sessions.length, 501);
   assert.equal(mock.queryClient.getQueryData([...key, 'page', 1000]).sessions[0].id, 'active-1000');
-  for (const suffix of [['sessions'], ['expanded', 2], ['archives', 1]]) mock.queryClient.setQueryData([...key, ...suffix], { fixture: true });
+  for (const suffix of [['sessions'], ['expanded'], ['archives']]) mock.queryClient.setQueryData([...key, ...suffix], { fixture: true });
   const foreign = ['hermes-t3sidebar', 'foreign', scope.profile, scope.epoch, 'page', 500]; mock.queryClient.setQueryData(foreign, { retain: true });
   await controller.mutate(scope, 'active-1000', { action: 'archive' });
   assert.equal(mock.queryClient.getQueryData([...key, 'page', 500]), undefined);
   assert.equal(mock.queryClient.getQueryData([...key, 'page', 1000]), undefined);
   assert.deepEqual(mock.queryClient.getQueryData(foreign), { retain: true });
-  for (const suffix of [['sessions'], ['expanded', 2], ['archives', 1]]) assert.equal(mock.queryClient.getQueryState([...key, ...suffix]).isInvalidated, true);
+  for (const suffix of [['sessions'], ['expanded'], ['archives']]) assert.equal(mock.queryClient.getQueryState([...key, ...suffix]).isInvalidated, true);
   assert.equal((await controller.expanded(scope, 2)).sessions.some(r => r.id === 'active-1000'), false);
   assert.equal((await controller.archives(scope, 1)).sessions.some(r => r.id === 'active-1000'), true);
   await controller.mutate(scope, 'active-1000', { action: 'unarchive' });

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import React, { act } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, QueryObserver } from '@tanstack/react-query';
 import * as mock from './sdk.mock.mjs';
 import { createController, captureScope, scopeKey, HermesT3Sidebar, PROJECT_ICON_GROUPS, PROJECT_PALETTE } from '../desktop/plugin.js';
 
@@ -58,6 +58,86 @@ test('dropped writes and wrong identity/folder readbacks never publish unverifie
     assert.equal(client.getQueryData(key), before);
   }
 });
+
+test('verified existing-project appearance updates patch all scoped caches without evicting or invalidating history', async () => {
+  const { scope, project } = fixture(), prefix = scopeKey(scope);
+  const target = structuredClone(mock.control.rows.find(row => row.id === 'design'));
+  const unrelated = structuredClone(mock.control.rows.find(row => row.id === 'readme'));
+  const keys = [['expanded'], ['page', 500], ['archives'], ['archive-page', 100], ['runtime']];
+  for (const suffix of keys) client.setQueryData([...prefix, ...suffix], { sessions: [target, unrelated], has_more: false });
+  const metadataKey = [...prefix, 'metadata']; client.setQueryData(metadataKey, { version: 1, sessions: {} });
+  const choicesKey = [...prefix, 'projects']; client.setQueryData(choicesKey, { projects: [{ id: `${project.id}:${project.cwd}`, projectId: project.id, path: project.cwd, name: project.name }] });
+  const foreignKey = ['hermes-t3sidebar', 'foreign', scope.profile, scope.epoch, 'page', 500];
+  client.setQueryData(foreignKey, { sessions: [target] }); const foreign = client.getQueryData(foreignKey);
+  const originalOthers = keys.map(suffix => client.getQueryData([...prefix, ...suffix]).sessions[1]);
+  await controller.updateProject(scope, project, { icon: 'rocket' });
+  for (const [index, suffix] of keys.entries()) {
+    const key = [...prefix, ...suffix], data = client.getQueryData(key);
+    assert.ok(data, `${suffix} must not be evicted`);
+    assert.equal(data.sessions[0].project.icon, 'rocket');
+    assert.equal(data.sessions[1], originalOthers[index]);
+    assert.equal(client.getQueryState(key).isInvalidated, false, `${suffix} does not need a full refresh`);
+  }
+  assert.equal(client.getQueryState(metadataKey).isInvalidated, false);
+  assert.equal(client.getQueryData(choicesKey).projects[0].icon, 'rocket');
+  assert.equal(client.getQueryState(choicesKey).isInvalidated, true, 'only the project catalog needs reconciliation');
+  assert.equal(client.getQueryData(foreignKey), foreign);
+  assert.equal(mock.calls.some(call => call[0] === 'rest'), false);
+});
+
+test('project validation failures leave history fresh while adoption and ambiguous writes retain broad reconciliation', async () => {
+  const { scope, project } = fixture(), pageKey = [...scopeKey(scope), 'page', 500], runtimeKey = [...scopeKey(scope), 'runtime'];
+  client.setQueryData(pageKey, { sessions: [] }); client.setQueryData(runtimeKey, { sessions: [] });
+  mock.control.projectCatalog = [];
+  await assert.rejects(controller.updateProject(scope, project, { icon: 'rocket' }), /changed or was removed/);
+  assert.ok(client.getQueryData(pageKey)); assert.equal(client.getQueryState(runtimeKey).isInvalidated, false);
+  await controller.updateProject(scope, { id: '/new-automatic', cwd: '/new-automatic', name: 'Automatic' }, { icon: 'rocket' });
+  assert.equal(client.getQueryData(pageKey), undefined); assert.equal(client.getQueryState(runtimeKey).isInvalidated, true);
+  client.setQueryData(pageKey, { sessions: [] }); client.setQueryData(runtimeKey, { sessions: [] });
+  const adopted = mock.control.projectCatalog.at(-1);
+  mock.control.projectLostReply = true;
+  await assert.rejects(controller.updateProject(scope, { ...adopted, cwd: '/new-automatic' }, { color: '#123456' }), /reply lost/);
+  assert.equal(client.getQueryData(pageKey), undefined); assert.equal(client.getQueryState(runtimeKey).isInvalidated, true);
+});
+
+for (const outcome of ['confirmed', 'validation failure', 'scope change']) {
+  test(`project ${outcome} does not strand an interrupted first history expansion`, async () => {
+    const { scope, project, key } = fixture(), before = client.getQueryData(key);
+    mock.control.extra = Array.from({ length: 600 }, (_, index) => ({ id: `older-${index}`, title: `Older ${index}`, project: { ...project } }));
+    controller.dispose();
+    let release, reached, reads = 0;
+    const gate = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { reached = resolve; });
+    controller = createController({ ...mock.ctx, rest: async (path, options) => {
+      const value = await mock.ctx.rest(path, options);
+      if (path.startsWith('/sessions?offset=500') && ++reads === 1) { reached(); await gate; }
+      return value;
+    } }, client);
+    const expandedKey = [...scopeKey(scope), 'expanded'];
+    const observer = new QueryObserver(client, { queryKey: expandedKey, retry: false, staleTime: Infinity,
+      queryFn: () => controller.expanded(scope, 1) });
+    let settled;
+    const refreshed = new Promise(resolve => { settled = resolve; });
+    const unsubscribe = observer.subscribe(result => { if (result.data) settled(result.data); });
+    try {
+      await started;
+      if (outcome === 'validation failure') mock.control.projectCatalog = [];
+      if (outcome === 'scope change') mock.control.afterProjectWrite = () => mock.switchScope();
+      const saving = controller.updateProject(scope, project, { icon: 'rocket' });
+      if (outcome === 'confirmed') await saving;
+      else await assert.rejects(saving, /changed or was removed|Source\/profile changed/);
+      release();
+      if (outcome === 'scope change') {
+        await tick(); assert.equal(reads, 1); assert.equal(client.getQueryData(expandedKey), undefined);
+      } else {
+        const data = await Promise.race([refreshed, new Promise((_, reject) => setTimeout(() => reject(new Error('Expansion was not resumed')), 1000))]);
+        assert.equal(reads, 2); assert.ok(data.sessions.length > 0); assert.equal(data.has_more, false);
+        assert.equal(data.sessions[0].project.icon, outcome === 'confirmed' ? 'rocket' : project.icon);
+        assert.equal(client.getQueryState(key).isInvalidated, false, 'settled history stays fresh');
+        if (outcome === 'validation failure') assert.equal(client.getQueryData(key), before);
+      }
+    } finally { release(); unsubscribe(); }
+  });
+}
 
 test('removed, archived and moved native projects are rejected before writing', async () => {
   const { scope, project } = fixture();

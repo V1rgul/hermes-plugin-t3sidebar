@@ -29,7 +29,7 @@ function fixture(t, action, { verify = true } = {}) {
   const active = { sessions: structuredClone(mock.control.rows.filter(item => !item.archived)), has_more: false };
   const archived = { sessions: structuredClone(mock.control.rows.filter(item => item.archived)), has_more: false };
   client.setQueryData([...prefix, 'sessions'], active);
-  client.setQueryData([...prefix, 'archives', 0], archived);
+  client.setQueryData([...prefix, 'archives'], archived);
   client.setQueryData([...prefix, 'metadata'], structuredClone(mock.control.metadata));
   const initialData = client.getQueryData([...prefix, suffix]);
   let refreshFinished = false, refreshStarted = false, archiveReads = 0, snapshots = 0;
@@ -124,7 +124,7 @@ for (const action of ['archive', 'unarchive']) {
     const foreign = { sessions: [{ ...f.row }] }; f.client.setQueryData(foreignKey, foreign);
     await f.run();
     const active = f.client.getQueryData([...f.prefix, 'sessions']).sessions;
-    const archived = f.client.getQueryData([...f.prefix, 'archives', 0]).sessions;
+    const archived = f.client.getQueryData([...f.prefix, 'archives']).sessions;
     const destination = action === 'archive' ? archived : active, source = action === 'archive' ? active : archived;
     assert.equal(source.some(row => aliases(row).includes(f.row.id)), false);
     const moved = destination.find(row => aliases(row).includes(f.row.id));
@@ -152,7 +152,7 @@ test('native archive never fabricates a rich card from runtime-only evidence', a
   const runtime = { id: 'runtime-design', session_key: 'design', status: 'idle' };
   f.client.setQueryData([...f.prefix, 'runtime'], { sessions: [runtime] });
   await f.run();
-  assert.equal(f.client.getQueryData([...f.prefix, 'archives', 0]).sessions.some(row => aliases(row).includes('design')), false);
+  assert.equal(f.client.getQueryData([...f.prefix, 'archives']).sessions.some(row => aliases(row).includes('design')), false);
 });
 
 test('ambiguous delete rejects promptly and retries exact request identity before publishing absence', async t => {

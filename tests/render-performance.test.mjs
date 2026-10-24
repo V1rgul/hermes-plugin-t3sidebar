@@ -12,7 +12,7 @@ const { createRoot } = await import('react-dom/client');
 let root, controller;
 const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
 const row = id => document.querySelector(`[data-session-id="${id}"]`);
-const button = name => [...document.querySelectorAll('button')].find(node => node.getAttribute('aria-label') === name);
+const button = name => [...document.querySelectorAll('button')].find(node => node.getAttribute('aria-label') === name || node.textContent === name);
 async function click(node) { assert.ok(node); await act(async () => node.click()); await tick(); }
 async function input(node, value) {
   await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(node, value); node.dispatchEvent(new Event('input', { bubbles: true })); });
@@ -201,7 +201,7 @@ test('clients without ResizeObserver retain measured scrolling and resize fallba
 });
 
 test('500-row shelves bound mounted cards, fold renders and fresh draft reads to the viewport', async () => {
-	denseHistory(); await mount();
+	denseHistory(); await mount(); await click(button('Browse older archives'));
 	assert.ok(document.querySelectorAll('.sf-row').length < 80, 'history size must not become mounted card count');
 	const descriptor = Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype, 'format');
 	let formatted = 0;
@@ -224,7 +224,7 @@ test('500-row shelves bound mounted cards, fold renders and fresh draft reads to
 });
 
 test('windowed keyboard navigation reaches unmounted rows; search retains menus and never unfolds Archives', async () => {
-	denseHistory(); await mount();
+	denseHistory(); await mount(); await click(button('Browse older archives'));
 	const first = row('dense-0').querySelector('.sf-open');
 	await act(async () => { first.focus(); first.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })); }); await tick();
 	assert.equal(document.activeElement.closest('[data-session-id]')?.dataset.sessionId, 'dense-999');

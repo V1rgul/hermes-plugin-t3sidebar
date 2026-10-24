@@ -8,6 +8,10 @@ const LABELS = { active: 'Ready', pinned: 'Pinned', working: 'Working', snoozed:
 const EMPTY_STATE = { version: 1, sessions: {} };
 const EMPTY_ROWS = [];
 const DEFAULT_META = { state: 'active', pinned: false };
+const ARCHIVE_FIRST_PAGE_SIZE = 100;
+const HISTORY_PAGE_SIZE = 500;
+const ARCHIVE_TAIL_STALE_MS = 30000;
+const HISTORY_PAGE_GC_MS = 300000;
 const tokenFormatter = Intl.NumberFormat('en', { useGrouping: false, maximumFractionDigits: 0 });
 const millionTokenFormatter = Intl.NumberFormat('en', { useGrouping: false, minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const shortDateTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' });
@@ -234,7 +238,7 @@ export function verifyAction(state, id, payload) {
 // Read generations + React Query cancellation prevent an old poll overwriting a write.
 export function createController(ctx, client = queryClient, env = { capture: captureScope, routes: () => host.profileRoutes(), host }) {
   let disposed = false, writing = false, generation = 0;
-  let pendingRoutes = null;
+  let pendingRoutes = null, archiveHead = null;
   const wakeAcks = new Map(), doneAcks = new Map(), deleteRequests = new Map();
   function check(scope) { if (disposed || !sameScope(scope, env.capture())) throw new Error('Source/profile changed; refresh before trying again.'); }
   async function fenced(scope, fn) { check(scope); const result = await fn(); check(scope); return result; }
@@ -275,15 +279,24 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     // Query errors must not replace the write result or escape unhandled.
     try { void Promise.resolve(client.invalidateQueries(filters)).catch(() => {}); } catch (_) { /* background refresh */ }
   }
+  const archiveOrder = value => JSON.stringify([value.has_more, value.sessions.map(row => [durableId(row), row.id])]);
+  async function invalidateArchiveTail(scope, offset, ticket) {
+    await client.invalidateQueries({ queryKey: [...scopeKey(scope), 'archive-page'], predicate: query => query.queryKey[5] > offset, refetchType: 'none' });
+    readTicket(scope, ticket);
+  }
   function updateRows(scope, ids, patch, archived) {
     check(scope);
     if (typeof client.getQueriesData !== 'function') return; // Minimal cache adapters may have no loaded lists.
     const matches = row => aliases(row).some(id => ids.has(id)) || ids.has(row.session_key);
     const queries = client.getQueriesData({ queryKey: scopeKey(scope) })
-      .filter(([key, data]) => ['sessions', 'expanded', 'archives', 'page', 'runtime'].includes(key[4]) && Array.isArray(data?.sessions));
+      .filter(([key, data]) => ['sessions', 'expanded', 'archives', 'page', 'archive-page', 'runtime'].includes(key[4]) && Array.isArray(data?.sessions));
     // Transfer only an already-loaded native row, never manufacture a rich row
     // from a runtime or metadata record. Preserve project/history richness.
-    const known = queries.filter(([key]) => key[4] !== 'runtime').flatMap(([, data]) => data.sessions).find(matches);
+    let known;
+    for (const [key, data] of queries) {
+      if (key[4] !== 'runtime') known = data.sessions.find(matches);
+      if (known) break;
+    }
     for (const [key, data] of queries) {
       const destination = archived === undefined || key[4] === 'runtime' ? null : archived ? 'archives' : 'sessions';
       let sessions = data.sessions.flatMap(row => {
@@ -296,7 +309,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     }
   }
   return {
-    dispose() { disposed = true; generation++; pendingRoutes = null; deleteRequests.clear(); doneAcks.clear(); }, check,
+    dispose() { disposed = true; generation++; pendingRoutes = null; archiveHead = null; deleteRequests.clear(); doneAcks.clear(); }, check,
     async hasDraft(scope, row) {
       check(scope);
       // The public getter is ID-addressed, not route-qualified. Use the same tip as open().
@@ -337,9 +350,25 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const route = await routeFor(scope), sessions = [];
       let has_more = true;
       for (let page = 0; page <= pages && has_more; page++) {
-        const value = qualified(await fenced(scope, () => ctx.rest(`/archives?offset=${page * 500}&limit=500`)), scope, route);
+        const offset = page ? ARCHIVE_FIRST_PAGE_SIZE + (page - 1) * HISTORY_PAGE_SIZE : 0;
+        const limit = page ? HISTORY_PAGE_SIZE : ARCHIVE_FIRST_PAGE_SIZE;
+        const pageKey = [...scopeKey(scope), 'archive-page', offset];
+        const previous = page ? client.getQueryData?.(pageKey) : null;
+        const read = async () => {
+          const value = qualified(await fenced(scope, () => ctx.rest(`/archives?offset=${offset}&limit=${limit}`)), scope, route);
+          readTicket(scope, ticket);
+          if (typeof value.has_more !== 'boolean' || value.sessions.some(row => row.archived !== true)) throw new Error('Invalid native archive listing response.');
+          return value;
+        };
+        // Poll the small head normally. Older pages reconcile on history events, shifted boundaries or a bounded recovery interval, not every head poll.
+        const value = page ? await fenced(scope, () => client.fetchQuery({ queryKey: pageKey,
+          staleTime: ARCHIVE_TAIL_STALE_MS, gcTime: HISTORY_PAGE_GC_MS, queryFn: read })) : await read();
         readTicket(scope, ticket);
-        if (typeof value.has_more !== 'boolean' || value.sessions.some(row => row.archived !== true)) throw new Error('Invalid native archive listing response.');
+        const signature = archiveOrder(value);
+        const priorSignature = page ? previous && archiveOrder(previous) : archiveHead && sameScope(archiveHead.scope, scope) && archiveHead.signature;
+        // Offset pagination shifts every later boundary after an insertion/removal.
+        if (priorSignature !== signature) await invalidateArchiveTail(scope, offset, ticket);
+        if (!page) archiveHead = { scope, signature };
         sessions.push(...value.sessions); has_more = value.has_more;
       }
       return { sessions, has_more };
@@ -355,7 +384,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       let has_more = true;
       for (let page = 1; page <= pages && has_more; page++) {
         const offset = page * 500;
-        const value = await fenced(scope, () => client.fetchQuery({ queryKey: [...scopeKey(scope), 'page', offset], staleTime: Infinity,
+        const value = await fenced(scope, () => client.fetchQuery({ queryKey: [...scopeKey(scope), 'page', offset], staleTime: Infinity, gcTime: HISTORY_PAGE_GC_MS,
           queryFn: async () => { const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=${offset}&limit=500`)), scope, route); readTicket(scope, ticket); return value; } }));
         readTicket(scope, ticket);
         sessions.push(...value.sessions); has_more = value.has_more;
@@ -550,7 +579,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         expected.name = patch.name.trim();
       }
       if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
+      const interrupted = client.getQueryCache().findAll({ queryKey: scopeKey(scope), type: 'active', fetchStatus: 'fetching' }).map(query => query.queryKey);
       writing = true; generation++;
+      let dispatched = false, confirmed = false, adopted = false;
       try {
         const route = await routeFor(scope);
         const rpc = (method, params) => fenced(scope, () => env.host.requestProfile(route, method, params));
@@ -566,8 +597,12 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         let id;
         if (target) {
           id = target.id;
+          adopted = id !== project.id;
+          dispatched = true;
           await rpc('projects.update', { id, ...payload });
         } else {
+          adopted = true;
+          dispatched = true;
           const created = await rpc('projects.create', { name: project.name, folders: [project.cwd], primary_path: project.cwd,
             icon: project.icon || null, color: project.color || null, use: false, ...expected });
           id = created?.project?.id;
@@ -578,16 +613,31 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           fields.some(key => (saved[key] ?? null) !== (expected[key] || null))) throw new Error('The server did not confirm this project change. Refresh and retry.');
         check(scope);
         for (const [key, data] of client.getQueriesData({ queryKey: scopeKey(scope) })) {
-          if (!['sessions', 'expanded', 'archives', 'page'].includes(key[4]) || !Array.isArray(data?.sessions)) continue;
-          client.setQueryData(key, { ...data, sessions: data.sessions.map(row => row.project?.id === project.id || row.project?.id === id
-            ? { ...row, project: { ...row.project, id, name: saved.name, icon: saved.icon, color: saved.color } } : row) });
+          if (['sessions', 'expanded', 'archives', 'page', 'archive-page', 'runtime'].includes(key[4]) && Array.isArray(data?.sessions)) {
+            const sessions = data.sessions.map(row => row.project?.id === project.id || row.project?.id === id
+              ? { ...row, project: { ...row.project, id, name: saved.name, icon: saved.icon, color: saved.color } } : row);
+            if (sessions.some((row, index) => row !== data.sessions[index])) client.setQueryData(key, { ...data, sessions });
+          } else if (key[4] === 'projects' && Array.isArray(data?.projects)) {
+            const projects = data.projects.map(choice => choice.projectId === project.id || choice.projectId === id
+              ? { ...choice, id: `${id}:${choice.path}`, projectId: id, name: saved.name, icon: saved.icon, color: saved.color } : choice);
+            if (projects.some((choice, index) => choice !== data.projects[index])) client.setQueryData(key, { ...data, projects });
+          }
         }
+        confirmed = true;
         return saved;
       } finally {
         writing = false;
         if (!disposed && sameScope(scope, env.capture())) {
-          client.removeQueries({ queryKey: [...scopeKey(scope), 'page'] });
-          refresh(scope, { queryKey: scopeKey(scope) });
+          if (dispatched && (!confirmed || adopted)) {
+            client.removeQueries({ queryKey: [...scopeKey(scope), 'page'] });
+            refresh(scope, { queryKey: scopeKey(scope) });
+          } else {
+            if (confirmed) refresh(scope, { queryKey: [...scopeKey(scope), 'projects'] });
+            // Cancellation must not strand a first expansion with no data or recovery poll; resume only reads already in progress, not settled history.
+            for (const queryKey of interrupted) {
+              try { void client.refetchQueries({ queryKey, exact: true, type: 'active' }, { cancelRefetch: false }).catch(() => {}); } catch (_) { /* background recovery */ }
+            }
+          }
         }
       }
     },
@@ -1194,8 +1244,15 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const projectCatalog = useQuery({ queryKey: [...key, 'projects'], queryFn: () => controller.projects(scope), enabled: false, retry: false });
   const runtime = useQuery({ ...opts, queryKey: [...key, 'runtime'], queryFn: () => controller.runtime(scope) });
   const metadata = useQuery({ ...opts, queryKey: [...key, 'metadata'], queryFn: () => controller.metadata(scope), enabled: !mutation.isPending });
-  const expanded = useQuery({ ...opts, staleTime: Infinity, refetchInterval: false, queryKey: [...key, 'expanded', limit], enabled: limit > 0, queryFn: () => controller.expanded(scope, limit) });
-  const archives = useQuery({ ...opts, queryKey: [...key, 'archives', archiveLimit], queryFn: () => controller.archives(scope, archiveLimit) });
+  const expanded = useQuery({ ...opts, staleTime: Infinity, refetchInterval: false, queryKey: [...key, 'expanded'], enabled: limit > 0, queryFn: () => controller.expanded(scope, limit) });
+  const archives = useQuery({ ...opts, queryKey: [...key, 'archives'], queryFn: () => controller.archives(scope, archiveLimit) });
+  const previousLimits = useRef({ limit, archiveLimit });
+  useEffect(() => {
+    // One aggregate per feed avoids retaining a separate overlapping prefix after every expansion. Only its requested page depth changes.
+    if (limit > previousLimits.current.limit && previousLimits.current.limit > 0) void expanded.refetch();
+    if (archiveLimit > previousLimits.current.archiveLimit) void archives.refetch();
+    previousLimits.current = { limit, archiveLimit };
+  }, [limit, archiveLimit, expanded.refetch, archives.refetch]);
   const live = runtime.isError ? EMPTY_ROWS : runtime.data?.sessions || EMPTY_ROWS;
   const rich = sessions.data?.sessions || EMPTY_ROWS, extra = sessions.data?.capped ? EMPTY_ROWS : expanded.data?.sessions || EMPTY_ROWS;
   const archivedRows = archives.isError ? EMPTY_ROWS : archives.data?.sessions || EMPTY_ROWS;
@@ -1388,7 +1445,7 @@ export default {
         if (disposed || pending !== work) return;
         pending = null;
         if (!sameScope(scope, captureScope())) return;
-        const resources = work.history ? ['sessions', 'expanded', 'page', 'archives', 'metadata', 'runtime'] : ['runtime'];
+        const resources = work.history ? ['sessions', 'expanded', 'page', 'archives', 'archive-page', 'metadata', 'runtime'] : ['runtime'];
         return queryClient.invalidateQueries({ queryKey: scopeKey(scope), predicate: query => resources.includes(query.queryKey[4]), refetchType: 'active' }, { cancelRefetch: false });
       }).catch(() => { /* Query retains errors for the pane's normal recovery UI. */ });
     });

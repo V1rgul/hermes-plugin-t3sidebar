@@ -143,12 +143,13 @@ export const ctx = {
     if (path.startsWith('/sessions?') || path.startsWith('/archives?')) {
       const archives = path.startsWith('/archives?');
       if (control.listError || (archives ? control.archivesMissing : control.sessionsMissing)) throw new Error('fixture listing unavailable');
-      const offset = Number(new URLSearchParams(path.split('?')[1]).get('offset'));
+      const params = new URLSearchParams(path.split('?')[1]);
+      const offset = Number(params.get('offset')), limit = Number(params.get('limit') || 500);
       const history = [...control.rows, ...(control.extra || [])].filter(row => !['cron', 'tool', 'oneshot', 'kanban'].includes(row.source) && (archives ? row.archived === true : row.archived !== true));
-      const page = history.slice(offset, offset + 500);
+      const page = history.slice(offset, offset + limit);
       const organized = !archives && offset === 0 ? history.filter(r => control.metadata.sessions[r._lineage_root_id || r.id]) : [];
       const sessions = [...new Map([...page, ...organized].map(r => [r.id, r])).values()];
-      return { profile: (archives ? control.archivesProfile : control.sessionsProfile) || host.state.profile.get(), sessions: clone(sessions), offset, limit: 500, has_more: history.length > offset + 500 };
+      return { profile: (archives ? control.archivesProfile : control.sessionsProfile) || host.state.profile.get(), sessions: clone(sessions), offset, limit, has_more: history.length > offset + limit };
     }
     if (path.endsWith('/delete') && options?.method === 'POST') {
       const id = decodeURIComponent(path.slice('/sessions/'.length, -'/delete'.length)), params = options.body;
@@ -255,7 +256,7 @@ export function reset() {
 }
 export function loadArchivePaginationFixtures() {
   control.rows = Array.from({ length: 501 }, (_, i) => ({ id: `synthetic-page-active-${i}`, title: `SYNTHETIC active page ${i}`, archived: false, source: 'desktop' }));
-  control.extra = Array.from({ length: 501 }, (_, i) => ({ id: `synthetic-page-archive-${i}`, title: `SYNTHETIC archive page ${i}`, archived: true, source: 'desktop', cwd: '/synthetic/archive-pagination', project: { name: 'Archive pagination', icon: '◇' }, git_branch: 'retained', provider: 'anthropic', total_tokens: 1250 }));
+  control.extra = Array.from({ length: 601 }, (_, i) => ({ id: `synthetic-page-archive-${i}`, title: `SYNTHETIC archive page ${i}`, archived: true, source: 'desktop', cwd: '/synthetic/archive-pagination', project: { name: 'Archive pagination', icon: '◇' }, git_branch: 'retained', provider: 'anthropic', total_tokens: 1250 }));
   control.live = []; control.metadata = { version: 1, sessions: {} }; control.runtimeError = false; control.backendMissing = false;
   queryClient.clear(); switchScope('synthetic-pagination-source');
 }

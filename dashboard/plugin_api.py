@@ -660,15 +660,18 @@ def card_rows(db, rows):
 	segment_ids = {sid for row in rows if row.get("_lineage_ids")
 		for sid in [row["id"], *row["_lineage_ids"]]}
 	segments = db._get_session_rich_rows_batch(segment_ids, compact_rows=True) if segment_ids else {}
-	billing = card_billing_providers(db, segment_ids | {row["id"] for row in rows})
+	tips = [segments.get(row["id"], {}) if row.get("_lineage_ids") else row for row in rows]
+	providers = [card_provider(tip.get("model_config")) for tip in tips]
+	# Explicit tip configuration wins over historical billing evidence; unresolved cards still need their complete lineage to detect conflicts.
+	billing_ids = {sid for row, provider in zip(rows, providers) if provider is None
+		for sid in [row["id"], *(row.get("_lineage_ids") or [])]}
+	billing = card_billing_providers(db, billing_ids) if billing_ids else {}
 	projects = card_projects(db) if rows else []
 	result = []
-	for row in rows:
+	for row, tip, provider in zip(rows, tips, providers):
 		chain = list(dict.fromkeys([row["id"], *(row.get("_lineage_ids") or [])]))
 		compressed = bool(row.get("_lineage_ids"))
-		tip = segments.get(row["id"], {}) if compressed else row
 		usage = [segments.get(sid, {}) for sid in chain] if compressed else [row]
-		provider = card_provider(tip.get("model_config"))
 		if provider is None:
 			candidates = set().union(*(billing.get(sid, set()) for sid in chain))
 			evidence = {name for segment in usage for name in (card_provider(segment.get("model_config")), provider_name(segment.get("billing_provider"))) if name}
@@ -695,6 +698,13 @@ def native_sessions(profile, offset, limit, organized_ids, archived_only=False):
 	# projection owns compression roots, project/branch inheritance and visibility.
 	db = _open_session_db_for_profile(profile, read_only=True)
 	try:
+		# Native read-only SessionDB routes every _read_ctx through this same connection (no pooled readers). Keep admission, lookahead and card enrichment in one request-local snapshot so a concurrent archive/reset cannot invalidate exhaustion halfway through the response.
+		# Adapters without a native connection retain the exact-ID fallback.
+		connection = getattr(db, "_conn", None)
+		snapshot = False
+		if organized_ids and offset == 0 and not archived_only and isinstance(connection, sqlite3.Connection):
+			connection.execute("BEGIN")
+			snapshot = True
 		page = db.list_sessions_rich(limit=limit, offset=offset, compact_rows=True, order_by_last_active=True, include_archived=False, archived_only=archived_only, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
 		rows = {row.get("_lineage_root_id") or row["id"]: row for row in page}
 		# Organization may be stored under any native compression/reset alias,
@@ -704,7 +714,8 @@ def native_sessions(profile, offset, limit, organized_ids, archived_only=False):
 			(row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])) if sid}
 		if offset == 0 and not archived_only:
 			pending = set(organized_ids) - covered
-			lookahead_matches, exhausted = {}, False
+			# Native visibility/reset filtering happens before LIMIT and compression projection preserves row count, so a short initial page is complete.
+			lookahead_matches, exhausted = {}, snapshot and len(page) < limit
 			# Many retained archive/deleted IDs otherwise cause one full native
 			# rich search each. Inspect ONE additional native page, not an
 			# unbounded history scan or a raw-ID visibility approximation.

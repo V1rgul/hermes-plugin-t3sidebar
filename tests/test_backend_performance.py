@@ -2,6 +2,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -114,6 +115,154 @@ class NativeAliasPerformance(unittest.TestCase):
 
 
 class OrganizedHistoryPerformance(unittest.TestCase):
+	@staticmethod
+	def exact_backfill_reference(db, limit, organized_ids):
+		"""Pre-optimization exact-ID path (fixtures stay below the lookahead threshold)."""
+		from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+
+		options = dict(compact_rows=True, order_by_last_active=True, include_archived=False,
+			include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
+		page = db.list_sessions_rich(limit=limit, offset=0, archived_only=False, **options)
+		rows = {row.get("_lineage_root_id") or row["id"]: row for row in page}
+		covered = {sid for row in page for sid in
+			(row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])) if sid}
+		for sid in organized_ids:
+			if sid in covered:
+				continue
+			offset = 0
+			while True:
+				matches = db.list_sessions_rich(limit=500, offset=offset, id_query=sid, **options)
+				found = False
+				for row in matches:
+					ids = {row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])}
+					if sid in ids:
+						rows[row.get("_lineage_root_id") or row["id"]] = row
+						covered.update(value for value in ids if value)
+						found = True
+				if found or len(matches) < 500:
+					break
+				offset += 500
+		return {"sessions": backend.card_rows(db, rows.values()), "offset": 0,
+			"limit": limit, "has_more": len(page) == limit}
+
+	def test_short_and_full_pages_match_exact_backfill_with_native_visibility_and_aliases(self):
+		from hermes_state import SessionDB
+		from hermes_state_local import POLICY_PREFIX
+		from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+
+		with tempfile.TemporaryDirectory(prefix="flow-short-organized-") as temp:
+			path = Path(temp) / "native.sqlite3"
+			with closing(SessionDB(path)) as db:
+				assert db._conn is not None
+				with db._conn:
+					for sid, source, started, parent, reason, archived, hidden in [
+						("recent", "cli", 1000, None, None, 0, 0),
+						("root", "cli", 1, None, "compression", 0, 0),
+						("middle", "cli", 2, "root", "compression", 1, 0),
+						("tip", "cli", 3, "middle", None, 1, 0),
+						("reset-root", "local", 4, None, "session_reset", 0, 0),
+						("reset-tip", "local", 5, "reset-root", None, 0, 0),
+						("archived-root", "cli", 6, None, "compression", 1, 0),
+						("archived-tip", "cli", 7, "archived-root", None, 0, 0),
+						("hidden", "cli", 8, None, None, 0, 1),
+						*((f"internal-{source}", source, 9, None, None, 0, 0)
+							for source in sorted({*INTERNAL_LISTING_SOURCES, "cron"})),
+					]:
+						db._conn.execute("INSERT INTO sessions(id, source, started_at, parent_session_id, end_reason, archived, hidden, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, 2, 3)", (sid, source, started, parent, reason, archived, hidden))
+					db._conn.execute("UPDATE sessions SET model_config = ? WHERE id = 'reset-tip'", (json.dumps({"_reset_from": "reset-root"}),))
+					db._conn.execute("INSERT INTO sessions(id, source, started_at) VALUES ('deleted', 'cli', 10)")
+					db._conn.execute("DELETE FROM sessions WHERE id = 'deleted'")
+					db._conn.execute("INSERT INTO state_meta(key, value) VALUES (?, ?)",
+						(POLICY_PREFIX + "reset-root", json.dumps({"session_id": "reset-root", "lineage": ["reset-root", "reset-tip"]})))
+			organized = ("tip", "middle", "root", "reset-tip", "reset-root", "archived-tip",
+				"archived-root", "hidden", "deleted", "absent", *(f"internal-{source}"
+					for source in sorted({*INTERNAL_LISTING_SOURCES, "cron"})))
+			self.assertLess(len(organized), 32)
+			before = path.read_bytes()
+			for limit in (1, 3, 100, 500):
+				with self.subTest(limit=limit), closing(SessionDB(path, read_only=True)) as db:
+					expected = self.exact_backfill_reference(db, limit, organized)
+					statements = []
+					def open_db(profile, *, read_only):
+						self.assertTrue(read_only)
+						reader = SessionDB(path, read_only=read_only)
+						assert reader._conn is not None
+						reader._conn.set_trace_callback(statements.append)
+						return reader
+					with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db):
+						actual = backend.native_sessions("exact-profile", 0, limit, organized)
+					self.assertEqual(actual, expected)
+					self.assertEqual({row["id"] for row in actual["sessions"]}, {"recent", "tip", "reset-tip"})
+					seeds = [sql for sql in statements if "WITH RECURSIVE chain(root_id, cur_id)" in sql]
+					if limit > 3:
+						self.assertEqual(len(seeds), 1, "an exhausted native page cannot recover any organized ID")
+					else:
+						self.assertGreater(len(seeds), 1, "full pages must keep exact-ID fallback")
+			self.assertEqual(path.read_bytes(), before)
+
+	def test_short_page_snapshot_is_request_local_during_concurrent_native_mutation(self):
+		from hermes_state import SessionDB
+
+		with tempfile.TemporaryDirectory(prefix="flow-short-snapshot-") as temp:
+			path = Path(temp) / "native.sqlite3"
+			with closing(SessionDB(path)) as db:
+				assert db._conn is not None
+				with db._conn:
+					db._conn.execute("INSERT INTO sessions(id, source, started_at, end_reason, input_tokens, output_tokens) VALUES ('root', 'cli', 1, 'compression', 2, 3)")
+					db._conn.execute("INSERT INTO sessions(id, source, started_at, parent_session_id, input_tokens, output_tokens) VALUES ('tip', 'cli', 2, 'root', 5, 7)")
+					db._conn.execute("INSERT INTO sessions(id, source, started_at, archived) VALUES ('restored', 'cli', 3, 1)")
+			with closing(SessionDB(path, read_only=True)) as db:
+				expected = self.exact_backfill_reference(db, 100, ("restored", "new"))
+			native_list = SessionDB.list_sessions_rich
+			readers, statements = [], []
+			def open_db(profile, *, read_only):
+				reader = SessionDB(path, read_only=read_only)
+				assert reader._conn is not None
+				reader._conn.set_trace_callback(statements.append)
+				readers.append(reader)
+				return reader
+			def mutate_after_page(reader, **options):
+				page = native_list(reader, **options)
+				# A separate WAL writer commits after native admission but before organized backfill/segment enrichment; never touch a user store.
+				if len(readers) == 1 and "id_query" not in options:
+					with closing(sqlite3.connect(path)) as writer, writer:
+						writer.execute("UPDATE sessions SET archived = 1 WHERE id = 'root'")
+						writer.execute("UPDATE sessions SET input_tokens = 500 WHERE id = 'tip'")
+						writer.execute("UPDATE sessions SET archived = 0 WHERE id = 'restored'")
+						writer.execute("INSERT INTO sessions(id, source, started_at) VALUES ('new', 'cli', 4)")
+				return page
+			with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db), patch.object(SessionDB, "list_sessions_rich", mutate_after_page):
+				first = backend.native_sessions("exact-profile", 0, 100, ("restored", "new"))
+				second = backend.native_sessions("exact-profile", 0, 100, ("root", "tip", "restored", "new"))
+			self.assertEqual(first, expected)
+			self.assertEqual(first["sessions"][0]["total_tokens"], 17)
+			self.assertEqual({row["id"] for row in second["sessions"]}, {"restored", "new"})
+			self.assertEqual(sum("WITH RECURSIVE chain(root_id, cur_id)" in sql for sql in statements), 2)
+			self.assertTrue(all(reader._conn is None for reader in readers))
+
+	def test_empty_short_page_with_many_retained_archive_ids_has_one_rich_seed(self):
+		from hermes_state import SessionDB
+
+		with tempfile.TemporaryDirectory(prefix="flow-empty-organized-") as temp:
+			path = Path(temp) / "native.sqlite3"
+			with closing(SessionDB(path)) as db:
+				assert db._conn is not None
+				with db._conn:
+					db._conn.executemany("INSERT INTO sessions(id, source, started_at, archived) VALUES (?, 'cli', 1, 1)",
+						[(f"archived-{i}",) for i in range(500)])
+			statements = []
+			def open_db(profile, *, read_only):
+				reader = SessionDB(path, read_only=read_only)
+				assert reader._conn is not None
+				reader._conn.set_trace_callback(statements.append)
+				return reader
+			before = path.read_bytes()
+			with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db):
+				value = backend.native_sessions("exact-profile", 0, 100, tuple(f"archived-{i}" for i in range(500)))
+			self.assertEqual(value, {"sessions": [], "offset": 0, "limit": 100, "has_more": False})
+			self.assertEqual(sum("WITH RECURSIVE chain(root_id, cur_id)" in sql for sql in statements), 1)
+			self.assertEqual(path.read_bytes(), before)
+
 	def test_archived_organization_misses_use_bounded_native_page_not_per_id_queries(self):
 		from hermes_state import SessionDB
 		with tempfile.TemporaryDirectory(prefix="flow-organized-performance-") as temp:

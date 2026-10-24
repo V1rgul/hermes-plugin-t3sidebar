@@ -174,6 +174,74 @@ class CardMetadata(unittest.TestCase):
 			rows = backend.card_rows(SimpleNamespace(_conn=connection), [{"id": "legacy", "model": "openai/not-evidence"}])
 			self.assertIsNone(rows[0]["provider"])
 
+	def test_explicit_tip_providers_skip_billing_reads_including_compressed_cards(self):
+		with closing(SessionDB(self.db_path)) as db:
+			for sid, parent, config in [
+				("plain", None, {"provider": "explicit"}),
+				("root", None, {"provider": "conflicting-root"}),
+				("tip", "root", {"provider": "auto", "gateway_runtime": {"provider": "explicit-tip"}}),
+			]:
+				db.create_session(sid, "cli", parent_session_id=parent, model_config=config)
+				db.update_token_counts(sid, input_tokens=2, output_tokens=3, model="fixture", billing_provider="conflicting-billing")
+				db.record_auxiliary_usage(sid, "vision", model="fixture-vision", billing_provider="auxiliary")
+				if sid == "root":
+					db.end_session(sid, "compression")
+		with closing(SessionDB(self.db_path, read_only=True)) as db:
+			queries = []
+			listed = db.list_sessions_rich(compact_rows=True)
+			# Native listing can read usage, so count only card enrichment's query; the aggregate on the projected root must not mask explicit tip config.
+			assert db._conn is not None
+			db._conn.set_trace_callback(queries.append)
+			with patch.object(backend, "card_billing_providers", wraps=backend.card_billing_providers) as billing:
+				rows = {row["id"]: row for row in backend.card_rows(db, listed)}
+			billing.assert_not_called()
+			self.assertFalse(any("FROM session_model_usage" in sql for sql in queries))
+		self.assertEqual(rows["plain"]["provider"], "explicit")
+		self.assertEqual(rows["tip"]["provider"], "explicit-tip")
+		self.assertEqual(rows["tip"]["total_tokens"], 10)
+
+	def test_mixed_billing_batch_covers_only_complete_unresolved_tip_lineages(self):
+		with closing(SessionDB(self.db_path)) as db:
+			for prefix, root_provider, tip_provider in [
+				("explicit", "root-conflict", "tip-wins"),
+				("fallback", "route", None),
+				("config-conflict", "other", "auto"),
+				("billing-conflict", None, "unknown"),
+			]:
+				for suffix, parent, provider in [("root", None, root_provider), ("tip", prefix + "-root", tip_provider)]:
+					sid = prefix + "-" + suffix
+					db.create_session(sid, "cli", parent_session_id=parent, model_config={"provider": provider})
+					db.update_token_counts(sid, input_tokens=2, output_tokens=3, model="fixture", billing_provider="other" if prefix == "billing-conflict" and suffix == "root" else "route")
+					db.record_auxiliary_usage(sid, "vision", model="fixture-vision", billing_provider="auxiliary-conflict")
+					if suffix == "root":
+						db.end_session(sid, "compression")
+			for sid, provider in [("explicit-plain", "plain-wins"), ("fallback-plain", "default"), ("no-evidence", None)]:
+				db.create_session(sid, "cli", model_config={"provider": provider})
+				if sid != "no-evidence":
+					db.update_token_counts(sid, input_tokens=2, output_tokens=3, model="fixture", billing_provider="route")
+		with closing(SessionDB(self.db_path, read_only=True)) as db:
+			listed = db.list_sessions_rich(compact_rows=True)
+			queries = []
+			assert db._conn is not None
+			db._conn.set_trace_callback(queries.append)
+			with patch.object(backend, "card_billing_providers", wraps=backend.card_billing_providers) as billing:
+				rows = {row["id"]: row for row in backend.card_rows(db, listed)}
+			ids = {"fallback-plain", "no-evidence", *(prefix + "-" + suffix
+				for prefix in ("fallback", "config-conflict", "billing-conflict") for suffix in ("root", "tip"))}
+			billing.assert_called_once_with(db, ids)
+			usage_queries = [sql for sql in queries if "FROM session_model_usage" in sql]
+			self.assertEqual(len(usage_queries), 1)
+			self.assertIn("task = ''", usage_queries[0])
+			self.assertNotIn("'explicit-", usage_queries[0])
+		self.assertEqual(rows["explicit-tip"]["provider"], "tip-wins")
+		self.assertEqual(rows["explicit-plain"]["provider"], "plain-wins")
+		for sid in ("fallback-tip", "fallback-plain"):
+			self.assertEqual(rows[sid]["provider"], "route")
+		for sid in ("config-conflict-tip", "billing-conflict-tip", "no-evidence"):
+			self.assertIsNone(rows[sid]["provider"])
+		for prefix in ("explicit", "fallback", "config-conflict", "billing-conflict"):
+			self.assertEqual(rows[prefix + "-tip"]["total_tokens"], 10)
+
 	def test_provider_only_accepts_explicit_strings(self):
 		for config in (None, [], "null", "42", {"provider": 7}, {"gateway_runtime": []}):
 			with self.subTest(config=config):
