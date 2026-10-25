@@ -419,7 +419,7 @@ test('card Snooze opens time choices and confirms organization without opening t
   assert.equal($('[role=dialog]'), null);
   assert.equal(mock.calls.some(call => call[0] === 'open'), false);
   assert.equal(button('Undo'), undefined); assert.equal($('.sf-undo'), null);
-  await click(button('Actions for Sidebar layout')); await click(button('Restore to Ready'));
+  await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Unsnooze'));
   assert.equal(row('design').closest('section'), shelf('Ready'));
   assert.equal(row('approval').querySelector('[aria-label="Snooze session"]').disabled, false);
 });
@@ -462,10 +462,11 @@ for (const status of ['working', 'starting', 'running children', 'waiting', 'unk
   await click(row('root').querySelector('[aria-label="Snooze session"]'));
   assert.equal($('form > button:not(:disabled)').textContent, 'Unsnooze');
   const information = all('form > .sf-snooze-info');
-  assert.equal(information.length, 2);
-  assert.equal(information[0].disabled && information[1].disabled, true);
-  assert.match(information[0].textContent, /^\d+d \d+h \d+min left$/);
-  assert.equal(information[1].textContent, new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(mock.control.metadata.sessions.root.wake_at * 1000)));
+  assert.equal(information.length, 1);
+  assert.equal(information[0].disabled, true);
+  assert.match(information[0].querySelector('.sf-snooze-remaining').textContent, /^\d+d \d+h \d+min left$/);
+  const wake = new Date(mock.control.metadata.sessions.root.wake_at * 1000);
+  assert.equal(information[0].querySelector('.sf-snooze-date').textContent, `${new Intl.DateTimeFormat(undefined, { dateStyle: 'short' }).format(wake)} ${new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }).format(wake)}`);
   assert.equal(button('Unsnooze').className.includes('sf-unsnooze'), true);
   await click(button('Unsnooze'));
   assert.equal(mock.control.metadata.sessions.root.state, 'active');
@@ -492,7 +493,7 @@ test('Unsnooze only dismisses and removes the countdown after exact backend conf
   assert.equal(row('snoozed').querySelector('.sf-snooze-time'), null);
 });
 
-test('snooze menu actions use the requested leading icons while both disabled information rows stay icon-free', async () => {
+test('snooze menu actions use the requested leading icons while its combined information row stays icon-free', async () => {
   await mount();
   await click(row('snoozed').querySelector('[aria-label="Snooze session"]'));
   const actions = [...$('[role=dialog]').querySelectorAll('.sf-menu-action')];
@@ -504,7 +505,7 @@ test('snooze menu actions use the requested leading icons while both disabled in
     assert.equal(node.lastElementChild.className, 'sf-menu-label');
   }
   const info = [...$('[role=dialog]').querySelectorAll('.sf-snooze-info')];
-  assert.equal(info.length, 2);
+  assert.equal(info.length, 1);
   assert.equal(info.every(node => node.disabled && !node.querySelector('.sf-menu-icon,svg,[data-codicon]')), true);
 });
 
@@ -557,12 +558,17 @@ test('React archives and unarchives without Undo; archive-and-advance opens next
   assert.ok(mock.calls.some(c => c[0] === 'open' && c[1] === 'approval'));
 });
 
-test('React hover snooze preset and custom validation, context Restore', async () => {
+test('React hover snooze preset and custom validation, no redundant context Restore', async () => {
   await mount(); await act(async () => row('design').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))); await tick();
   assert.ok($('[role=dialog]')); assert.equal(button('In 1 hour'), undefined);
   await click(button('Close session actions')); await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('In 1 hour'));
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
-  await click(button('Actions for Sidebar layout')); await click(button('Restore to Ready')); assert.equal(row('design').closest('section'), shelf('Ready'));
+  await click(button('Actions for Sidebar layout'));
+  assert.equal(button('Restore to Ready'), undefined);
+  assert.equal(button('Return to ready'), undefined);
+  assert.equal(button('Unsnooze'), undefined);
+  await click(button('Close session actions'));
+  await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Unsnooze')); assert.equal(row('design').closest('section'), shelf('Ready'));
   await click(row('design').querySelector('[aria-label="Snooze session"]')); await input($('input[type=datetime-local]'), '2020-01-01T12:00');
   assert.equal(button('Snooze until chosen time'), undefined);
   await click(button('Apply custom snooze')); assert.match($('[role=alert]').textContent, /future/);
@@ -1593,7 +1599,7 @@ test('pin, snooze and restore are reversed through ordinary actions without any 
   assert.equal(row('design').closest('section'), shelf('Ready')); noUndo();
   await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('In 1 hour'));
   assert.equal(row('design').closest('section'), shelf('Snoozed')); noUndo();
-  await click(button('Actions for Sidebar layout')); await click(button('Restore to Ready'));
+  await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Unsnooze'));
   assert.equal(row('design').closest('section'), shelf('Ready')); noUndo();
   await click(row('readme').querySelector('[aria-label="Snooze session"]')); await click(button('In 1 hour'));
   assert.equal(row('readme').closest('section'), shelf('Snoozed')); noUndo();

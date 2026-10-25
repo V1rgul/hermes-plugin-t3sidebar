@@ -115,7 +115,7 @@ test('open snooze menu precise minutes update even when rounded card duration st
     await mount();
     await click(row('snoozed').querySelector('[aria-label="Snooze session"]'));
     const key = [...flow.scopeKey(flow.captureScope()), 'sessions'], previousData = mock.queryClient.getQueryData(key);
-    const info = () => document.querySelector('.sf-snooze-info');
+    const info = () => document.querySelector('.sf-snooze-remaining');
     assert.equal(row('snoozed').querySelector('.sf-time').textContent, '3d');
     assert.equal(info().textContent, '2d 16h 12min left');
     now += 61_000;

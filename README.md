@@ -24,7 +24,7 @@ Search sessions or filter by project without changing your workspace.
 
 Snooze for an hour, three hours, tomorrow, next Monday or a custom local date and time. Snoozing never stops or resumes an agent.
 
-![Snooze menu with one-hour, three-hour, tomorrow, next-Monday and custom date options](docs/images/snooze.png)
+![Snoozed session menu with wake date/time and right-aligned time left on one line, Unsnooze, presets and an aligned custom date input](docs/images/snooze.png)
 
 ### Organize sessions and projects
 

@@ -14,7 +14,8 @@ const ARCHIVE_TAIL_STALE_MS = 30000;
 const HISTORY_PAGE_GC_MS = 300000;
 const tokenFormatter = Intl.NumberFormat('en', { useGrouping: false, maximumFractionDigits: 0 });
 const millionTokenFormatter = Intl.NumberFormat('en', { useGrouping: false, minimumFractionDigits: 1, maximumFractionDigits: 1 });
-const shortDateTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' });
+const shortDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'short' });
+const shortTime = new Intl.DateTimeFormat(undefined, { timeStyle: 'short' });
 const SNOOZE_TIME_KEY = ['hermes-t3sidebar-preferences', 'snooze-time'];
 const validSnoozeTime = value => typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
 function readSnoozeTime(ctx) {
@@ -751,7 +752,7 @@ const CSS = `
 .sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-row .sf-project{gap:4px}.sf-row .sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--ui-blue,#0053fd);font-weight:400}.sf-snooze-time svg{width:13px;height:13px;flex-shrink:0}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
-.sf-menu button.sf-snooze-info:disabled{color:var(--ui-blue,#0053fd);opacity:1;font-weight:400;cursor:default}
+.sf-menu button.sf-snooze-info:disabled{display:flex;gap:12px;width:100%;white-space:nowrap;color:var(--ui-blue,#0053fd);opacity:1;font-weight:400;cursor:default}.sf-snooze-remaining{margin-left:auto;text-align:right}.sf-menu .sf-custom-snooze{padding:0 8px}.sf-menu .sf-custom-snooze,.sf-menu .sf-snooze-info,.sf-menu .sf-snooze-action{padding-left:8px;padding-right:8px}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}.sf-project-choice[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
 .sf-project-picker{box-sizing:border-box;width:min(440px,calc(100vw - 18px));min-width:0;max-width:none;max-height:min(720px,calc(100dvh - 24px),calc(var(--radix-popover-content-available-height,100dvh) - 2px));overflow:hidden}.sf-project-picker>strong,.sf-project-picker>input{flex-shrink:0}.sf-project-picker>input{box-sizing:border-box;min-width:0}.sf-menu.sf-project-picker>.sf-project-options{gap:0;overflow-y:auto;overscroll-behavior:contain;min-height:0}.sf-project-picker .sf-project-choice{box-sizing:border-box;flex-shrink:0;width:100%;height:24px;min-height:24px;padding:4px 8px;font-size:12px;line-height:16px;gap:8px;border:0}.sf-project-picker .sf-project-icon{width:14px;height:14px}.sf-project-details{display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left}.sf-project-details>.sf-project-name,.sf-project-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.sf-project-details>.sf-project-name{max-width:55%}.sf-project-path{flex:1;margin-left:auto;text-align:right;font-size:11px;font-weight:400;line-height:16px;color:var(--ui-text-tertiary)}
 .sf-project-group{display:flex;flex-direction:column;gap:0;flex-shrink:0}.sf-project-picker .sf-project-folder{padding-left:30px}.sf-project-folder .sf-project-path{text-align:left;margin-left:0}.sf-project-heading .sf-project-name{max-width:100%}.sf-project-heading[aria-disabled=true]{opacity:1;cursor:default}
@@ -964,16 +965,16 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
   };
   return h('div', { className: 'sf-menu' }, h('div', { className: 'sf-menu-title' }, sessionTitle(row)),
     snoozeOnly ? h('form', { onSubmit: custom },
-      row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-info', disabled: true }, snoozeDetail) : null,
-      row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-info', disabled: true }, shortDateTime.format(new Date(row.meta.wake_at * 1000))) : null,
-      row.meta.state === 'snoozed' ? h(MenuAction, { codicon: 'discard', className: 'sf-unsnooze', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'restore' }) }, 'Unsnooze') : null,
-      ...snoozePresets(Date.now(), presetTime).map(preset => h(MenuAction, { key: preset.label, name: preset.icon, codicon: preset.codicon, disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
-      h('label', null, 'Custom · local time', h('span', { className: 'sf-custom-time' },
+      row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-info', disabled: true },
+        h('span', { className: 'sf-snooze-date' }, `${shortDate.format(new Date(row.meta.wake_at * 1000))} ${shortTime.format(new Date(row.meta.wake_at * 1000))}`),
+        h('span', { className: 'sf-snooze-remaining' }, snoozeDetail)) : null,
+      row.meta.state === 'snoozed' ? h(MenuAction, { codicon: 'discard', className: 'sf-unsnooze sf-snooze-action', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'restore' }) }, 'Unsnooze') : null,
+      ...snoozePresets(Date.now(), presetTime).map(preset => h(MenuAction, { key: preset.label, name: preset.icon, codicon: preset.codicon, className: 'sf-snooze-action', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
+      h('label', { className: 'sf-custom-snooze' }, 'Custom · local time', h('span', { className: 'sf-custom-time' },
         h('input', { type: 'datetime-local', value, disabled: disabled || snoozeDisabled, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
         h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value }))))
       : h('div', null,
         row.archived !== true ? action(row.meta.pinned ? 'Unpin' : 'Pin', 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
-        row.archived !== true && row.meta.state === 'snoozed' ? action('Restore to Ready', 'CornerDownLeft', { action: 'restore' }) : null,
         h(MenuAction, { name: 'Pencil', disabled: busy || !row.runtimeId, onClick: () => setRenaming(true) }, 'Rename'),
         !row.runtimeId ? h('p', null, 'Rename requires a live runtime. Open the thread and retry.') : null,
         renaming ? h('form', { onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },

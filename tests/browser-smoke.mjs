@@ -189,6 +189,14 @@ try {
   await snooze.click();
   await page.getByRole('dialog', { name: 'Snooze session', exact: true }).waitFor();
   const snoozeDialog = page.getByRole('dialog', { name: 'Snooze session', exact: true });
+  const customTimeAligned = () => snoozeDialog.locator('form').evaluate(form => {
+    const icon = form.querySelector('.sf-menu-icon').getBoundingClientRect();
+    const custom = form.querySelector('.sf-custom-snooze');
+    const label = document.createRange(); label.selectNodeContents(custom.firstChild);
+    const input = custom.querySelector('input').getBoundingClientRect();
+    return Math.abs(label.getBoundingClientRect().left - icon.left) < 1 && Math.abs(input.left - icon.left) < 1;
+  });
+  check('custom local-time label and input align with preset action icons', await customTimeAligned());
   const snoozeAnchor = design.locator('[aria-label="Snooze session"]');
   const anchorBefore = await snoozeAnchor.evaluate(el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; });
   const menuBefore = await snoozeDialog.boundingBox();
@@ -210,9 +218,12 @@ try {
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('hover Snooze saves the selected time without any Undo toast', await noUndo());
   await design.click({ button: 'right' });
-  await page.getByRole('button', { name: 'Restore to Ready', exact: true }).click();
+  check('snoozed context menu omits the redundant restore action', !await page.getByRole('button', { name: /^(Restore to Ready|Return to ready|Unsnooze)$/ }).count());
+  await page.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  await design.hover(); await snooze.click();
+  await snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
-  check('context Restore returns the snoozed session to Ready without any Undo toast', await noUndo());
+  check('Snooze menu Unsnooze returns the snoozed session to Ready without any Undo toast', await noUndo());
   const worker = page.locator('[data-session-id="root"]');
   await worker.click({ button: 'right' });
   const disabledDelete = page.getByRole('button', { name: 'Delete session', exact: true });
@@ -257,13 +268,23 @@ try {
     const green = getComputedStyle(probe).color; probe.remove();
     return getComputedStyle(el).color === green;
   }));
-  check('snoozed menu starts with two disabled blue info rows before Unsnooze', await snoozeDialog.locator('form').evaluate(form => {
-    const [remaining, date, unsnooze] = form.children;
+  check('snoozed menu starts with one disabled blue info row before Unsnooze', await snoozeDialog.locator('form').evaluate(form => {
+    const [info, unsnooze] = form.children;
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; form.append(probe);
     const blue = getComputedStyle(probe).color; probe.remove();
-    return remaining.disabled && date.disabled && /^\d+d \d+h \d+min left$/.test(remaining.textContent) && unsnooze.textContent === 'Unsnooze' && [remaining, date].every(el => getComputedStyle(el).color === blue && getComputedStyle(el).opacity === '1');
+    return info.disabled && /^\d+d \d+h \d+min left$/.test(info.querySelector('.sf-snooze-remaining').textContent) && unsnooze.textContent === 'Unsnooze' && getComputedStyle(info).color === blue && getComputedStyle(info).opacity === '1';
   }));
-  check('wake date uses the client locale short date and time in its local timezone', await snoozeDialog.locator('.sf-snooze-info').nth(1).textContent() === await page.evaluate(() => new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(window.hermesT3SidebarHarness.control.metadata.sessions.root.wake_at * 1000))));
+  check('wake date uses local short date and time separated by a space, without a comma', await snoozeDialog.locator('.sf-snooze-date').textContent() === await page.evaluate(() => {
+    const date = new Date(window.hermesT3SidebarHarness.control.metadata.sessions.root.wake_at * 1000);
+    return `${new Intl.DateTimeFormat(undefined, { dateStyle: 'short' }).format(date)} ${new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }).format(date)}`;
+  }));
+  check('date/time and remaining time share a line, with remaining time aligned to the right content edge', await snoozeDialog.locator('.sf-snooze-info').evaluate(el => {
+    const date = el.querySelector('.sf-snooze-date').getBoundingClientRect(), remaining = el.querySelector('.sf-snooze-remaining').getBoundingClientRect();
+    const r = el.getBoundingClientRect(), style = getComputedStyle(el);
+    return Math.abs(date.top - remaining.top) < 1 && date.right < remaining.left && Math.abs(remaining.right - r.right + parseFloat(style.paddingRight) + parseFloat(style.borderRightWidth)) < 1 && el.scrollWidth <= el.clientWidth;
+  }));
+  check('custom local-time label and input also align with icons in an existing snooze menu', await customTimeAligned());
+  await snoozeDialog.screenshot({ path: join(screenshotDir, 'snoozed-menu.png') });
   check('Snooze actions use discard, Clock, Clock, Sun and calendar as aligned leading icons', await snoozeDialog.locator('.sf-menu-action').evaluateAll(actions => {
     const names = actions.map(el => el.querySelector('[data-codicon]')?.dataset.codicon || el.querySelector('[data-icon]')?.dataset.icon);
     return JSON.stringify(names) === JSON.stringify(['discard', 'Clock', 'Clock', 'Sun', 'calendar']) && actions.every(el => {
@@ -272,7 +293,7 @@ try {
       return el.firstElementChild === icon && icon.getAttribute('aria-hidden') === 'true' && i.width === 14 && i.right < l.left && Math.abs(i.top + i.height / 2 - l.top - l.height / 2) < 1;
     });
   }));
-  check('both disabled snooze information rows remain completely icon-free', await snoozeDialog.locator('.sf-snooze-info').evaluateAll(rows => rows.length === 2 && rows.every(el => el.disabled && !el.querySelector('.sf-menu-icon,svg,[data-codicon]'))));
+  check('combined disabled snooze information row remains completely icon-free', await snoozeDialog.locator('.sf-snooze-info').evaluateAll(rows => rows.length === 1 && rows.every(el => el.disabled && !el.querySelector('.sf-menu-icon,svg,[data-codicon]'))));
   check('Unsnooze discard icon inherits the green action color', await unsnooze.evaluate(el => getComputedStyle(el.querySelector('[data-codicon=discard]')).color === getComputedStyle(el).color));
   await unsnooze.hover();
   check('Unsnooze stays green on hover', await unsnooze.evaluate(el => {
@@ -290,9 +311,8 @@ try {
   await page.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('snoozing a pinned session wins without clearing its pin', await design.locator('.sf-pin').count() === 1);
-  await design.click({ button: 'right' });
-  check('Restore has a leading decorative icon', await page.getByRole('button', { name: 'Restore to Ready', exact: true }).locator('.sf-menu-icon[aria-hidden=true] svg').count() === 1);
-  await page.getByRole('button', { name: 'Restore to Ready', exact: true }).click();
+  await design.hover(); await snooze.click();
+  await snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true }).click();
   await page.locator('section[aria-label="Pinned"] [data-session-id="design"]').waitFor();
   check('restoring a pinned snooze returns to Pinned', await design.locator('.sf-pin').count() === 1);
   await design.click({ button: 'right' });
@@ -314,8 +334,8 @@ try {
     const fixture = window.hermesT3SidebarHarness;
     return fixture.calls.slice(mondayCallStart).some(call => call[0] === 'rest' && call[1] === '/sessions/design' && call[2]?.body?.action === 'snooze' && call[2].body.wake_at === expectedMonday) && fixture.control.metadata.sessions.design.wake_at === expectedMonday;
   }, { expectedMonday, mondayCallStart }) && await noUndo());
-  await design.click({ button: 'right' });
-  await page.getByRole('button', { name: 'Restore to Ready', exact: true }).click();
+  await design.hover(); await snooze.click();
+  await snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('restoring the Monday snooze has no Undo toast', await noUndo());
   await design.hover();
@@ -490,10 +510,10 @@ try {
   await page.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('direct Snooze control remains available without an Undo toast', await noUndo());
-  await page.locator('[data-session-id="design"]').click({ button: 'right' });
-  await page.getByRole('button', { name: 'Restore to Ready', exact: true }).click();
+  await design.hover(); await snooze.click();
+  await snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
-  check('context Restore remains available without an Undo toast', await noUndo());
+  check('Snooze menu Unsnooze remains available without an Undo toast', await noUndo());
   await page.getByRole('searchbox').fill('release');
   await page.waitForFunction(() => !document.querySelector('[data-session-id="design"]'));
   check('search filters real React rows', await page.locator('[data-session-id="readme"]').count() === 1);
