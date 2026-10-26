@@ -161,7 +161,7 @@ test('subagent lifecycle events refresh snapshots but streamed text does not fan
   mock.control.disposers.forEach(fn => fn());
 });
 
-test('React reconstructs parent Working from child snapshots on remount and discards failed polls', async () => {
+test('React reconstructs parent Working from child snapshots on remount and keeps it through a failed poll', async () => {
   mock.control.live.push({ id: 'runtime-design', session_key: 'design', status: 'idle', running_subagents: 1 });
   await mount();
   const section = () => row('design').closest('section').getAttribute('aria-label');
@@ -170,8 +170,10 @@ test('React reconstructs parent Working from child snapshots on remount and disc
   await remount();
   assert.equal(section(), 'Working');
   mock.control.runtimeError = true; await refresh();
-  assert.equal(section(), 'Ready');
+  // Last-known placement survives, but the unconfirmed status is unknown rather than a stale Working badge.
+  assert.equal(section(), 'Working');
   assert.equal(row('design').querySelector('.sf-status'), null);
+  assert.match(row('design').querySelector('.sf-open').getAttribute('aria-label'), /status unknown/);
   mock.control.runtimeError = false; mock.control.live.at(-1).running_subagents = 0; await refresh();
   assert.equal(section(), 'Ready');
   mock.control.live.at(-1).running_subagents = 2; await refresh();
@@ -623,6 +625,45 @@ test('React runtime failure shows unknown without flooding Ready with native arc
   mock.control.runtimeError = true; await mount();
   assert.match(document.body.textContent, /Runtime status unavailable/); assert.equal(row('archived').closest('section'), shelf('Archived'));
   assert.match(row('archived').querySelector('.sf-open').getAttribute('aria-label'), /status unknown/);
+});
+
+test('React failed runtime and archive polls keep last-known shelves while refusing idle-gated actions', async () => {
+  await mount();
+  const section = id => row(id).closest('section').getAttribute('aria-label');
+  const before = Object.fromEntries(['root', 'snoozed', 'archived', 'design'].map(id => [id, section(id)]));
+  assert.deepEqual(before, { root: 'Working', snoozed: 'Snoozed', archived: 'Archived', design: 'Ready' });
+  assert.equal(row('design').querySelector('[aria-label="Archive session"]').disabled, false);
+  mock.control.runtimeError = true; mock.control.archivesMissing = true; await refresh();
+  assert.deepEqual(Object.fromEntries(Object.keys(before).map(id => [id, section(id)])), before);
+  assert.match(document.body.textContent, /Runtime status unavailable: fixture runtime disconnected\. Showing last known shelves/);
+  assert.match(document.body.textContent, /Archives unavailable: fixture listing unavailable/);
+  assert.match(row('design').querySelector('.sf-open').getAttribute('aria-label'), /status unknown/);
+  assert.equal(row('design').querySelector('[aria-label="Archive session"]').disabled, true);
+  mock.control.runtimeError = false; mock.control.archivesMissing = false; await refresh();
+  assert.deepEqual(Object.fromEntries(Object.keys(before).map(id => [id, section(id)])), before);
+  assert.doesNotMatch(document.body.textContent, /Runtime status unavailable|Archives unavailable/);
+  assert.equal(row('design').querySelector('[aria-label="Archive session"]').disabled, false);
+});
+
+test('React polls overlapping a plugin write retry instead of reporting Superseded', async () => {
+  let release, reached; const gate = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { reached = resolve; });
+  const ctx = { ...mock.ctx, async rest(path, options) { if (options?.method === 'POST') { reached(); await gate; } return mock.ctx.rest(path, options); } };
+  controller = flow.createController(ctx);
+  root = createRoot($('#app'));
+  await act(async () => { root.render(React.createElement(QueryClientProvider, { client: mock.queryClient }, React.createElement(flow.HermesT3Sidebar, { ctx, controller }))); });
+  await tick(); await tick();
+  const saving = controller.mutate(flow.captureScope(), 'design', { action: 'pin' });
+  await started;
+  // Do not await the refetch: it only settles once retries outlive the held writer.
+  await act(async () => { void mock.queryClient.invalidateQueries({ queryKey: flow.scopeKey(flow.captureScope()) }); }); await tick(); await tick();
+  const errors = /Superseded|Session list failed|saving a change|backend unavailable|Archives unavailable/;
+  assert.doesNotMatch(document.body.textContent, errors);
+  assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Working');
+  release(); await act(async () => { await saving; });
+  const key = [...flow.scopeKey(flow.captureScope()), 'sessions'];
+  for (let i = 0; i < 400 && mock.queryClient.getQueryState(key)?.fetchStatus !== 'idle'; i++) await tick();
+  assert.equal(mock.queryClient.getQueryState(key)?.status, 'success');
+  assert.doesNotMatch(document.body.textContent, errors);
 });
 
 test('React missing backend is read-only without local fallback; list errors visible', async () => {

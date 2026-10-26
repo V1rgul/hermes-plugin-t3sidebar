@@ -172,7 +172,7 @@ export function mergeRows(rich, extra = [], live = [], extraRich = false, archiv
     return { ...row, ...fields };
   });
 }
-export function buildSections(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown = true, query = '', project = '*' } = {}) {
+export function buildSections(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown = true, runtimeStale = false, query = '', project = '*' } = {}) {
   const result = Object.fromEntries(SECTIONS.map(section => [section, []]));
   const tokens = searchTokens(query);
   const runtimeIndex = new Map();
@@ -194,16 +194,19 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     // Native "starting" means the agent is being built. Opening an old session rebuilds it with no turn, which is not work:
     // only a prompt submitted meanwhile (an in-flight turn with its start) makes it Working. A bare "starting" card stays
     // where it was, without a badge, and is not idle, so archive/delete/move stay refused until the build settles.
-    const status = !runtimeKnown ? 'unknown' : matches.some(i => i.status === 'waiting') ? 'waiting'
+    const observed = !runtimeKnown ? 'unknown' : matches.some(i => i.status === 'waiting') ? 'waiting'
       : matches.some(i => i.status === 'working' || i.status === 'starting' && i.turn_started_at > 0 || Number.isInteger(i.running_subagents) && i.running_subagents > 0 || i.awaiting_processes === true) ? 'working'
       : matches.some(i => !['idle', 'working', 'starting', 'waiting'].includes(i.status)) ? 'unknown' : matches.some(i => i.status === 'starting') ? 'starting' : 'idle';
+    // After a failed poll the last snapshot still places the card, so one failure does not dump every shelf into Ready,
+    // but its status is no longer confirmed: reporting unknown keeps archive/delete/move refused until a poll succeeds.
+    const status = runtimeStale ? 'unknown' : observed;
     const woke = Number.isFinite(meta.woke_at) && meta.woke_at > 0 || meta.state === 'snoozed' && meta.wake_at <= now;
-    const section = status === 'waiting' ? 'active'
-      : row.archived === true ? status === 'working' ? 'working' : 'archived'
-      : status === 'unknown' ? 'active'
+    const section = observed === 'waiting' ? 'active'
+      : row.archived === true ? observed === 'working' ? 'working' : 'archived'
+      : observed === 'unknown' ? 'active'
       : meta.state === 'snoozed' && !woke ? 'snoozed'
       : meta.pinned ? 'pinned'
-      : status === 'working' ? 'working' : 'active';
+      : observed === 'working' ? 'working' : 'active';
     const newSession = isEmptySession(row, runtimeKnown ? matches : []);
     if (!matchesFilters({ ...row, newSession }, tokens, project)) continue;
     // Runtime last_active is also a resume/reattach clock, not conversation progress.
@@ -265,6 +268,11 @@ export function verifyAction(state, id, payload) {
   if (!expected) throw new Error('The server did not confirm this change. Refresh and retry.');
   return state;
 }
+// A read overlapping a plugin write is discarded so it cannot publish pre-write data. That is not a failure:
+// the query retries after the writer exits instead of entering an error state.
+class SupersededRead extends Error {}
+const retrySuperseded = (failures, error) => error instanceof SupersededRead && failures < 6;
+const retrySupersededDelay = failures => Math.min(250 * 2 ** failures, 4000);
 // A single metadata writer per plugin instance. Every await is fenced by activation epoch.
 // Read generations + React Query cancellation prevent an old poll overwriting a write.
 export function createController(ctx, client = queryClient, env = { capture: captureScope, routes: () => host.profileRoutes(), host }) {
@@ -298,7 +306,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
   }
   function readTicket(scope, ticket) {
     check(scope);
-    if (writing || ticket !== generation) throw new Error('Superseded session listing.');
+    if (writing || ticket !== generation) throw new SupersededRead('Superseded session listing.');
   }
   async function archiveFlag(scope, route, id) {
     const value = await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}/archive`));
@@ -435,10 +443,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       return { sessions, has_more };
     },
     async metadata(scope) {
-      if (writing) throw new Error('hermes-t3sidebar is saving a change.');
+      if (writing) throw new SupersededRead('hermes-t3sidebar is saving a change.');
       const ticket = generation;
       const value = await fenced(scope, () => ctx.rest('/state'));
-      if (ticket !== generation) throw new Error('Superseded metadata read.');
+      if (ticket !== generation) throw new SupersededRead('Superseded metadata read.');
       return validState(value);
     },
     async mutate(scope, id, payload) {
@@ -1558,7 +1566,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const search = useRef(null), rowRefs = useRef(new Map()), navigators = useRef(new Map()), focused = useRef(null), latest = useRef(null), readMarkers = useRef(new Set());
   const key = scopeKey(scope);
   const mutation = useMutation({ mutationFn: async ({ id, payload }) => controller.mutate(scope, id, payload) });
-  const opts = { refetchInterval: 5000, staleTime: 2000, retry: false };
+  const opts = { refetchInterval: 5000, staleTime: 2000, retry: retrySuperseded, retryDelay: retrySupersededDelay };
   const sessions = useQuery({ ...opts, queryKey: [...key, 'sessions'], queryFn: () => controller.list(scope) });
   // Observe picker data lazily so projects without loaded sessions retain their native filter name/icon.
   const projectCatalog = useQuery({ queryKey: [...key, 'projects'], queryFn: () => controller.projects(scope), enabled: false, retry: false });
@@ -1578,11 +1586,13 @@ function ScopedSidebar({ ctx, controller, scope }) {
     if (archiveLimit > previousLimits.current.archiveLimit) void archives.refetch();
     previousLimits.current = { limit, archiveLimit };
   }, [limit, archiveLimit, expanded.refetch, archives.refetch]);
-  const live = runtime.isError ? EMPTY_ROWS : runtime.data?.sessions || EMPTY_ROWS;
+  // A failed poll keeps the last successful snapshot (Query retains data on error) instead of emptying the feed, which
+  // would drop Working/Snoozed/Archived placement into Ready until the next success. Notes still report the failure.
+  const live = runtime.data?.sessions || EMPTY_ROWS;
   const rich = sessions.data?.sessions || EMPTY_ROWS, extra = sessions.data?.capped ? EMPTY_ROWS : expanded.data?.sessions || EMPTY_ROWS;
-  const archivedRows = archives.isError ? EMPTY_ROWS : archives.data?.sessions || EMPTY_ROWS;
+  const archivedRows = archives.data?.sessions || EMPTY_ROWS;
   const rows = useMemo(() => mergeRows(rich, extra, live, true, archivedRows), [rich, extra, live, archivedRows]);
-  const runtimeKnown = !!runtime.data && !runtime.isError;
+  const runtimeKnown = !!runtime.data, runtimeStale = runtimeKnown && runtime.isError;
   // Successful polls still advance ages and due snoozes when Query structural
   // sharing keeps data references unchanged. Use existing polls, no extra timer.
   const now = useMemo(() => Date.now() / 1000, [sessions.dataUpdatedAt, runtime.dataUpdatedAt, metadata.dataUpdatedAt, archives.dataUpdatedAt]);
@@ -1598,7 +1608,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     }
     return low ? snoozeDeadlines[low - 1] : 0;
   }, [snoozeDeadlines, now]);
-  const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, now: classificationNow }), [rows, metadata.data, live, runtimeKnown, classificationNow]);
+  const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, runtimeStale, now: classificationNow }), [rows, metadata.data, live, runtimeKnown, runtimeStale, classificationNow]);
   const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession), [classified]);
   const tokens = useMemo(() => searchTokens(query), [query]);
   // Populate text only for rows actually searched; replacing the classified snapshot also replaces its search index.
@@ -1702,7 +1712,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
         h('span', { className: 'sf-section-line', 'aria-hidden': true }),
         h('span', { className: 'sf-section-chevron', 'aria-hidden': true }, icon(closed ? 'ChevronRight' : 'ChevronUp', closed ? '›' : '⌃'))) : null,
       h('div', { className: 'sf-section-body', 'aria-label': `${section === 'active' ? 'Ready' : LABELS[section]} sessions`, 'aria-hidden': closed || undefined, inert: closed || undefined, tabIndex: -1 },
-        section === 'archived' && archives.isError ? h('div', { className: 'sf-empty', role: 'alert' }, `Archives unavailable: ${archives.error.message}`) : items, entries.length || section === 'archived' && archives.isError || section === 'pinned' || section === 'working' || section === 'active' && filtering ? null : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : section === 'archived' && archives.isLoading ? 'Loading archives…' : 'No sessions'),
+        section === 'archived' && archives.isError ? h('div', { className: 'sf-empty', role: 'alert' }, `Archives unavailable: ${archives.error.message}`) : null,
+        section === 'archived' && archives.isError && !archives.data ? null : items,
+        entries.length || section === 'archived' && archives.isError || section === 'pinned' || section === 'working' || section === 'active' && filtering ? null : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : section === 'archived' && archives.isLoading ? 'Loading archives…' : 'No sessions'),
         section === 'archived' && !archives.isError && archives.data?.has_more ? h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: archives.isFetching, onClick: () => setArchiveLimit(previous => previous + 1) }, 'Browse older archives') : null));
 
   };
@@ -1710,7 +1722,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // not only the cards, so these interactions never walk thousands of rows.
   const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, settled, activeId, activeOwner,
     scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, emptyDrafts,
-    archives.isError, archives.error, archives.isLoading, archives.isFetching, archives.data?.has_more]);
+    archives.isError, archives.error, !archives.data, archives.isLoading, archives.isFetching, archives.data?.has_more]);
   // CSS flex owns every shelf height (see the stylesheet). A pure JavaScript allocator was also built and profiled: pixel heights
   // computed from card counts, exact Ready-first priority even in short panes, and Working/Snoozed capped at 40%. Once fold
   // pinning stopped restyling every card, both cost about the same per frame; flex is far less code and follows real content,
@@ -1749,7 +1761,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
         h(sdk.PopoverContent, { align: 'end', style: PROJECT_MENU_STYLE, 'aria-label': 'New session project' }, pickerOpen ? h(ProjectPicker, { controller, scope, filterProject: selectProject, close: () => setPickerOpen(false) }) : null))),
     sessions.isLoading ? h(Note, null, 'Loading sessions…') : null,
     sessions.isError ? h(Note, { error: true }, `Session list failed: ${sessions.error.message} `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
-    !runtimeKnown ? h(Note, { error: runtime.isError }, runtime.isError ? `Runtime status unavailable: ${runtime.error.message}. Native archives remain Archived; other sessions stay accessible in Ready.` : 'Checking runtime status…') : null,
+    !runtimeKnown || runtimeStale ? h(Note, { error: runtime.isError }, runtimeStale ? `Runtime status unavailable: ${runtime.error.message}. Showing last known shelves; status-dependent actions wait for the next successful refresh.`
+      : runtime.isError ? `Runtime status unavailable: ${runtime.error.message}. Native archives remain Archived; other sessions stay accessible in Ready.` : 'Checking runtime status…') : null,
     metadata.isError ? h(Note, { error: true }, `hermes-t3sidebar backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback. `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,
