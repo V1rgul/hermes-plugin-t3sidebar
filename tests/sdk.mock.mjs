@@ -310,8 +310,25 @@ export function ContextMenu({ children }) { return h(React.Fragment, null, child
 export function ContextMenuTrigger({ children }) { return React.cloneElement(children, { 'data-slot': 'context-menu-trigger', 'data-hermes-context-menu-trigger': '' }); }
 export function Popover({ open, onOpenChange, children }) { const anchor = useRef(null); return h(PopoverContext.Provider, { value: { open, onOpenChange, anchor } }, children); }
 export function PopoverTrigger({ children, asChild, ...props }) { const value = useContext(PopoverContext); return React.cloneElement(children, { ...props, ref: node => { value.anchor.current = node; }, onClick: event => { children.props.onClick?.(event); if (!event.defaultPrevented) value.onOpenChange(!value.open); }, 'aria-expanded': value.open }); }
+// Like Radix's dismissable layers, Escape anywhere closes only the topmost open popover; there is no visible Close control.
+const openPopovers = [], escapeDocuments = new WeakSet();
+function listenForEscape(doc) {
+  if (escapeDocuments.has(doc)) return;
+  escapeDocuments.add(doc);
+  doc.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || event.defaultPrevented || !openPopovers.length) return;
+    openPopovers.at(-1).current(false);
+  });
+}
 export function PopoverContent({ align, side, children, style, onKeyDown, ...props }) {
-  const value = useContext(PopoverContext), content = useRef(null);
+  const value = useContext(PopoverContext), content = useRef(null), close = useRef(value.onOpenChange);
+  close.current = value.onOpenChange;
+  useLayoutEffect(() => {
+    if (!value.open) return undefined;
+    listenForEscape(document);
+    openPopovers.push(close);
+    return () => { const index = openPopovers.indexOf(close); if (index >= 0) openPopovers.splice(index, 1); };
+  }, [value.open]);
   // Native Radix repositions content by its measured size, including larger pickers.
   useLayoutEffect(() => {
     if (!value.open || style?.width !== 'max-content') return;
@@ -326,8 +343,7 @@ export function PopoverContent({ align, side, children, style, onKeyDown, ...pro
     return () => window.removeEventListener('resize', reposition);
   });
   const rect = value.anchor.current?.getBoundingClientRect();
-  return value.open ? createPortal(h('div', { ...props, ref: content, style: { ...style, ...(style?.width === 'max-content' ? { maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' } : {}), position: 'fixed', left: Math.max(8, Math.min((rect?.right || 280) + 6, window.innerWidth - (style?.width === 'max-content' ? Math.min(510, window.innerWidth - 16) : 300) - 8)), top: Math.max(10, Math.min(rect?.top || 120, window.innerHeight - 440)) }, role: 'dialog', className: 'mock-popover', onKeyDown: event => { onKeyDown?.(event); if (event.key === 'Escape' && !event.defaultPrevented) value.onOpenChange(false); } }, children,
-    h('button', { type: 'button', 'aria-label': 'Close session actions', onClick: () => value.onOpenChange(false) }, 'Close')), document.body) : null;
+  return value.open ? createPortal(h('div', { ...props, ref: content, style: { ...style, ...(style?.width === 'max-content' ? { maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' } : {}), position: 'fixed', left: Math.max(8, Math.min((rect?.right || 280) + 6, window.innerWidth - (style?.width === 'max-content' ? Math.min(510, window.innerWidth - 16) : 300) - 8)), top: Math.max(10, Math.min(rect?.top || 120, window.innerHeight - 440)) }, role: 'dialog', className: 'mock-popover', onKeyDown }, children), document.body) : null;
 }
 export const icons = Object.fromEntries(Object.entries({
   SquarePen: 'M12 5v14M5 12h14', Search: 'M21 21l-6-6M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0',

@@ -16,6 +16,8 @@ const all = selector => [...document.querySelectorAll(selector)];
 const row = id => { const element = $(`[data-session-id="${id}"]`); return element?.closest('[data-closed=true]') ? null : element; };
 const shelf = name => $(`section[aria-label="${name}"]`);
 const button = label => all('button').find(node => node.getAttribute('aria-label') === label || node.textContent === label);
+// Desktop's popovers close on Escape (Radix); the SDK mock mirrors that instead of rendering a Close control.
+async function dismiss() { await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); }); await tick(); }
 async function click(node) { assert.ok(node, 'button exists'); await act(async () => { node.click(); }); await tick(); }
 async function input(node, value) {
   await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(node, value); node.dispatchEvent(new Event('input', { bubbles: true })); }); await tick();
@@ -364,6 +366,8 @@ test('context actions have decorative leading icons and Delete is marked destruc
   await mount(); await click(button('Actions for Sidebar layout'));
   const menu = $('.sf-menu'), actions = [...menu.querySelectorAll('.sf-menu-action')];
   assert.deepEqual(actions.map(action => action.getAttribute('aria-label') || action.querySelector('.sf-menu-label')?.textContent), ['Pin', 'Rename', 'Copy session ID', 'Delete session', 'Move to project', 'Project']);
+  // Move to project and the Project submenu use bundled Tabler folder-symlink and folder-cog.
+  assert.deepEqual(actions.slice(-2).map(action => action.querySelector('.sf-menu-icon svg')?.dataset.icon), ['FolderSymlink', 'FolderCog']);
   for (const action of actions) {
     assert.equal(action.firstElementChild?.className, 'sf-menu-icon');
     assert.equal(action.firstElementChild?.getAttribute('aria-hidden'), 'true');
@@ -490,7 +494,7 @@ for (const status of ['working', 'starting', 'running children', 'waiting', 'unk
   const information = all('form > .sf-snooze-info');
   assert.equal(information.length, 1);
   assert.equal(information[0].disabled, true);
-  assert.match(information[0].querySelector('.sf-snooze-remaining').textContent, /^\d+d \d+h \d+min left$/);
+  assert.match(information[0].querySelector('.sf-snooze-remaining').textContent, /^(\d+d \d+h |\d+h )?\d+min left$/);
   const wake = new Date(mock.control.metadata.sessions.root.wake_at * 1000);
   assert.equal(information[0].querySelector('.sf-snooze-date').textContent, `${new Intl.DateTimeFormat(undefined, { dateStyle: 'short' }).format(wake)} ${new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }).format(wake)}`);
   assert.equal(button('Unsnooze').className.includes('sf-unsnooze'), true);
@@ -566,7 +570,7 @@ test('menu triggers and their owning card retain open state until dismissal or s
   assert.match($('[role=alert]').textContent, /did not confirm/);
   assert.equal(trigger.getAttribute('aria-expanded'), 'true'); assert.equal(row('design').dataset.menuOpen, 'true');
   mock.control.dropWrite = false;
-  await click(button('Close session actions'));
+  await dismiss();
   assert.equal(trigger.getAttribute('aria-expanded'), 'false'); assert.equal(row('design').dataset.menuOpen, 'false');
   await click(button('Actions for Sidebar layout'));
   assert.equal(row('design').dataset.menuOpen, 'true');
@@ -587,13 +591,13 @@ test('React archives and unarchives without Undo; archive-and-advance opens next
 test('React hover snooze preset and custom validation, no redundant context Restore', async () => {
   await mount(); await act(async () => row('design').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))); await tick();
   assert.ok($('[role=dialog]')); assert.equal(button('In 1 hour'), undefined);
-  await click(button('Close session actions')); await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('In 1 hour'));
+  await dismiss(); await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('In 1 hour'));
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
   await click(button('Actions for Sidebar layout'));
   assert.equal(button('Restore to Ready'), undefined);
   assert.equal(button('Return to ready'), undefined);
   assert.equal(button('Unsnooze'), undefined);
-  await click(button('Close session actions'));
+  await dismiss();
   await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Unsnooze')); assert.equal(row('design').closest('section'), shelf('Ready'));
   await click(row('design').querySelector('[aria-label="Snooze session"]')); await input($('input[type=datetime-local]'), '2020-01-01T12:00');
   assert.equal(button('Snooze until chosen time'), undefined);
@@ -608,7 +612,7 @@ test('React waiting stays in headerless Ready and cannot be settled; secondary s
   assert.equal(row('approval').querySelector('[aria-label="Archive session"]').disabled, true);
   await click(button('Actions for Approval request'));
   assert.equal([...$('[role=dialog]').querySelectorAll('button')].some(node => /^(?:Archive|Snooze)/.test(node.textContent)), false);
-  await click(button('Close session actions')); await click(button('Archived (1)')); assert.equal(row('archived'), null);
+  await dismiss(); await click(button('Archived (1)')); assert.equal(row('archived'), null);
 });
 
 test('React runtime failure shows unknown without flooding Ready with native archives', async () => {
@@ -933,7 +937,7 @@ test('unsupported Add project is absent while the existing-project picker remain
   assert.equal(button('New session in Home'), undefined);
   assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.create'), false);
   assert.equal(button('Cancel'), undefined);
-  await click(button('Close session actions'));
+  await dismiss();
 });
 
 test('Home-only native project trees show no usable projects and retain the creation guard', async () => {
@@ -1305,7 +1309,8 @@ test('clipboard failure stays visible without falsely closing context; stale cop
 
 test('Rename is available only for live runtime and verifies the title with exact lineage readback', async () => {
   await mount(); await click(button('Actions for Sidebar layout')); assert.equal(button('Rename').disabled, true);
-  assert.match($('[role=dialog]').textContent, /live runtime/); await click(button('Close session actions'));
+  // Disabled without an inline disclaimer.
+  assert.doesNotMatch($('[role=dialog]').textContent, /live runtime/); await dismiss();
   await click(button('Actions for Runtime classification')); assert.equal(button('Rename').disabled, false);
   await click(button('Rename')); await input($('input[aria-label="Session title"]'), 'Renamed runtime'); await click(button('Save rename'));
   assert.equal(row('root').querySelector('.sf-row-title').textContent, 'Renamed runtime');
@@ -1609,7 +1614,7 @@ test('shared actions omit obsolete footer; picker omits Cancel; hidden card cont
   for (const label of ['Snooze session', 'Actions for Sidebar layout']) {
     await click(row('design').querySelector(`[aria-label="${label}"]`));
     assert.doesNotMatch($('[role=dialog]').textContent, /History kept · never stops the agent\./);
-    await click(button('Close session actions'));
+    await dismiss();
   }
   await click(button('New session')); assert.equal(button('Cancel'), undefined);
 });

@@ -55,8 +55,8 @@ test('invalid preset times fall back to 09:00 without normalizing malformed valu
 });
 
 test('precise snooze duration keeps day/hour/minute fields, rounding only partial minutes up', () => {
-	for (const [remaining, expected] of [[-1, '0d 0h 0min left'], [0, '0d 0h 0min left'], [1, '0d 0h 1min left'],
-		[3600, '0d 1h 0min left'], [2 * 86400 + 16 * 3600 + 12 * 60, '2d 16h 12min left']]) {
+	for (const [remaining, expected] of [[-1, '0min left'], [0, '0min left'], [1, '1min left'], [3600, '1h 0min left'],
+		[12 * 3600 + 14 * 60, '12h 14min left'], [2 * 86400 + 5 * 60, '2d 0h 5min left'], [2 * 86400 + 16 * 3600 + 12 * 60, '2d 16h 12min left']]) {
 		assert.equal(snoozePreciseRemaining(100 + remaining, 100), expected);
 	}
 });

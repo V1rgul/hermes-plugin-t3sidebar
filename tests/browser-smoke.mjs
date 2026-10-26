@@ -50,7 +50,7 @@ try {
     await dialog.waitFor();
     await page.mouse.move(1100, 850);
     check(`${label} retains hover background and primary text while its popover is open`, await trigger.getAttribute('aria-expanded') === 'true' && JSON.stringify(await buttonStyle(trigger)) === JSON.stringify(hovered));
-    await dialog.getByRole('button', { name: 'Close session actions', exact: true }).click();
+    await page.keyboard.press('Escape');
     await page.mouse.move(1100, 850);
     check(`${label} returns to normal after closing its popover`, await trigger.getAttribute('aria-expanded') === 'false' && JSON.stringify(await buttonStyle(trigger)) === JSON.stringify(normal));
   };
@@ -216,6 +216,10 @@ try {
       const card = el.getBoundingClientRect(), hover = el.querySelector('.sf-hover').getBoundingClientRect(), border = parseFloat(getComputedStyle(el).borderTopWidth);
       return Math.abs((hover.top - card.top - border) - (card.right - hover.right)) < .5;
     }));
+    if (await card.locator('[aria-label="Snooze session"]').count()) check(`${id} hover alarm draws in a 15px box with a 1px line so it reads as large as Archive`, await card.locator('[aria-label="Snooze session"] svg').evaluate(el => {
+      const box = el.getBoundingClientRect(), style = getComputedStyle(el);
+      return box.width === 15 && box.height === 15 && style.strokeWidth === '1.6px' && style.flexShrink === '0';
+    }));
     check(`${id} hover actions appear without an opacity fade`, await card.locator('.sf-hover').evaluate(el => getComputedStyle(el).visibility === 'visible' && getComputedStyle(el).opacity === '1' && !/opacity/.test(getComputedStyle(el).transitionProperty)));
     // Desktop's SDK Button is `transition-all duration-100` (a Tailwind utility class), which also transitions inherited visibility.
     const desktopButton = await page.addStyleTag({ content: ':where(.sf-row button){transition:all 100ms}' });
@@ -272,7 +276,7 @@ try {
   check('open Snooze retains row highlight and hides metadata after pointer leaves', await design.getAttribute('data-menu-open') === 'true' && await design.evaluate(el => getComputedStyle(el).backgroundColor) === rowHoverBackground && await design.locator('.sf-provider,.sf-token,.sf-time').evaluateAll(els => els.every(el => getComputedStyle(el).visibility === 'hidden')));
   await design.hover();
   check('Snooze does not jump when pointer re-enters sidebar', JSON.stringify(await snoozeDialog.boundingBox()) === JSON.stringify(menuBefore));
-  await snoozeDialog.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  await page.keyboard.press('Escape');
   await page.mouse.move(1100, 850);
   check('closing Snooze clears row and trigger open state and hides actions', await design.getAttribute('data-menu-open') === 'false' && await snoozeAnchor.getAttribute('aria-expanded') === 'false' && !await snooze.isVisible() && !await archive.isVisible() && await design.locator('.sf-provider,.sf-token,.sf-time').evaluateAll(els => els.every(el => getComputedStyle(el).visibility === 'visible')));
   await design.hover(); await snooze.click();
@@ -283,7 +287,7 @@ try {
   check('hover Snooze saves the selected time without any Undo toast', await noUndo());
   await design.click({ button: 'right' });
   check('snoozed context menu omits the redundant restore action', !await page.getByRole('button', { name: /^(Restore to Ready|Return to ready|Unsnooze)$/ }).count());
-  await page.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  await page.keyboard.press('Escape');
   await design.hover(); await snooze.click();
   await snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
@@ -354,7 +358,7 @@ try {
     const [info, unsnooze] = form.children;
     const probe = document.createElement('span'); probe.style.color = 'var(--sf-purple)'; form.append(probe);
     const purple = getComputedStyle(probe).color; probe.remove();
-    return info.disabled && /^\d+d \d+h \d+min left$/.test(info.querySelector('.sf-snooze-remaining').textContent) && unsnooze.textContent === 'Unsnooze' && getComputedStyle(info).color === purple && getComputedStyle(info).opacity === '1';
+    return info.disabled && /^(\d+d \d+h |\d+h )?\d+min left$/.test(info.querySelector('.sf-snooze-remaining').textContent) && unsnooze.textContent === 'Unsnooze' && getComputedStyle(info).color === purple && getComputedStyle(info).opacity === '1';
   }));
   check('wake date uses local short date and time separated by a space, without a comma', await snoozeDialog.locator('.sf-snooze-date').textContent() === await page.evaluate(() => {
     const date = new Date(window.hermesT3SidebarHarness.control.metadata.sessions.root.wake_at * 1000);
@@ -455,7 +459,7 @@ try {
   check('Delete icon and text follow changes to the red theme token', await deleteIsRed(menuDelete));
   await context.locator('.sf-menu').evaluate(el => el.style.removeProperty('--ui-red'));
   await page.mouse.move(1100, 850);
-  check('stored-only Rename is disabled with an explanation', await context.getByRole('button', { name: 'Rename', exact: true }).isDisabled() && /live|runtime/i.test(await context.innerText()));
+  check('stored-only Rename is disabled without an inline disclaimer', await context.getByRole('button', { name: 'Rename', exact: true }).isDisabled() && !/live runtime/i.test(await context.innerText()));
   await context.getByRole('button', { name: 'Copy session ID', exact: true }).click();
   check('Copy session ID uses the public clipboard with the durable ID', await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'clipboard' && call[1] === 'design')));
   if (!await context.count()) await design.click({ button: 'right' });
@@ -528,8 +532,8 @@ try {
   await projectMenu.getByRole('button', { name: 'Default icon', exact: true }).scrollIntoViewIfNeeded();
   check('categorized icon picker stays scrollable through its final row on a short viewport', await projectMenu.getByRole('button', { name: 'Project icon: music', exact: true }).isVisible() && await projectMenu.getByRole('button', { name: 'Default icon', exact: true }).isVisible());
   await page.setViewportSize({ width: 1200, height: 900 });
-  await projectMenu.getByRole('button', { name: 'Close session actions', exact: true }).click();
-  await context.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   await page.evaluate(() => {
     window.fixtureFallbackMenus = 0;
@@ -587,7 +591,7 @@ try {
   await design.click({ button: 'right' }); await context.getByRole('button', { name: 'Project', exact: true }).focus(); await page.keyboard.press('ArrowRight');
   await projectMenu.waitFor(); await projectMenu.getByRole('button', { name: 'Rename', exact: true }).focus(); await page.keyboard.press('ArrowLeft');
   check('Project submenu opens with Right and closes with Left without dismissing session actions', !await projectMenu.count() && await context.count() === 1);
-  await context.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  await page.keyboard.press('Escape');
   await design.hover(); await archive.click();
   await page.locator('section[aria-label="Archived"] [data-session-id="design"]').waitFor();
   check('archival and server-readback rendered without an Undo toast', await noUndo());
@@ -1080,7 +1084,7 @@ try {
   await page.locator('[data-session-id="design"]').hover();
   await page.locator('[data-session-id="design"]').getByRole('button', { name: 'Snooze session', exact: true }).click();
   check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Next Monday at 14:35', exact: true }).count() === 1);
-  await snoozeDialog.getByRole('button', { name: 'Close session actions', exact: true }).click();
+  await page.keyboard.press('Escape');
   await presetSetting.fill('09:00');
   await page.setViewportSize({ width: 1200, height: 900 });
   await page.evaluate(async () => {
@@ -1150,12 +1154,12 @@ try {
     await heading.locator('.sf-project-name').click({ button: 'right', force: true });
     await projectMenu.waitFor();
     check(`${trigger} non-selectable heading still opens its project menu`, await projectMenu.locator('.sf-menu-title').textContent() === 'Multi workspace' && await projectMenu.getByRole('button', { name: 'Rename', exact: true }).isEnabled() && await projectMenu.getByRole('button', { name: 'Copy path', exact: true }).isDisabled() && await projectMenu.getByRole('button', { name: 'Filter for', exact: true }).isDisabled());
-    await projectMenu.getByRole('button', { name: 'Close session actions', exact: true }).click();
+    await page.keyboard.press('Escape');
     await picker.getByRole('searchbox', { name: 'Search projects' }).fill('~/second');
     check(`${trigger} path search preserves the non-selectable parent and matching folder only`, await picker.locator('.sf-project-folder').count() === 1 && await heading.count() === 1 && !await picker.getByRole('button', { name: `${prefix} Single workspace`, exact: true }).count());
     await picker.getByRole('searchbox', { name: 'Search projects' }).fill('');
     await picker.screenshot({ path: join(screenshotDir, `${prefix === 'Filter by' ? 'filter' : 'new-session'}-project-picker.png`) });
-    await picker.getByRole('button', { name: 'Close session actions', exact: true }).click();
+    await page.keyboard.press('Escape');
   }
   check('Filter and New session render the same project list and grouped paths', JSON.stringify(pickerShapes[0]) === JSON.stringify(pickerShapes[1]));
   await page.evaluate(async () => {
@@ -1192,7 +1196,7 @@ try {
         await picker.evaluate(el => el.style.setProperty('--radix-popover-content-available-height', '280px'));
         check(`${trigger} honors the native popover available-height limit`, await picker.locator('.sf-project-picker').evaluate(el => el.getBoundingClientRect().height <= 280 && el.querySelector('.sf-project-options').clientHeight > 0));
       }
-      await picker.getByRole('button', { name: 'Close session actions', exact: true }).click();
+      await page.keyboard.press('Escape');
     }
   }
   await contentBox.evaluate(el => el.remove());

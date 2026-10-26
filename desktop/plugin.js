@@ -231,7 +231,10 @@ export function snoozeRemaining(wakeAt, now = Date.now() / 1000) {
 }
 export function snoozePreciseRemaining(wakeAt, now = Date.now() / 1000) {
   const minutes = Math.max(0, Math.ceil((wakeAt - now) / 60));
-  return `${Math.floor(minutes / 1440)}d ${Math.floor(minutes / 60) % 24}h ${minutes % 60}min left`;
+  // Leading zero units are dropped (12h 14min, not 0d 12h 14min); minutes always remain, and inner zeros keep their place.
+  const units = [[Math.floor(minutes / 1440), 'd'], [Math.floor(minutes / 60) % 24, 'h'], [minutes % 60, 'min']];
+  const first = units.findIndex(([value], index) => value > 0 || index === units.length - 1);
+  return `${units.slice(first).map(([value, unit]) => `${value}${unit}`).join(' ')} left`;
 }
 export function snoozePresets(now = Date.now(), presetTime = '09:00') {
   const [hour, minute] = (validSnoozeTime(presetTime) ? presetTime : '09:00').split(':').map(Number);
@@ -777,7 +780,7 @@ const CSS = `
 .sf-open{display:flex;flex-direction:column;justify-content:center;gap:3px;width:100%;height:100%;min-width:0;padding:var(--sf-card-padding,6px) 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}/* Quieter than the other metadata. The filled provider logo covers about 2.3x more of its box than digits do, so at equal colour it reads heavier; 0.7 opacity (about the square root of that ratio) evens them out. */
 .sf-row .sf-token,.sf-row .sf-provider{color:color-mix(in srgb,var(--ui-base,var(--ui-text-primary)) 30%,transparent)}.sf-row .sf-provider{opacity:.7}
 .sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-time{display:inline-flex;align-items:center}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}/* Equal top and right insets; 4px also centres the 25px strip on the 19px metadata line. */
-.sf-hover{position:absolute;right:4px;top:4px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}/* The SDK Button's transition-all would keep hidden actions visible for its 100ms: swap instantly. */.sf-hover .sf-icon{transition:none}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
+.sf-hover{position:absolute;right:4px;top:4px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}/* The SDK Button's transition-all would keep hidden actions visible for its 100ms: swap instantly. */.sf-hover .sf-icon{transition:none}/* Desktop's buttons draw both hover icons in 12px boxes, where the round alarm (about 9px of ink) reads smaller than the square Archive mark (about 10px). A 15px box with a 1.6 stroke keeps its 1px line and gives about 10.7px of round ink, optically level with Archive. */.sf-hover .sf-icon svg[data-icon^=Alarm]{width:15px;height:15px;flex-shrink:0;stroke-width:1.6}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
 .sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
 .sf-row[data-menu-open=true] .sf-hover{visibility:visible}.sf-row[data-menu-open=true] .sf-provider,.sf-row[data-menu-open=true] .sf-token,.sf-row[data-menu-open=true] .sf-time{visibility:hidden}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
@@ -875,8 +878,10 @@ function statusIcon(status) {
   return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
     STATUS_ICONS[status].map(d => h('path', { key: d, d })));
 }
-// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm glyphs.
+// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm and folder glyphs.
 const BUNDLED_ICONS = {
+  FolderCog: ['M12.5 19h-7.5a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v3', 'M17.001 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M19.001 15.5v1.5', 'M19.001 21v1.5', 'M22.032 17.25l-1.299 .75', 'M17.27 20l-1.3 .75', 'M15.97 17.25l1.3 .75', 'M20.733 20l1.3 .75'],
+  FolderSymlink: ['M3 21v-4a3 3 0 0 1 3 -3h5', 'M8 17l3 -3l-3 -3', 'M3 11v-5a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8'],
   Alarm: ['M5 13a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M12 10l0 3l2 0', 'M7 4l-2.75 2', 'M17 4l2.75 2'],
   AlarmOff: ['M7.587 7.566a7 7 0 1 0 9.833 9.864m1.35 -2.645a7 7 0 0 0 -8.536 -8.56', 'M12 12v1h1', 'M5.261 5.265l-1.011 .735', 'M17 4l2.75 2', 'M3 3l18 18'],
   AlarmSnooze: ['M5 13a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M10 11h4l-4 4h4', 'M7 4l-2.75 2', 'M17 4l2.75 2'],
@@ -1095,7 +1100,6 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
       : h('div', null,
         row.archived !== true ? action(row.meta.pinned ? 'Unpin' : 'Pin', 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
         h(MenuAction, { name: 'Pencil', disabled: busy || !row.runtimeId, onClick: () => setRenaming(true) }, 'Rename'),
-        !row.runtimeId ? h('p', null, 'Rename requires a live runtime. Open the thread and retry.') : null,
         renaming ? h('form', { onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
           h('span', { className: 'sf-custom-time' },
           h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
@@ -1104,12 +1108,12 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
         h(MenuAction, { name: 'Trash2', destructive: true, disabled: disabled || busy || row.status !== 'idle' || row._liveOnly || typeof sdk.ConfirmDialog !== 'function', onClick: () => { controller.check(scope); deleteSession(row); close(); } }, 'Delete session'),
         row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null,
         h(sdk.Popover, { open: moveOpen, onOpenChange: setMoveOpen },
-          h(sdk.PopoverTrigger, { asChild: true }, h(MenuAction, { name: 'FolderOpen', 'aria-label': 'Move to project', disabled: disabled || busy || row.status !== 'idle' || row._liveOnly,
+          h(sdk.PopoverTrigger, { asChild: true }, h(MenuAction, { name: 'FolderSymlink', 'aria-label': 'Move to project', disabled: disabled || busy || row.status !== 'idle' || row._liveOnly,
             onKeyDown: event => { if (event.key === 'ArrowRight') { event.preventDefault(); setMoveOpen(true); } } }, 'Move to project', h('span', { className: 'sf-submenu-arrow', 'aria-hidden': true }, icon('ChevronRight', '›')))),
           h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Move to project',
             onKeyDown: event => projectMenuKeyDown(event, () => setMoveOpen(false)) }, h(MoveProjectActions, { row, scope, controller, close }))),
         h(sdk.Popover, { open: projectOpen, onOpenChange: setProjectOpen },
-          h(sdk.PopoverTrigger, { asChild: true }, h(MenuAction, { name: 'FolderOpen', 'aria-label': 'Project', disabled: busy, onKeyDown: event => { if (event.key === 'ArrowRight') { event.preventDefault(); setProjectOpen(true); } } }, 'Project', h('span', { className: 'sf-submenu-arrow', 'aria-hidden': true }, icon('ChevronRight', '›')))),
+          h(sdk.PopoverTrigger, { asChild: true }, h(MenuAction, { name: 'FolderCog', 'aria-label': 'Project', disabled: busy, onKeyDown: event => { if (event.key === 'ArrowRight') { event.preventDefault(); setProjectOpen(true); } } }, 'Project', h('span', { className: 'sf-submenu-arrow', 'aria-hidden': true }, icon('ChevronRight', '›')))),
           h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
             onKeyDown: event => projectMenuKeyDown(event, () => setProjectOpen(false)) }, h(ProjectActions, { row, scope, controller, filterProject, close })))),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
