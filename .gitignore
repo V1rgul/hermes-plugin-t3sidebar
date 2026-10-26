@@ -7,3 +7,4 @@ test-results/
 harness/app.bundle.js
 artifacts/*.zip
 *.sqlite3*
+.scratch/
