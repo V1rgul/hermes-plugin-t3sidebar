@@ -1106,6 +1106,13 @@ function EmptySessionDraft({ row, active, controller, scope, onPresence, refresh
   }, [refreshAt, active, draft.refetch]);
   return null;
 }
+function statusBadge(badge, row) {
+  return h('span', { className: 'sf-status', 'data-status': badge },
+    statusIcon(badge),
+    // The dashed circle and elapsed time replace the visible Working word; screen readers still hear it.
+    badge === 'working' ? h('span', { className: 'sf-sr' }, 'Working') : { done: 'Done', woke: 'Woke', input: 'Input' }[badge],
+    badge === 'working' && row.runStartedAt ? h(WorkingDuration, { startedAt: row.runStartedAt }) : null);
+}
 function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain, presetTime, snoozeDetail }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
   useEffect(() => { retain?.(row.key, menuOpen || snoozeOpen); return () => retain?.(row.key, false); }, [retain, row.key, menuOpen, snoozeOpen]);
@@ -1135,11 +1142,9 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
         row.status === 'unknown' ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': 'Status unknown' }, '?') : null,
         provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, title: row.provider }, provider) : null,
         h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${tokens}` }, tokens),
-        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? h('span', { className: 'sf-status', 'data-status': badge },
-          statusIcon(badge),
-          // The dashed circle and elapsed time replace the visible Working word; screen readers still hear it.
-          badge === 'working' ? h('span', { className: 'sf-sr' }, 'Working') : { done: 'Done', woke: 'Woke', input: 'Input' }[badge],
-          badge === 'working' && row.runStartedAt ? h(WorkingDuration, { startedAt: row.runStartedAt }) : null) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
+        // A running snoozed card stays in Snoozed but still shows its Working status, between tokens and the countdown.
+        snoozed && row.status === 'working' ? h('span', { className: 'sf-time sf-snooze-working' }, statusBadge('working', row)) : null,
+        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
       h('span', { className: 'sf-row-title' }, sessionTitle(row))),
     h('div', { className: 'sf-hover' },
       row.archived !== true ? h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },

@@ -380,7 +380,11 @@ test('a pinned working card keeps its Working status, stays undimmed and follows
   assert.equal(row('root').querySelector('[data-status=working]')?.textContent, 'Working');
   mock.control.metadata.sessions.root = { state: 'snoozed', pinned: true, wake_at: Math.floor(Date.now() / 1000) + 3600 };
   await refresh(); assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Snoozed');
-  assert.equal(row('root').querySelector('[data-status=working]'), null);
+  // Still running: the Working badge sits between the token count and the countdown.
+  const meta = [...row('root').querySelector('.sf-card-meta').children].map(child => child.className);
+  assert.deepEqual(meta.slice(-3), ['sf-token', 'sf-time sf-snooze-working', 'sf-time sf-snooze-time']);
+  assert.equal(row('root').querySelector('.sf-snooze-working [data-status=working]')?.textContent, 'Working');
+  assert.equal(row('root').querySelector('.sf-snooze-time [data-status=working]'), null);
   assert.equal(row('root').querySelector('.sf-snooze-time')?.textContent, '1h');
   mock.control.metadata.sessions.root = { state: 'active', pinned: true };
   await refresh(); assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Pinned');
@@ -467,7 +471,9 @@ for (const status of ['working', 'starting', 'running children', 'waiting', 'unk
     assert.equal(countdown.firstElementChild.tagName.toLowerCase(), 'svg');
     assert.equal(countdown.firstElementChild.getAttribute('aria-hidden'), 'true');
     assert.equal(countdown.lastElementChild.className, 'sf-snooze-duration');
-    assert.equal(row('root').querySelector('.sf-status'), null, 'countdown replaces Working or attention badge on the Snoozed shelf');
+    assert.equal(Boolean(countdown.querySelector('.sf-status')), false, 'the countdown replaces the age, never carries a badge');
+    // Still running on the Snoozed shelf: Working stays visible beside the countdown.
+    assert.equal(row('root').querySelector('.sf-snooze-working [data-status=working]')?.textContent, 'Working');
   } else {
     assert.equal(row('root').closest('section'), shelf('Ready'), 'input/unknown safety remains visible');
     assert.equal(row('root').querySelector('.sf-snooze-time'), null);

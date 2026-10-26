@@ -313,12 +313,21 @@ try {
   await snoozeDialog.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="root"]').waitFor();
   await page.mouse.move(1100, 850);
-  check('snoozed worker shows remaining time in non-bold theme purple instead of Working or age', await worker.locator('.sf-time').evaluate(el => {
+  check('snoozed worker shows remaining time in non-bold theme purple instead of age', await worker.locator('.sf-snooze-time').evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--sf-purple)'; el.append(probe);
     const purple = getComputedStyle(probe).color; probe.remove();
     return el.textContent === '1h' && !el.querySelector('.sf-status') && getComputedStyle(el).color === purple && getComputedStyle(el).fontWeight === '400' && getComputedStyle(el).visibility === 'visible';
   }));
-  check('snooze purple mixes Desktop purple with the base text color for contrast', await worker.locator('.sf-time').evaluate(el => {
+  check('a running snoozed card shows the blue Working icon and time between tokens and the countdown', await worker.evaluate(row => {
+    const token = row.querySelector('.sf-token').getBoundingClientRect(), working = row.querySelector('.sf-snooze-working'), countdown = row.querySelector('.sf-snooze-time').getBoundingClientRect();
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; row.append(probe); const blue = getComputedStyle(probe).color; probe.remove();
+    const box = working.getBoundingClientRect(), status = working.querySelector('[data-status=working]');
+    return /^Working\d+m$/.test(status.textContent) && getComputedStyle(status).color === blue && token.right < box.left && box.right < countdown.left;
+  }));
+  await worker.hover();
+  check('snoozed Working badge hides on hover like the other metadata', await worker.locator('.sf-snooze-working').evaluate(el => getComputedStyle(el).visibility === 'hidden'));
+  await page.mouse.move(1100, 850);
+  check('snooze purple mixes Desktop purple with the base text color for contrast', await worker.locator('.sf-snooze-time').evaluate(el => {
     const color = value => { const probe = document.createElement('span'); probe.style.color = value; el.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; };
     return getComputedStyle(el).color === color('oklch(from color-mix(in oklab,var(--ui-purple) 65%,var(--ui-base,var(--ui-text-primary))) l calc(c * 2) h)') && getComputedStyle(el).color !== color('var(--ui-purple)');
   }));
