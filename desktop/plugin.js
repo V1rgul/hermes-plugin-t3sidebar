@@ -754,11 +754,9 @@ const CSS = `
 .sf-search input::-webkit-search-cancel-button{-webkit-appearance:none}.sf-search .sf-clear{width:20px;height:20px;padding:2px;visibility:visible;opacity:1}
 .sf-header input{font-size:14px}.sf-menu select{max-width:260px;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary)}
 .sf-scroll{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column;padding:0 6px;gap:1px}
-.sf-shelves{display:grid;flex:1;min-height:0;gap:1px;transition:grid-template-rows .22s ease}
-/* Fixed header minima survive short panes; Archives gets most of the flexible space. */
-.sf-section{display:flex;flex-direction:column;min-height:0;overflow:hidden}.sf-section[data-section=pinned]{flex:0 1 auto;max-height:18%}.sf-section[data-section=active]{grid-row:1}.sf-section[data-section=working]{grid-row:2}.sf-section[data-section=snoozed]{grid-row:3}.sf-section[data-section=archived]{grid-row:4}
-/* Working and Snoozed contribute their intrinsic header + body size to a fit-content track; animating their own body track keeps the parent cap stable during reversals. Content sizing also lets the shelves follow cards animating in and out. */
-.sf-section:is([data-section=working],[data-section=snoozed]){display:grid;grid-template-rows:30px minmax(0,1fr);min-height:31px;transition:grid-template-rows .22s ease}.sf-section:is([data-section=working],[data-section=snoozed])[data-closed=true]{grid-template-rows:30px minmax(0,0fr);min-height:30px}.sf-section:is([data-section=working],[data-section=snoozed])[data-populated=false]{min-height:30px}
+.sf{interpolate-size:allow-keywords}.sf-shelves{display:flex;flex-direction:column;flex:1;min-height:0;gap:1px}.sf-shelves>.sf-section{flex:1 1 0;transition:flex-grow .22s ease,min-height .22s ease,max-height .22s ease}.sf-shelves>.sf-section[data-section=active]{min-height:min(40%,calc(var(--sf-count) * var(--sf-card-stride)));max-height:max-content;margin-bottom:auto}.sf-shelves>.sf-section:is([data-section=working],[data-section=snoozed],[data-section=archived]){min-height:max(30px,min(calc(30px + min(var(--sf-count),2) * var(--sf-card-stride)),calc(20% - 1px)));max-height:max-content}.sf-shelves>.sf-section[data-section=archived]{max-height:40%;max-height:calc-size(max-content,min(size,40%))}.sf-shelves>.sf-section[data-closed=true]{flex-grow:0;min-height:30px;max-height:30px}
+/* Shelves are a flex column: every section starts from zero and takes an equal share (flex-grow), bounded by its min/max heights, so constrained sections end up the same height. The 20% minima give up 1px each for the gaps, so 40% + 3 × 20% fits exactly. Ready takes up to 40% first (its minimum) and absorbs unused space below its cards (auto margin) so headings stay at the bottom. Working and Snoozed keep up to two cards (20% in short panes) and can grow to all their cards; Archived stops at 40%. Folding transitions flex-grow plus min/max-height (interpolate-size makes max-content animatable), so the edge moves from the first frame whether the section is squeezed or fits its cards. */
+.sf-section{display:flex;flex-direction:column;min-height:0;overflow:hidden}.sf-section[data-section=pinned]{flex:0 1 auto;max-height:18%}
 /* An empty Pinned stays mounted (zero height, gap cancelled) so its last card can animate out. */
 .sf-section[data-section=pinned][data-populated=false]{margin-bottom:-1px}
 .sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--ui-text-primary) 28%,transparent) transparent}
@@ -797,13 +795,13 @@ const CSS = `
 .sf-status{font-weight:600}
 .sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--sf-purple)}.sf-status[data-status=input]{color:var(--ui-orange,#db704b)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.sf-working-duration{font-variant-numeric:tabular-nums}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
 /* Folding moves only the section edge: pinned lists keep their size and slide under a fade at that edge instead of resizing (and toggling scrollbars) every frame. */
-.sf-section[data-pinned=true]>.sf-section-body{height:var(--sf-pin);flex:none}
+.sf-section[data-pinned=true]>.sf-section-body{flex:none}
 .sf-section[data-pinned=true]{mask:linear-gradient(#000,#000) top/100% 30px no-repeat,linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
 .sf-section[data-pinned=true][data-section=active]{mask:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
 .sf-section[data-closed=true] .sf-section-body{visibility:hidden;transition:visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:background-color .16s ease,box-shadow .16s ease}.sf-custom-time{display:flex;align-items:center;gap:4px}.sf-custom-time input{min-width:0}.sf-custom-time .sf-icon{flex-shrink:0}
 /* Empty-state text waits for leaving cards to collapse instead of appearing under them (visibility only, no fade). */
 @keyframes sf-after-exit{from{visibility:hidden}}.sf-empty{animation:sf-after-exit .22s step-end}
-@media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-section:is([data-section=working],[data-section=snoozed]),.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
+@media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
 // Monochrome brand paths: Simple Icons 15.20.0 (CC0), fetched from its pinned GitHub tag.
 const PROVIDER_PATHS = {
@@ -1175,10 +1173,11 @@ const MemoSessionRow = memo(SessionRow, (previous, next) => Object.keys(next).ev
 // so lists never resize mid-animation. Seeking the new transitions to their end measures the final layout.
 function pinShelfBodies(shelves, run, current) {
   const sections = [...shelves.children].filter(element => element.classList.contains('sf-section'));
-  const release = () => { for (const section of sections) { section.style.removeProperty('--sf-pin'); delete section.dataset.pinned; } };
+  // The pinned height is set on the body itself: an inherited custom property on the section would restyle every card.
+  const release = () => { for (const section of sections) { section.querySelector(':scope > .sf-section-body')?.style.removeProperty('height'); delete section.dataset.pinned; } };
   release();
   const transitions = [shelves, ...sections].flatMap(element => element.getAnimations())
-    .filter(animation => animation.transitionProperty === 'grid-template-rows');
+    .filter(animation => ['flex-grow', 'min-height', 'max-height'].includes(animation.transitionProperty));
   if (!transitions.length) return;
   const bodies = sections.map(section => section.querySelector(':scope > .sf-section-body'));
   const heights = () => bodies.map(body => body ? body.getBoundingClientRect().height : 0);
@@ -1186,12 +1185,9 @@ function pinShelfBodies(shelves, run, current) {
   for (const animation of transitions) animation.currentTime = animation.effect.getComputedTiming().endTime;
   const end = heights();
   transitions.forEach((animation, index) => { animation.currentTime = times[index]; });
-  // Content-sized shelves (Working, Snoozed) follow their cards' own enter/exit motion; pin them only while they fold themselves.
-  const folding = new Set(transitions.map(animation => animation.effect.target));
   sections.forEach((section, index) => {
-    if (['working', 'snoozed'].includes(section.dataset.section) && !folding.has(section)) return;
     const pin = Math.max(start[index], end[index]);
-    if (pin > 0) { section.style.setProperty('--sf-pin', `${pin}px`); section.dataset.pinned = 'true'; }
+    if (pin > 0 && bodies[index]) { bodies[index].style.height = `${pin}px`; section.dataset.pinned = 'true'; }
   });
   // Cancelled transitions (a reversal) reject; the newer run owns the pins then.
   void Promise.all(transitions.map(animation => animation.finished.catch(() => {}))).then(() => { if (current() === run) release(); });
@@ -1484,17 +1480,6 @@ function ScopedSidebar({ ctx, controller, scope }) {
     classified[section].filter(row => (!row.newSession || emptyDrafts.has(draftIdentity(row)) || ['waiting', 'working'].includes(row.status)) && matchesFilters(row, tokens, project, searchIndex))])), [classified, emptyDrafts, tokens, project, searchIndex]);
   const searching = !!query.trim();
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
-  // Working and Snoozed fit their content up to two whole cards (at least 18%) before Archived takes the space, never
-  // reserving room they cannot fill. Capping at 20% of the shelves keeps every heading visible and Archived dominant in short
-  // panes. The track never depends on the card count: content sizing follows cards animating in and out.
-  const contentTrack = 'fit-content(max(18%,min(calc(30px + 2 * var(--sf-card-stride)),20%)))';
-  const sectionTrack = section => {
-    const count = sections[section].length;
-    // CSS owns Working's and Snoozed's content fit and body-track fold animation; the parent only bounds them.
-    if (section === 'working' || section === 'snoozed') return contentTrack;
-    if (isClosed(section)) return 'minmax(30px,0fr)';
-    return `minmax(31px,${section === 'archived' && count ? 3 : count ? .65 : .25}fr)`;
-  };
   const filtering = searching || project !== '*';
   const hasMatches = SECTIONS.some(section => sections[section].length > 0);
   const visible = useMemo(() => SECTIONS.flatMap(section => !!collapsed[section] && !(searching && section === 'working')
@@ -1583,7 +1568,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     const entries = sections[section], closed = isClosed(section);
     const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs, animate: settled });
     const headerless = section === 'active' || section === 'pinned';
-    return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed },
+    return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed, style: { '--sf-count': entries.length } },
       !headerless ? h('button', { type: 'button', className: 'sf-section-toggle', 'aria-expanded': !closed, 'aria-label': `${LABELS[section]} (${entries.length})`,
         onClick: () => setCollapsed(previous => ({ ...previous, [section]: !previous[section] })) },
         h('span', { className: 'sf-section-label' }, LABELS[section]), h('span', { className: 'sf-count' }, entries.length),
@@ -1599,16 +1584,20 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, settled, activeId, activeOwner,
     scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, emptyDrafts,
     archives.isError, archives.error, archives.isLoading, archives.isFetching, archives.data?.has_more]);
-  const shelfTracks = `minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(sectionTrack).join(' ')}`;
-  const shelvesRef = useRef(null), motionRun = useRef(0), motionKey = useRef(null), shelfMotion = `${shelfTracks}|${isClosed('working')}|${isClosed('snoozed')}`;
+  // CSS flex owns every shelf height (see the stylesheet). A pure JavaScript allocator was also built and profiled: pixel heights
+  // computed from card counts, exact Ready-first priority even in short panes, and Working/Snoozed capped at 40%. Once fold
+  // pinning stopped restyling every card, both cost about the same per frame; flex is far less code and follows real content,
+  // so it ships first and the allocator stays the fallback if flex's approximations (short panes) prove insufficient.
+  // Only folds pin the scrolling bodies: card enter/exit motion may resize them.
+  const shelvesRef = useRef(null), motionRun = useRef(0), foldKey = useRef(null), folds = SECTIONS.map(isClosed).join();
   useLayoutEffect(() => {
-    const previous = motionKey.current; motionKey.current = shelfMotion;
+    const previous = foldKey.current; foldKey.current = folds;
     const shelves = shelvesRef.current;
     // Initial layout is not a fold; old clients without Web Animations keep plain resizing.
-    if (previous === null || previous === shelfMotion || typeof shelves?.getAnimations !== 'function') return;
+    if (previous === null || previous === folds || typeof shelves?.getAnimations !== 'function') return;
     const run = ++motionRun.current;
     pinShelfBodies(shelves, run, () => motionRun.current);
-  }, [shelfMotion]);
+  }, [folds]);
   useEffect(() => () => { motionRun.current++; }, []);
   const total = sessions.data?.total;
   const knownTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0;
@@ -1638,7 +1627,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,
     h('div', { className: 'sf-scroll' }, renderedSections[0],
-      h('div', { ref: shelvesRef, className: 'sf-shelves', style: { gridTemplateRows: shelfTracks } }, ...renderedSections.slice(1),
+      h('div', { ref: shelvesRef, className: 'sf-shelves' }, ...renderedSections.slice(1),
         !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null)),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,

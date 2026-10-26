@@ -934,11 +934,17 @@ try {
     check(`${height}px: logical Ready rows use a bounded viewport while small priority shelves retain all 20 rows`, layout.sections.find(s => s.name === 'active').count > 0 && layout.sections.find(s => s.name === 'active').count < 30 && layout.sections.filter(s => s.name !== 'active').every(s => s.count === 20));
     check(`${height}px: Pinned before headerless Ready, secondary headings fixed and visible`, layout.sections.map(s => s.name).join(',') === 'pinned,active,working,snoozed,archived' && layout.sections.slice(0, 2).every(s => !s.header) && layout.sections.slice(2).every(s => s.header.height === 30 && s.header.top >= layout.list.top && s.header.bottom <= layout.root.bottom && s.body.top >= s.header.bottom));
     check(`${height}px: no whole-list scrolling; all five bodies constrained`, layout.overflow === 'hidden' && layout.listScrollHeight <= layout.listHeight + 1 && layout.sections.every(s => s.body.height > 0 && s.body.bottom <= layout.list.bottom + 1 && s.scrollHeight > s.body.height));
-    check(`${height}px: expanded Archived gets a substantially larger share`, layout.sections.find(s => s.name === 'archived').rect.height > layout.list.height * .35 && layout.sections.filter(s => s.name !== 'archived').every(s => s.body.height > 0));
-    check(`${height}px: dense Working shows up to two whole cards, bounded by 18%/20% of the remaining grid`, await page.locator('[data-section="working"]').evaluate(el => {
-      const grid = el.parentElement.getBoundingClientRect().height, expected = Math.max(grid * .18, Math.min(30 + 2 * 56, grid * .2));
-      return Math.abs(el.getBoundingClientRect().height - expected) <= 1;
+    const shares = await page.locator('.sf-shelves').evaluate(el => ({ height: el.getBoundingClientRect().height, ...Object.fromEntries([...el.children].map(s => [s.dataset.section, s.getBoundingClientRect().height])) }));
+    check(`${height}px: dense Ready takes its 40% first and constrained Working, Snoozed and Archived share the rest equally`, Math.abs(shares.active - shares.height * .4) <= 1.5
+      && Math.max(shares.working, shares.snoozed, shares.archived) - Math.min(shares.working, shares.snoozed, shares.archived) <= 1 && layout.sections.every(s => s.body.height > 0));
+    await page.getByRole('searchbox').fill('SYNTHETIC snoozed'); await page.waitForTimeout(100);
+    check(`${height}px: Snoozed grows past 40% into space nobody else needs`, await page.locator('.sf-shelves').evaluate(el => el.querySelector('[data-section=snoozed]').getBoundingClientRect().height > el.getBoundingClientRect().height * .6));
+    await page.getByRole('searchbox').fill('SYNTHETIC archived'); await page.waitForTimeout(100);
+    check(`${height}px: Archived stops at 40%, leaving blank space under Ready with headings at the bottom`, await page.locator('.sf-shelves').evaluate(el => {
+      const shelves = el.getBoundingClientRect(), archived = el.querySelector('[data-section=archived]').getBoundingClientRect();
+      return Math.abs(archived.height - shelves.height * .4) <= 1 && Math.abs(archived.bottom - shelves.bottom) <= 1 && el.querySelector('[data-section=archived]').querySelectorAll('.sf-row').length === 20;
     }));
+    await page.getByRole('searchbox').fill(''); await page.waitForTimeout(100);
     check(`${height}px: dense Snoozed gets the same two-card minimum before Archived`, await page.locator('[data-section="snoozed"]').evaluate(el => {
       const grid = el.parentElement.getBoundingClientRect().height;
       return el.getBoundingClientRect().height >= Math.min(30 + 2 * 56, grid * .2) - 1;
@@ -1007,7 +1013,7 @@ try {
     }, count);
     await page.waitForFunction(count => document.querySelector('[data-section="working"]')?.querySelectorAll('.sf-row').length === count, count);
     check(`Working with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="working"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - (30 + count * 56)) <= 1, count));
-    check(`Working ${count}: parent track is content-fit, not count-derived pixels`, await page.locator('[data-section="working"]').evaluate(el => /fit-content\(max\(18%, ?min\(calc\(30px \+ \d \* var\(--sf-card-stride\)\), ?20%\)\)\)/.test(el.parentElement.style.gridTemplateRows) && !el.style.height && !el.style.maxHeight));
+    check(`Working ${count}: CSS flex sizes it from its content, with no inline size`, await page.locator('[data-section="working"]').evaluate(el => getComputedStyle(el.parentElement).display === 'flex' && !el.style.height && !el.style.maxHeight && !el.parentElement.style.gridTemplateRows));
     if (!count) check('empty Working retains only its 30px header and no scroll-body footprint', await page.locator('[data-section="working"]').evaluate(el => el.querySelector('.sf-section-toggle').getBoundingClientRect().height === 30 && el.querySelector('.sf-section-body').getBoundingClientRect().height === 0));
     if (count === 2) {
       // A CSS row-size change must flow through intrinsic layout without new data.

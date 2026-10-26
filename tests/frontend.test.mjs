@@ -1325,7 +1325,7 @@ test('Rename rechecks runtime ownership before writing and collapsed bodies are 
   controller.dispose(); await mount(); await click(button('Archived (1)'));
   const body = shelf('Archived').querySelector('.sf-section-body');
   assert.equal(body.hasAttribute('inert'), true); assert.equal(body.getAttribute('aria-hidden'), 'true');
-  assert.match($('style').textContent, /transition:grid-template-rows/);
+  assert.match($('style').textContent, /transition:flex-grow \.22s ease,min-height \.22s ease,max-height \.22s ease/);
   assert.match($('style').textContent, /prefers-reduced-motion:reduce/);
 });
 
