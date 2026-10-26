@@ -518,6 +518,35 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         }
       }
     },
+    // The backend's command catalog lists commands actually registered by loaded plugins, not merely installed files.
+    async autotitlerAvailable(scope) {
+      const route = await routeFor(scope);
+      const catalog = await fenced(scope, () => env.host.requestProfile(route, 'commands.catalog', {}));
+      // A discovery error means the plugin list is unknown, so the action stays unavailable rather than guessing.
+      return !catalog?.plugin_discovery_error && !!catalog?.plugin_commands && Object.hasOwn(catalog.plugin_commands, 'autotitler');
+    },
+    async autotitlerRename(scope, row) {
+      check(scope);
+      if (row._liveOnly) throw new Error('This unsaved session has no stored history to title yet.');
+      // AutoTitler titles the session it is given; the surfaced tip is the segment whose title the card shows.
+      const id = row.resolved_id || row.id;
+      try {
+        const route = await routeFor(scope);
+        // Not a metadata write: holding the writer lock would block list reads for the whole model call.
+        const result = await fenced(scope, () => env.host.requestProfile(route, 'command.dispatch', { name: 'autotitler', arg: `rename-now ${id}` }, 120_000));
+        const output = result?.type === 'plugin' && typeof result.output === 'string' ? result.output.trim() : '';
+        // AutoTitler replies "<first 8 id chars> <action> <title or reason>".
+        const [, prefix, outcome, detail = ''] = /^(\S+)\s+(\S+)\s*([\s\S]*)$/.exec(output) || [];
+        if (!prefix || !id.startsWith(prefix)) throw new Error(output ? `AutoTitler: ${output}` : 'AutoTitler did not report a result.');
+        if (outcome !== 'renamed' && outcome !== 'keep') throw new Error(`AutoTitler ${outcome}${detail ? `: ${detail}` : ''}.`);
+        return { outcome, title: detail };
+      } finally {
+        if (!disposed && sameScope(scope, env.capture())) {
+          client.removeQueries({ queryKey: [...scopeKey(scope), 'page'] });
+          refresh(scope, { queryKey: scopeKey(scope) });
+        }
+      }
+    },
     async delete(scope, row) {
       check(scope);
       if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
@@ -885,6 +914,8 @@ const BUNDLED_ICONS = {
   Alarm: ['M5 13a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M12 10l0 3l2 0', 'M7 4l-2.75 2', 'M17 4l2.75 2'],
   AlarmOff: ['M7.587 7.566a7 7 0 1 0 9.833 9.864m1.35 -2.645a7 7 0 0 0 -8.536 -8.56', 'M12 12v1h1', 'M5.261 5.265l-1.011 .735', 'M17 4l2.75 2', 'M3 3l18 18'],
   AlarmSnooze: ['M5 13a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M10 11h4l-4 4h4', 'M7 4l-2.75 2', 'M17 4l2.75 2'],
+  // pencil-ai first shipped in Tabler v3.48.0.
+  PencilAi: ['M17.013 10.987l1.487 -1.487a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4h4l2 -2', 'M13.5 6.5l4 4', 'M14 21v-4a2 2 0 1 1 4 0v4', 'M14 19h4', 'M21 15v6'],
 };
 // T3 Code's elapsed format: 12s, then 4m, then 1h 5m.
 export function formatWorkingDuration(elapsedMs) {
@@ -1071,6 +1102,7 @@ function MoveProjectActions({ row, scope, controller, close }) {
 function RowActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, snoozeOnly = false, presetTime, snoozeDetail }) {
   const [value, setValue] = useState(''), [error, setError] = useState(''), [renaming, setRenaming] = useState(false), [title, setTitle] = useState(row.title || ''), [busy, setBusy] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false), [moveOpen, setMoveOpen] = useState(false);
+  const autotitler = useQuery({ queryKey: [...scopeKey(scope), 'autotitler'], queryFn: () => controller.autotitlerAvailable(scope), enabled: !snoozeOnly, retry: false, staleTime: 60_000 });
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const snoozeDisabled = row.archived === true;
@@ -1104,6 +1136,9 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
           h('span', { className: 'sf-custom-time' },
           h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
           h(IconButton, { type: 'submit', label: 'Save rename', name: 'Check', glyph: '✓', disabled: busy || !title.trim() }))) : null,
+        h(MenuAction, { name: 'PencilAi', disabled: busy || row._liveOnly || autotitler.data !== true,
+          title: autotitler.data === true ? undefined : autotitler.isLoading ? 'Checking for the AutoTitler plugin…' : 'The AutoTitler plugin is not available on this backend.',
+          onClick: () => void perform(() => controller.autotitlerRename(scope, row)) }, 'Autotitler: rename now'),
         h(MenuAction, { name: 'Copy', disabled: busy, onClick: () => void perform(() => controller.copyId(scope, row)) }, 'Copy session ID'),
         h(MenuAction, { name: 'Trash2', destructive: true, disabled: disabled || busy || row.status !== 'idle' || row._liveOnly || typeof sdk.ConfirmDialog !== 'function', onClick: () => { controller.check(scope); deleteSession(row); close(); } }, 'Delete session'),
         row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null,

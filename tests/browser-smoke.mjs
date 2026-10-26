@@ -448,7 +448,7 @@ try {
   check('open row context menu retains row highlight, actions and hidden metadata off hover', await design.getAttribute('data-menu-open') === 'true' && await design.evaluate(el => getComputedStyle(el).backgroundColor) === rowHoverBackground && await snooze.isVisible() && await archive.isVisible() && await design.locator('.sf-provider,.sf-token,.sf-time').evaluateAll(els => els.every(el => getComputedStyle(el).visibility === 'hidden')));
   check('context menu omits archive and snooze actions', !await context.getByRole('button', { name: /^(?:Unarchive|Archive|Snooze)/ }).count());
   check('context menu offers Rename, Copy session ID and Project last instead of the old filter action', await context.getByRole('button', { name: 'Rename', exact: true }).count() === 1 && await context.getByRole('button', { name: 'Copy session ID', exact: true }).count() === 1 && !await context.getByRole('button', { name: /^Filter by / }).count() && await context.locator('.sf-menu-action').last().getAttribute('aria-label') === 'Project');
-  check('each context action aligns a decorative icon before its text', await context.locator('.sf-menu-action').evaluateAll(actions => actions.length === 6 && actions.every(action => {
+  check('each context action aligns a decorative icon before its text', await context.locator('.sf-menu-action').evaluateAll(actions => actions.length === 7 && actions.every(action => {
     const icon = action.querySelector('.sf-menu-icon'), label = action.querySelector('.sf-menu-label');
     if (!icon?.querySelector('svg') || !label || icon.getAttribute('aria-hidden') !== 'true' || action.firstElementChild !== icon) return false;
     const i = icon.getBoundingClientRect(), l = label.getBoundingClientRect();

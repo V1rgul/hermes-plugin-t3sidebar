@@ -365,7 +365,9 @@ test('React search and exact project filter stay flat with keyboard navigation',
 test('context actions have decorative leading icons and Delete is marked destructive without bypassing confirmation', async () => {
   await mount(); await click(button('Actions for Sidebar layout'));
   const menu = $('.sf-menu'), actions = [...menu.querySelectorAll('.sf-menu-action')];
-  assert.deepEqual(actions.map(action => action.getAttribute('aria-label') || action.querySelector('.sf-menu-label')?.textContent), ['Pin', 'Rename', 'Copy session ID', 'Delete session', 'Move to project', 'Project']);
+  assert.deepEqual(actions.map(action => action.getAttribute('aria-label') || action.querySelector('.sf-menu-label')?.textContent), ['Pin', 'Rename', 'Autotitler: rename now', 'Copy session ID', 'Delete session', 'Move to project', 'Project']);
+  // Autotitler uses bundled Tabler pencil-ai.
+  assert.equal(button('Autotitler: rename now').querySelector('.sf-menu-icon svg')?.dataset.icon, 'PencilAi');
   // Move to project and the Project submenu use bundled Tabler folder-symlink and folder-cog.
   assert.deepEqual(actions.slice(-2).map(action => action.querySelector('.sf-menu-icon svg')?.dataset.icon), ['FolderSymlink', 'FolderCog']);
   for (const action of actions) {
@@ -1305,6 +1307,48 @@ test('clipboard failure stays visible without falsely closing context; stale cop
   const count = mock.calls.filter(call => call[0] === 'clipboard').length;
   await assert.rejects(controller.copyId(scope, { id: 'design' }), /Source\/profile changed/);
   assert.equal(mock.calls.filter(call => call[0] === 'clipboard').length, count);
+});
+
+test('Autotitler: rename now stays visible but disabled unless the backend registers the autotitler command', async () => {
+  await mount(); await click(button('Actions for Sidebar layout'));
+  const action = button('Autotitler: rename now');
+  assert.equal(action.disabled, true);
+  assert.match(action.getAttribute('title') || '', /not available/);
+  await dismiss();
+  // An unknown plugin list (discovery error) must not be read as available.
+  mock.control.autotitler = true; mock.control.pluginDiscoveryError = 'fixture discovery failed';
+  await act(async () => mock.queryClient.removeQueries({ queryKey: [...flow.scopeKey(flow.captureScope()), 'autotitler'] }));
+  await click(button('Actions for Sidebar layout'));
+  assert.equal(button('Autotitler: rename now').disabled, true);
+  assert.equal(mock.calls.some(call => call[2] === 'command.dispatch'), false);
+});
+
+test('Autotitler: rename now dispatches rename-now for the surfaced tip and refreshes the title', async () => {
+  mock.control.autotitler = true;
+  await mount(); await click(button('Actions for Runtime classification'));
+  const action = button('Autotitler: rename now');
+  assert.equal(action.disabled, false);
+  await click(action); await tick();
+  const dispatch = mock.calls.filter(call => call[0] === 'requestProfile' && call[2] === 'command.dispatch');
+  assert.deepEqual(dispatch.map(call => call[3]), [{ name: 'autotitler', arg: 'rename-now tip' }]);
+  assert.equal(dispatch[0][1].connectionId, 'source-a');
+  assert.equal(row('root').querySelector('.sf-row-title').textContent, 'Regenerated title');
+  assert.equal(button('Autotitler: rename now'), undefined, 'menu closes after success');
+});
+
+test('Autotitler: rename now reports skipped, foreign and switched-source results', async () => {
+  mock.control.autotitler = true;
+  controller = flow.createController(mock.ctx);
+  const item = mock.control.rows.find(row => row.id === 'tip');
+  mock.control.autotitlerOutput = '  tip skipped user title is authoritative';
+  await assert.rejects(controller.autotitlerRename(flow.captureScope(), item), /AutoTitler skipped: user title is authoritative/);
+  mock.control.autotitlerOutput = '  other12 renamed Wrong session';
+  await assert.rejects(controller.autotitlerRename(flow.captureScope(), item), /AutoTitler:/);
+  mock.control.autotitlerOutput = '  tip keep Runtime classification';
+  assert.deepEqual(await controller.autotitlerRename(flow.captureScope(), item), { outcome: 'keep', title: 'Runtime classification' });
+  delete mock.control.autotitlerOutput;
+  mock.control.afterAutotitle = () => mock.switchScope();
+  await assert.rejects(controller.autotitlerRename(flow.captureScope(), item), /Source\/profile changed/);
 });
 
 test('Rename is available only for live runtime and verifies the title with exact lineage readback', async () => {

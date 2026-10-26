@@ -104,6 +104,20 @@ export const host = {
       return clone(control.created.get(params.idempotency_key));
     }
     if (method === 'session.cwd.set') { control.composerCwd = params.cwd; return { cwd: params.cwd }; }
+    if (method === 'commands.catalog') {
+      if (control.catalogError) throw new Error('fixture command catalog unavailable');
+      return { plugin_commands: control.autotitler ? { autotitler: 'Inspect/configure automatic titles' } : {}, plugin_discovery_error: control.pluginDiscoveryError || '' };
+    }
+    if (method === 'command.dispatch') {
+      if (!control.autotitler || params.name !== 'autotitler') throw new Error(`not a quick/plugin/bundle/skill command: ${params.name}`);
+      const [, id] = params.arg.split(' ');
+      control.afterAutotitle?.();
+      if (control.autotitlerOutput !== undefined) return { type: 'plugin', output: control.autotitlerOutput };
+      const row = [...control.rows, ...(control.extra || [])].find(item => item.id === id);
+      if (!row) return { type: 'plugin', output: `  ${id.slice(0, 8)} skipped no messages` };
+      row.title = 'Regenerated title';
+      return { type: 'plugin', output: `  ${id.slice(0, 8)} renamed ${row.title}` };
+    }
     throw new Error(`Unexpected profile RPC ${method}`);
   },
   openSession(id, options) {
