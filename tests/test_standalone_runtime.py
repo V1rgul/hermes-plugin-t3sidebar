@@ -141,6 +141,19 @@ class StandaloneRuntime(unittest.TestCase):
 		self.assertNotIn("private-", response.text)
 		return response.json()["sessions"][0]
 
+	def test_runtime_rows_carry_only_the_native_in_flight_turn_start(self):
+		self.assertIsNone(self.runtime_row()["turn_started_at"])
+		self.registry["runtime-a"]["inflight_turn"] = {"started_at": 1234.5, "user": "private-live-prompt", "assistant": "", "streaming": True}
+		row = self.runtime_row()
+		self.assertEqual(row["turn_started_at"], 1234.5)
+		self.assertNotIn("private-live-prompt", repr(row))
+		# A failed turn is retained for resuming clients until the next one starts; it is not running.
+		self.registry["runtime-a"]["inflight_turn"] = {"started_at": 1234.5, "status": "error"}
+		self.assertIsNone(self.runtime_row()["turn_started_at"])
+		for invalid in (0, -1, float("nan"), float("inf"), True, "1234.5"):
+			self.registry["runtime-a"]["inflight_turn"] = {"started_at": invalid}
+			self.assertIsNone(self.runtime_row()["turn_started_at"], invalid)
+
 	def test_idle_parent_counts_live_children_and_clears_after_last_child_finishes(self):
 		parent, db = self.attach_subagents()
 		self.registry["runtime-a"]["running"] = False

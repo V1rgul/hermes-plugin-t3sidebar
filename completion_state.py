@@ -1,4 +1,4 @@
-"""Plugin-owned completion markers and durable, content-free delivery receipts.
+"""Plugin-owned completion markers, durable content-free delivery receipts and current turn start times.
 
 Only an authenticated lifecycle caller may record a completion. This module knows nothing about native session databases, HTTP, prompts or model output.
 """
@@ -49,6 +49,16 @@ class CompletionStore:
                 PRIMARY KEY (session_id, turn_id)
             )
         """)
+        # Latest human turn per conversation root. It outlives the turn (ended_at) so a parent kept
+        # Working by its subagents still has a start to count from.
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS session_runs (
+                session_id TEXT PRIMARY KEY,
+                started_at REAL NOT NULL CHECK (started_at > 0),
+                ended_at REAL CHECK (ended_at IS NULL OR ended_at > 0),
+                turn_id TEXT NOT NULL CHECK (length(turn_id) BETWEEN 1 AND 256)
+            )
+        """)
 
     @staticmethod
     def read(connection):
@@ -59,6 +69,50 @@ class CompletionStore:
                 "SELECT session_id, done_at, done_token FROM session_completions ORDER BY session_id"
             )
         }
+
+    @staticmethod
+    def read_runs(connection):
+        """Turn start/end times only; turn identities stay backend-private."""
+        return {
+            sid: {"started_at": started_at, "ended_at": ended_at}
+            for sid, started_at, ended_at in connection.execute(
+                "SELECT session_id, started_at, ended_at FROM session_runs ORDER BY session_id")
+        }
+
+    def _write(self, statement, parameters):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self.ensure_schema(connection)
+            changed = connection.execute(statement, parameters).rowcount
+            connection.execute("COMMIT")
+            return changed
+        except BaseException:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def begin_run(self, session_id, turn_id, started_at):
+        """A newer turn replaces the conversation's previous turn."""
+        validate_session_id(session_id)
+        validate_done_token(turn_id)
+        if type(started_at) is not float or not math.isfinite(started_at) or started_at <= 0:
+            raise ValueError("started_at must be a positive finite UTC epoch timestamp")
+        self._write("""
+            INSERT INTO session_runs (session_id, started_at, ended_at, turn_id) VALUES (?, ?, NULL, ?)
+            ON CONFLICT(session_id) DO UPDATE SET started_at = excluded.started_at, ended_at = NULL, turn_id = excluded.turn_id
+        """, (session_id, started_at, turn_id))
+
+    def end_run(self, turn_id):
+        """End only this exact turn, so a racing next turn stays open; return whether it was open."""
+        validate_done_token(turn_id)
+        now = float(self.clock())
+        if not math.isfinite(now) or now <= 0:
+            raise ValueError("clock must return a positive finite UTC epoch timestamp")
+        return self._write("UPDATE session_runs SET ended_at = ? WHERE turn_id = ? AND ended_at IS NULL", (now, turn_id)) > 0
 
     @staticmethod
     def acknowledge(connection, session_id, done_token):

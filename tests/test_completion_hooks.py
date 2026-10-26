@@ -73,6 +73,15 @@ class CompletionHookTests(unittest.TestCase):
 		with closing(sqlite3.connect(self.ledger_path)) as connection:
 			return CompletionStore.read(connection)
 
+	def runs(self):
+		if not self.ledger_path.exists():
+			return {}
+		with closing(sqlite3.connect(self.ledger_path)) as connection:
+			try:
+				return CompletionStore.read_runs(connection)
+			except sqlite3.OperationalError:
+				return {}
+
 	def delegate(self, name="deleg_1", session="human", state="running", owner="parent_session_id"):
 		with closing(sqlite3.connect(self.home / "state.db")) as connection:
 			connection.execute(f"INSERT INTO async_delegations (delegation_id, origin_session, {owner}, state, dispatched_at, updated_at) VALUES (?, '', ?, ?, ?, ?)", (name, session, state, time.time(), time.time()))
@@ -322,6 +331,43 @@ class CompletionHookTests(unittest.TestCase):
 				self.assertIsNone(future.result(timeout=5))
 		self.end()
 		self.assertEqual(self.markers(), {})
+		# The begin lost its race with the end, so no turn start was recorded at all.
+		self.assertEqual(self.runs(), {})
+
+	def test_turn_start_is_recorded_for_the_root_and_every_outcome_ends_it(self):
+		for index, outcome in enumerate((dict(), dict(completed=False, failed=True), dict(completed=False, interrupted=True))):
+			with self.subTest(outcome=outcome):
+				before, turn = time.time(), f"timed-{index}"
+				self.begin(turn=turn)
+				run = self.runs()["human"]
+				self.assertTrue(before <= run["started_at"] <= time.time())
+				self.assertIsNone(run["ended_at"])
+				self.end(turn=turn, **outcome)
+				# The start stays for a parent that subagents keep Working after its own turn.
+				ended = self.runs()["human"]
+				self.assertEqual(ended["started_at"], run["started_at"])
+				self.assertTrue(run["started_at"] <= ended["ended_at"] <= time.time())
+
+	def test_next_turn_replaces_start_and_a_late_end_of_the_previous_turn_keeps_it_open(self):
+		self.begin(turn="first")
+		first = self.runs()["human"]["started_at"]
+		self.begin(turn="second")
+		second = self.runs()["human"]["started_at"]
+		self.assertGreaterEqual(second, first)
+		self.end(turn="first")
+		self.assertEqual(self.runs(), {"human": {"started_at": second, "ended_at": None}})
+		self.end(turn="second")
+		self.assertIsNotNone(self.runs()["human"]["ended_at"])
+
+	def test_non_human_turns_and_timer_write_failures_never_affect_done(self):
+		self.begin(turn="worker", platform="cron")
+		self.assertEqual(self.runs(), {})
+		with patch.object(self.observer.store, "begin_run", side_effect=OSError("unwritable")):
+			self.assertEqual(self.begin(), [])
+		with patch.object(self.observer.store, "end_run", side_effect=OSError("unwritable")):
+			self.assertEqual(self.end(), [])
+		self.assertEqual(self.runs(), {})
+		self.assertEqual(self.markers()["human"]["done_token"], "human:task:turn1")
 
 	def test_slow_begin_worker_cannot_absorb_new_finished_dispatch(self):
 		entered, release = threading.Event(), threading.Event()

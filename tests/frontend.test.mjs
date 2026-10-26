@@ -37,7 +37,10 @@ test('only supported import specifiers; opt-in left-pane registration and dispos
   assert.equal(JSON.parse(manifest).name, plugin.id); assert.equal(JSON.parse(manifest).label, plugin.name);
   assert.equal(JSON.parse(packageJson).name, plugin.id); assert.equal(JSON.parse(lock).name, plugin.id); assert.equal(JSON.parse(lock).packages[''].name, plugin.id);
   assert.equal(yaml.split('\n')[0], `name: ${plugin.id}`);
-  assert.doesNotMatch(source, /setInterval|document\.|window\.|localStorage|__reactFiber|restartGateway/);
+  assert.doesNotMatch(source, /document\.|window\.|localStorage|__reactFiber|restartGateway/);
+  // Polls drive every other clock; the sole interval is the shared, subscriber-gated Working timer.
+  assert.equal(source.match(/setInterval/g)?.length, 1);
+  assert.match(source, /const secondTicker = [^]*?setInterval\(/);
   plugin.register(mock.ctx);
   assert.equal(mock.control.contributions[0].data.placement, 'left');
   assert.equal(mock.control.contributions[0].title, 't3sidebar'); assert.equal(mock.control.settings.title, plugin.name);
@@ -498,7 +501,7 @@ test('snooze menu actions use the requested leading icons while its combined inf
   await click(row('snoozed').querySelector('[aria-label="Snooze session"]'));
   const actions = [...$('[role=dialog]').querySelectorAll('.sf-menu-action')];
   assert.deepEqual(actions.map(node => node.querySelector('[data-codicon]')?.getAttribute('data-codicon') || node.querySelector('[data-icon]')?.getAttribute('data-icon')),
-    ['discard', 'Clock', 'Clock', 'Sun', 'calendar']);
+    ['AlarmOff', 'Clock', 'Clock', 'Sun', 'calendar']);
   for (const node of actions) {
     assert.equal(node.firstElementChild.className, 'sf-menu-icon');
     assert.equal(node.firstElementChild.getAttribute('aria-hidden'), 'true');
@@ -1198,6 +1201,13 @@ test('backend unread shows Done and clears on successful native open; Input and 
   assert.equal(row('readme').dataset.unread, 'true');
   assert.equal(row('approval').querySelector('.sf-status').dataset.status, 'input');
   assert.equal(row('root').querySelector('.sf-status').dataset.status, 'working');
+  // Status glyphs are plugin-owned: the Desktop SDK has no CircleCheck/AlarmClock/CircleDashed exports to fall back on.
+  for (const id of ['readme', 'approval', 'root']) {
+    const status = row(id).querySelector('.sf-status'), glyph = status.firstElementChild;
+    assert.equal(glyph.tagName.toLowerCase(), 'svg', id);
+    assert.equal(glyph.dataset.statusIcon, status.dataset.status, id);
+    assert.ok(glyph.querySelectorAll('path').length >= 1, id);
+  }
   assert.equal(flow.cardStatus({ unread: 'true', status: 'idle' }), null);
   assert.equal(flow.cardStatus({ unread: true, woke: true, status: 'waiting' }), 'input');
   assert.equal(flow.cardStatus({ unread: true, woke: true, status: 'working' }), 'working');
@@ -1544,19 +1554,19 @@ test('project filtering counts folded matches rather than claiming none or Ready
   await click(button('Archived (1)')); assert.ok(row('archived'));
 });
 
-test('secondary headers contain label, parenthesized filtered count, line and right-edge up/right chevron', async () => {
+test('secondary headers contain label, plain filtered count, line and right-edge up/right chevron', async () => {
   await mount();
   for (const name of ['Working', 'Snoozed', 'Archived']) {
     const header = shelf(name).querySelector('.sf-section-toggle');
     assert.deepEqual([...header.children].map(node => node.className), ['sf-section-label', 'sf-count', 'sf-section-line', 'sf-section-chevron']);
-    assert.equal(header.querySelector('.sf-count').textContent, `(${shelf(name).querySelectorAll('.sf-row').length})`);
+    assert.equal(header.querySelector('.sf-count').textContent, `${shelf(name).querySelectorAll('.sf-row').length}`);
     assert.equal(header.querySelector('.sf-section-chevron path').getAttribute('d'), 'M6 15l6-6 6 6');
   }
   await click(button('Working (1)'));
   assert.equal(shelf('Working').querySelector('.sf-section-chevron path').getAttribute('d'), 'M9 6l6 6-6 6');
   await input($('input[type=search]'), 'SDK inventory');
   for (const name of ['Working', 'Snoozed', 'Archived']) {
-    assert.equal(shelf(name).querySelector('.sf-count').textContent, `(${shelf(name).querySelectorAll('.sf-row').length})`);
+    assert.equal(shelf(name).querySelector('.sf-count').textContent, `${shelf(name).querySelectorAll('.sf-row').length}`);
   }
 });
 
@@ -1567,6 +1577,7 @@ test('shared actions omit obsolete footer; picker omits Cancel; hidden card cont
   assert.match(css, /\.sf-row:hover \.sf-hover\{visibility:visible\}/);
   assert.doesNotMatch(css, /focus-within \.sf-hover|focus-visible \.sf-hover/);
   assert.match(css, /\.sf-project-icon\{[^}]*background:transparent/);
+  assert.match(css, /\.sf-section-body\{[^}]*scrollbar-color:color-mix\(in srgb,var\(--ui-text-primary\) 28%,transparent\) transparent/);
   assert.match(css, /\.sf-row\[data-working=true\] \.sf-time[^}]*var\(--ui-blue,#0053fd\)/);
   for (const label of ['Snooze session', 'Actions for Sidebar layout']) {
     await click(row('design').querySelector(`[aria-label="${label}"]`));
@@ -1616,4 +1627,36 @@ test('unfiltered empty Ready keeps catch-up while a no-match project filter supp
   mock.control.rows = []; await refresh();
   assert.match(document.body.textContent, /No matching sessions/);
   assert.doesNotMatch(document.body.textContent, /All caught up/);
+});
+
+test('alarm icons mark snooze controls and snoozed cards; Working shows the backend turn start as elapsed time', async () => {
+  mock.control.metadata.runs = { root: { started_at: Date.now() / 1000 - 3725, ended_at: null } };
+  await mount();
+  assert.ok(row('design').querySelector('[aria-label="Snooze session"] [data-icon="Alarm"]'));
+  assert.ok(row('snoozed').querySelector('.sf-snooze-time [data-icon="AlarmSnooze"]'));
+  const working = row('root').querySelector('.sf-status');
+  assert.equal(working.dataset.status, 'working');
+  assert.equal(working.querySelector('.sf-working-duration').textContent, '1h 2m');
+  assert.equal(working.querySelector('.sf-working-duration').getAttribute('aria-hidden'), 'true');
+  // Without any start, Working keeps its spinner and (screen-reader) label only.
+  delete mock.control.metadata.runs.root; await refresh();
+  assert.equal(row('root').querySelector('.sf-status').textContent, 'Working');
+  assert.equal(row('root').querySelector('.sf-sr').textContent, 'Working');
+  assert.deepEqual([0, 999, 59_999, 60_000, 3_599_999, 3_600_000, 3_725_000, -5_000, NaN].map(flow.formatWorkingDuration),
+    ['0s', '0s', '59s', '1m', '59m', '1h 0m', '1h 2m', '0s', '0s']);
+  for (const runs of [[], { root: null }, { root: { started_at: 0 } }, { root: { started_at: 'soon' } }, { root: { started_at: 5, ended_at: 0 } }]) {
+    assert.throws(() => flow.validState({ version: 1, sessions: {}, runs }), /turn/);
+  }
+});
+
+test('Working time prefers the native in-flight turn, keeps a subagent parent on its last turn and never shows a finished turn as current', () => {
+  const run = { started_at: 100, ended_at: 160 }, open = { started_at: 200, ended_at: null };
+  assert.equal(flow.workingSince('idle', [{ status: 'working', turn_started_at: 300 }], open), null);
+  assert.equal(flow.workingSince('working', [{ status: 'working', turn_started_at: 300 }, { status: 'starting', turn_started_at: 250 }], open), 250);
+  // Authority runtimes have no native start: use the hook's open turn, never the previous finished one.
+  assert.equal(flow.workingSince('working', [{ status: 'working', turn_started_at: null }], open), 200);
+  assert.equal(flow.workingSince('working', [{ status: 'working' }], run), null);
+  // An idle parent kept Working by subagents counts from its last turn, even after that turn ended.
+  assert.equal(flow.workingSince('working', [{ status: 'idle', running_subagents: 2 }], run), 100);
+  assert.equal(flow.workingSince('working', [{ status: 'idle', running_subagents: 2 }], undefined), null);
 });

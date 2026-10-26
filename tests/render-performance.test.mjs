@@ -140,14 +140,14 @@ test('observed viewport height avoids geometry reads on scroll and keyboard navi
 	let reads = 0;
 	globalThis.ResizeObserver = class {
 		constructor(callback) { this.callback = callback; observers.push(this); }
-		observe(target) { this.target = target; }
+		observe(target) { (this.targets ||= []).push(target); }
 		disconnect() { this.disconnected = true; }
 	};
 	Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get() { reads++; return 112; } });
 	try {
 		denseHistory(); await mount();
 		const section = document.querySelector('[data-section=active]'), body = section.querySelector('.sf-section-body');
-		const observer = observers.find(observer => observer.target === body);
+		const observer = observers.find(observer => observer.targets?.includes(body));
 		assert.ok(observer, 'observe the actual viewport, not the full-height spacer');
 		const resize = async height => { await act(async () => observer.callback([{ target: body, contentRect: { height } }])); await tick(); };
 		await resize(112);

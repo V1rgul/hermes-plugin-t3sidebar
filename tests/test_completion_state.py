@@ -63,11 +63,28 @@ class CompletionTests(unittest.TestCase):
         self.assertTrue(self.producer.record("same", "turn-1"))
         with closing(sqlite3.connect(self.path)) as connection:
             self.assertEqual({row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")},
-                             {"session_completions", "completion_receipts"})
+                             {"session_completions", "completion_receipts", "session_runs"})
         self.assertEqual(self.state(self.client()), {
-            "version": 1, "sessions": {}, "completions": {"same": self.marker()},
+            "version": 1, "sessions": {}, "completions": {"same": self.marker()}, "runs": {},
         })
         self.assertEqual(self.state(self.client())["completions"], {"same": self.marker()})
+
+    def test_turn_starts_are_shared_content_free_and_ended_per_exact_turn(self):
+        one, two = self.client(), self.client()
+        self.producer.begin_run("same", "turn-1", 1000.5)
+        self.assertEqual(self.state(one)["runs"], {"same": {"started_at": 1000.5, "ended_at": None}})
+        self.assertEqual(self.state(one), self.state(two))
+        self.producer.begin_run("same", "turn-2", 1001.0)
+        self.assertFalse(self.producer.end_run("turn-1"))
+        self.assertEqual(self.state(two)["runs"], {"same": {"started_at": 1001.0, "ended_at": None}})
+        self.assertTrue(self.producer.end_run("turn-2"))
+        self.assertFalse(self.producer.end_run("turn-2"))
+        self.assertEqual(self.state(one)["runs"], {"same": {"started_at": 1001.0, "ended_at": self.now}})
+        self.producer.begin_run("same", "turn-3", 1002.0)
+        self.assertEqual(self.state(one)["runs"], {"same": {"started_at": 1002.0, "ended_at": None}})
+        for invalid in (0.0, -1.0, float("nan"), float("inf"), 5):
+            with self.assertRaises(ValueError):
+                self.producer.begin_run("same", "turn-3", invalid)
 
     def test_two_independent_apps_observe_and_share_exact_ack(self):
         one, two = self.client(), self.client()
@@ -76,7 +93,7 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(self.state(one), self.state(two))
         self.assertEqual(self.state(two)["completions"], {"same": self.marker()})
         result = self.act(one, "ack_done", done_token="turn-1")
-        self.assertEqual(result, {"version": 1, "sessions": {}, "completions": {}})
+        self.assertEqual(result, {"version": 1, "sessions": {}, "completions": {}, "runs": {}})
         self.assertEqual(self.state(two)["completions"], {})
         self.assertEqual(self.act(two, "ack_done", done_token="turn-1"), result)
 
@@ -115,7 +132,7 @@ class CompletionTests(unittest.TestCase):
     def test_ack_absent_does_not_create_org_row_or_sweep_due_snooze(self):
         client = self.client()
         empty = self.act(client, "ack_done", done_token="turn-1")
-        self.assertEqual(empty, {"version": 1, "sessions": {}, "completions": {}})
+        self.assertEqual(empty, {"version": 1, "sessions": {}, "completions": {}, "runs": {}})
         self.act(client, "snooze", "due", wake_at=self.now + 1)
         self.now += 2
         result = self.act(client, "ack_done", done_token="turn-1")
@@ -154,7 +171,7 @@ class CompletionTests(unittest.TestCase):
             connection.execute("DROP TABLE completion_receipts")
             connection.commit()
         value = self.state(client)
-        self.assertEqual(value, {"version": 1, "sessions": before, "completions": {}})
+        self.assertEqual(value, {"version": 1, "sessions": before, "completions": {}, "runs": {}})
         self.producer.record("same", "turn-1")
         self.assertEqual(self.state(client)["sessions"], before)
 
@@ -174,7 +191,7 @@ class CompletionTests(unittest.TestCase):
                 writer.execute("ROLLBACK")
                 future.result(timeout=2)
 
-    def test_current_get_reads_both_tables_in_one_snapshot_without_receipts(self):
+    def test_current_get_reads_all_three_tables_in_one_snapshot_without_receipts(self):
         client = self.client()
         self.state(client)
         statements = []
@@ -187,9 +204,10 @@ class CompletionTests(unittest.TestCase):
         before = self.path.read_bytes()
         with patch.object(backend.sqlite3, "connect", traced):
             self.state(client)
-        self.assertEqual([s.split()[0] for s in statements], ["BEGIN", "SELECT", "SELECT", "COMMIT"])
+        self.assertEqual([s.split()[0] for s in statements], ["BEGIN", "SELECT", "SELECT", "SELECT", "COMMIT"])
         self.assertIn("session_metadata", statements[1])
         self.assertIn("session_completions", statements[2])
+        self.assertIn("session_runs", statements[3])
         self.assertNotIn("completion_receipts", " ".join(statements))
         self.assertEqual(self.path.read_bytes(), before)
 

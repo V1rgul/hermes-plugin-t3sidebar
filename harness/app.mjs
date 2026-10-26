@@ -11,6 +11,8 @@ mock.ctx.storage = {
   remove(key) { localStorage.removeItem(`hermes.plugin.hermes-t3sidebar.${key}`); }
 };
 plugin.register(mock.ctx);
+// The running fixture's native in-flight turn began just over two minutes ago.
+mock.control.live.find(item => item.id === 'runtime-worker').turn_started_at = Date.now() / 1000 - 125;
 window.hermesT3SidebarHarness = mock;
 function Workspace() {
   const id = mock.useValue(mock.host.state.activeSessionId);

@@ -1,6 +1,6 @@
 // hermes-t3sidebar — independent T3-inspired session browser; plain disk-plugin ESM.
 import * as sdk from '@hermes/plugin-sdk';
-import { createElement as h, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createElement as h, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 const { host, useValue, useQuery, useMutation, useQueryClient, queryClient, gatewayActivationEpoch } = sdk;
 export const SECTIONS = ['pinned', 'active', 'working', 'snoozed', 'archived'];
@@ -70,7 +70,21 @@ export function validState(value) {
     if (!value.completions || typeof value.completions !== 'object' || Array.isArray(value.completions)) throw new Error('Invalid completion state.');
     for (const item of Object.values(value.completions)) if (!item || typeof item.done_token !== 'string' || !item.done_token.length || item.done_token.length > 256 || !Number.isFinite(item.done_at) || item.done_at <= 0) throw new Error('Invalid completion marker.');
   }
+  if (value.runs !== undefined) {
+    if (!value.runs || typeof value.runs !== 'object' || Array.isArray(value.runs)) throw new Error('Invalid turn state.');
+    for (const item of Object.values(value.runs)) if (!item || !Number.isFinite(item.started_at) || item.started_at <= 0 || item.ended_at != null && !(Number.isFinite(item.ended_at) && item.ended_at > 0)) throw new Error('Invalid turn start.');
+  }
   return value;
+}
+// Elapsed Working time counts from the native in-flight turn when the conversation itself runs. A parent kept
+// Working only by subagents counts from its last recorded turn. The hook's open turn covers runtimes without native starts.
+export function workingSince(status, matches, run) {
+  if (status !== 'working') return null;
+  const own = matches.filter(item => item.status === 'working' || item.status === 'starting');
+  const native = own.map(item => item.turn_started_at).filter(value => Number.isFinite(value) && value > 0);
+  if (native.length) return Math.min(...native);
+  if (!run) return null;
+  return own.length && run.ended_at != null ? null : run.started_at;
 }
 export const visibleSource = row => !['cron', 'tool', 'oneshot', 'kanban'].includes(String(row.source || '').toLowerCase());
 export function compactTokens(row) {
@@ -191,7 +205,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     // Runtime last_active is also a resume/reattach clock, not conversation progress.
     const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
     const runtimes = matches.filter(item => typeof item.id === 'string' && item.id && item.id !== item.session_key);
-    result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, section, status, woke, newSession,
+    result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, runStartedAt: workingSince(status, matches, metadata.runs?.[durableId(row)]), section, status, woke, newSession,
       runtimeId: runtimes.length === 1 ? runtimes[0].id : null, activity });
   }
   for (const section of SECTIONS) result[section].sort((a, b) => {
@@ -728,7 +742,7 @@ const CSS = `
 .sf button:focus-visible,.sf input:focus-visible,.sf select:focus-visible{outline:2px solid var(--ui-accent);outline-offset:-2px}
 .sf-header{padding:6px 12px;display:flex;align-items:center;gap:5px;height:40px;flex-shrink:0}.sf-icon{display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;width:27px;height:27px;padding:4px;border:0;border-radius:4px;color:var(--ui-text-tertiary);background:transparent}
 .sf-icon:hover,.sf-icon[aria-expanded=true],.sf-row:hover,.sf-row:focus-within,.sf-row[data-menu-open=true],.sf-section-toggle:hover{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
-.sf-search{display:flex;align-items:center;gap:8px;flex:1;min-width:0;color:var(--ui-text-tertiary)}.sf-search svg{flex-shrink:0;width:18px;height:18px}
+.sf-search{display:flex;align-items:center;gap:8px;flex:1;min-width:0;height:27px;margin-left:-6px;padding:0 6px;border-radius:4px;color:var(--ui-text-tertiary)}.sf-search:focus-within{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ui-accent) 70%,transparent)}.sf .sf-search input:focus-visible{outline:none}.sf-search svg{flex-shrink:0;width:18px;height:18px}
 .sf-search input{width:100%;min-width:0;padding:0;border:0;background:transparent;color:var(--ui-text-primary);outline:none}
 .sf-search input::-webkit-search-cancel-button{-webkit-appearance:none}.sf-search .sf-clear{width:20px;height:20px;padding:2px;visibility:visible;opacity:1}
 .sf-header input{font-size:14px}.sf-menu select{max-width:260px;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary)}
@@ -737,23 +751,27 @@ const CSS = `
 /* Fixed header minima survive short panes; Archives gets most of the flexible space. */
 .sf-section{display:flex;flex-direction:column;min-height:0;overflow:hidden}.sf-section[data-section=pinned]{flex:0 1 auto;max-height:18%}.sf-section[data-section=active]{grid-row:1}.sf-section[data-section=working]{grid-row:2}.sf-section[data-section=snoozed]{grid-row:3}.sf-section[data-section=archived]{grid-row:4}
 /* Working contributes its intrinsic header + body size to fit-content(18%); animating its own body track keeps the parent cap stable during reversals. */
-.sf-section[data-section=working]{display:grid;grid-template-rows:24px minmax(0,1fr);min-height:25px;transition:grid-template-rows .22s ease}.sf-section[data-section=working][data-closed=true]{grid-template-rows:24px minmax(0,0fr);min-height:24px}.sf-section[data-section=working][data-populated=false]{min-height:24px}.sf-section[data-section=working][data-populated=false] .sf-section-body{display:none}
-.sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:24px;min-height:24px;padding:3px 6px;border:0;background:transparent;color:var(--ui-text-tertiary);font-size:11px;text-align:left}.sf-count{color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums}.sf-section-label,.sf-count,.sf-section-chevron{flex-shrink:0}.sf-section-line{flex:1;min-width:0;height:1px;background:var(--ui-stroke-secondary)}.sf-section-chevron{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px}
+.sf-section[data-section=working]{display:grid;grid-template-rows:30px minmax(0,1fr);min-height:31px;transition:grid-template-rows .22s ease}.sf-section[data-section=working][data-closed=true]{grid-template-rows:30px minmax(0,0fr);min-height:30px}.sf-section[data-section=working][data-populated=false]{min-height:30px}.sf-section[data-section=working][data-populated=false] .sf-section-body{display:none}
+.sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--ui-text-primary) 28%,transparent) transparent}
+/* Fade the bottom edge only while more content lies below, so lists never run hard into the next heading. */
+.sf-section-body[data-more-below=true]{mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:30px;min-height:30px;padding:9px 6px 3px;border:0;background:transparent;color:var(--ui-text-secondary);font-size:11px;text-align:left}.sf-section-label{font-weight:500;color:var(--ui-accent)}.sf-count{color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}.sf-section-label,.sf-count,.sf-section-chevron{flex-shrink:0}.sf-section-line{flex:1;min-width:0;height:1px;background:var(--ui-stroke-secondary)}.sf-section-chevron{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px}
 .sf-row{position:relative;height:56px;flex-shrink:0;padding:0 10px;border-radius:5px}.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
 .sf-row[data-has-draft=true][data-current=false]{background:color-mix(in srgb,var(--ui-orange,#db704b) 10%,transparent)}
 .sf-row[data-has-draft=true][data-current=false]:hover,.sf-row[data-has-draft=true][data-current=false]:focus-within{background:color-mix(in srgb,var(--ui-orange,#db704b) 14%,transparent)}
-.sf-row[data-dimmed=true]{opacity:.55}.sf-row[data-dimmed=true]:hover,.sf-row[data-dimmed=true]:focus-within{opacity:1}
+/* Recede only the neutral title so status labels, colored icons and metadata stay readable. */
+.sf-row[data-dimmed=true]:not([data-unread=true]) .sf-row-title{color:var(--ui-text-secondary)}.sf-row[data-dimmed=true]:hover .sf-row-title,.sf-row[data-dimmed=true]:focus-within .sf-row-title,.sf-row[data-dimmed=true][data-menu-open=true] .sf-row-title{color:var(--ui-text-primary)}
 /* Native semantic blue is independent of the user's configurable accent. */
 .sf-row[data-working=true] .sf-time{color:var(--ui-blue,#0053fd)}
-.sf-open{display:flex;flex-direction:column;justify-content:center;gap:3px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
+.sf-open{display:flex;flex-direction:column;justify-content:center;gap:3px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-time{display:inline-flex;align-items:center}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
 .sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
-.sf-row[data-menu-open=true] .sf-hover{visibility:visible;opacity:1}.sf-row[data-menu-open=true] .sf-provider,.sf-row[data-menu-open=true] .sf-token,.sf-row[data-menu-open=true] .sf-time{visibility:hidden}.sf-row[data-dimmed=true][data-menu-open=true]{opacity:1}
+.sf-row[data-menu-open=true] .sf-hover{visibility:visible}.sf-row[data-menu-open=true] .sf-provider,.sf-row[data-menu-open=true] .sf-token,.sf-row[data-menu-open=true] .sf-time{visibility:hidden}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
 .sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
-.sf-row .sf-project{gap:4px}.sf-row .sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--ui-blue,#0053fd);font-weight:400}.sf-snooze-time svg{width:13px;height:13px;flex-shrink:0}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
-.sf-menu button.sf-snooze-info:disabled{display:flex;gap:12px;width:100%;white-space:nowrap;color:var(--ui-blue,#0053fd);opacity:1;font-weight:400;cursor:default}.sf-snooze-remaining{margin-left:auto;text-align:right}.sf-menu .sf-custom-snooze{padding:0 8px}.sf-menu .sf-custom-snooze,.sf-menu .sf-snooze-info,.sf-menu .sf-snooze-action{padding-left:8px;padding-right:8px}
-.sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}.sf-project-choice[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
+.sf-row .sf-project{gap:4px}/* Outranks the Working time color: a snoozed card can still be running. */
+.sf-row .sf-time.sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--ui-purple,#9e94d5);font-weight:400}.sf-snooze-time svg{width:13px;height:13px;flex-shrink:0}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
+.sf-menu button.sf-snooze-info:disabled{display:flex;gap:12px;width:100%;white-space:nowrap;color:var(--ui-purple,#9e94d5);opacity:1;font-weight:400;cursor:default}.sf-snooze-remaining{margin-left:auto;text-align:right}.sf-menu .sf-custom-snooze{padding:0 8px}.sf-menu .sf-custom-snooze,.sf-menu .sf-snooze-info,.sf-menu .sf-snooze-action{padding-left:8px;padding-right:8px}
+.sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}.sf-project-choice[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-project-picker .sf-project-choice[aria-pressed=true]{background:color-mix(in srgb,var(--ui-text-primary) 10%,transparent);color:var(--ui-text-primary)}
 .sf-project-picker{box-sizing:border-box;width:min(440px,calc(100vw - 18px));min-width:0;max-width:none;max-height:min(720px,calc(100dvh - 24px),calc(var(--radix-popover-content-available-height,100dvh) - 2px));overflow:hidden}.sf-project-picker>strong,.sf-project-picker>input{flex-shrink:0}.sf-project-picker>input{box-sizing:border-box;min-width:0}.sf-menu.sf-project-picker>.sf-project-options{gap:0;overflow-y:auto;overscroll-behavior:contain;min-height:0}.sf-project-picker .sf-project-choice{box-sizing:border-box;flex-shrink:0;width:100%;height:24px;min-height:24px;padding:4px 8px;font-size:12px;line-height:16px;gap:8px;border:0}.sf-project-picker .sf-project-icon{width:14px;height:14px}.sf-project-details{display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left}.sf-project-details>.sf-project-name,.sf-project-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.sf-project-details>.sf-project-name{max-width:55%}.sf-project-path{flex:1;margin-left:auto;text-align:right;font-size:11px;font-weight:400;line-height:16px;color:var(--ui-text-tertiary)}
 .sf-project-group{display:flex;flex-direction:column;gap:0;flex-shrink:0}.sf-project-picker .sf-project-folder{padding-left:30px}.sf-project-folder .sf-project-path{text-align:left;margin-left:0}.sf-project-heading .sf-project-name{max-width:100%}.sf-project-heading[aria-disabled=true]{opacity:1;cursor:default}
 .sf-menu .sf-menu-action{display:flex;align-items:center;gap:8px}.sf-menu-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex-shrink:0}.sf-menu-icon svg{width:14px;height:14px}.sf-menu button.sf-menu-action[data-destructive=true]{color:var(--ui-red)}
@@ -764,9 +782,13 @@ const CSS = `
 .sf-project-icon-categories{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px}.sf-project-submenu .sf-project-icon-category{margin:0}.sf-project-submenu .sf-project-icon-category legend{font-size:10px;margin-bottom:4px}.sf-project-icons{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:2px}.sf-project-icons button{display:flex;align-items:center;justify-content:center;height:25px;min-width:0;padding:3px;border:0;border-radius:4px;background:transparent;color:var(--sf-project-color)}.sf-project-icons button:hover,.sf-project-icons button[aria-pressed=true]{background:var(--ui-control-hover-background);color:var(--sf-project-color)}.sf-submenu-arrow{display:inline-flex;margin-left:auto}
 @media(max-width:520px){.sf-project-icon-categories{grid-template-columns:minmax(0,1fr)}}
 .sf-status{font-weight:600}
-.sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--ui-orange,#db704b)}.sf-status[data-status=input]{color:var(--ui-purple,#9e94d5)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
-.sf-section-body{transition:opacity .18s ease,visibility 0s}.sf-section[data-closed=true] .sf-section-body{opacity:0;visibility:hidden;transition:opacity .18s ease,visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:opacity .16s ease,background-color .16s ease,box-shadow .16s ease}.sf-hover{transition:opacity .12s ease;opacity:0}.sf-row:hover .sf-hover{opacity:1}.sf-custom-time{display:flex;align-items:center;gap:4px}.sf-custom-time input{min-width:0}.sf-custom-time .sf-icon{flex-shrink:0}
-@media(prefers-reduced-motion:reduce){.sf-shelves,.sf-section[data-section=working],.sf-section-body,.sf-section-chevron,.sf-row,.sf-hover{transition:none!important}}
+.sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--ui-purple,#9e94d5)}.sf-status[data-status=input]{color:var(--ui-orange,#db704b)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.sf-working-duration{font-variant-numeric:tabular-nums}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
+/* Folding moves only the section edge: pinned lists keep their size and slide under a fade at that edge instead of resizing (and toggling scrollbars) every frame. */
+.sf-section[data-pinned=true]>.sf-section-body{height:var(--sf-pin);flex:none}
+.sf-section[data-pinned=true]{mask:linear-gradient(#000,#000) top/100% 30px no-repeat,linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
+.sf-section[data-pinned=true][data-section=active]{mask:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
+.sf-section[data-closed=true] .sf-section-body{visibility:hidden;transition:visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:background-color .16s ease,box-shadow .16s ease}.sf-custom-time{display:flex;align-items:center;gap:4px}.sf-custom-time input{min-width:0}.sf-custom-time .sf-icon{flex-shrink:0}
+@media(prefers-reduced-motion:reduce){.sf-shelves,.sf-section[data-section=working],.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
 // Monochrome brand paths: Simple Icons 15.20.0 (CC0), fetched from its pinned GitHub tag.
 const PROVIDER_PATHS = {
@@ -785,7 +807,48 @@ function projectMark(project) {
   const name = value || (project?.is_home || project?.isNoProject ? 'home' : 'folder');
   return sdk.Codicon ? h(sdk.Codicon, { name, size: 13 }) : icon(name === 'home' ? 'House' : 'Folder', '◇');
 }
+// T3 Code's Lucide v1.59.0 status glyphs (ISC); the Desktop SDK icon set exports none of them. Circles are written as arcs.
+const STATUS_ICONS = {
+  working: ['M10.1 2.182a10 10 0 0 1 3.8 0', 'M13.9 21.818a10 10 0 0 1-3.8 0', 'M17.609 3.721a10 10 0 0 1 2.69 2.7', 'M2.182 13.9a10 10 0 0 1 0-3.8', 'M20.279 17.609a10 10 0 0 1-2.7 2.69', 'M21.818 10.1a10 10 0 0 1 0 3.8', 'M3.721 6.391a10 10 0 0 1 2.7-2.69', 'M6.391 20.279a10 10 0 0 1-2.69-2.7'],
+  input: ['M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719', 'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3', 'M12 17h.01'],
+  done: ['M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0', 'm16 9-5.5 5.5L8 12'],
+  woke: ['M4 13a8 8 0 1 0 16 0a8 8 0 1 0-16 0', 'M12 9v4l2 2', 'M5 3 2 6', 'm22 6-3-3', 'M6.38 18.7 4 21', 'M17.64 18.67 20 21'],
+};
+function statusIcon(status) {
+  // Lucide's stroke 2 keeps Done's rim thicker than the native Codicon pass glyph.
+  return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
+    STATUS_ICONS[status].map(d => h('path', { key: d, d })));
+}
+// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm glyphs.
+const BUNDLED_ICONS = {
+  Alarm: ['M5 13a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M12 10l0 3l2 0', 'M7 4l-2.75 2', 'M17 4l2.75 2'],
+  AlarmOff: ['M7.587 7.566a7 7 0 1 0 9.833 9.864m1.35 -2.645a7 7 0 0 0 -8.536 -8.56', 'M12 12v1h1', 'M5.261 5.265l-1.011 .735', 'M17 4l2.75 2', 'M3 3l18 18'],
+  AlarmSnooze: ['M5 13a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M10 11h4l-4 4h4', 'M7 4l-2.75 2', 'M17 4l2.75 2'],
+};
+// T3 Code's elapsed format: 12s, then 4m, then 1h 5m.
+export function formatWorkingDuration(elapsedMs) {
+  const seconds = Number.isFinite(elapsedMs) ? Math.max(0, Math.floor(elapsedMs / 1000)) : 0;
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+// One shared interval, running only while a Working timer is mounted, re-renders just those labels.
+const secondTicker = (() => {
+  const listeners = new Set(); let timer = null;
+  return listener => {
+    listeners.add(listener);
+    if (!timer) { timer = setInterval(() => listeners.forEach(notify => notify()), 1000); timer.unref?.(); }
+    return () => { listeners.delete(listener); if (!listeners.size) { clearInterval(timer); timer = null; } };
+  };
+})();
+function WorkingDuration({ startedAt }) {
+  const [, tick] = useState(0);
+  useEffect(() => secondTicker(() => tick(count => count + 1)), []);
+  // Decorative: the label already announces Working, and a per-second change would be noisy.
+  return h('span', { className: 'sf-working-duration', 'aria-hidden': true }, formatWorkingDuration(Date.now() - startedAt * 1000));
+}
 function icon(name, fallback) {
+  if (BUNDLED_ICONS[name]) return h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-icon': name }, BUNDLED_ICONS[name].map(d => h('path', { key: d, d })));
   const local = { Archive: 'M3 3h18v4H3zM5 7v14h14V7M10 11h4', ArchiveRestore: 'M3 3h18v4H3zM5 7v14h14V7M12 17v-7M9 13l3-3 3 3', SquarePen: 'M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7M10 14l1-4 9-9 3 3-9 9-4 1', ListFilter: 'M4 6h16M7 12h10M10 18h4' }[name];
   if (local) return h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: local }));
   const Component = sdk.icons?.[name]; return Component ? h(Component, { size: 14, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, fallback);
@@ -968,7 +1031,7 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
       row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-info', disabled: true },
         h('span', { className: 'sf-snooze-date' }, `${shortDate.format(new Date(row.meta.wake_at * 1000))} ${shortTime.format(new Date(row.meta.wake_at * 1000))}`),
         h('span', { className: 'sf-snooze-remaining' }, snoozeDetail)) : null,
-      row.meta.state === 'snoozed' ? h(MenuAction, { codicon: 'discard', className: 'sf-unsnooze sf-snooze-action', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'restore' }) }, 'Unsnooze') : null,
+      row.meta.state === 'snoozed' ? h(MenuAction, { name: 'AlarmOff', className: 'sf-unsnooze sf-snooze-action', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'restore' }) }, 'Unsnooze') : null,
       ...snoozePresets(Date.now(), presetTime).map(preset => h(MenuAction, { key: preset.label, name: preset.icon, codicon: preset.codicon, className: 'sf-snooze-action', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
       h('label', { className: 'sf-custom-snooze' }, 'Custom · local time', h('span', { className: 'sf-custom-time' },
         h('input', { type: 'datetime-local', value, disabled: disabled || snoozeDisabled, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
@@ -1057,13 +1120,15 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
         row.status === 'unknown' ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': 'Status unknown' }, '?') : null,
         provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, title: row.provider }, provider) : null,
         h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${tokens}` }, tokens),
-        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('Clock', '◷') : null, badge ? h('span', { className: 'sf-status', 'data-status': badge },
-          badge === 'input' ? h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('path', { d: 'M4 4h16v12H9l-5 4V4M10 8a2 2 0 0 1 4 0c0 2-2 1-2 3M12 13v1' })) : badge !== 'working' ? icon(badge === 'done' ? 'CircleCheck' : 'AlarmClock', badge === 'done' ? '✓' : '◷') : null,
-          { done: 'Done', woke: 'Woke', input: 'Input', working: 'Working' }[badge]) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
+        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? h('span', { className: 'sf-status', 'data-status': badge },
+          statusIcon(badge),
+          // The dashed circle and elapsed time replace the visible Working word; screen readers still hear it.
+          badge === 'working' ? h('span', { className: 'sf-sr' }, 'Working') : { done: 'Done', woke: 'Woke', input: 'Input' }[badge],
+          badge === 'working' && row.runStartedAt ? h(WorkingDuration, { startedAt: row.runStartedAt }) : null) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
       h('span', { className: 'sf-row-title' }, sessionTitle(row))),
     h('div', { className: 'sf-hover' },
       row.archived !== true ? h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },
-        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Snooze session', name: 'Clock', glyph: '◷', disabled, 'aria-haspopup': 'dialog' })),
+        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Snooze session', name: 'Alarm', glyph: '◷', disabled, 'aria-haspopup': 'dialog' })),
         h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Snooze session' },
           h(RowActions, { row, scope, controller, mutate, disabled, presetTime, snoozeDetail, snoozeOnly: true, close: () => setSnoozeOpen(false) }))) : null,
       h(sdk.Button, { type: 'button', variant: 'ghost', size: 'xs', className: 'sf-icon sf-archive', 'aria-label': row.archived === true ? 'Unarchive session' : 'Archive session', disabled: disabled || (row.archived !== true && row.status !== 'idle'),
@@ -1086,8 +1151,30 @@ const MemoSessionRow = memo(SessionRow, (previous, next) => Object.keys(next).ev
   key === 'row' ? sameCard(previous.row, next.row) : Object.is(previous[key], next[key])));
 // Fixed-height windows keep shelves proportional to their viewport, not history.
 // Small lists retain their original DOM; open popovers keep their owner mounted.
+// Pin each shelf body to the larger of its start and end height for the duration of the track transitions,
+// so lists never resize mid-animation. Seeking the new transitions to their end measures the final layout.
+function pinShelfBodies(shelves, run, current) {
+  const sections = [...shelves.children].filter(element => element.classList.contains('sf-section'));
+  const release = () => { for (const section of sections) { section.style.removeProperty('--sf-pin'); delete section.dataset.pinned; } };
+  release();
+  const transitions = [shelves, ...sections].flatMap(element => element.getAnimations())
+    .filter(animation => animation.transitionProperty === 'grid-template-rows');
+  if (!transitions.length) return;
+  const bodies = sections.map(section => section.querySelector(':scope > .sf-section-body'));
+  const heights = () => bodies.map(body => body ? body.getBoundingClientRect().height : 0);
+  const start = heights(), times = transitions.map(animation => animation.currentTime);
+  for (const animation of transitions) animation.currentTime = animation.effect.getComputedTiming().endTime;
+  const end = heights();
+  transitions.forEach((animation, index) => { animation.currentTime = times[index]; });
+  sections.forEach((section, index) => {
+    const pin = Math.max(start[index], end[index]);
+    if (pin > 0) { section.style.setProperty('--sf-pin', `${pin}px`); section.dataset.pinned = 'true'; }
+  });
+  // Cancelled transitions (a reversal) reject; the newer run owns the pins then.
+  void Promise.all(transitions.map(animation => animation.finished.catch(() => {}))).then(() => { if (current() === run) release(); });
+}
 function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
-  const body = useRef(null), pending = useRef(null), viewportHeight = useRef(null);
+  const body = useRef(null), pending = useRef(null), viewportHeight = useRef(null), scrollHeight = useRef(0);
   const [viewport, setViewport] = useState({ top: 0, height: 560 });
   const [retained, setRetained] = useState(() => new Set()), [focusedKey, setFocusedKey] = useState(null);
   const windowed = entries.length > 80;
@@ -1101,18 +1188,24 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
     // Observer-backed clients need no height measurement on the scroll path.
     const top = Math.floor(element.scrollTop / 56), height = viewportHeight.current ?? element.clientHeight;
     setViewport(previous => previous.top === top && (!height || previous.height === height) ? previous : { top, height: height || previous.height });
+    // Cached scroll height: set directly on the scroller, so the fade never re-renders cards.
+    const more = height > 0 && element.scrollTop + height < scrollHeight.current - 1;
+    if (element.dataset.moreBelow !== String(more)) element.dataset.moreBelow = more;
   }, []);
   useEffect(() => {
     const element = body.current?.parentElement;
     if (typeof ResizeObserver === 'function') viewportHeight.current = element.clientHeight || 560;
+    scrollHeight.current = element.scrollHeight;
     update();
     element.addEventListener('scroll', update, { passive: true });
     if (typeof ResizeObserver !== 'function') return () => element.removeEventListener('scroll', update);
     const observer = new ResizeObserver(entries => {
       const entry = entries.find(entry => entry.target === element);
+      scrollHeight.current = element.scrollHeight;
       // Collapse must not erase the last usable height before reopening/navigation.
-      if (entry?.contentRect.height > 0) { viewportHeight.current = entry.contentRect.height; update(); }
-    }); observer.observe(element);
+      if (entry?.contentRect.height > 0) viewportHeight.current = entry.contentRect.height;
+      update();
+    }); observer.observe(element); observer.observe(body.current);
     return () => { observer.disconnect(); element.removeEventListener('scroll', update); };
   }, [update]);
   useEffect(() => {
@@ -1224,7 +1317,7 @@ export function ProjectPicker({ controller, scope, close, mode = 'new', selected
     h('input', { type: 'search', 'aria-label': 'Search projects', placeholder: 'Search projects', value: query, onChange: event => setQuery(event.target.value) }),
     h('div', { className: 'sf-project-options' },
       filtering ? h(sdk.Button, { type: 'button', variant: 'ghost', className: 'sf-project-choice', 'aria-label': 'All projects', 'aria-pressed': selected === '*', disabled: busy,
-        onClick: () => { controller.check(scope); filterProject('*'); close(); } }, h('span', { className: 'sf-project-icon', 'aria-hidden': true }, icon('ListFilter', '≡')), h('span', { className: 'sf-project-details' }, h('span', { className: 'sf-project-name' }, 'All projects')), selected === '*' ? icon('Check', '✓') : null) : null,
+        onClick: () => { controller.check(scope); filterProject('*'); close(); } }, h('span', { className: 'sf-project-icon', 'aria-hidden': true }, icon('ListFilter', '≡')), h('span', { className: 'sf-project-details' }, h('span', { className: 'sf-project-name' }, 'All projects'))) : null,
       ...groups.map(group => group.multiple ? h('div', { key: group.id, className: 'sf-project-group', role: 'group', 'aria-label': group.name },
         h(ProjectChoice, { ...choiceProps, choice: group.choices[0], heading: true, label: `Project ${group.name}` }),
         ...group.choices.map(choice => renderChoice(choice, true))) : renderChoice(group.choices[0]))),
@@ -1245,7 +1338,7 @@ function ProjectChoice({ choice, selected, scope, controller, filterProject, clo
       onClick: event => { event.preventDefault(); if (!heading) onSelect(); }, onContextMenu: openMenu,
       onKeyDown: event => { if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') openMenu(event); } },
       !pathOnly ? h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)) : null,
-      h('span', { className: 'sf-project-details' }, !pathOnly ? h('span', { className: 'sf-project-name' }, choice.name) : null, !heading ? h('span', { className: 'sf-project-path' }, displayPath) : null), selected ? icon('Check', '✓') : null)))),
+      h('span', { className: 'sf-project-details' }, !pathOnly ? h('span', { className: 'sf-project-name' }, choice.name) : null, !heading ? h('span', { className: 'sf-project-path' }, displayPath) : null))))),
     h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
       onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject, close }) : null));
 }
@@ -1301,12 +1394,16 @@ function ScopedSidebar({ ctx, controller, scope }) {
     classified[section].filter(row => (!row.newSession || emptyDrafts.has(draftIdentity(row)) || ['waiting', 'working'].includes(row.status)) && matchesFilters(row, tokens, project, searchIndex))])), [classified, emptyDrafts, tokens, project, searchIndex]);
   const searching = !!query.trim();
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
+  // Working and Snoozed show up to two whole cards before Archived takes the space, never reserving room they cannot fill;
+  // Capping at 20% of the shelves keeps every heading visible and Archived dominant in short panes.
+  const cardsMinimum = count => `min(${30 + Math.min(count, 2) * 56}px,20%)`;
   const sectionTrack = section => {
-    // CSS owns Working's content fit, cap, and body-track fold animation.
-    if (section === 'working') return 'fit-content(18%)';
     const count = sections[section].length;
-    if (isClosed(section)) return 'minmax(24px,0fr)';
-    return `minmax(25px,${section === 'archived' && count ? 3 : count ? .65 : .25}fr)`;
+    // CSS owns Working's content fit and body-track fold animation; the parent only bounds it.
+    if (section === 'working') return `fit-content(max(18%,${cardsMinimum(count)}))`;
+    if (isClosed(section)) return 'minmax(30px,0fr)';
+    if (section === 'snoozed' && count) return `minmax(${cardsMinimum(count)},.65fr)`;
+    return `minmax(31px,${section === 'archived' && count ? 3 : count ? .65 : .25}fr)`;
   };
   const filtering = searching || project !== '*';
   const hasMatches = SECTIONS.some(section => sections[section].length > 0);
@@ -1400,7 +1497,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed },
       !headerless ? h('button', { type: 'button', className: 'sf-section-toggle', 'aria-expanded': !closed, 'aria-label': `${LABELS[section]} (${entries.length})`,
         onClick: () => setCollapsed(previous => ({ ...previous, [section]: !previous[section] })) },
-        h('span', { className: 'sf-section-label' }, LABELS[section]), h('span', { className: 'sf-count' }, `(${entries.length})`),
+        h('span', { className: 'sf-section-label' }, LABELS[section]), h('span', { className: 'sf-count' }, entries.length),
         h('span', { className: 'sf-section-line', 'aria-hidden': true }),
         h('span', { className: 'sf-section-chevron', 'aria-hidden': true }, icon(closed ? 'ChevronRight' : 'ChevronUp', closed ? '›' : '⌃'))) : null,
       h('div', { className: 'sf-section-body', 'aria-label': `${section === 'active' ? 'Ready' : LABELS[section]} sessions`, 'aria-hidden': closed || undefined, inert: closed || undefined, tabIndex: -1 },
@@ -1413,6 +1510,17 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, activeId, activeOwner,
     scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, emptyDrafts,
     archives.isError, archives.error, archives.isLoading, archives.isFetching, archives.data?.has_more]);
+  const shelfTracks = `minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(sectionTrack).join(' ')}`;
+  const shelvesRef = useRef(null), motionRun = useRef(0), motionKey = useRef(null), shelfMotion = `${shelfTracks}|${isClosed('working')}`;
+  useLayoutEffect(() => {
+    const previous = motionKey.current; motionKey.current = shelfMotion;
+    const shelves = shelvesRef.current;
+    // Initial layout is not a fold; old clients without Web Animations keep plain resizing.
+    if (previous === null || previous === shelfMotion || typeof shelves?.getAnimations !== 'function') return;
+    const run = ++motionRun.current;
+    pinShelfBodies(shelves, run, () => motionRun.current);
+  }, [shelfMotion]);
+  useEffect(() => () => { motionRun.current++; }, []);
   const total = sessions.data?.total;
   const knownTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0;
   const fallbackCount = knownTotal && total > 500 ? ` is capped at 500 of ${total}`
@@ -1441,7 +1549,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,
     h('div', { className: 'sf-scroll' }, renderedSections[0],
-      h('div', { className: 'sf-shelves', style: { gridTemplateRows: `minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(sectionTrack).join(' ')}` } }, ...renderedSections.slice(1),
+      h('div', { ref: shelvesRef, className: 'sf-shelves', style: { gridTemplateRows: shelfTracks } }, ...renderedSections.slice(1),
         !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null)),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,

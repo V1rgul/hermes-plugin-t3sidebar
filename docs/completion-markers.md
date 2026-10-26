@@ -30,6 +30,12 @@ The producer uses supported `pre_llm_call` and per-turn `on_session_end` plugin 
 
 The inspected opt-in `api_mode: codex_app_server` path returns before the standard end hook and supplies no equivalent supported completion observer. It is not covered by this producer unless Hermes adds that lifecycle coverage. The `openai-codex` provider name alone does not imply this separate runtime mode. No core patch or private runtime replacement is installed to conceal the gap.
 
+## Working time
+
+Hermes's own in-flight turn start (`inflight_turn.started_at`, Desktop's chat timer source) is the primary source. The standalone runtime endpoint returns it as `turn_started_at`, captured under the registry lock and set before `message.start` is emitted, so the Working card and its time arrive together. A retained failed turn is not reported.
+
+The hooks also record each human turn's start against the conversation root. `pre_llm_call` stores it under the same end fence as completion receipts, so a begin that finishes after its turn ended records nothing. `on_session_end` marks that exact turn ended for every outcome rather than deleting it; a newer turn of the same conversation stays open. The state API exposes only `runs: {root: {started_at, ended_at}}`; turn identities stay in the backend. Desktop uses it for a parent kept Working only by subagents (counting from its last turn, ended or not) and, on authority runtimes without a native start, for an open turn. A lost end observation (process crash, or the uncovered `codex_app_server` path) leaves an open start until the next turn replaces it; it is only displayed while runtime status independently reports Working.
+
 ## Verification scope
 
 Exercise the actual hook with an isolated native profile store and no connected UI. Verify completion persistence, duplicate suppression, profile/lineage ownership, failure/interruption/internal-source exclusion and delegated-parent behavior. Two independent API clients must observe one shared marker, and acknowledgment by one must clear it for the other without erasing a newer generation.

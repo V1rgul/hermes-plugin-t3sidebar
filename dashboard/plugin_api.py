@@ -101,10 +101,16 @@ class CompletionMetadata(BaseModel):
 	done_token: str = Field(min_length=1, max_length=256)
 
 
+class RunMetadata(BaseModel):
+	started_at: float = Field(gt=0, allow_inf_nan=False)
+	ended_at: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+
 class FlowState(BaseModel):
 	version: Literal[1] = 1
 	sessions: dict[str, SessionMetadata]
 	completions: dict[str, CompletionMetadata] = Field(default_factory=dict)
+	runs: dict[str, RunMetadata] = Field(default_factory=dict)
 
 
 def default_state_path() -> Path:
@@ -143,6 +149,7 @@ class HermesT3SidebarStore:
 						FROM session_metadata ORDER BY session_id
 					""").fetchall()
 					completions = CompletionStore.read(connection)
+					runs = CompletionStore.read_runs(connection)
 				except sqlite3.OperationalError as exc:
 					# Only absent/legacy schema needs a writer; do not hide IO/lock errors.
 					if not str(exc).startswith(("no such table:", "no such column:")):
@@ -153,14 +160,14 @@ class HermesT3SidebarStore:
 						raise ValueError("clock must return a finite UTC epoch timestamp")
 					if not any(row["state"] == "snoozed" and row["wake_at"] <= now for row in rows):
 						connection.execute("COMMIT")
-						return self._state_rows(rows, completions)
+						return self._state_rows(rows, completions, runs)
 			finally:
 				connection.close()
 		return self._transaction()
 
 	@staticmethod
-	def _state_rows(rows, completions) -> dict:
-		result = {"version": 1, "sessions": {}, "completions": completions}
+	def _state_rows(rows, completions, runs) -> dict:
+		result = {"version": 1, "sessions": {}, "completions": completions, "runs": runs}
 		for row in rows:
 			metadata = dict(row)
 			key = metadata.pop("session_id")
@@ -254,7 +261,7 @@ class HermesT3SidebarStore:
 						UPDATE session_metadata SET pinned = ?, updated_at = ? WHERE session_id = ?
 					""", (int(body.action == "pin"), now, session_id))
 			rows = connection.execute("SELECT * FROM session_metadata ORDER BY session_id").fetchall()
-			result = self._state_rows(rows, CompletionStore.read(connection))
+			result = self._state_rows(rows, CompletionStore.read(connection), CompletionStore.read_runs(connection))
 			connection.execute("COMMIT")
 			return result
 		except BaseException:
@@ -325,6 +332,20 @@ def runtime_retired(db, row):
 	from hermes_state_mutation_retirement import retired_session
 
 	return any(retired_session(db, sid) for sid in {row.get("session_key"), row.get("id")} if sid)
+
+
+def runtime_turn_started_at(session):
+	"""Native in-flight turn start (Desktop's own elapsed-timer source), never a retained failed turn.
+
+	Call under the registry lock. Unlike the plugin hook, this exists before ``message.start`` is emitted, so the runtime refresh that reveals Working already carries it.
+	"""
+	turn = session.get("inflight_turn")
+	if not isinstance(turn, dict) or turn.get("status") == "error":
+		return None
+	started = turn.get("started_at")
+	if type(started) not in (int, float) or not math.isfinite(started) or started <= 0:
+		return None
+	return float(started)
 
 
 def runtime_session_facts(session):
@@ -409,7 +430,7 @@ def standalone_runtime(request, profile, actor):
 	from hermes_cli.web_server_sessions import _open_session_db_for_profile
 	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
 
-	facts, parents = {}, {}
+	facts, parents, turn_starts = {}, {}, {}
 
 	def profile_home(name):
 		resolved = server._profile_home(name)
@@ -429,6 +450,7 @@ def standalone_runtime(request, profile, actor):
 			if not admitted(sid, session, parent, key):
 				raise HTTPException(503, "standalone_snapshot_changed")
 			captured = runtime_session_facts(session)
+			turn_starts[(sid, key)] = runtime_turn_started_at(session)
 		# The native mapper can read titles from SQLite. It must run outside
 		# the global registry lock, just like catalog/default-route/lineage IO.
 		item = server._session_live_item(sid, session, current)
@@ -477,6 +499,7 @@ def standalone_runtime(request, profile, actor):
 			metadata = runtime_display_metadata(server, captured, projects)
 			# Native legacy previews may contain pending prompts. Runtime needs
 			# liveness/identity only; do not return that text or any extra fields.
+			item["turn_started_at"] = turn_starts.get(identity)
 			item["running_subagents"] = standalone_subagent_count(server, row,
 				parents[identity], db, home)
 			# All catalog/default-route/lineage IO ran outside the registry lock.
@@ -556,6 +579,8 @@ async def native_runtime(request, profile):
 	value["sessions"] = await asyncio.to_thread(authority_runtime_rows, db_path, value["sessions"])
 	for row in value["sessions"]:
 		row["running_subagents"] = None
+		# Authority rows carry no turn start; Desktop falls back to the hook-recorded open turn.
+		row["turn_started_at"] = None
 		try:
 			from gateway.session_ancillary import read
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildSections, SECTIONS, visibleSource, durableId, aliases, isEmptySession, seconds, sessionTitle } from '../desktop/plugin.js';
+import { buildSections, SECTIONS, visibleSource, durableId, aliases, isEmptySession, seconds, sessionTitle, workingSince } from '../desktop/plugin.js';
 
 // Reference the same classifier with the old per-row runtime scan; compare complete outputs, not only status labels.
 function reference(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown = true, query = '', project = '*' } = {}) {
@@ -26,7 +26,7 @@ function reference(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown
 		if (!matchesFilters({ ...row, newSession })) continue;
 		const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
 		const runtimes = matches.filter(item => typeof item.id === 'string' && item.id && item.id !== item.session_key);
-		result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, section, status, woke, newSession,
+		result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, runStartedAt: workingSince(status, matches, metadata.runs?.[durableId(row)]), section, status, woke, newSession,
 			runtimeId: runtimes.length === 1 ? runtimes[0].id : null, activity });
 	}
 	for (const section of SECTIONS) result[section].sort((a, b) => {

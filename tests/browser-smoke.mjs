@@ -128,22 +128,50 @@ try {
   check('search still allows explicitly unfolding matching archives', await page.locator('[data-session-id="archived"]').isVisible());
   await page.getByRole('button', { name: 'Clear search', exact: true }).click();
   check('all five shelves rendered', await page.locator('.sf-section').count() === 5);
-  check('Working with one card has no spare vertical space', await page.locator('[data-section="working"]').evaluate(el => el.getBoundingClientRect().height <= 24 + el.querySelectorAll('.sf-row').length * 56 + 1));
+  check('Working with one card has no spare vertical space', await page.locator('[data-section="working"]').evaluate(el => el.getBoundingClientRect().height <= 30 + el.querySelectorAll('.sf-row').length * 56 + 1));
   check('waiting approval remains Ready despite archival and pin metadata', await page.locator('section[aria-label="Ready"] [data-session-id="approval"]').count() === 1);
-  check('Working is visually dimmed', Number(await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity)) < 1);
+  const tokenColor = (locator, token) => locator.evaluate((el, token) => {
+    const probe = document.createElement('span'); probe.style.color = `var(${token})`; el.append(probe);
+    const color = getComputedStyle(probe).color; probe.remove(); return color;
+  }, token);
+  const titleColor = id => page.locator(`[data-session-id="${id}"] .sf-row-title`).evaluate(el => getComputedStyle(el).color);
+  check('Working, Input and Done status icons and labels share the metadata line centre', await page.locator('.sf-status').evaluateAll(labels => labels.length >= 2 && labels.every(label => {
+    const tokens = label.closest('.sf-card-meta').querySelector('.sf-token').getBoundingClientRect(), icon = label.querySelector('[data-status-icon]')?.getBoundingClientRect(), text = label.getBoundingClientRect();
+    const centre = rect => rect.top + rect.height / 2;
+    return icon && Math.abs(centre(icon) - centre(tokens)) <= 1 && Math.abs(centre(text) - centre(tokens)) <= 1 && icon.right <= text.right;
+  })));
+  check('Working shows a still, unfilled dashed circle and the native turn elapsed time instead of a visible label', await page.locator('[data-session-id="root"] .sf-status').evaluate(el => {
+    const duration = el.querySelector('.sf-working-duration'), label = el.querySelector('.sf-sr'), disc = el.querySelector('svg[data-status-icon=working]');
+    return !!duration && /^2m$/.test(duration.textContent) && duration.getAttribute('aria-hidden') === 'true' && label?.textContent === 'Working'
+      && label.getBoundingClientRect().width <= 1 && getComputedStyle(disc).animationName === 'none' && disc.querySelectorAll('path').length === 8 && getComputedStyle(disc.querySelector('path')).fill === 'none'
+      && duration.getBoundingClientRect().left > disc.getBoundingClientRect().right && getComputedStyle(duration).fontVariantNumeric.includes('tabular-nums');
+  }));
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  check('Working dashed circle stays still even without reduced motion', await page.locator('[data-session-id="root"] svg[data-status-icon=working]').evaluate(el => getComputedStyle(el).animationName === 'none'));
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const setRunAge = seconds => page.evaluate(age => { const harness = window.hermesT3SidebarHarness; harness.control.live.find(item => item.id === 'runtime-worker').turn_started_at = Date.now() / 1000 - age; return harness.queryClient.invalidateQueries(); }, seconds);
+  const workingSeconds = () => page.locator('[data-session-id="root"] .sf-working-duration').evaluate(el => /^(\d+)s$/.exec(el.textContent)?.[1]).then(Number);
+  await setRunAge(5);
+  await page.waitForFunction(() => /^\d+s$/.test(document.querySelector('[data-session-id="root"] .sf-working-duration')?.textContent));
+  // Ticks are not phase-aligned with the turn start, so allow one second of display lag.
+  const firstSecond = await workingSeconds(); await page.waitForTimeout(3200);
+  check('Working elapsed time ticks every second without a new poll', await workingSeconds() - firstSecond >= 2);
+  await setRunAge(125);
+  await page.waitForFunction(() => document.querySelector('[data-session-id="root"] .sf-working-duration')?.textContent === '2m');
+  check('Working recedes its title, not the whole card', await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity) === '1' && await titleColor('root') === await tokenColor(page.locator('[data-session-id="root"]'), '--ui-text-secondary'));
   check('Working card text uses the native blue theme token', await page.locator('[data-session-id="root"] .sf-time').evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; el.append(probe);
     const expected = getComputedStyle(probe).color, actual = getComputedStyle(el).color; probe.remove();
     return actual === expected && actual !== getComputedStyle(el.parentElement).color;
   }));
-  check('category headings place parenthesized counts and divider before right-aligned chevron', await page.locator('.sf-section-toggle').evaluateAll(headers => headers.every(header => {
+  check('category headings place plain counts and divider before right-aligned chevron', await page.locator('.sf-section-toggle').evaluateAll(headers => headers.every(header => {
     const count = header.querySelector('.sf-count'), line = header.querySelector('.sf-section-line'), chevron = header.querySelector('.sf-section-chevron');
-    if (!count || !line || !chevron || !/^\(\d+\)$/.test(count.textContent)) return false;
+    if (!count || !line || !chevron || !/^\d+$/.test(count.textContent)) return false;
     const c = count.getBoundingClientRect(), l = line.getBoundingClientRect(), a = chevron.getBoundingClientRect(), h = header.getBoundingClientRect();
-    return c.right <= l.left && l.width > 30 && l.right <= a.left && a.right >= h.right - 8 && h.height === 24;
+    return c.right <= l.left && l.width > 30 && l.right <= a.left && a.right >= h.right - 8 && h.height === 30;
   })));
   check('sidebar project icons have no filled background', await page.locator('.sf-row .sf-project-icon').evaluateAll(icons => icons.every(icon => getComputedStyle(icon).backgroundColor === 'rgba(0, 0, 0, 0)')));
-  for (const [id, status, label, token] of [['readme', 'done', 'Done', '--ui-green'], ['approval', 'input', 'Input', '--ui-purple']]) {
+  for (const [id, status, label, token] of [['readme', 'done', 'Done', '--ui-green'], ['approval', 'input', 'Input', '--ui-orange']]) {
     const card = page.locator(`[data-session-id="${id}"]`), badge = card.locator(`.sf-status[data-status="${status}"]`);
     check(`${label} has a leading icon and the requested semantic color`, await badge.evaluate((el, token) => {
       const probe = document.createElement('span'); probe.style.color = `var(${token})`; el.append(probe);
@@ -162,15 +190,21 @@ try {
   }));
   await page.mouse.move(1100, 850);
   check('Input, Working and Done labels are bold', await page.locator('.sf-status').evaluateAll(labels => ['input', 'working', 'done'].every(status => labels.some(el => el.dataset.status === status && Number(getComputedStyle(el).fontWeight) >= 600))));
-  const workingOpacity = await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity);
+  const recededTitle = await titleColor('root'), primaryTitle = await tokenColor(page.locator('[data-session-id="root"]'), '--ui-text-primary');
   for (const id of ['snoozed', 'archived']) {
     const card = page.locator(`[data-session-id="${id}"]`);
-    check(`${id} dimmed exactly like Working`, await card.evaluate(el => getComputedStyle(el).opacity) === workingOpacity);
+    check(`${id} recedes its title exactly like Working while staying fully opaque`, await titleColor(id) === recededTitle && await card.evaluate(el => getComputedStyle(el).opacity) === '1');
     await card.hover();
-    check(`${id} returns to full opacity on hover`, await card.evaluate(el => getComputedStyle(el).opacity) === '1');
+    check(`${id} title returns to primary text instantly on hover`, await titleColor(id) === primaryTitle);
+    check(`${id} hover actions appear without an opacity fade`, await card.locator('.sf-hover').evaluate(el => getComputedStyle(el).visibility === 'visible' && getComputedStyle(el).opacity === '1' && !/opacity/.test(getComputedStyle(el).transitionProperty)));
     await page.mouse.move(1100, 850);
-    check(`${id} dims again when pointer leaves`, await card.evaluate(el => getComputedStyle(el).opacity) === workingOpacity);
+    check(`${id} recedes again when pointer leaves`, await titleColor(id) === recededTitle);
   }
+  const searchField = page.locator('.sf-search');
+  await searchField.locator('input').focus();
+  check('search focus highlights the whole field instead of outlining the text box', await searchField.evaluate(el => getComputedStyle(el).boxShadow.includes('inset') && getComputedStyle(el.querySelector('input')).outlineStyle === 'none'));
+  await searchField.locator('input').blur();
+  check('search field has no focus ring at rest', await searchField.evaluate(el => getComputedStyle(el).boxShadow === 'none'));
   check('external native archive has no plugin metadata; legacy completion remains Ready', await page.evaluate(() => !window.hermesT3SidebarHarness.control.metadata.sessions.archived) && await page.locator('section[aria-label="Archived"] [data-session-id="archived"]').count() === 1 && await page.locator('section[aria-label="Ready"] [data-session-id="legacy"]').count() === 1);
   await mkdir(screenshotDir, { recursive: true });
   const design = page.locator('[data-session-id="design"]');
@@ -235,7 +269,7 @@ try {
   check('pinning a running session keeps it Pinned with undimmed blue Working status', await worker.evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; el.append(probe);
     const blue = getComputedStyle(probe).color; probe.remove();
-    return el.dataset.working === 'true' && el.dataset.dimmed === 'false' && getComputedStyle(el).opacity === '1' && el.querySelector('[data-status=working]')?.textContent === 'Working' && getComputedStyle(el.querySelector('.sf-time')).color === blue;
+    return el.dataset.working === 'true' && el.dataset.dimmed === 'false' && getComputedStyle(el).opacity === '1' && /^Working\d+m$/.test(el.querySelector('[data-status=working]')?.textContent) && getComputedStyle(el.querySelector('.sf-time')).color === blue;
   }));
   await worker.click({ button: 'right' });
   check('Unpin has a leading decorative icon', await page.getByRole('button', { name: 'Unpin', exact: true }).locator('.sf-menu-icon[aria-hidden=true] svg').count() === 1);
@@ -249,12 +283,12 @@ try {
   await snoozeDialog.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="root"]').waitFor();
   await page.mouse.move(1100, 850);
-  check('snoozed worker shows remaining time in non-bold theme blue instead of Working or age', await worker.locator('.sf-time').evaluate(el => {
-    const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; el.append(probe);
-    const blue = getComputedStyle(probe).color; probe.remove();
-    return el.textContent === '1h' && !el.querySelector('.sf-status') && getComputedStyle(el).color === blue && getComputedStyle(el).fontWeight === '400' && getComputedStyle(el).visibility === 'visible';
+  check('snoozed worker shows remaining time in non-bold theme purple instead of Working or age', await worker.locator('.sf-time').evaluate(el => {
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-purple)'; el.append(probe);
+    const purple = getComputedStyle(probe).color; probe.remove();
+    return el.textContent === '1h' && !el.querySelector('.sf-status') && getComputedStyle(el).color === purple && getComputedStyle(el).fontWeight === '400' && getComputedStyle(el).visibility === 'visible';
   }));
-  check('blue snooze icon is left of the rounded duration, with no left suffix', await worker.locator('.sf-snooze-time').evaluate(el => {
+  check('purple alarm-snooze icon is left of the rounded duration, with no left suffix', await worker.locator('.sf-snooze-time').evaluate(el => {
     const icon = el.querySelector('svg'), duration = el.querySelector('.sf-snooze-duration');
     const i = icon.getBoundingClientRect(), d = duration.getBoundingClientRect(), style = getComputedStyle(el);
     return el.firstElementChild === icon && icon.getAttribute('aria-hidden') === 'true' && getComputedStyle(icon).color === style.color && getComputedStyle(icon).stroke === style.color && getComputedStyle(duration).color === style.color && i.width === 13 && i.right < d.left && Math.abs(i.top + i.height / 2 - d.top - d.height / 2) < 1 && /^\d+[mhd]$/.test(duration.textContent);
@@ -268,11 +302,11 @@ try {
     const green = getComputedStyle(probe).color; probe.remove();
     return getComputedStyle(el).color === green;
   }));
-  check('snoozed menu starts with one disabled blue info row before Unsnooze', await snoozeDialog.locator('form').evaluate(form => {
+  check('snoozed menu starts with one disabled purple info row before Unsnooze', await snoozeDialog.locator('form').evaluate(form => {
     const [info, unsnooze] = form.children;
-    const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; form.append(probe);
-    const blue = getComputedStyle(probe).color; probe.remove();
-    return info.disabled && /^\d+d \d+h \d+min left$/.test(info.querySelector('.sf-snooze-remaining').textContent) && unsnooze.textContent === 'Unsnooze' && getComputedStyle(info).color === blue && getComputedStyle(info).opacity === '1';
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-purple)'; form.append(probe);
+    const purple = getComputedStyle(probe).color; probe.remove();
+    return info.disabled && /^\d+d \d+h \d+min left$/.test(info.querySelector('.sf-snooze-remaining').textContent) && unsnooze.textContent === 'Unsnooze' && getComputedStyle(info).color === purple && getComputedStyle(info).opacity === '1';
   }));
   check('wake date uses local short date and time separated by a space, without a comma', await snoozeDialog.locator('.sf-snooze-date').textContent() === await page.evaluate(() => {
     const date = new Date(window.hermesT3SidebarHarness.control.metadata.sessions.root.wake_at * 1000);
@@ -285,16 +319,16 @@ try {
   }));
   check('custom local-time label and input also align with icons in an existing snooze menu', await customTimeAligned());
   await snoozeDialog.screenshot({ path: join(screenshotDir, 'snoozed-menu.png') });
-  check('Snooze actions use discard, Clock, Clock, Sun and calendar as aligned leading icons', await snoozeDialog.locator('.sf-menu-action').evaluateAll(actions => {
+  check('Snooze actions use AlarmOff, Clock, Clock, Sun and calendar as aligned leading icons', await snoozeDialog.locator('.sf-menu-action').evaluateAll(actions => {
     const names = actions.map(el => el.querySelector('[data-codicon]')?.dataset.codicon || el.querySelector('[data-icon]')?.dataset.icon);
-    return JSON.stringify(names) === JSON.stringify(['discard', 'Clock', 'Clock', 'Sun', 'calendar']) && actions.every(el => {
+    return JSON.stringify(names) === JSON.stringify(['AlarmOff', 'Clock', 'Clock', 'Sun', 'calendar']) && actions.every(el => {
       const icon = el.querySelector('.sf-menu-icon'), label = el.querySelector('.sf-menu-label');
       const i = icon.getBoundingClientRect(), l = label.getBoundingClientRect();
       return el.firstElementChild === icon && icon.getAttribute('aria-hidden') === 'true' && i.width === 14 && i.right < l.left && Math.abs(i.top + i.height / 2 - l.top - l.height / 2) < 1;
     });
   }));
   check('combined disabled snooze information row remains completely icon-free', await snoozeDialog.locator('.sf-snooze-info').evaluateAll(rows => rows.length === 1 && rows.every(el => el.disabled && !el.querySelector('.sf-menu-icon,svg,[data-codicon]'))));
-  check('Unsnooze discard icon inherits the green action color', await unsnooze.evaluate(el => getComputedStyle(el.querySelector('[data-codicon=discard]')).color === getComputedStyle(el).color));
+  check('Unsnooze alarm-off icon inherits the green action color', await unsnooze.evaluate(el => getComputedStyle(el.querySelector('[data-icon=AlarmOff]')).color === getComputedStyle(el).color));
   await unsnooze.hover();
   check('Unsnooze stays green on hover', await unsnooze.evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe);
@@ -302,7 +336,7 @@ try {
   }));
   await unsnooze.click();
   await page.locator('section[aria-label="Working"] [data-session-id="root"]').waitFor();
-  check('Unsnooze returns the running card to Working and removes its countdown', await worker.locator('[data-status=working]').textContent() === 'Working' && !await worker.locator('.sf-snooze-time').count());
+  check('Unsnooze returns the running card to Working and removes its countdown', /^Working\d+m$/.test(await worker.locator('[data-status=working]').textContent()) && !await worker.locator('.sf-snooze-time').count());
   await design.click({ button: 'right' });
   await page.getByRole('button', { name: 'Pin', exact: true }).click();
   await page.locator('section[aria-label="Pinned"] [data-session-id="design"]').waitFor();
@@ -396,6 +430,12 @@ try {
   await filters.getByRole('button', { name: 'Filter by docs', exact: true }).waitFor();
   check('one filter click exposes project choices directly without intermediate select', await filters.getByRole('button', { name: 'All projects', exact: true }).isVisible() && await filters.getByRole('button', { name: 'Filter by docs', exact: true }).isVisible() && !await filters.getByRole('combobox').count());
   check('direct filter list identifies selected project', await filters.getByRole('button', { name: 'Filter by Synthetic Sidebar', exact: true }).getAttribute('aria-pressed') === 'true');
+  check('selected project uses a row background instead of a trailing check', await filters.locator('.sf-project-choice').evaluateAll(choices => {
+    const selected = choices.filter(el => el.getAttribute('aria-pressed') === 'true'), other = choices.find(el => el.getAttribute('aria-pressed') === 'false');
+    const background = el => getComputedStyle(el).backgroundColor, rest = 'rgba(0, 0, 0, 0)';
+    return selected.length === 1 && background(selected[0]) !== rest && background(selected[0]) !== background(other)
+      && choices.every(el => el.querySelectorAll(':scope > svg').length === 0 && el.querySelector('.sf-project-path, .sf-project-name').parentElement.nextElementSibling === null);
+  }));
   await filters.getByRole('button', { name: 'All projects', exact: true }).click();
   check('All projects clears active icon and closes filter picker', !await filters.count() && await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'false');
   const openProject = async () => { await design.click({ button: 'right' }); await context.getByRole('button', { name: 'Project', exact: true }).click(); await projectMenu.waitFor(); };
@@ -583,8 +623,8 @@ try {
     await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
   });
   await design.locator('.sf-status[data-status="woke"]').waitFor();
-  check('durable wake marker shows orange Woke with icon and bold title', await design.evaluate(el => {
-    const badge = el.querySelector('.sf-status'), probe = document.createElement('span'); probe.style.color = 'var(--ui-orange)'; badge.append(probe);
+  check('durable wake marker shows purple Woke with icon and bold title', await design.evaluate(el => {
+    const badge = el.querySelector('.sf-status'), probe = document.createElement('span'); probe.style.color = 'var(--ui-purple)'; badge.append(probe);
     const expected = getComputedStyle(probe).color; probe.remove();
     return badge.textContent === 'Woke' && badge.querySelector('svg') !== null && getComputedStyle(badge).color === expected && Number(getComputedStyle(el.querySelector('.sf-row-title')).fontWeight) >= 600;
   }));
@@ -663,13 +703,16 @@ try {
   await page.evaluate(async () => {
     const fixture = window.hermesT3SidebarHarness;
     fixture.control.live.find(row => row.session_key === 'design').running_subagents = 2;
+    // Its own turn ended after dispatching; the backend keeps that turn's start.
+    fixture.control.metadata.runs = { design: { started_at: Date.now() / 1000 - 300, ended_at: Date.now() / 1000 - 240 } };
     await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
   });
   await page.locator('[data-section="working"] [data-session-id="design"]').waitFor();
-  check('idle parent with running subagents shows blue Working and stays dimmed', await design.getAttribute('data-working') === 'true' && await design.locator('.sf-status').textContent() === 'Working');
+  check('idle parent with running subagents shows blue Working counted from its last turn start and stays dimmed', await design.getAttribute('data-working') === 'true' && await design.locator('.sf-status').textContent() === 'Working5m');
   await page.evaluate(async () => {
     const fixture = window.hermesT3SidebarHarness;
     fixture.control.live.find(row => row.session_key === 'design').running_subagents = 0;
+    delete fixture.control.metadata.runs;
     await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
   });
   await page.locator('[data-section="active"] [data-session-id="design"]').waitFor();
@@ -757,6 +800,16 @@ try {
   await page.evaluate(() => window.hermesT3SidebarHarness.loadDenseFixtures());
   await page.locator('[data-session-id="synthetic-active-000"]').waitFor();
   await page.waitForFunction(() => document.querySelector('[data-session-id="synthetic-working-000"]')?.dataset.working === 'true');
+  const fade = () => page.evaluate(() => Object.fromEntries(['active', 'working'].map(name => {
+    const body = document.querySelector(`[data-section="${name}"] .sf-section-body`);
+    return [name, { more: body.dataset.moreBelow, mask: getComputedStyle(body).maskImage }];
+  })));
+  const fadeTop = await fade();
+  check('a scrollable list fades its bottom edge toward the next heading', fadeTop.active.more === 'true' && fadeTop.active.mask.includes('linear-gradient') && (fadeTop.working.more !== 'true' || fadeTop.working.mask.includes('linear-gradient')));
+  await page.locator('[data-section="active"] .sf-section-body').evaluate(el => { el.scrollTop = el.scrollHeight; });
+  await page.waitForFunction(() => document.querySelector('[data-section="active"] .sf-section-body').dataset.moreBelow === 'false');
+  check('the fade disappears at the end of the list', (await fade()).active.mask === 'none');
+  await page.locator('[data-section="active"] .sf-section-body').evaluate(el => { el.scrollTop = 0; });
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   for (const shelf of ['archived', 'working']) {
     const motion = await page.evaluate(async shelf => {
@@ -777,7 +830,21 @@ try {
       return { before, closed, inaccessible, closing, opening, final: height(), reopened: !body.inert && !body.hasAttribute('aria-hidden') };
     }, shelf);
     console.log(`MOTION ${shelf}: ${JSON.stringify(motion)}`);
-    check(`${shelf} fold and unfold animate real category height, not just the chevron`, motion.closing.some(h => h > 25 && h < motion.before - 1) && motion.opening.some(h => h > 25 && h < motion.before - 1) && Math.abs(motion.closed - 24) < 1 && Math.abs(motion.final - motion.before) < 1 && motion.inaccessible && motion.reopened);
+    const steady = await page.evaluate(async shelf => {
+      const section = document.querySelector(`[data-section="${shelf}"]`), toggle = section.querySelector('.sf-section-toggle'), body = section.querySelector('.sf-section-body');
+      const open = body.getBoundingClientRect().height, samples = [];
+      const collect = async () => { const start = performance.now(); while (performance.now() - start < 200) { await new Promise(requestAnimationFrame); samples.push({ section: section.getBoundingClientRect().height, body: body.getBoundingClientRect().height, masked: getComputedStyle(section).maskImage !== 'none' }); } };
+      toggle.click(); await collect();
+      const closing = samples.splice(0);
+      toggle.click(); await collect();
+      await new Promise(resolve => setTimeout(resolve, 150));
+      return { open, closing, opening: samples, released: !section.dataset.pinned && getComputedStyle(section).maskImage === 'none' && Math.abs(body.getBoundingClientRect().height - open) < 1 };
+    }, shelf);
+    const moving = phase => phase.filter(sample => sample.section > 31 && sample.section < motion.before - 1);
+    check(`${shelf} fold and unfold move only the section edge: the list keeps its height under a fading edge, then releases`,
+      moving(steady.closing).length > 0 && moving(steady.opening).length > 0
+      && [...moving(steady.closing), ...moving(steady.opening)].every(sample => Math.abs(sample.body - steady.open) < 1 && sample.masked) && steady.released);
+    check(`${shelf} fold and unfold animate real category height, not just the chevron`, motion.closing.some(h => h > 31 && h < motion.before - 1) && motion.opening.some(h => h > 31 && h < motion.before - 1) && Math.abs(motion.closed - 30) < 1 && Math.abs(motion.final - motion.before) < 1 && motion.inaccessible && motion.reopened);
     const rapid = await page.evaluate(async shelf => {
       const section = document.querySelector(`[data-section="${shelf}"]`), toggle = section.querySelector('.sf-section-toggle');
       const before = section.getBoundingClientRect().height;
@@ -787,7 +854,7 @@ try {
         while (performance.now() - start < 260) {
           await new Promise(requestAnimationFrame);
           const height = section.getBoundingClientRect().height;
-          if (height > 25 && height < before - 1) return true;
+          if (height > 31 && height < before - 1) return true;
         }
         return false;
       };
@@ -799,7 +866,7 @@ try {
       toggle.click();
       const duringOpen = await intermediate();
       toggle.click(); await wait(320);
-      const closed = section.dataset.closed === 'true' && section.querySelector('.sf-section-body').inert && Math.abs(section.getBoundingClientRect().height - 24) < 1;
+      const closed = section.dataset.closed === 'true' && section.querySelector('.sf-section-body').inert && Math.abs(section.getBoundingClientRect().height - 30) < 1;
       toggle.click(); await wait(320);
       return duringClose && duringOpen && open && closed && Math.abs(section.getBoundingClientRect().height - before) < 1;
     }, shelf);
@@ -817,10 +884,17 @@ try {
         toolbar: [...el.querySelector('.sf-header').children].map(rect), sections: [...el.querySelectorAll('.sf-section')].map(s => ({ name: s.dataset.section, rect: rect(s), header: s.querySelector('.sf-section-toggle') ? rect(s.querySelector('.sf-section-toggle')) : null, body: rect(s.querySelector('.sf-section-body')), scrollHeight: s.querySelector('.sf-section-body').scrollHeight, count: s.querySelectorAll('.sf-row').length })) };
     });
     check(`${height}px: logical Ready rows use a bounded viewport while small priority shelves retain all 20 rows`, layout.sections.find(s => s.name === 'active').count > 0 && layout.sections.find(s => s.name === 'active').count < 30 && layout.sections.filter(s => s.name !== 'active').every(s => s.count === 20));
-    check(`${height}px: Pinned before headerless Ready, secondary headings fixed and visible`, layout.sections.map(s => s.name).join(',') === 'pinned,active,working,snoozed,archived' && layout.sections.slice(0, 2).every(s => !s.header) && layout.sections.slice(2).every(s => s.header.height === 24 && s.header.top >= layout.list.top && s.header.bottom <= layout.root.bottom && s.body.top >= s.header.bottom));
+    check(`${height}px: Pinned before headerless Ready, secondary headings fixed and visible`, layout.sections.map(s => s.name).join(',') === 'pinned,active,working,snoozed,archived' && layout.sections.slice(0, 2).every(s => !s.header) && layout.sections.slice(2).every(s => s.header.height === 30 && s.header.top >= layout.list.top && s.header.bottom <= layout.root.bottom && s.body.top >= s.header.bottom));
     check(`${height}px: no whole-list scrolling; all five bodies constrained`, layout.overflow === 'hidden' && layout.listScrollHeight <= layout.listHeight + 1 && layout.sections.every(s => s.body.height > 0 && s.body.bottom <= layout.list.bottom + 1 && s.scrollHeight > s.body.height));
     check(`${height}px: expanded Archived gets a substantially larger share`, layout.sections.find(s => s.name === 'archived').rect.height > layout.list.height * .35 && layout.sections.filter(s => s.name !== 'archived').every(s => s.body.height > 0));
-    check(`${height}px: dense Working is capped at 18% of the remaining grid`, await page.locator('[data-section="working"]').evaluate(el => Math.abs(el.getBoundingClientRect().height - el.parentElement.getBoundingClientRect().height * .18) <= 1));
+    check(`${height}px: dense Working shows up to two whole cards, bounded by 18%/20% of the remaining grid`, await page.locator('[data-section="working"]').evaluate(el => {
+      const grid = el.parentElement.getBoundingClientRect().height, expected = Math.max(grid * .18, Math.min(30 + 2 * 56, grid * .2));
+      return Math.abs(el.getBoundingClientRect().height - expected) <= 1;
+    }));
+    check(`${height}px: dense Snoozed gets the same two-card minimum before Archived`, await page.locator('[data-section="snoozed"]').evaluate(el => {
+      const grid = el.parentElement.getBoundingClientRect().height;
+      return el.getBoundingClientRect().height >= Math.min(30 + 2 * 56, grid * .2) - 1;
+    }));
     check(`${height}px: toolbar single line and Search left of Filter and New session`, layout.toolbar.length === 3 && layout.toolbar.every(r => Math.abs((r.top + r.bottom) / 2 - (layout.toolbar[0].top + layout.toolbar[0].bottom) / 2) < 2) && layout.toolbar.every((r, i, arr) => !i || arr[i-1].right <= r.left));
     // Scroll each body in turn: every other category's scrollTop AND geometry stay fixed.
     for (const section of ['pinned', 'active', 'working', 'snoozed', 'archived']) {
@@ -884,14 +958,14 @@ try {
       await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
     }, count);
     await page.waitForFunction(count => document.querySelector('[data-section="working"]')?.querySelectorAll('.sf-row').length === count, count);
-    check(`Working with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="working"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - (24 + count * 56)) <= 1, count));
-    check(`Working ${count}: parent track is content-fit, not count-derived pixels`, await page.locator('[data-section="working"]').evaluate(el => el.parentElement.style.gridTemplateRows.includes('fit-content(18%)') && !el.style.height && !el.style.maxHeight));
-    if (!count) check('empty Working retains only its 24px header and no scroll-body footprint', await page.locator('[data-section="working"]').evaluate(el => el.querySelector('.sf-section-toggle').getBoundingClientRect().height === 24 && el.querySelector('.sf-section-body').getBoundingClientRect().height === 0));
+    check(`Working with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="working"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - (30 + count * 56)) <= 1, count));
+    check(`Working ${count}: parent track is content-fit, not count-derived pixels`, await page.locator('[data-section="working"]').evaluate(el => /fit-content\(max\(18%, ?min\(\d+px, ?20%\)\)\)/.test(el.parentElement.style.gridTemplateRows) && !el.style.height && !el.style.maxHeight));
+    if (!count) check('empty Working retains only its 30px header and no scroll-body footprint', await page.locator('[data-section="working"]').evaluate(el => el.querySelector('.sf-section-toggle').getBoundingClientRect().height === 30 && el.querySelector('.sf-section-body').getBoundingClientRect().height === 0));
     if (count === 2) {
       // A CSS row-size change must flow through intrinsic layout without new data.
       await page.locator('.harness-sidebar').evaluate(el => { el.style.height = '1800px'; });
       const css = await page.addStyleTag({ content: '[data-section="working"] .sf-row{height:70px}' });
-      check('Working follows actual CSS content height without recalculating JavaScript row geometry', await page.locator('[data-section="working"]').evaluate(el => Math.abs(el.getBoundingClientRect().height - 164) <= 1));
+      check('Working follows actual CSS content height without recalculating JavaScript row geometry', await page.locator('[data-section="working"]').evaluate(el => Math.abs(el.getBoundingClientRect().height - 170) <= 1));
       await css.evaluate(el => el.remove());
     }
   }
@@ -920,7 +994,7 @@ try {
           }),
           headers: [...list.querySelectorAll('.sf-section-toggle')].every(el => {
             const r = el.getBoundingClientRect();
-            return r.height === 24 && r.top >= bounds.top && r.bottom <= bounds.bottom + 1;
+            return r.height === 30 && r.top >= bounds.top && r.bottom <= bounds.bottom + 1;
           }),
           bodies: [...list.querySelectorAll('.sf-section-body')].every(el => {
             const r = el.getBoundingClientRect();

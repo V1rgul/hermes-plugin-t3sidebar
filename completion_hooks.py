@@ -218,9 +218,19 @@ class CompletionObserver:
 							snapshot = None
 					self._receipts[key] = (started, snapshot)
 					self._prune(now)
+					# Still under the end fence: a turn that already ended can never leave a start behind.
+					if snapshot is not None:
+						self._begin_run(snapshot.root, key[1], started_wall)
 		except Exception:
 			log.debug("Completion begin observation unavailable")
 		return None
+
+	def _begin_run(self, root, turn_id, started_wall):
+		# Independent of Done admission: a failed timer write must not discard the receipt.
+		try:
+			self.store.begin_run(root, turn_id, float(started_wall))
+		except Exception:
+			log.debug("Turn start unavailable")
 
 	def on_session_end(self, *, session_id=None, task_id=None, turn_id=None, completed=None,
 					   failed=None, interrupted=None, platform=None, **_ignored):
@@ -237,6 +247,11 @@ class CompletionObserver:
 				# Also fence begins whose timeout worker has not returned yet.
 				self._receipts[key] = (now, None)
 				self._prune(now)
+			# Every outcome ends this exact turn; its start stays for subagent-only Working parents.
+			try:
+				self.store.end_run(key[1])
+			except Exception:
+				log.debug("Turn end unavailable")
 			if (completed is not True or failed is not False or interrupted is not False
 					or (platform and not _human(platform)) or receipt is None):
 				return None

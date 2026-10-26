@@ -56,7 +56,7 @@ class BackendTests(unittest.TestCase):
 		response = self.client.post(f"/api/plugins/hermes-t3sidebar/sessions/{session}", json={"action": action, **kwargs})
 		self.assertEqual(response.status_code, 200, response.text)
 		self.assertEqual(response.headers["cache-control"], "no-store")
-		self.assertEqual(set(response.json()), {"version", "sessions", "completions"})
+		self.assertEqual(set(response.json()), {"version", "sessions", "completions", "runs"})
 		return response.json()["sessions"][session]
 
 	def test_environment_reports_owning_home_not_profile_home_and_checks_profile_assertions(self):
@@ -70,7 +70,7 @@ class BackendTests(unittest.TestCase):
 		self.assertFalse(self.path.exists(), "environment lookup must not create metadata storage")
 
 	def test_empty_and_full_response_shape(self):
-		self.assertEqual(self.state(), {"version": 1, "sessions": {}, "completions": {}})
+		self.assertEqual(self.state(), {"version": 1, "sessions": {}, "completions": {}, "runs": {}})
 		self.assertEqual(self.act("pin"), {
 			"state": "active", "settled_at": None, "wake_at": None,
 			"woke_at": None, "pinned": True, "updated_at": self.now,
@@ -234,7 +234,7 @@ class BackendTests(unittest.TestCase):
 	def test_ack_absent_row_does_not_create_or_sweep(self):
 		response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/absent", json={"action": "ack_wake", "woke_at": self.now})
 		self.assertEqual(response.status_code, 200, response.text)
-		self.assertEqual(response.json(), {"version": 1, "sessions": {}, "completions": {}})
+		self.assertEqual(response.json(), {"version": 1, "sessions": {}, "completions": {}, "runs": {}})
 		self.act("snooze", wake_at=self.now + 1)
 		self.now += 2
 		response = self.client.post("/api/plugins/hermes-t3sidebar/sessions/absent", json={"action": "ack_wake", "woke_at": self.now})
