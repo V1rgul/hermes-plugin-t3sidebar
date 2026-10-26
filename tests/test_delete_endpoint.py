@@ -255,6 +255,66 @@ class DeleteEndpoint(unittest.TestCase):
                 self.assertEqual(self.post().status_code, 403)
         self.owner_forward.assert_not_called()
 
+    def rename(self, sid="target", body=None, query=None):
+        return self.client.post(f"{PREFIX}/sessions/{sid}/title?{query or 'profile=' + self.profile}",
+                                json={"title": "  Renamed   archive "} if body is None else body)
+
+    def title(self, sid="target", home=None):
+        with closing(SessionDB((home or self.home) / "state.db", read_only=True)) as db:
+            row = db.get_session(sid)
+            assert row is not None
+            return row["title"]
+
+    def test_stored_rename_of_archived_history_uses_native_http_and_exact_readback(self):
+        with closing(SessionDB(self.home / "state.db")) as db:
+            db.set_session_archived("target", True, notify=False)
+        response = self.rename()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        # Core's sanitized title is what is stored and reported.
+        self.assertEqual(response.json(), {"ok": True, "profile": self.profile, "session_id": "target", "title": "Renamed archive"})
+        self.assertEqual(self.title("target"), "Renamed archive")
+        with closing(SessionDB(self.home / "state.db", read_only=True)) as db:
+            row = db.get_session("target")
+            assert row is not None
+            self.assertTrue(row["archived"])
+        self.assertIsNone(self.title("target-longer"))
+        self.assertIsNone(self.title("target", self.homes["other-profile"]))
+        # A repeat is a fresh, revision-fenced idempotent write.
+        self.assertEqual(self.rename().status_code, 200)
+        self.assertFalse((self.home / "plugin-data").exists())
+
+    def test_stored_rename_refuses_missing_prefix_invalid_and_unauthorized_requests(self):
+        for sid in ("targ", "missing"):
+            self.assertEqual(self.rename(sid).status_code, 404)
+        for body in ({}, {"title": ""}, {"title": 3}, {"title": "x", "profile": "other-profile"}, {"title": "x", "expected_revision": 0}):
+            with self.subTest(body=body):
+                self.assertEqual(self.rename(body=body).status_code, 422)
+        self.assertEqual(self.rename(query="profile=exact-profile&profile=other-profile").status_code, 422)
+        self.hosted = True
+        response = self.rename()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "native_rename_context_unavailable")
+        self.hosted = None
+        for actor in (Principal("fixture", str(self.homes["other-profile"]), frozenset({"session:control"}), "http"),
+                      Principal("fixture", str(self.home), frozenset({"session:read"}), "http")):
+            with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(None, actor)):
+                self.assertEqual(self.rename().status_code, 403)
+        self.owner_forward.assert_not_called()
+        self.assertIsNone(self.title("target"))
+
+    def test_stored_rename_rejects_invalid_receipt_and_mismatched_readback(self):
+        for receipt in ({"ok": False, "title": "Renamed archive"}, {"ok": True}, {"ok": True, "title": ""}):
+            with self.subTest(receipt=receipt), patch("hermes_cli.web_routers.sessions.rename_session_endpoint", new=AsyncMock(return_value=receipt)):
+                response = self.rename()
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json()["detail"], "native_rename_receipt_invalid")
+        with patch("hermes_cli.web_routers.sessions.rename_session_endpoint", new=AsyncMock(return_value={"ok": True, "title": "Renamed archive"})):
+            response = self.rename()
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.json()["detail"], "native_rename_verification_failed")
+        self.assertIsNone(self.title("target"))
+
 
     def test_authority_backed_deletion_uses_native_owner_not_offline_writer(self):
         from gateway.session_authority import LiveSession, SessionAuthority

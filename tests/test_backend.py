@@ -392,8 +392,8 @@ class BackendTests(unittest.TestCase):
 				imports.update(alias.name for alias in node.names)
 			elif isinstance(node, ast.ImportFrom):
 				imports.add(node.module)
-		self.assertEqual(imports, {"asyncio", "importlib.util", "json", "math", "pathlib", "re", "sqlite3", "sys", "threading", "time", "typing", "types", "fastapi", "pydantic", "hermes_constants", "hermes_state", "hermes_state_mutation_retirement", "agent.voice_turn_route", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.session_notifications", "tui_gateway.ws_legacy_fallback"})
-		# Native reads remain read-only; deletion delegates to the sanctioned HTTP endpoint.
+		self.assertEqual(imports, {"asyncio", "importlib.util", "json", "math", "pathlib", "re", "sqlite3", "sys", "threading", "time", "typing", "types", "uuid", "fastapi", "pydantic", "hermes_constants", "hermes_state", "hermes_state_mutation_retirement", "agent.voice_turn_route", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "hermes_cli.web_models", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.session_notifications", "tui_gateway.ws_legacy_fallback"})
+		# Native reads remain read-only; deletion and stored rename delegate to the sanctioned HTTP endpoints.
 		self.assertNotIn("import tui_gateway.server", source)
 		parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
 		registry_reads = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "server" and node.attr == "_sessions"]
@@ -433,7 +433,7 @@ class BackendTests(unittest.TestCase):
 		self.assertEqual(manifest["name"], "hermes-t3sidebar")
 		self.assertEqual(manifest["api"], "plugin_api.py")
 		self.assertTrue(manifest["tab"]["hidden"])
-		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/environment", "/runtime", "/sessions", "/archives", "/sessions/{session_id}/archive", "/sessions/{session_id}/snapshot", "/sessions/{session_id}/workspace", "/sessions/{session_id}/delete", "/sessions/{session_id}"})
+		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/environment", "/runtime", "/sessions", "/archives", "/sessions/{session_id}/archive", "/sessions/{session_id}/snapshot", "/sessions/{session_id}/workspace", "/sessions/{session_id}/delete", "/sessions/{session_id}/title", "/sessions/{session_id}"})
 
 
 if __name__ == "__main__":

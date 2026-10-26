@@ -499,8 +499,20 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       writing = true; generation++;
       try {
         const route = await routeFor(scope);
-        const live = qualified(await fenced(scope, () => ctx.rest('/runtime')), scope, route);
         const ids = new Set(aliases(row));
+        if (!row.runtimeId) {
+          if (row._liveOnly) throw new Error('This unsaved session has no stored history to rename.');
+          // No live runtime (typically archived or older history): the session.title RPC cannot reach it,
+          // so rename the listed stored row through native authenticated HTTP, as the native sidebar does.
+          await client.cancelQueries({ queryKey: scopeKey(scope) }); check(scope);
+          const saved = await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(row.id)}/title`, { method: 'POST', body: { title } }));
+          if (saved?.ok !== true || saved.profile !== (route?.targetProfile || scope.profile) || saved.session_id !== row.id || typeof saved.title !== 'string' || !saved.title) {
+            throw new Error('The server did not confirm this session title. Refresh and retry.');
+          }
+          updateRows(scope, ids, { title: saved.title });
+          return saved.title;
+        }
+        const live = qualified(await fenced(scope, () => ctx.rest('/runtime')), scope, route);
         const matches = live.sessions.filter(item => ids.has(item.session_key) && typeof item.id === 'string' && item.id !== item.session_key);
         if (matches.length !== 1 || matches[0].id !== row.runtimeId) throw new Error('Rename requires the same live runtime. Open the thread and retry.');
         await client.cancelQueries({ queryKey: scopeKey(scope) }); check(scope);
@@ -1137,7 +1149,7 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
         h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value, 'data-valid': customValid })))
       : h('div', null,
         row.archived !== true ? action(row.meta.pinned ? 'Unpin' : 'Pin', 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
-        h(MenuAction, { name: 'Pencil', disabled: busy || !row.runtimeId, onClick: () => setRenaming(true) }, 'Rename'),
+        h(MenuAction, { name: 'Pencil', disabled: busy || (row._liveOnly && !row.runtimeId), onClick: () => setRenaming(true) }, 'Rename'),
         renaming ? h('form', { onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
           h('span', { className: 'sf-custom-time' },
           h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),

@@ -165,6 +165,17 @@ export const ctx = {
       const sessions = [...new Map([...page, ...organized].map(r => [r.id, r])).values()];
       return { profile: (archives ? control.archivesProfile : control.sessionsProfile) || host.state.profile.get(), sessions: clone(sessions), offset, limit, has_more: history.length > offset + limit };
     }
+    if (path.endsWith('/title') && options?.method === 'POST') {
+      const id = decodeURIComponent(path.slice('/sessions/'.length, -'/title'.length));
+      if (control.storedRenameError) throw new Error('fixture stored rename unavailable');
+      const row = [...control.rows, ...(control.extra || [])].find(item => item.id === id);
+      if (!row) throw new Error('session_not_found');
+      // Core collapses whitespace; the companion reports the stored value.
+      const title = options.body.title.trim().replace(/\s+/g, ' ');
+      if (!control.dropStoredRename) row.title = title;
+      control.afterStoredRename?.();
+      return { ok: true, profile: control.storedRenameProfile || host.state.profile.get(), session_id: control.storedRenameWrongId || id, title };
+    }
     if (path.endsWith('/delete') && options?.method === 'POST') {
       const id = decodeURIComponent(path.slice('/sessions/'.length, -'/delete'.length)), params = options.body;
       if (control.deleteError) throw new Error('fixture delete unavailable');

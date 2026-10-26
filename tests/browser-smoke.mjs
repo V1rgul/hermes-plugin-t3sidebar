@@ -480,7 +480,7 @@ try {
   check('Delete icon and text follow changes to the red theme token', await deleteIsRed(menuDelete));
   await context.locator('.sf-menu').evaluate(el => el.style.removeProperty('--ui-red'));
   await page.mouse.move(1100, 850);
-  check('stored-only Rename is disabled without an inline disclaimer', await context.getByRole('button', { name: 'Rename', exact: true }).isDisabled() && !/live runtime/i.test(await context.innerText()));
+  check('stored-only Rename is enabled without an inline disclaimer', !await context.getByRole('button', { name: 'Rename', exact: true }).isDisabled() && !/live runtime/i.test(await context.innerText()));
   await context.getByRole('button', { name: 'Copy session ID', exact: true }).click();
   check('Copy session ID uses the public clipboard with the durable ID', await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'clipboard' && call[1] === 'design')));
   if (!await context.count()) await design.click({ button: 'right' });

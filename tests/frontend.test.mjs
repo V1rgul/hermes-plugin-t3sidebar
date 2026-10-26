@@ -1353,16 +1353,36 @@ test('Autotitler: rename now reports skipped, foreign and switched-source result
   await assert.rejects(controller.autotitlerRename(flow.captureScope(), item), /Source\/profile changed/);
 });
 
-test('Rename is available only for live runtime and verifies the title with exact lineage readback', async () => {
-  await mount(); await click(button('Actions for Sidebar layout')); assert.equal(button('Rename').disabled, true);
-  // Disabled without an inline disclaimer.
-  assert.doesNotMatch($('[role=dialog]').textContent, /live runtime/); await dismiss();
-  await click(button('Actions for Runtime classification')); assert.equal(button('Rename').disabled, false);
+test('Rename uses the live runtime RPC when present and verifies the title with exact lineage readback', async () => {
+  await mount(); await click(button('Actions for Runtime classification')); assert.equal(button('Rename').disabled, false);
   await click(button('Rename')); await input($('input[aria-label="Session title"]'), 'Renamed runtime'); await click(button('Save rename'));
   assert.equal(row('root').querySelector('.sf-row-title').textContent, 'Renamed runtime');
   const writes = mock.calls.filter(call => call[0] === 'requestProfile' && call[2] === 'session.title');
   assert.deepEqual(writes.map(call => call[3]), [{ session_id: 'runtime-worker', title: 'Renamed runtime' }, { session_id: 'runtime-worker' }]);
   assert.equal(writes[0][1].connectionId, 'source-a');
+  assert.equal(mock.calls.some(call => call[0] === 'rest' && call[1].endsWith('/title')), false);
+});
+
+test('Rename without a live runtime, including archived history, writes the stored row through the companion', async () => {
+  await mount();
+  await click(button('Actions for SDK inventory')); assert.equal(button('Rename').disabled, false);
+  await click(button('Rename')); await input($('input[aria-label="Session title"]'), '  Renamed   archive '); await click(button('Save rename'));
+  assert.equal(row('archived').querySelector('.sf-row-title').textContent, 'Renamed archive');
+  const writes = mock.calls.filter(call => call[0] === 'rest' && call[1].endsWith('/title'));
+  assert.deepEqual(writes.map(call => [call[1], call[2]]), [['/sessions/archived/title', { method: 'POST', body: { title: 'Renamed   archive' } }]]);
+  assert.equal(mock.calls.some(call => call[2] === 'session.title'), false);
+});
+
+test('Stored rename refuses foreign, wrong-profile and switched-source confirmations', async () => {
+  controller = flow.createController(mock.ctx);
+  const item = mock.control.rows.find(row => row.id === 'design');
+  for (const [flag, value] of [['storedRenameWrongId', 'readme'], ['storedRenameProfile', 'other-profile']]) {
+    mock.control[flag] = value;
+    await assert.rejects(controller.rename(flow.captureScope(), item, 'New title'), /did not confirm/);
+    delete mock.control[flag];
+  }
+  mock.control.afterStoredRename = () => mock.switchScope();
+  await assert.rejects(controller.rename(flow.captureScope(), item, 'Other title'), /Source\/profile changed/);
 });
 
 test('Rename refuses dropped, pending, wrong-lineage and switched-source confirmations', async () => {

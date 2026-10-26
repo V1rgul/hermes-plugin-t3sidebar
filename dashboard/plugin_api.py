@@ -13,6 +13,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from typing import Annotated, Callable, Literal
 
 from types import SimpleNamespace
@@ -86,6 +87,13 @@ class SessionDelete(BaseModel):
 	request_id: str = Field(pattern=SESSION_ID_PATTERN, min_length=1, max_length=256)
 	expected_revision: int = Field(ge=0)
 	expected_generation: int = Field(ge=0)
+
+
+class SessionTitle(BaseModel):
+	model_config = ConfigDict(extra="forbid", strict=True)
+
+	# Core enforces its own maximum; this only bounds the request.
+	title: str = Field(min_length=1, max_length=1024)
 
 
 class SessionMetadata(BaseModel):
@@ -859,6 +867,48 @@ def native_workspace(profile, session_id):
 		db.close()
 
 
+def native_control_guard(request, profile, unavailable):
+	"""Require a real native actor with session control over exactly this served home.
+
+	Hosted admission is not an actor; those topologies must use core HTTP itself.
+	"""
+	if getattr(request.state, "hosted_http_authenticated", None) is not None:
+		raise HTTPException(503, unavailable)
+	from hermes_constants import get_hermes_home
+	from hermes_cli.web_server_sessions import _session_mutation_context, _session_db_path_for_profile
+
+	home = get_hermes_home().resolve()
+	# A matching display name is not enough: check core's actual store resolution.
+	if _session_db_path_for_profile(profile).resolve().parent != home:
+		raise HTTPException(403, "profile_mismatch")
+	authority, actor = _session_mutation_context(request, profile)
+	if actor is None:
+		raise HTTPException(503, unavailable)
+	owner = Path(actor.profile_id)
+	if not owner.is_absolute() or owner.resolve() != home:
+		raise HTTPException(403, "profile_mismatch")
+	native = getattr(request.state, "native_http_principal", None)
+	if native is not None and native.get("profile_id") != str(home):
+		raise HTTPException(403, "profile_mismatch")
+	if "session:control" not in actor.capabilities:
+		raise HTTPException(403, "permission_denied")
+	if authority is not None and (authority.profile_id != str(home)
+		or Path(authority.db.db_path).resolve().parent != home):
+		raise HTTPException(403, "profile_mismatch")
+
+
+def native_title(profile, session_id):
+	"""Exact read-only stored title; never resolve titles, prefixes or aliases."""
+	from hermes_cli.web_server_sessions import _open_session_db_for_profile
+
+	db = _open_session_db_for_profile(profile, read_only=True)
+	try:
+		row = db.get_session(session_id)
+		return None if row is None else row.get("title")
+	finally:
+		db.close()
+
+
 def native_delete_snapshot(profile, session_id):
 	"""Exact read-only CAS counters/absence; never resolve titles, prefixes or aliases."""
 	from hermes_cli.web_server_sessions import _open_session_db_for_profile
@@ -880,30 +930,8 @@ async def native_delete(request, profile, session_id, body):
 	busy/lease/worker/lineage guards, owner forwarding and artifact cleanup.
 	Hosted admission is not an actor; those topologies must use core HTTP itself.
 	"""
-	if getattr(request.state, "hosted_http_authenticated", None) is not None:
-		raise HTTPException(503, "native_delete_context_unavailable")
-	from hermes_constants import get_hermes_home
-	from hermes_cli.web_server_sessions import _session_mutation_context, _session_db_path_for_profile
+	native_control_guard(request, profile, "native_delete_context_unavailable")
 	from hermes_cli.web_routers.sessions import delete_session_endpoint
-
-	home = get_hermes_home().resolve()
-	# A matching display name is not enough: check core's actual store resolution.
-	if _session_db_path_for_profile(profile).resolve().parent != home:
-		raise HTTPException(403, "profile_mismatch")
-	authority, actor = _session_mutation_context(request, profile)
-	if actor is None:
-		raise HTTPException(503, "native_delete_context_unavailable")
-	owner = Path(actor.profile_id)
-	if not owner.is_absolute() or owner.resolve() != home:
-		raise HTTPException(403, "profile_mismatch")
-	native = getattr(request.state, "native_http_principal", None)
-	if native is not None and native.get("profile_id") != str(home):
-		raise HTTPException(403, "profile_mismatch")
-	if "session:control" not in actor.capabilities:
-		raise HTTPException(403, "permission_denied")
-	if authority is not None and (authority.profile_id != str(home)
-		or Path(authority.db.db_path).resolve().parent != home):
-		raise HTTPException(403, "profile_mismatch")
 
 	result = await delete_session_endpoint(session_id=session_id, request=request, profile=profile,
 		request_id=body.request_id, expected_revision=body.expected_revision,
@@ -936,6 +964,32 @@ async def native_delete(request, profile, session_id, body):
 	if not absent:
 		value.update(revision=result["revision"], execution_generation=result["execution_generation"])
 	return value
+
+
+async def native_rename(request, profile, session_id, body):
+	"""Rename stored history through core's authenticated HTTP rename, as the native sidebar does.
+
+	The live-runtime RPC cannot reach a session without a runtime (typically archived or old
+	history). A title write is idempotent, so a fresh request fenced on the current revision
+	is safe to retry after an ambiguous failure; core still enforces owner and busy guards.
+	"""
+	native_control_guard(request, profile, "native_rename_context_unavailable")
+	from hermes_cli.web_models import SessionRename
+	from hermes_cli.web_routers.sessions import rename_session_endpoint
+
+	snapshot = await asyncio.to_thread(native_delete_snapshot, profile, session_id)
+	if snapshot["session_id"] != session_id or snapshot["exists"] is not True:
+		raise HTTPException(404, "session_not_found")
+	result = await rename_session_endpoint(session_id=session_id, request=request, body=SessionRename(
+		title=body.title, request_id=f"t3sidebar-rename-{uuid.uuid4().hex}", profile=profile,
+		expected_revision=snapshot["runtime_revision"], expected_generation=snapshot["runtime_generation"]))
+	if not isinstance(result, dict) or result.get("ok") is not True or not isinstance(result.get("title"), str) or not result["title"]:
+		raise HTTPException(503, "native_rename_receipt_invalid")
+	# Core sanitizes titles (whitespace collapse), so verify the stored value against the receipt.
+	title = await asyncio.to_thread(native_title, profile, session_id)
+	if title != result["title"]:
+		raise HTTPException(503, "native_rename_verification_failed")
+	return {"ok": True, "profile": profile, "session_id": session_id, "title": title}
 
 
 def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None) -> APIRouter:
@@ -1046,6 +1100,17 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		except Exception as exc:
 			# Ambiguous failures must retain the original request for exact retry.
 			raise HTTPException(503, "native_delete_unavailable") from exc
+
+	@api.post("/sessions/{session_id}/title")
+	async def rename_session(session_id: SessionId, body: SessionTitle, request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		try:
+			profile = listing_profile(request)
+			return await native_rename(request, profile, session_id, body)
+		except HTTPException:
+			raise
+		except Exception as exc:
+			raise HTTPException(503, "native_rename_unavailable") from exc
 
 	@api.get("/state", response_model=FlowState)
 	def get_state(response: Response):
