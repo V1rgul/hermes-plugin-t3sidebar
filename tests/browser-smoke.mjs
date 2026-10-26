@@ -183,6 +183,12 @@ try {
       return status.left >= tokens.right && Number(getComputedStyle(el.querySelector('.sf-row-title')).fontWeight) >= 600;
     }));
   }
+  check('provider logo and token count share a quieter color, with the denser logo at 0.7 opacity', await page.locator('[data-session-id="design"]').evaluate(el => {
+    const probe = document.createElement('span'); probe.style.color = 'color-mix(in srgb,var(--ui-base,var(--ui-text-primary)) 46%,transparent)'; el.append(probe);
+    const quiet = getComputedStyle(probe).color; probe.remove();
+    const provider = el.querySelector('.sf-provider'), token = el.querySelector('.sf-token');
+    return getComputedStyle(provider).color === quiet && getComputedStyle(token).color === quiet && getComputedStyle(provider).opacity === '0.7' && getComputedStyle(token).opacity === '1';
+  }));
   check('project and age contrast increased without brightening provider/tokens', await page.locator('[data-session-id="design"]').evaluate(el => {
     const project = getComputedStyle(el.querySelector('.sf-project-name')).color, time = getComputedStyle(el.querySelector('.sf-time')).color;
     const provider = getComputedStyle(el.querySelector('.sf-provider')).color, tokens = getComputedStyle(el.querySelector('.sf-token')).color;
@@ -196,8 +202,28 @@ try {
     check(`${id} recedes its title exactly like Working while staying fully opaque`, await titleColor(id) === recededTitle && await card.evaluate(el => getComputedStyle(el).opacity) === '1');
     await card.hover();
     check(`${id} title returns to primary text instantly on hover`, await titleColor(id) === primaryTitle);
+    check(`${id} card backgrounds keep a 2px gap from adjacent cards without changing the 56px stride`, await card.evaluate(el => {
+      const style = getComputedStyle(el), next = el.parentElement.nextElementSibling?.querySelector('.sf-row') || el.nextElementSibling;
+      return el.getBoundingClientRect().height === 56 && style.backgroundClip === 'padding-box' && style.borderTopWidth === '1px' && style.borderBottomWidth === '1px'
+        && style.borderTopColor === 'rgba(0, 0, 0, 0)' && (!next || Math.abs(next.getBoundingClientRect().top - el.getBoundingClientRect().bottom) < .5);
+    }));
+    check(`${id} hover actions sit equally far from the card's top and right edges`, await card.evaluate(el => {
+      // The visible card background starts inside the transparent top border.
+      const card = el.getBoundingClientRect(), hover = el.querySelector('.sf-hover').getBoundingClientRect(), border = parseFloat(getComputedStyle(el).borderTopWidth);
+      return Math.abs((hover.top - card.top - border) - (card.right - hover.right)) < .5;
+    }));
     check(`${id} hover actions appear without an opacity fade`, await card.locator('.sf-hover').evaluate(el => getComputedStyle(el).visibility === 'visible' && getComputedStyle(el).opacity === '1' && !/opacity/.test(getComputedStyle(el).transitionProperty)));
-    await page.mouse.move(1100, 850);
+    // Desktop's SDK Button is `transition-all duration-100` (a Tailwind utility class), which also transitions inherited visibility.
+    const desktopButton = await page.addStyleTag({ content: ':where(.sf-row button){transition:all 100ms}' });
+    await card.hover(); await page.mouse.move(1100, 850);
+    const linger = await card.evaluate(async el => {
+      await new Promise(requestAnimationFrame);
+      const bad = [...el.querySelectorAll('.sf-hover, .sf-hover button')].filter(node => !(getComputedStyle(node).visibility === 'hidden' && getComputedStyle(node).transitionDuration.split(',').every(value => parseFloat(value) === 0)));
+      return bad.length ? bad.map(node => `${node.className}|${getComputedStyle(node).visibility}|${getComputedStyle(node).transitionDuration}|${node.matches(':hover')}`).join(' ; ') : true;
+    });
+    await desktopButton.evaluate(el => el.remove());
+    if (linger !== true) console.log('LINGER', linger);
+    check(`${id} hover actions and their buttons hide in the same frame the pointer leaves`, linger === true);
     check(`${id} recedes again when pointer leaves`, await titleColor(id) === recededTitle);
   }
   const searchField = page.locator('.sf-search');
@@ -284,15 +310,24 @@ try {
   await page.locator('section[aria-label="Snoozed"] [data-session-id="root"]').waitFor();
   await page.mouse.move(1100, 850);
   check('snoozed worker shows remaining time in non-bold theme purple instead of Working or age', await worker.locator('.sf-time').evaluate(el => {
-    const probe = document.createElement('span'); probe.style.color = 'var(--ui-purple)'; el.append(probe);
+    const probe = document.createElement('span'); probe.style.color = 'var(--sf-purple)'; el.append(probe);
     const purple = getComputedStyle(probe).color; probe.remove();
     return el.textContent === '1h' && !el.querySelector('.sf-status') && getComputedStyle(el).color === purple && getComputedStyle(el).fontWeight === '400' && getComputedStyle(el).visibility === 'visible';
+  }));
+  check('snooze purple mixes Desktop purple with the base text color for contrast', await worker.locator('.sf-time').evaluate(el => {
+    const color = value => { const probe = document.createElement('span'); probe.style.color = value; el.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; };
+    return getComputedStyle(el).color === color('oklch(from color-mix(in oklab,var(--ui-purple) 65%,var(--ui-base,var(--ui-text-primary))) l calc(c * 2) h)') && getComputedStyle(el).color !== color('var(--ui-purple)');
   }));
   check('purple alarm-snooze icon is left of the rounded duration, with no left suffix', await worker.locator('.sf-snooze-time').evaluate(el => {
     const icon = el.querySelector('svg'), duration = el.querySelector('.sf-snooze-duration');
     const i = icon.getBoundingClientRect(), d = duration.getBoundingClientRect(), style = getComputedStyle(el);
     return el.firstElementChild === icon && icon.getAttribute('aria-hidden') === 'true' && getComputedStyle(icon).color === style.color && getComputedStyle(icon).stroke === style.color && getComputedStyle(duration).color === style.color && i.width === 13 && i.right < d.left && Math.abs(i.top + i.height / 2 - d.top - d.height / 2) < 1 && /^\d+[mhd]$/.test(duration.textContent);
   }));
+  check('card project glyphs start at the title left edge, while pickers keep their centred icon column', await page.locator('.sf-row').evaluateAll(rows => rows.slice(0, 6).every(row => {
+    const range = document.createRange(); range.selectNodeContents(row.querySelector('.sf-row-title'));
+    const box = row.querySelector('.sf-project-icon'), style = getComputedStyle(box);
+    return Math.abs(box.getBoundingClientRect().left - range.getBoundingClientRect().left) < .5 && style.justifyContent === 'flex-start';
+  })));
   check('session-card project icon/name gap is compact at 4px', await worker.locator('.sf-project').evaluate(el => getComputedStyle(el).columnGap === '4px'));
   check('snooze does not stop or alter the live worker', await page.evaluate(() => window.hermesT3SidebarHarness.control.live.find(item => item.id === 'runtime-worker').status === 'working'));
   await worker.hover(); await worker.getByRole('button', { name: 'Snooze session', exact: true }).click();
@@ -304,7 +339,7 @@ try {
   }));
   check('snoozed menu starts with one disabled purple info row before Unsnooze', await snoozeDialog.locator('form').evaluate(form => {
     const [info, unsnooze] = form.children;
-    const probe = document.createElement('span'); probe.style.color = 'var(--ui-purple)'; form.append(probe);
+    const probe = document.createElement('span'); probe.style.color = 'var(--sf-purple)'; form.append(probe);
     const purple = getComputedStyle(probe).color; probe.remove();
     return info.disabled && /^\d+d \d+h \d+min left$/.test(info.querySelector('.sf-snooze-remaining').textContent) && unsnooze.textContent === 'Unsnooze' && getComputedStyle(info).color === purple && getComputedStyle(info).opacity === '1';
   }));
@@ -624,7 +659,7 @@ try {
   });
   await design.locator('.sf-status[data-status="woke"]').waitFor();
   check('durable wake marker shows purple Woke with icon and bold title', await design.evaluate(el => {
-    const badge = el.querySelector('.sf-status'), probe = document.createElement('span'); probe.style.color = 'var(--ui-purple)'; badge.append(probe);
+    const badge = el.querySelector('.sf-status'), probe = document.createElement('span'); probe.style.color = 'var(--sf-purple)'; badge.append(probe);
     const expected = getComputedStyle(probe).color; probe.remove();
     return badge.textContent === 'Woke' && badge.querySelector('svg') !== null && getComputedStyle(badge).color === expected && Number(getComputedStyle(el.querySelector('.sf-row-title')).fontWeight) >= 600;
   }));
@@ -959,7 +994,7 @@ try {
     }, count);
     await page.waitForFunction(count => document.querySelector('[data-section="working"]')?.querySelectorAll('.sf-row').length === count, count);
     check(`Working with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="working"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - (30 + count * 56)) <= 1, count));
-    check(`Working ${count}: parent track is content-fit, not count-derived pixels`, await page.locator('[data-section="working"]').evaluate(el => /fit-content\(max\(18%, ?min\(\d+px, ?20%\)\)\)/.test(el.parentElement.style.gridTemplateRows) && !el.style.height && !el.style.maxHeight));
+    check(`Working ${count}: parent track is content-fit, not count-derived pixels`, await page.locator('[data-section="working"]').evaluate(el => /fit-content\(max\(18%, ?min\(calc\(30px \+ \d \* var\(--sf-card-stride\)\), ?20%\)\)\)/.test(el.parentElement.style.gridTemplateRows) && !el.style.height && !el.style.maxHeight));
     if (!count) check('empty Working retains only its 30px header and no scroll-body footprint', await page.locator('[data-section="working"]').evaluate(el => el.querySelector('.sf-section-toggle').getBoundingClientRect().height === 30 && el.querySelector('.sf-section-body').getBoundingClientRect().height === 0));
     if (count === 2) {
       // A CSS row-size change must flow through intrinsic layout without new data.
@@ -1142,6 +1177,31 @@ try {
     }
   }
   await contentBox.evaluate(el => el.remove());
+  {
+    // Card geometry is themeable: a different content/padding/margin must drive heights, gaps, windowing and shelf minimums alike.
+    const geometry = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+    geometry.on('pageerror', error => errors.push(error));
+    // Shelf tracks animate when the fixture changes card counts; measure final layout, like the main page.
+    await geometry.emulateMedia({ reducedMotion: 'reduce' });
+    await geometry.addInitScript(() => document.addEventListener('DOMContentLoaded', () => {
+      const style = document.createElement('style'); style.textContent = ':root{--sf-card-content:44px;--sf-card-padding:7px;--sf-card-margin:2px}'; document.head.append(style);
+    }));
+    await geometry.goto(`http://127.0.0.1:${server.address().port}`);
+    await geometry.waitForSelector('.sf-row');
+    await geometry.evaluate(() => window.hermesT3SidebarHarness.loadDenseFixtures());
+    await geometry.locator('[data-session-id="synthetic-active-000"]').waitFor();
+    await geometry.waitForFunction(() => document.querySelector('[data-session-id="synthetic-working-000"]')?.dataset.working === 'true');
+    const layout = await geometry.evaluate(() => {
+      const row = document.querySelector('[data-session-id="synthetic-active-001"]'), style = getComputedStyle(row), open = getComputedStyle(row.querySelector('.sf-open'));
+      const ready = document.querySelector('[data-section="active"] .sf-window'), shelves = document.querySelector('.sf-shelves').getBoundingClientRect().height;
+      const top = id => document.querySelector(`[data-session-id="${id}"]`).parentElement.getBoundingClientRect().top;
+      return { height: row.getBoundingClientRect().height, margin: style.borderTopWidth, padding: open.paddingTop, spacer: ready.getBoundingClientRect().height,
+        step: top('synthetic-active-001') - top('synthetic-active-000'), working: document.querySelector('[data-section="working"]').getBoundingClientRect().height, shelves };
+    });
+    check('custom card content, padding and margin drive the row height, gap and windowed stride', layout.height === 62 && layout.margin === '2px' && layout.padding === '7px' && layout.step === 62 && layout.spacer === 100 * 62);
+    check('custom card geometry drives the two-card shelf minimum', Math.abs(layout.working - Math.max(layout.shelves * .18, Math.min(30 + 2 * 62, layout.shelves * .2))) <= 1);
+    await geometry.close();
+  }
   check('no browser page errors', errors.length === 0);
   console.log(`Browser smoke: ${checks.length} checks passed; screenshots ${screenshotDir}/{frontend,hovered,actions,dense-400,dense-650,short-300-error}.png`);
 } finally { await browser?.close(); server.close(); }

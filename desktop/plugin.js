@@ -737,6 +737,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
 }
 
 const CSS = `
+/* Desktop's --ui-purple (#9e94d5 in both modes) is 2.7:1 on light backgrounds. Mixing in the base text darkens it in light mode and lightens it in dark mode; doubling OKLCH chroma restores the saturation the mix removes. */
+.sf,.sf-menu{--sf-purple:color-mix(in srgb,var(--ui-purple,#9e94d5) 70%,var(--ui-base,var(--ui-text-primary)));--sf-purple:oklch(from color-mix(in oklab,var(--ui-purple,#9e94d5) 65%,var(--ui-base,var(--ui-text-primary))) l calc(c * 2) h)}
+/* Card geometry: --sf-card-content (two text lines), --sf-card-padding and --sf-card-margin (vertical, per side). Defaults are fallbacks rather than declarations, so :root, a theme or any ancestor can set them; the stride used by windowing and shelf minimums derives from them. */
+.sf{--sf-card-stride:calc(var(--sf-card-content,42px) + 2 * var(--sf-card-padding,6px) + 2 * var(--sf-card-margin,1px))}
 .sf{display:flex;flex-direction:column;height:100%;min-height:0;min-width:220px;font:12px/1.4 var(--font-sans,inherit);color:var(--ui-text-primary)}
 .sf *{box-sizing:border-box}.sf button,.sf input,.sf select{font:inherit}.sf button{cursor:pointer}.sf button:disabled{cursor:default;opacity:.4}
 .sf button:focus-visible,.sf input:focus-visible,.sf select:focus-visible{outline:2px solid var(--ui-accent);outline-offset:-2px}
@@ -755,22 +759,26 @@ const CSS = `
 .sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--ui-text-primary) 28%,transparent) transparent}
 /* Fade the bottom edge only while more content lies below, so lists never run hard into the next heading. */
 .sf-section-body[data-more-below=true]{mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:30px;min-height:30px;padding:9px 6px 3px;border:0;background:transparent;color:var(--ui-text-secondary);font-size:11px;text-align:left}.sf-section-label{font-weight:500;color:var(--ui-accent)}.sf-count{color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}.sf-section-label,.sf-count,.sf-section-chevron{flex-shrink:0}.sf-section-line{flex:1;min-width:0;height:1px;background:var(--ui-stroke-secondary)}.sf-section-chevron{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px}
-.sf-row{position:relative;height:56px;flex-shrink:0;padding:0 10px;border-radius:5px}.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
+/* The margin is a transparent border clipping each card's background: adjacent hovered/selected/draft cards stay visually separate while the stride stays exact. */
+.sf-row{position:relative;height:var(--sf-card-stride);flex-shrink:0;padding:0 10px;border-block:var(--sf-card-margin,1px) solid transparent;border-radius:6px}.sf .sf-row{background-clip:padding-box!important}/* the hover/selected/draft background shorthands would reset it */.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
 .sf-row[data-has-draft=true][data-current=false]{background:color-mix(in srgb,var(--ui-orange,#db704b) 10%,transparent)}
 .sf-row[data-has-draft=true][data-current=false]:hover,.sf-row[data-has-draft=true][data-current=false]:focus-within{background:color-mix(in srgb,var(--ui-orange,#db704b) 14%,transparent)}
 /* Recede only the neutral title so status labels, colored icons and metadata stay readable. */
 .sf-row[data-dimmed=true]:not([data-unread=true]) .sf-row-title{color:var(--ui-text-secondary)}.sf-row[data-dimmed=true]:hover .sf-row-title,.sf-row[data-dimmed=true]:focus-within .sf-row-title,.sf-row[data-dimmed=true][data-menu-open=true] .sf-row-title{color:var(--ui-text-primary)}
 /* Native semantic blue is independent of the user's configurable accent. */
 .sf-row[data-working=true] .sf-time{color:var(--ui-blue,#0053fd)}
-.sf-open{display:flex;flex-direction:column;justify-content:center;gap:3px;width:100%;height:100%;min-width:0;padding:5px 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-time{display:inline-flex;align-items:center}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}.sf-hover{position:absolute;right:8px;top:3px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
+.sf-open{display:flex;flex-direction:column;justify-content:center;gap:3px;width:100%;height:100%;min-width:0;padding:var(--sf-card-padding,6px) 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}/* Quieter than the other metadata. The filled provider logo covers about 2.3x more of its box than digits do, so at equal colour it reads heavier; 0.7 opacity (about the square root of that ratio) evens them out. */
+.sf-row .sf-token,.sf-row .sf-provider{color:color-mix(in srgb,var(--ui-base,var(--ui-text-primary)) 46%,transparent)}.sf-row .sf-provider{opacity:.7}
+.sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-time{display:inline-flex;align-items:center}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}/* Equal top and right insets; 4px also centres the 25px strip on the 19px metadata line. */
+.sf-hover{position:absolute;right:4px;top:4px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}/* The SDK Button's transition-all would keep hidden actions visible for its 100ms: swap instantly. */.sf-hover .sf-icon{transition:none}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
 .sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
 .sf-row[data-menu-open=true] .sf-hover{visibility:visible}.sf-row[data-menu-open=true] .sf-provider,.sf-row[data-menu-open=true] .sf-token,.sf-row[data-menu-open=true] .sf-time{visibility:hidden}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
 .sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
-.sf-row .sf-project{gap:4px}/* Outranks the Working time color: a snoozed card can still be running. */
-.sf-row .sf-time.sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--ui-purple,#9e94d5);font-weight:400}.sf-snooze-time svg{width:13px;height:13px;flex-shrink:0}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
-.sf-menu button.sf-snooze-info:disabled{display:flex;gap:12px;width:100%;white-space:nowrap;color:var(--ui-purple,#9e94d5);opacity:1;font-weight:400;cursor:default}.sf-snooze-remaining{margin-left:auto;text-align:right}.sf-menu .sf-custom-snooze{padding:0 8px}.sf-menu .sf-custom-snooze,.sf-menu .sf-snooze-info,.sf-menu .sf-snooze-action{padding-left:8px;padding-right:8px}
+.sf-row .sf-project{gap:4px}/* Start the glyph at the title's left edge; Codicons also carry a 1/16em side bearing. */.sf-row .sf-project-icon{width:auto;min-width:13px;justify-content:flex-start}.sf-row .sf-project-icon>.codicon{margin-left:calc(-1em / 16)}/* Outranks the Working time color: a snoozed card can still be running. */
+.sf-row .sf-time.sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--sf-purple);font-weight:400}.sf-snooze-time svg{width:13px;height:13px;flex-shrink:0}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
+.sf-menu button.sf-snooze-info:disabled{display:flex;gap:12px;width:100%;white-space:nowrap;color:var(--sf-purple);opacity:1;font-weight:400;cursor:default}.sf-snooze-remaining{margin-left:auto;text-align:right}.sf-menu .sf-custom-snooze{padding:0 8px}.sf-menu .sf-custom-snooze,.sf-menu .sf-snooze-info,.sf-menu .sf-snooze-action{padding-left:8px;padding-right:8px}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}.sf-project-choice[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-project-picker .sf-project-choice[aria-pressed=true]{background:color-mix(in srgb,var(--ui-text-primary) 10%,transparent);color:var(--ui-text-primary)}
 .sf-project-picker{box-sizing:border-box;width:min(440px,calc(100vw - 18px));min-width:0;max-width:none;max-height:min(720px,calc(100dvh - 24px),calc(var(--radix-popover-content-available-height,100dvh) - 2px));overflow:hidden}.sf-project-picker>strong,.sf-project-picker>input{flex-shrink:0}.sf-project-picker>input{box-sizing:border-box;min-width:0}.sf-menu.sf-project-picker>.sf-project-options{gap:0;overflow-y:auto;overscroll-behavior:contain;min-height:0}.sf-project-picker .sf-project-choice{box-sizing:border-box;flex-shrink:0;width:100%;height:24px;min-height:24px;padding:4px 8px;font-size:12px;line-height:16px;gap:8px;border:0}.sf-project-picker .sf-project-icon{width:14px;height:14px}.sf-project-details{display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left}.sf-project-details>.sf-project-name,.sf-project-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.sf-project-details>.sf-project-name{max-width:55%}.sf-project-path{flex:1;margin-left:auto;text-align:right;font-size:11px;font-weight:400;line-height:16px;color:var(--ui-text-tertiary)}
 .sf-project-group{display:flex;flex-direction:column;gap:0;flex-shrink:0}.sf-project-picker .sf-project-folder{padding-left:30px}.sf-project-folder .sf-project-path{text-align:left;margin-left:0}.sf-project-heading .sf-project-name{max-width:100%}.sf-project-heading[aria-disabled=true]{opacity:1;cursor:default}
@@ -782,7 +790,7 @@ const CSS = `
 .sf-project-icon-categories{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px}.sf-project-submenu .sf-project-icon-category{margin:0}.sf-project-submenu .sf-project-icon-category legend{font-size:10px;margin-bottom:4px}.sf-project-icons{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:2px}.sf-project-icons button{display:flex;align-items:center;justify-content:center;height:25px;min-width:0;padding:3px;border:0;border-radius:4px;background:transparent;color:var(--sf-project-color)}.sf-project-icons button:hover,.sf-project-icons button[aria-pressed=true]{background:var(--ui-control-hover-background);color:var(--sf-project-color)}.sf-submenu-arrow{display:inline-flex;margin-left:auto}
 @media(max-width:520px){.sf-project-icon-categories{grid-template-columns:minmax(0,1fr)}}
 .sf-status{font-weight:600}
-.sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--ui-purple,#9e94d5)}.sf-status[data-status=input]{color:var(--ui-orange,#db704b)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.sf-working-duration{font-variant-numeric:tabular-nums}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
+.sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--sf-purple)}.sf-status[data-status=input]{color:var(--ui-orange,#db704b)}.sf-status[data-status=working]{color:var(--ui-blue,#0053fd)}.sf-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.sf-working-duration{font-variant-numeric:tabular-nums}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
 /* Folding moves only the section edge: pinned lists keep their size and slide under a fade at that edge instead of resizing (and toggling scrollbars) every frame. */
 .sf-section[data-pinned=true]>.sf-section-body{height:var(--sf-pin);flex:none}
 .sf-section[data-pinned=true]{mask:linear-gradient(#000,#000) top/100% 30px no-repeat,linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
@@ -1173,8 +1181,19 @@ function pinShelfBodies(shelves, run, current) {
   // Cancelled transitions (a reversal) reject; the newer run owns the pins then.
   void Promise.all(transitions.map(animation => animation.finished.catch(() => {}))).then(() => { if (current() === run) release(); });
 }
+// Resolved card stride in pixels, from the CSS geometry variables; 56px when they are unavailable (non-CSS environments).
+const DEFAULT_CARD_STRIDE = 56;
+export function cardStride(element) {
+  try {
+    const style = getComputedStyle(element), value = (name, fallback) => { const parsed = parseFloat(style.getPropertyValue(name)); return Number.isFinite(parsed) ? parsed : fallback; };
+    const stride = value('--sf-card-content', 42) + 2 * value('--sf-card-padding', 6) + 2 * value('--sf-card-margin', 1);
+    return Number.isFinite(stride) && stride > 0 ? stride : DEFAULT_CARD_STRIDE;
+  } catch (_) { return DEFAULT_CARD_STRIDE; }
+}
 function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
   const body = useRef(null), pending = useRef(null), viewportHeight = useRef(null), scrollHeight = useRef(0);
+  const [stride, setStride] = useState(DEFAULT_CARD_STRIDE), strideRef = useRef(DEFAULT_CARD_STRIDE);
+  useLayoutEffect(() => { const next = cardStride(body.current); strideRef.current = next; setStride(next); }, []);
   const [viewport, setViewport] = useState({ top: 0, height: 560 });
   const [retained, setRetained] = useState(() => new Set()), [focusedKey, setFocusedKey] = useState(null);
   const windowed = entries.length > 80;
@@ -1186,7 +1205,7 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
     const element = body.current?.parentElement;
     if (!element) return;
     // Observer-backed clients need no height measurement on the scroll path.
-    const top = Math.floor(element.scrollTop / 56), height = viewportHeight.current ?? element.clientHeight;
+    const top = Math.floor(element.scrollTop / strideRef.current), height = viewportHeight.current ?? element.clientHeight;
     setViewport(previous => previous.top === top && (!height || previous.height === height) ? previous : { top, height: height || previous.height });
     // Cached scroll height: set directly on the scroller, so the fade never re-renders cards.
     const more = height > 0 && element.scrollTop + height < scrollHeight.current - 1;
@@ -1214,8 +1233,9 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
       if (index < 0 || !element) return;
       pending.current = key;
       const top = element.scrollTop, height = viewportHeight.current ?? element.clientHeight;
-      if (index * 56 < top) element.scrollTop = index * 56;
-      else if ((index + 1) * 56 > top + height) element.scrollTop = (index + 1) * 56 - height;
+      const size = strideRef.current;
+      if (index * size < top) element.scrollTop = index * size;
+      else if ((index + 1) * size > top + height) element.scrollTop = (index + 1) * size - height;
       setFocusedKey(key); update();
     };
     navigators.current.set(section, reveal);
@@ -1227,7 +1247,7 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
     if (element) { pending.current = null; element.focus({ preventScroll: true }); }
   });
   const start = Math.max(0, Math.min(viewport.top - 3, entries.length - 1));
-  const end = Math.min(entries.length, viewport.top + Math.ceil(viewport.height / 56) + 3);
+  const end = Math.min(entries.length, viewport.top + Math.ceil(viewport.height / stride) + 3);
   const positions = useMemo(() => new Map(entries.map((row, index) => [row.key, index])), [entries]);
   const indexes = windowed ? [...new Set([
     ...Array.from({ length: Math.max(0, end - start) }, (_, offset) => start + offset),
@@ -1236,8 +1256,8 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
   return h('div', { ref: body, className: 'sf-window', onScroll: update,
     onFocusCapture: event => { const row = event.target.closest('[data-session-id]'); if (row) setFocusedKey(row.dataset.sessionId); },
     onBlurCapture: event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusedKey(null); },
-    style: { position: 'relative', height: windowed ? entries.length * 56 : undefined } },
-    ...indexes.map(index => h('div', { key: entries[index].key, style: windowed ? { position: 'absolute', top: index * 56, left: 0, right: 0 } : undefined }, renderRow(entries[index], retain))));
+    style: { position: 'relative', height: windowed ? entries.length * stride : undefined } },
+    ...indexes.map(index => h('div', { key: entries[index].key, style: windowed ? { position: 'absolute', top: index * stride, left: 0, right: 0 } : undefined }, renderRow(entries[index], retain))));
 }
 export function HermesT3Sidebar({ ctx, controller }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
@@ -1396,7 +1416,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
   // Working and Snoozed show up to two whole cards before Archived takes the space, never reserving room they cannot fill;
   // Capping at 20% of the shelves keeps every heading visible and Archived dominant in short panes.
-  const cardsMinimum = count => `min(${30 + Math.min(count, 2) * 56}px,20%)`;
+  const cardsMinimum = count => `min(calc(30px + ${Math.min(count, 2)} * var(--sf-card-stride)),20%)`;
   const sectionTrack = section => {
     const count = sections[section].length;
     // CSS owns Working's content fit and body-track fold animation; the parent only bounds it.
