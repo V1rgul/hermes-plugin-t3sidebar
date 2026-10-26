@@ -46,10 +46,15 @@ test('archived history is viewable without unarchiving and carries no Done, snoo
 
 test('active archived runtimes immediately leave Archived even before persisted activity restoration refreshes', () => {
 	for (const status of ['working', 'starting', 'waiting']) {
-		const sections = buildSections([{ id: 'root', archived: true }], { sessions: { root: { state: 'snoozed', wake_at: 9999, pinned: true } } }, [{ session_key: 'root', status }], { now: 100 });
+		// "starting" is work only with an in-flight turn (a prompt sent while the agent builds).
+		const sections = buildSections([{ id: 'root', archived: true }], { sessions: { root: { state: 'snoozed', wake_at: 9999, pinned: true } } }, [{ session_key: 'root', status, turn_started_at: status === 'starting' ? 90 : undefined }], { now: 100 });
 		assert.equal(sections.archived.length, 0);
 		assert.equal(sections[status === 'waiting' ? 'active' : 'working'][0].key, 'root');
 	}
+	// Opening an archived session only rebuilds its agent: it stays Archived, and not idle, so it is not unarchived or deleted mid-build.
+	const opened = buildSections([{ id: 'root', archived: true }], { sessions: {} }, [{ session_key: 'root', status: 'starting' }], { now: 100 });
+	assert.equal(opened.archived[0]?.key, 'root');
+	assert.equal(opened.archived[0].status, 'starting');
 });
 
 test('archived metadata guard prevents pin/snooze writes including stale menu clicks', async () => {

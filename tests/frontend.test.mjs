@@ -59,12 +59,15 @@ test('waiting outranks native archives, pin, legacy completion, snoozed and work
 });
 
 test('working and starting dim shelf; idle pins; snooze wake; native archives by activity', () => {
-  const rows = ['work', 'start', 'pin', 'due', 'later', 's1', 's2'].map(id => ({ id, archived: id.startsWith('s') && id !== 'start', last_active: id === 's2' ? 40 : id === 's1' ? 30 : 0 }));
+  const rows = ['work', 'start', 'pin', 'due', 'later', 's1', 's2', 'opened'].map(id => ({ id, archived: id.startsWith('s') && id !== 'start', last_active: id === 's2' ? 40 : id === 's1' ? 30 : 0 }));
   const result = flow.buildSections(rows, { sessions: {
     pin: { state: 'active', pinned: true }, due: { state: 'snoozed', wake_at: 100 }, later: { state: 'snoozed', wake_at: 101 },
     s1: { state: 'settled', settled_at: 30 }, s2: { state: 'settled', settled_at: 40 }
-  } }, [{ session_key: 'work', status: 'working' }, { session_key: 'start', status: 'starting' }], { now: 100 });
+  } }, [{ session_key: 'work', status: 'working' }, { session_key: 'start', status: 'starting', turn_started_at: 50 }, { session_key: 'opened', status: 'starting' }], { now: 100 });
   assert.deepEqual(result.working.map(r => r.id), ['start', 'work']); assert.equal(result.pinned[0].id, 'pin');
+  // Opening an old session rebuilds its agent without a turn: it stays Ready, without a Working badge, and is not idle.
+  const opened = result.active.find(r => r.id === 'opened');
+  assert.equal(opened?.status, 'starting'); assert.equal(flow.cardStatus(opened, false), null);
   assert.equal(result.active[0].id, 'due'); assert.equal(result.active[0].woke, true); assert.equal(result.snoozed[0].id, 'later');
   assert.deepEqual(result.archived.map(r => r.id), ['s2', 's1']);
 });
@@ -78,9 +81,11 @@ test('pins outrank working and starting, including running children, but not sno
       const sections = flow.buildSections(rows, metadata, live, { now: 100 });
       const card = sections[expected][0];
       assert.equal(card?.key, 'root', `${status}/${running_subagents}/${state}/${wake_at}`);
-      assert.equal(card.status, status !== 'idle' || running_subagents ? 'working' : 'idle');
+      // A bare "starting" (agent rebuild on open, no turn) is neither Working nor idle.
+      const busy = status === 'working' || running_subagents > 0;
+      assert.equal(card.status, busy ? 'working' : status);
       assert.equal(Object.values(sections).flat().length, 1);
-      assert.equal(flow.buildSections([{ ...rows[0], archived: true }], metadata, live, { now: 100 })[status !== 'idle' || running_subagents ? 'working' : 'archived'][0]?.key, 'root');
+      assert.equal(flow.buildSections([{ ...rows[0], archived: true }], metadata, live, { now: 100 })[busy ? 'working' : 'archived'][0]?.key, 'root');
       assert.equal(flow.buildSections(rows, metadata, [{ ...live[0], status: 'waiting' }], { now: 100 }).active[0]?.status, 'waiting');
       assert.equal(flow.buildSections(rows, metadata, live, { now: 100, runtimeKnown: false }).active[0]?.status, 'unknown');
     }
@@ -452,6 +457,8 @@ test('snooze countdown rounds to one whole unit with no left suffix or past dura
 for (const status of ['working', 'starting', 'running children', 'waiting', 'unknown']) test(`snooze and Unsnooze allow ${status} without native execution changes; Archive remains guarded`, async () => {
   const worker = mock.control.live.find(item => item.id === 'runtime-worker');
   worker.status = status === 'running children' ? 'idle' : status === 'unknown' ? 'working' : status;
+  // A prompt sent while the agent builds: "starting" with its in-flight turn.
+  if (status === 'starting') worker.turn_started_at = Date.now() / 1000 - 30;
   if (status === 'running children') worker.running_subagents = 1;
   if (status === 'unknown') mock.control.runtimeError = true;
   const before = structuredClone(mock.control.live);
@@ -473,7 +480,7 @@ for (const status of ['working', 'starting', 'running children', 'waiting', 'unk
     assert.equal(countdown.lastElementChild.className, 'sf-snooze-duration');
     assert.equal(Boolean(countdown.querySelector('.sf-status')), false, 'the countdown replaces the age, never carries a badge');
     // Still running on the Snoozed shelf: Working stays visible beside the countdown.
-    assert.equal(row('root').querySelector('.sf-snooze-working [data-status=working]')?.textContent, 'Working');
+    assert.match(row('root').querySelector('.sf-snooze-working [data-status=working]')?.textContent ?? '', /^Working(\d+[smh].*)?$/);
   } else {
     assert.equal(row('root').closest('section'), shelf('Ready'), 'input/unknown safety remains visible');
     assert.equal(row('root').querySelector('.sf-snooze-time'), null);
@@ -869,13 +876,15 @@ test('missing project/provider/tokens remain neutral even when model resembles a
 test('provider icons stay absent until a supported concrete provider arrives and clear when it is lost', async () => {
   mock.control.rows[1].provider = null;
   await mount();
-  for (const provider of [null, '', 'auto', 'unknown', 'unsupported-provider', 'constructor', '__proto__', 'openai-codex', 'anthropic', 'gemini', null]) {
+  // Bundled marks cover Hermes provider ids and registry aliases; providers without a published mark (Ramp Router) show none.
+  const supported = ['openai-codex', 'anthropic', 'gemini', 'openai-api', 'vertex', 'nous', 'deepseek', 'fw', 'solar', 'openrouter', 'xai-oauth', 'dashscope-cn', 'muse'];
+  for (const provider of [null, '', 'auto', 'unknown', 'unsupported-provider', 'constructor', '__proto__', 'hasOwnProperty', 'router', ...supported, null]) {
     mock.control.rows[1].provider = provider;
     await refresh();
     const mark = row('design').querySelector('.sf-provider');
-    if (['openai-codex', 'anthropic', 'gemini'].includes(provider)) {
+    if (supported.includes(provider)) {
       assert.equal(mark.getAttribute('aria-label'), `Provider: ${provider}`);
-      assert.ok(mark.querySelector(`[data-provider-mark="${provider}"]`));
+      assert.ok(mark.querySelector(`[data-provider-mark="${provider}"] path`));
     } else assert.equal(mark === null, true, `no placeholder or spacer for ${provider}`);
     assert.equal(row('design').querySelector('.sf-token').textContent, '2K');
   }
@@ -1667,11 +1676,11 @@ test('alarm icons mark snooze controls and snoozed cards; Working shows the back
   }
 });
 
-test('Working sorts by elapsed time, longest first, not by activity; unknown starts follow by activity', () => {
+test('Working sorts by elapsed time, shortest first, not by activity; unknown starts use their activity', () => {
   const rows = [{ id: 'recent', last_active: 90 }, { id: 'long', last_active: 10 }, { id: 'mid', last_active: 50 }, { id: 'unknown-old', last_active: 5 }, { id: 'unknown-new', last_active: 95 }];
   const live = [{ session_key: 'recent', status: 'working', turn_started_at: 80 }, { session_key: 'long', status: 'working', turn_started_at: 20 },
     { session_key: 'mid', status: 'working', turn_started_at: 40 }, { session_key: 'unknown-old', status: 'working' }, { session_key: 'unknown-new', status: 'working' }];
-  assert.deepEqual(flow.buildSections(rows, { sessions: {} }, live, { now: 100 }).working.map(row => row.id), ['long', 'mid', 'recent', 'unknown-new', 'unknown-old']);
+  assert.deepEqual(flow.buildSections(rows, { sessions: {} }, live, { now: 100 }).working.map(row => row.id), ['unknown-new', 'recent', 'mid', 'long', 'unknown-old']);
 });
 test('Working time prefers the native in-flight turn, keeps a subagent parent on its last turn and never shows a finished turn as current', () => {
   const run = { started_at: 100, ended_at: 160 }, open = { started_at: 200, ended_at: null };

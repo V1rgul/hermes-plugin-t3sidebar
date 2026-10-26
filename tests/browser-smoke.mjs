@@ -188,7 +188,7 @@ try {
     }));
   }
   check('provider logo and token count share a quieter color, with the denser logo at 0.7 opacity', await page.locator('[data-session-id="design"]').evaluate(el => {
-    const probe = document.createElement('span'); probe.style.color = 'color-mix(in srgb,var(--ui-base,var(--ui-text-primary)) 46%,transparent)'; el.append(probe);
+    const probe = document.createElement('span'); probe.style.color = 'color-mix(in srgb,var(--ui-base,var(--ui-text-primary)) 30%,transparent)'; el.append(probe);
     const quiet = getComputedStyle(probe).color; probe.remove();
     const provider = el.querySelector('.sf-provider'), token = el.querySelector('.sf-token');
     return getComputedStyle(provider).color === quiet && getComputedStyle(token).color === quiet && getComputedStyle(provider).opacity === '0.7' && getComputedStyle(token).opacity === '1';

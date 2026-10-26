@@ -17,8 +17,8 @@ function reference(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown
 		const ids = new Set(aliases(row));
 		const matches = live.filter(item => ids.has(item.session_key) || ids.has(item.id));
 		const status = !runtimeKnown ? 'unknown' : matches.some(i => i.status === 'waiting') ? 'waiting'
-			: matches.some(i => i.status === 'working' || i.status === 'starting' || Number.isInteger(i.running_subagents) && i.running_subagents > 0 || i.awaiting_processes === true) ? 'working'
-			: matches.some(i => !['idle', 'working', 'starting', 'waiting'].includes(i.status)) ? 'unknown' : 'idle';
+			: matches.some(i => i.status === 'working' || i.status === 'starting' && i.turn_started_at > 0 || Number.isInteger(i.running_subagents) && i.running_subagents > 0 || i.awaiting_processes === true) ? 'working'
+			: matches.some(i => !['idle', 'working', 'starting', 'waiting'].includes(i.status)) ? 'unknown' : matches.some(i => i.status === 'starting') ? 'starting' : 'idle';
 		const woke = Number.isFinite(meta.woke_at) && meta.woke_at > 0 || meta.state === 'snoozed' && meta.wake_at <= now;
 		const section = status === 'waiting' ? 'active' : row.archived === true ? status === 'working' ? 'working' : 'archived' : status === 'unknown' ? 'active'
 			: meta.state === 'snoozed' && !woke ? 'snoozed' : meta.pinned ? 'pinned' : status === 'working' ? 'working' : 'active';
@@ -31,7 +31,8 @@ function reference(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown
 	}
 	for (const section of SECTIONS) result[section].sort((a, b) => {
 		if (section === 'active' && (a.status === 'waiting') !== (b.status === 'waiting')) return a.status === 'waiting' ? -1 : 1;
-		const delta = section === 'snoozed' ? a.meta.wake_at - b.meta.wake_at : b.activity - a.activity;
+		const delta = section === 'snoozed' ? a.meta.wake_at - b.meta.wake_at
+			: section === 'working' ? (b.runStartedAt ?? b.activity) - (a.runStartedAt ?? a.activity) : b.activity - a.activity;
 		return delta || a.key.localeCompare(b.key);
 	});
 	return result;
@@ -51,7 +52,7 @@ test('indexed classification retains runtime order, duplicates, aliases, empty e
 	const random = max => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % max; };
 	for (let run = 0; run < 100; run++) {
 		const rows = Array.from({ length: 25 }, (_, i) => ({ id: `s${i}`, _lineage_root_id: random(3) ? undefined : `root${i}`, _lineage_ids: [`alias${i}`, `alias${random(25)}`], archived: !random(4), source: random(9) ? 'desktop' : 'cron', title: random(2) ? `Title ${i}` : '', preview: random(5) ? '' : 'real history', message_count: random(4), last_active: random(1000), cwd: random(3) ? '/a' : '/b' }));
-		const live = Array.from({ length: 40 }, (_, i) => ({ id: random(4) ? `runtime${random(20)}` : `s${random(25)}`, session_key: `${random(2) ? 'alias' : 's'}${random(25)}`, status: ['idle', 'working', 'starting', 'waiting', 'unknown'][random(5)], running_subagents: [null, 0, 1, 2][random(4)], message_count: random(3) }));
+		const live = Array.from({ length: 40 }, (_, i) => ({ id: random(4) ? `runtime${random(20)}` : `s${random(25)}`, session_key: `${random(2) ? 'alias' : 's'}${random(25)}`, status: ['idle', 'working', 'starting', 'waiting', 'unknown'][random(5)], turn_started_at: [undefined, 0, 3000 + random(1000)][random(3)], running_subagents: [null, 0, 1, 2][random(4)], message_count: random(3) }));
 		// Repeated references are intentionally separate entries in the native snapshot.
 		live.push(live[0], { id: 'same', session_key: 's1', status: 'idle' }, { id: 'same', session_key: 's2', status: 'idle' });
 		const metadata = { sessions: Object.fromEntries(rows.filter(() => random(2)).map(row => [row._lineage_root_id || row.id, { state: ['active', 'settled', 'snoozed'][random(3)], wake_at: random(2) ? 4000 : 6000, woke_at: random(4) ? null : 4500, pinned: !!random(2) }])), completions: { s1: { done_at: 4000, done_token: 'turn' } } };
