@@ -1610,7 +1610,7 @@ test('shared actions omit obsolete footer; picker omits Cancel; hidden card cont
   assert.doesNotMatch(css, /focus-within \.sf-hover|focus-visible \.sf-hover/);
   assert.match(css, /\.sf-project-icon\{[^}]*background:transparent/);
   assert.match(css, /\.sf-section-body\{[^}]*scrollbar-color:color-mix\(in srgb,var\(--ui-text-primary\) 28%,transparent\) transparent/);
-  assert.match(css, /\.sf-row\[data-working=true\] \.sf-time[^}]*var\(--ui-blue,#0053fd\)/);
+  assert.match(css, /\.sf-row\[data-working=true\] \.sf-time[^}]*var\(--sf-blue\)/);
   for (const label of ['Snooze session', 'Actions for Sidebar layout']) {
     await click(row('design').querySelector(`[aria-label="${label}"]`));
     assert.doesNotMatch($('[role=dialog]').textContent, /History kept · never stops the agent\./);

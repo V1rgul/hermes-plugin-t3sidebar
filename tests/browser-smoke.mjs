@@ -163,8 +163,13 @@ try {
   await setRunAge(125);
   await page.waitForFunction(() => document.querySelector('[data-session-id="root"] .sf-working-duration')?.textContent === '2m');
   check('Working recedes its title, not the whole card', await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity) === '1' && await titleColor('root') === await tokenColor(page.locator('[data-session-id="root"]'), '--ui-text-secondary'));
+  check('Working blue mixes Desktop blue with the base text color so it stays readable in dark themes', await page.locator('[data-session-id="root"] .sf-time').evaluate(el => {
+    const color = value => { const probe = document.createElement('span'); probe.style.color = value; el.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; };
+    return getComputedStyle(el).color === color('oklch(from color-mix(in oklab,var(--ui-blue) 68%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.7) h)') && getComputedStyle(el).color !== color('var(--ui-blue)');
+  }));
+  check('snooze status alarm draws in a 16px box with a 1px line, as large as the Working circle', await page.locator('.sf-snooze-time svg').first().evaluate(el => el.getBoundingClientRect().width === 16 && getComputedStyle(el).strokeWidth === '1.6px'));
   check('Working card text uses the native blue theme token', await page.locator('[data-session-id="root"] .sf-time').evaluate(el => {
-    const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; el.append(probe);
+    const probe = document.createElement('span'); probe.style.color = 'var(--sf-blue)'; el.append(probe);
     const expected = getComputedStyle(probe).color, actual = getComputedStyle(el).color; probe.remove();
     return actual === expected && actual !== getComputedStyle(el.parentElement).color;
   }));
@@ -301,7 +306,7 @@ try {
   await page.locator('section[aria-label="Pinned"] [data-session-id="root"]').waitFor();
   await page.mouse.move(1100, 850);
   check('pinning a running session keeps it Pinned with undimmed blue Working status', await worker.evaluate(el => {
-    const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; el.append(probe);
+    const probe = document.createElement('span'); probe.style.color = 'var(--sf-blue)'; el.append(probe);
     const blue = getComputedStyle(probe).color; probe.remove();
     return el.dataset.working === 'true' && el.dataset.dimmed === 'false' && getComputedStyle(el).opacity === '1' && /^Working\d+m$/.test(el.querySelector('[data-status=working]')?.textContent) && getComputedStyle(el.querySelector('.sf-time')).color === blue;
   }));
@@ -324,7 +329,7 @@ try {
   }));
   check('a running snoozed card shows the blue Working icon and time between tokens and the countdown', await worker.evaluate(row => {
     const token = row.querySelector('.sf-token').getBoundingClientRect(), working = row.querySelector('.sf-snooze-working'), countdown = row.querySelector('.sf-snooze-time').getBoundingClientRect();
-    const probe = document.createElement('span'); probe.style.color = 'var(--ui-blue)'; row.append(probe); const blue = getComputedStyle(probe).color; probe.remove();
+    const probe = document.createElement('span'); probe.style.color = 'var(--sf-blue)'; row.append(probe); const blue = getComputedStyle(probe).color; probe.remove();
     const box = working.getBoundingClientRect(), status = working.querySelector('[data-status=working]');
     return /^Working\d+m$/.test(status.textContent) && getComputedStyle(status).color === blue && token.right < box.left && box.right < countdown.left;
   }));
@@ -338,7 +343,7 @@ try {
   check('purple alarm-snooze icon is left of the rounded duration, with no left suffix', await worker.locator('.sf-snooze-time').evaluate(el => {
     const icon = el.querySelector('svg'), duration = el.querySelector('.sf-snooze-duration');
     const i = icon.getBoundingClientRect(), d = duration.getBoundingClientRect(), style = getComputedStyle(el);
-    return el.firstElementChild === icon && icon.getAttribute('aria-hidden') === 'true' && getComputedStyle(icon).color === style.color && getComputedStyle(icon).stroke === style.color && getComputedStyle(duration).color === style.color && i.width === 13 && i.right < d.left && Math.abs(i.top + i.height / 2 - d.top - d.height / 2) < 1 && /^\d+[mhd]$/.test(duration.textContent);
+    return el.firstElementChild === icon && icon.getAttribute('aria-hidden') === 'true' && getComputedStyle(icon).color === style.color && getComputedStyle(icon).stroke === style.color && getComputedStyle(duration).color === style.color && i.width === 16 && i.right < d.left && Math.abs(i.top + i.height / 2 - d.top - d.height / 2) < 1 && /^\d+[mhd]$/.test(duration.textContent);
   }));
   check('card project glyphs start at the title left edge, while pickers keep their centred icon column', await page.locator('.sf-row').evaluateAll(rows => rows.slice(0, 6).every(row => {
     const range = document.createRange(); range.selectNodeContents(row.querySelector('.sf-row-title'));
