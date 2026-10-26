@@ -68,6 +68,21 @@ Regressions in `tests/frontend-derivation.test.mjs`, `tests/project-picker.test.
 
 The follow-up's complete `npm run test:all` gate passed 274 frontend/integration tests, 185 backend tests and 291 Chromium checks; syntax checks and `git diff --check` also passed. Browser data remains explicitly synthetic, not live Electron or a deployed backend. No dependency, backend/core, installation or service changes are part of this follow-up.
 
+## Scroll and clock work follow-up
+
+The follow-up starts at `85f10b1`. These are deterministic work reductions, not new interaction-latency measurements:
+
+- Viewport scrolling no longer runs full-history slot cleanup in a layout effect. Membership and enter/exit bookkeeping follow entry changes and reuse the key-position index; retained menu/focus owners and small-list card motion remain unchanged.
+- Lists of eighty or fewer entries still refresh geometry caches and their imperative bottom fade, but do not publish unused viewport React state during scrolling or resize observations. Crossing into windowing synchronizes the current scroll position and last positive viewport height before paint.
+- Snooze deadlines are sorted per metadata snapshot and searched on successful polls. Classification and its search-text index remain stable between deadline crossings, including after every deadline is already due. Exact deadlines, jumps across several deadlines and backwards clock movement still reclassify; ages and precise countdowns retain the ordinary poll clock.
+- Working labels retain the single shared one-second ticker, but only subscribe while their shelf is expanded and only update state when the formatted string changes. Reopening or changing the run start refreshes before paint. Running Snoozed cards use the same visibility handling.
+
+`tests/frontend-work.test.mjs` uses a test-loader-only export of the private components, synthetic SDK data and controlled clocks/resize observations. Running the new targeted tests against the starting implementation at `85f10b1` observed 537 key reads for a 500-row scroll, 24 row-render calls for small-list resize/scroll updates, eight shelf sorts across unchanged polls with future snoozes, and a committed render for an unchanged minute label. The optimized assertions require fewer than 100 scroll key reads and zero work for the other three cases. Additional regressions cover threshold transitions, keyboard reveal, deadline reversals/jumps, timer sharing, boundaries, changed starts and both foldable timer locations. Deadline equality uses an integer-second clock origin.
+
+The Opus review identified a focus regression in the small-list optimization: re-revealing an already-focused card could leave a pending focus request because neither state setter needed a commit. The next blur then consumed that request and stole focus back from Search or the composer. A new React regression first reproduced that failure. Mounted reveal targets now focus immediately and clear pending; unmounted virtual targets retain deferred focus after mounting. React and real-keyboard Chromium cases cover End, Home, ArrowDown and ArrowUp after scrolling, plus the no-scroll Home variant, followed by an outside input click.
+
+After this correction, the complete frontend/integration suite passes 291 tests, and Chromium smoke passes 350 checks, including large archives, ordinary/reduced motion, fold reversals, fixed fold-body geometry, card motion, independent scrolling and custom card stride. These browser checks use the SDK adapter and synthetic fixtures, not the user's Windows Electron client. No CSS, backend, dependency, deployment or service changes are included.
+
 ## Preserved contracts
 
 Optimizations must retain profile/source/activation-epoch fences, native archive/delete/title verification, exact deletion retry identity, rich older-history recovery, native archive membership, Waiting precedence, running-subagent ownership, atomic snooze wake materialization and exact wake acknowledgments. Composer text remains read-only and immediately reduced to boolean presence; draft text must not enter plugin caches, logs, storage or backend requests. Polling remains a recovery mechanism rather than relying on event replay.

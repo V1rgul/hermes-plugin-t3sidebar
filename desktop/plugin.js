@@ -939,7 +939,7 @@ export function formatWorkingDuration(elapsedMs) {
   const minutes = Math.floor(seconds / 60);
   return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
-// One shared interval, running only while a Working timer is mounted, re-renders just those labels.
+// One shared interval, running only while a Working timer is visible, re-renders only changed labels.
 const secondTicker = (() => {
   const listeners = new Set(); let timer = null;
   return listener => {
@@ -948,11 +948,21 @@ const secondTicker = (() => {
     return () => { listeners.delete(listener); if (!listeners.size) { clearInterval(timer); timer = null; } };
   };
 })();
-function WorkingDuration({ startedAt }) {
-  const [, tick] = useState(0);
-  useEffect(() => secondTicker(() => tick(count => count + 1)), []);
+function WorkingDuration({ startedAt, hidden = false }) {
+  const [duration, setDuration] = useState(() => formatWorkingDuration(Date.now() - startedAt * 1000));
+  const previous = useRef(duration);
+  useLayoutEffect(() => {
+    if (hidden) return;
+    const update = () => {
+      const next = formatWorkingDuration(Date.now() - startedAt * 1000);
+      if (next !== previous.current) { previous.current = next; setDuration(next); }
+    };
+    // Reopening or changing turns must refresh before paint, not on the next shared tick.
+    update();
+    return secondTicker(update);
+  }, [startedAt, hidden]);
   // Decorative: the label already announces Working, and a per-second change would be noisy.
-  return h('span', { className: 'sf-working-duration', 'aria-hidden': true }, formatWorkingDuration(Date.now() - startedAt * 1000));
+  return h('span', { className: 'sf-working-duration', 'aria-hidden': true }, duration);
 }
 function icon(name, fallback) {
   if (BUNDLED_ICONS[name]) return h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-icon': name }, BUNDLED_ICONS[name].map(d => h('path', { key: d, d })));
@@ -1204,12 +1214,12 @@ function EmptySessionDraft({ row, active, controller, scope, onPresence, refresh
   }, [refreshAt, active, draft.refetch]);
   return null;
 }
-function statusBadge(badge, row) {
+function statusBadge(badge, row, hidden) {
   return h('span', { className: 'sf-status', 'data-status': badge },
     statusIcon(badge),
     // The dashed circle and elapsed time replace the visible Working word; screen readers still hear it.
     badge === 'working' ? h('span', { className: 'sf-sr' }, 'Working') : { done: 'Done', woke: 'Woke', input: 'Input' }[badge],
-    badge === 'working' && row.runStartedAt ? h(WorkingDuration, { startedAt: row.runStartedAt }) : null);
+    badge === 'working' && row.runStartedAt ? h(WorkingDuration, { startedAt: row.runStartedAt, hidden }) : null);
 }
 function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain, presetTime, snoozeDetail }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
@@ -1241,8 +1251,8 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
         provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, title: row.provider }, provider) : null,
         h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${tokens}` }, tokens),
         // A running snoozed card stays in Snoozed but still shows its Working status, between tokens and the countdown.
-        snoozed && row.status === 'working' ? h('span', { className: 'sf-time sf-snooze-working' }, statusBadge('working', row)) : null,
-        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
+        snoozed && row.status === 'working' ? h('span', { className: 'sf-time sf-snooze-working' }, statusBadge('working', row, hidden)) : null,
+        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row, hidden) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
       h('span', { className: 'sf-row-title' }, sessionTitle(row))),
     h('div', { className: 'sf-hover' },
       row.archived !== true ? h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },
@@ -1326,6 +1336,8 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs, anima
   const [viewport, setViewport] = useState({ top: 0, height: 560 });
   const [retained, setRetained] = useState(() => new Set()), [focusedKey, setFocusedKey] = useState(null);
   const windowed = entries.length > 80;
+  const windowing = useRef(windowed);
+  const positions = useMemo(() => new Map(entries.map((row, index) => [row.key, index])), [entries]);
   // Slots by key; the last element of a removed key is kept until its exit ghost is created.
   const slots = useRef(new Map()), previousKeys = useRef(null), slotRefs = useRef(new Map());
   const slotRef = key => {
@@ -1354,9 +1366,8 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs, anima
         animateSlot(slot, 0, size).finished.then(() => { slot.style.removeProperty('overflow'); }, () => {});
       }
     }
-    const present = new Set(keys || entries.map(row => row.key));
-    for (const key of [...slots.current.keys()]) if (!present.has(key)) { slots.current.delete(key); slotRefs.current.delete(key); }
-  });
+    for (const key of slots.current.keys()) if (!positions.has(key)) { slots.current.delete(key); slotRefs.current.delete(key); }
+  }, [entries, windowed, animate, positions]);
   const retain = useCallback((key, keep) => setRetained(previous => {
     if (previous.has(key) === keep) return previous;
     const next = new Set(previous); if (keep) next.add(key); else next.delete(key); return next;
@@ -1366,11 +1377,16 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs, anima
     if (!element) return;
     // Observer-backed clients need no height measurement on the scroll path.
     const top = Math.floor(element.scrollTop / strideRef.current), height = viewportHeight.current ?? element.clientHeight;
-    setViewport(previous => previous.top === top && (!height || previous.height === height) ? previous : { top, height: height || previous.height });
+    if (windowing.current) setViewport(previous => previous.top === top && (!height || previous.height === height) ? previous : { top, height: height || previous.height });
     // Cached scroll height: set directly on the scroller, so the fade never re-renders cards.
     const more = height > 0 && element.scrollTop + height < scrollHeight.current - 1;
     if (element.dataset.moreBelow !== String(more)) element.dataset.moreBelow = more;
   }, []);
+  useLayoutEffect(() => {
+    windowing.current = windowed;
+    // Small lists cache sizes without rendering; restore the current window before paint on expansion.
+    if (windowed) update();
+  }, [windowed, update]);
   useEffect(() => {
     const element = body.current?.parentElement;
     if (typeof ResizeObserver === 'function') viewportHeight.current = element.clientHeight || 560;
@@ -1396,6 +1412,9 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs, anima
       const size = strideRef.current;
       if (index * size < top) element.scrollTop = index * size;
       else if ((index + 1) * size > top + height) element.scrollTop = (index + 1) * size - height;
+      // Mounted targets need no commit; a no-op state update must not leave focus queued for a later blur.
+      const target = rowRefs.current.get(key);
+      if (target) { pending.current = null; target.focus({ preventScroll: true }); }
       setFocusedKey(key); update();
     };
     navigators.current.set(section, reveal);
@@ -1408,7 +1427,6 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs, anima
   });
   const start = Math.max(0, Math.min(viewport.top - 3, entries.length - 1));
   const end = Math.min(entries.length, viewport.top + Math.ceil(viewport.height / stride) + 3);
-  const positions = useMemo(() => new Map(entries.map((row, index) => [row.key, index])), [entries]);
   const indexes = windowed ? [...new Set([
     ...Array.from({ length: Math.max(0, end - start) }, (_, offset) => start + offset),
     ...[...retained, focusedKey].map(key => positions.get(key)).filter(index => index !== undefined)
@@ -1568,9 +1586,18 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // Successful polls still advance ages and due snoozes when Query structural
   // sharing keeps data references unchanged. Use existing polls, no extra timer.
   const now = useMemo(() => Date.now() / 1000, [sessions.dataUpdatedAt, runtime.dataUpdatedAt, metadata.dataUpdatedAt, archives.dataUpdatedAt]);
-  const hasSnoozes = useMemo(() => Object.values(metadata.data?.sessions || EMPTY_STATE.sessions).some(meta => meta.state === 'snoozed'), [metadata.data]);
-  // Only snooze eligibility depends on the clock; unchanged ordinary history keeps its classification while displayed ages still advance.
-  const classificationNow = hasSnoozes ? now : 0;
+  const snoozeDeadlines = useMemo(() => Object.values(metadata.data?.sessions || EMPTY_STATE.sessions)
+    .filter(meta => meta.state === 'snoozed').map(meta => meta.wake_at).sort((a, b) => a - b), [metadata.data]);
+  // Only crossing a deadline changes classification. Keep ages/countdowns on the live poll clock,
+  // while a binary search also handles clock reversals and jumps across multiple deadlines.
+  const classificationNow = useMemo(() => {
+    let low = 0, high = snoozeDeadlines.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (snoozeDeadlines[middle] <= now) low = middle + 1; else high = middle;
+    }
+    return low ? snoozeDeadlines[low - 1] : 0;
+  }, [snoozeDeadlines, now]);
   const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, now: classificationNow }), [rows, metadata.data, live, runtimeKnown, classificationNow]);
   const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession), [classified]);
   const tokens = useMemo(() => searchTokens(query), [query]);

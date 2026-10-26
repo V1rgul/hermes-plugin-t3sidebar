@@ -1264,6 +1264,41 @@ try {
     await motion.close();
   }
   {
+    // Re-revealing an already-focused small-list card must not queue focus for the next outside click.
+    const focus = await browser.newPage({ viewport: { width: 900, height: 400 } });
+    focus.on('pageerror', error => errors.push(error));
+    await focus.emulateMedia({ reducedMotion: 'reduce' });
+    await focus.goto(`http://127.0.0.1:${server.address().port}`);
+    await focus.locator('[data-session-id="root"][data-working=true]').waitFor();
+    await focus.evaluate(async () => {
+      const fixture = window.hermesT3SidebarHarness;
+      fixture.control.rows = Array.from({ length: 12 }, (_, index) => ({ id: `focus-${index}`, title: `Focus probe ${index}`, message_count: 2, last_active: 100 - index }));
+      fixture.control.extra = []; fixture.control.live = []; fixture.control.metadata = { version: 1, sessions: {} };
+      fixture.host.state.focusedStoredSessionId.set(null);
+      const composer = document.createElement('textarea'); composer.setAttribute('aria-label', 'Composer probe');
+      document.querySelector('.harness-main').append(composer);
+      await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+    });
+    await focus.waitForFunction(() => document.querySelectorAll('[data-section=active] [data-session-id]').length === 12);
+    const body = focus.locator('[data-section=active] .sf-section-body');
+    check('small-list focus fixture is scrollable without windowing', await body.evaluate(el => el.scrollHeight > el.clientHeight) && await focus.locator('[data-section=active] .sf-row').count() === 12);
+    for (const [id, key, scrollToEnd, outside] of [
+      ['focus-11', 'End', false, 'Search sessions'],
+      ['focus-11', 'ArrowDown', false, 'Composer probe'],
+      ['focus-0', 'Home', true, 'Search sessions'],
+      ['focus-0', 'ArrowUp', true, 'Composer probe'],
+      ['focus-0', 'Home', false, 'Search sessions']
+    ]) {
+      await focus.locator(`[data-session-id="${id}"] .sf-open`).focus();
+      await body.evaluate(async (el, end) => { el.scrollTop = end ? el.scrollHeight : 0; await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame); }, scrollToEnd);
+      await focus.keyboard.press(key);
+      check(`${key} reveals its already-focused small-list card`, await body.evaluate((el, last) => last ? el.scrollTop > 0 : el.scrollTop === 0, id === 'focus-11'));
+      await focus.getByRole(outside === 'Search sessions' ? 'searchbox' : 'textbox', { name: outside, exact: true }).click();
+      check(`${key} small-list reveal does not steal ${outside} focus on blur`, await focus.getByLabel(outside, { exact: true }).evaluate(el => document.activeElement === el));
+    }
+    await focus.close();
+  }
+  {
     // Card geometry is themeable: a different content/padding/margin must drive heights, gaps, windowing and shelf minimums alike.
     const geometry = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
     geometry.on('pageerror', error => errors.push(error));
