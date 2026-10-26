@@ -162,7 +162,7 @@ export const ctx = {
         const rows = [...control.rows, ...(control.extra || [])].filter(row => row.id === id || row._lineage_root_id === id || row._lineage_ids?.includes(id));
         const deleted_ids = rows.length ? [...new Set(rows.flatMap(row => [row.id, row._lineage_root_id, ...(row._lineage_ids || [])]).filter(Boolean))] : [id];
         if (rows.length && (params.expected_revision !== (rows[0].runtime_revision ?? 0) || params.expected_generation !== (rows[0].runtime_generation ?? 0))) throw new Error('stale_revision');
-        if (control.live.some(row => deleted_ids.includes(row.session_key) && (row.status !== 'idle' || row.running_subagents > 0))) throw new Error('session_busy');
+        if (control.live.some(row => deleted_ids.includes(row.session_key) && (row.status !== 'idle' || row.running_subagents > 0 || row.awaiting_processes === true))) throw new Error('session_busy');
         receipt = { digest, result: { ok: true, profile: host.state.profile.get(), request_id: params.request_id, session_id: id, operation: 'delete',
           verified_absent: true, already_absent: !rows.length, ...(rows.length ? { revision: params.expected_revision + 1, execution_generation: params.expected_generation } : {}), deleted_ids } };
         if (!control.dropDelete) {

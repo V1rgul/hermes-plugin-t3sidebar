@@ -20,6 +20,7 @@ import tui_gateway.server_requests as server_requests
 import tui_gateway.ws_legacy_fallback as legacy
 import gateway.session_ancillary as ancillary
 import tools.delegate_tool_registry as subagent_registry
+from tools.process_registry import ProcessSession, process_registry
 
 from test_backend import backend
 
@@ -153,6 +154,54 @@ class StandaloneRuntime(unittest.TestCase):
 		for invalid in (0, -1, float("nan"), float("inf"), True, "1234.5"):
 			self.registry["runtime-a"]["inflight_turn"] = {"started_at": invalid}
 			self.assertIsNone(self.runtime_row()["turn_started_at"], invalid)
+
+	def test_manual_compaction_is_timed_from_first_observation_and_never_replaces_a_native_turn(self):
+		# Manual /compress sets running without a turn or hook; the native turn always wins when present.
+		session = self.registry["runtime-a"]
+		self.start_patch(patch.dict(backend._compression_seen, clear=True))
+		session["_manual_compress_active"] = True
+		with patch.object(backend.time, "time", return_value=5000.0):
+			self.assertEqual(self.runtime_row()["turn_started_at"], 5000.0)
+		with patch.object(backend.time, "time", return_value=5030.0):
+			self.assertEqual(self.runtime_row()["turn_started_at"], 5000.0)
+			session["inflight_turn"] = {"started_at": 4000.0, "user": "private-live-prompt"}
+			self.assertEqual(self.runtime_row()["turn_started_at"], 4000.0)
+			session["inflight_turn"] = None
+			self.assertEqual(self.runtime_row()["turn_started_at"], 5000.0)
+			session.pop("_manual_compress_active")
+			self.assertIsNone(self.runtime_row()["turn_started_at"])
+		# A later compaction gets its own start, as does a replaced session object under the same runtime id.
+		session["_manual_compress_active"] = True
+		with patch.object(backend.time, "time", return_value=6000.0):
+			self.assertEqual(self.runtime_row()["turn_started_at"], 6000.0)
+		self.registry["runtime-a"] = {**session}
+		with patch.object(backend.time, "time", return_value=6100.0):
+			self.assertEqual(self.runtime_row()["turn_started_at"], 6100.0)
+		# Runtime ids that leave the snapshot are forgotten.
+		del self.registry["runtime-a"]
+		self.client.get("/runtime?profile=exact-profile")
+		self.assertNotIn((str(self.current), "runtime-a"), backend._compression_seen)
+
+	def test_awaited_background_processes_use_the_native_notification_predicate(self):
+		# Real registry predicate with a synthetic tracked process; only notifying processes keep a session busy.
+		running = {}
+		self.start_patch(patch.object(process_registry, "_running", running))
+		self.registry["runtime-a"]["running"] = False
+		self.assertIs(self.runtime_row()["awaiting_processes"], False)
+		running["proc_server"] = ProcessSession(id="proc_server", command="serve", owner_task_id="collision", started_at=1)
+		self.assertIs(self.runtime_row()["awaiting_processes"], False)
+		running["proc_build"] = ProcessSession(id="proc_build", command="build", owner_task_id="collision", started_at=1, notify_on_complete=True)
+		# The fixture's pending approval keeps status waiting; the flag is independent of it.
+		self.assertIs(self.runtime_row()["awaiting_processes"], True)
+		self.assertNotIn("build", self.client.get("/runtime?profile=exact-profile").text)
+		running["proc_build"].exited = True
+		running["proc_build"]._completion_event.set()
+		self.assertIs(self.runtime_row()["awaiting_processes"], False)
+		# Another owner's work does not count; a predicate failure is unknown, never idle.
+		running["proc_other"] = ProcessSession(id="proc_other", command="build", owner_task_id="someone-else", started_at=1, notify_on_complete=True)
+		self.assertIs(self.runtime_row()["awaiting_processes"], False)
+		with patch("tui_gateway.session_notifications._session_owns_pending_process_notification", side_effect=RuntimeError):
+			self.assertIsNone(self.runtime_row()["awaiting_processes"])
 
 	def test_idle_parent_counts_live_children_and_clears_after_last_child_finishes(self):
 		parent, db = self.attach_subagents()

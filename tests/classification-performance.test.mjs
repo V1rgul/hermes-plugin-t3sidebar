@@ -17,7 +17,7 @@ function reference(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown
 		const ids = new Set(aliases(row));
 		const matches = live.filter(item => ids.has(item.session_key) || ids.has(item.id));
 		const status = !runtimeKnown ? 'unknown' : matches.some(i => i.status === 'waiting') ? 'waiting'
-			: matches.some(i => i.status === 'working' || i.status === 'starting' || Number.isInteger(i.running_subagents) && i.running_subagents > 0) ? 'working'
+			: matches.some(i => i.status === 'working' || i.status === 'starting' || Number.isInteger(i.running_subagents) && i.running_subagents > 0 || i.awaiting_processes === true) ? 'working'
 			: matches.some(i => !['idle', 'working', 'starting', 'waiting'].includes(i.status)) ? 'unknown' : 'idle';
 		const woke = Number.isFinite(meta.woke_at) && meta.woke_at > 0 || meta.state === 'snoozed' && meta.wake_at <= now;
 		const section = status === 'waiting' ? 'active' : row.archived === true ? status === 'working' ? 'working' : 'archived' : status === 'unknown' ? 'active'

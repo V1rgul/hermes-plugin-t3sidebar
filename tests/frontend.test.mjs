@@ -141,6 +141,16 @@ test('subagent lifecycle events refresh snapshots but streamed text does not fan
     assert.equal(mock.queryClient.getQueryState(draftKey).isInvalidated, false);
     mock.queryClient.setQueryData(key, { sessions: [] });
   }
+  // Manual compaction starts without a turn: its status refreshes runtime, other status text does not.
+  mock.control.listener({ type: 'status.update', payload: { kind: 'status', text: 'thinking' } });
+  await Promise.resolve();
+  assert.equal(mock.queryClient.getQueryState(key).isInvalidated, false);
+  for (const kind of ['compressing', 'compacting']) {
+    mock.control.listener({ type: 'status.update', payload: { kind, text: 'compressing 40 messages' } });
+    await Promise.resolve();
+    assert.equal(mock.queryClient.getQueryState(key).isInvalidated, true, kind);
+    mock.queryClient.setQueryData(key, { sessions: [] });
+  }
   mock.control.disposers.forEach(fn => fn());
 });
 
@@ -872,9 +882,11 @@ test('cron excluded from recent, extra, organized, runtime and SDK fallback rows
   mock.control.rows.push(cron); mock.control.sessionsMissing = true; await mount(); assert.equal(row('cron-fixture'), null);
 });
 
-test('Pinned absent when empty while Ready and all secondary categories remain', async () => {
+test('empty Pinned has no cards or heading while Ready and all secondary categories remain', async () => {
   mock.control.metadata.sessions.pinned.pinned = false; await mount();
-  assert.equal(shelf('Pinned'), null);
+  // It stays mounted (zero height in CSS) so its last card can animate out. Compare scalars: a jsdom element in an assertion diff exhausts the heap.
+  assert.equal(shelf('Pinned').dataset.populated, 'false');
+  assert.equal(shelf('Pinned').querySelectorAll('.sf-row, .sf-section-toggle, .sf-empty').length, 0);
   for (const name of ['Ready', 'Working', 'Snoozed', 'Archived']) assert.ok(shelf(name));
 });
 
@@ -1649,6 +1661,12 @@ test('alarm icons mark snooze controls and snoozed cards; Working shows the back
   }
 });
 
+test('Working sorts by elapsed time, longest first, not by activity; unknown starts follow by activity', () => {
+  const rows = [{ id: 'recent', last_active: 90 }, { id: 'long', last_active: 10 }, { id: 'mid', last_active: 50 }, { id: 'unknown-old', last_active: 5 }, { id: 'unknown-new', last_active: 95 }];
+  const live = [{ session_key: 'recent', status: 'working', turn_started_at: 80 }, { session_key: 'long', status: 'working', turn_started_at: 20 },
+    { session_key: 'mid', status: 'working', turn_started_at: 40 }, { session_key: 'unknown-old', status: 'working' }, { session_key: 'unknown-new', status: 'working' }];
+  assert.deepEqual(flow.buildSections(rows, { sessions: {} }, live, { now: 100 }).working.map(row => row.id), ['long', 'mid', 'recent', 'unknown-new', 'unknown-old']);
+});
 test('Working time prefers the native in-flight turn, keeps a subagent parent on its last turn and never shows a finished turn as current', () => {
   const run = { started_at: 100, ended_at: 160 }, open = { started_at: 200, ended_at: null };
   assert.equal(flow.workingSince('idle', [{ status: 'working', turn_started_at: 300 }], open), null);
@@ -1659,4 +1677,17 @@ test('Working time prefers the native in-flight turn, keeps a subagent parent on
   // An idle parent kept Working by subagents counts from its last turn, even after that turn ended.
   assert.equal(flow.workingSince('working', [{ status: 'idle', running_subagents: 2 }], run), 100);
   assert.equal(flow.workingSince('working', [{ status: 'idle', running_subagents: 2 }], undefined), null);
+  // Awaited background processes keep an idle session Working from its last turn, like subagents.
+  assert.equal(flow.workingSince('working', [{ status: 'idle', awaiting_processes: true }], run), 100);
+});
+
+test('awaited background processes count as Working; unknown or false do not', () => {
+  const rows = [{ id: 'root', last_active: 10 }];
+  for (const [awaiting_processes, section] of [[true, 'working'], [false, 'active'], [null, 'active']]) {
+    const sections = flow.buildSections(rows, { sessions: {} }, [{ id: 'runtime', session_key: 'root', status: 'idle', running_subagents: 0, awaiting_processes }], { now: 100 });
+    assert.equal(sections[section][0]?.key, 'root', String(awaiting_processes));
+    assert.equal(sections[section][0].status, awaiting_processes ? 'working' : 'idle');
+  }
+  // Input still wins over background work.
+  assert.equal(flow.buildSections(rows, { sessions: {} }, [{ session_key: 'root', status: 'waiting', awaiting_processes: true }], { now: 100 }).active[0].status, 'waiting');
 });

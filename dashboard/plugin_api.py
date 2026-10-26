@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 from typing import Annotated, Callable, Literal
 
@@ -334,6 +335,41 @@ def runtime_retired(db, row):
 	return any(retired_session(db, sid) for sid in {row.get("session_key"), row.get("id")} if sid)
 
 
+# Manual /compress holds a session busy without a native turn or plugin hook, and records no start time. Remember when this process first saw each compaction so its Working time is shown and continuous; keyed by home and runtime id, and owned by the session object observed.
+_compression_lock = threading.Lock()
+_compression_seen: dict[tuple[str, str], tuple[int, float]] = {}
+
+
+def runtime_compression_started_at(home, sid, session, compressing, now=None):
+	"""First observation of the session's current manual compaction, or None. Call once per snapshot row."""
+	key = (str(home), sid)
+	with _compression_lock:
+		if not compressing:
+			_compression_seen.pop(key, None)
+			return None
+		seen = _compression_seen.get(key)
+		if seen is None or seen[0] != id(session):
+			seen = _compression_seen[key] = (id(session), time.time() if now is None else now)
+		return seen[1]
+
+
+def forget_compressions(home, present):
+	"""Drop compaction observations for runtime ids absent from this home's snapshot."""
+	with _compression_lock:
+		for key in [key for key in _compression_seen if key[0] == str(home) and key[1] not in present]:
+			del _compression_seen[key]
+
+
+def runtime_awaits_processes(session):
+	"""Native predicate: a background process this session started (notify_on_complete or watch_patterns) is running, or its notice is still on the way back into the session. Plain background servers that never report back do not count. Unknown is None."""
+	try:
+		from tui_gateway.session_notifications import _session_owns_pending_process_notification
+
+		return bool(_session_owns_pending_process_notification(session))
+	except Exception:
+		return None
+
+
 def runtime_turn_started_at(session):
 	"""Native in-flight turn start (Desktop's own elapsed-timer source), never a retained failed turn.
 
@@ -430,7 +466,7 @@ def standalone_runtime(request, profile, actor):
 	from hermes_cli.web_server_sessions import _open_session_db_for_profile
 	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
 
-	facts, parents, turn_starts = {}, {}, {}
+	facts, parents, turn_starts, compressing, awaiting = {}, {}, {}, {}, {}
 
 	def profile_home(name):
 		resolved = server._profile_home(name)
@@ -451,9 +487,12 @@ def standalone_runtime(request, profile, actor):
 				raise HTTPException(503, "standalone_snapshot_changed")
 			captured = runtime_session_facts(session)
 			turn_starts[(sid, key)] = runtime_turn_started_at(session)
+			compressing[(sid, key)] = bool(session.get("_manual_compress_active"))
 		# The native mapper can read titles from SQLite. It must run outside
 		# the global registry lock, just like catalog/default-route/lineage IO.
 		item = server._session_live_item(sid, session, current)
+		# The native predicate refreshes detached processes and takes registry locks of its own.
+		awaiting[(sid, key)] = runtime_awaits_processes(session)
 		with server._sessions_lock:
 			if (not admitted(sid, session, parent, key) or item["session_key"] != key
 				or runtime_session_facts(session) != captured):
@@ -471,6 +510,7 @@ def standalone_runtime(request, profile, actor):
 	if "error" in snapshot:
 		raise HTTPException(503, "standalone_profile_unavailable")
 	rows = snapshot["result"]["sessions"]
+	forget_compressions(home, {row["id"] for row in rows})
 	if not rows:
 		return {"sessions": []}
 	# Persisted source facts win; native empty drafts have no DB row yet, so retain their source captured during the same exact-home native mapping.
@@ -499,7 +539,10 @@ def standalone_runtime(request, profile, actor):
 			metadata = runtime_display_metadata(server, captured, projects)
 			# Native legacy previews may contain pending prompts. Runtime needs
 			# liveness/identity only; do not return that text or any extra fields.
-			item["turn_started_at"] = turn_starts.get(identity)
+			# Compaction is transparent: a turn's own compaction keeps its native start, and a manual one counts from when it was first seen.
+			item["turn_started_at"] = turn_starts.get(identity) or runtime_compression_started_at(
+				home, row["id"], parents[identity][0], compressing.get(identity, False))
+			item["awaiting_processes"] = awaiting.get(identity)
 			item["running_subagents"] = standalone_subagent_count(server, row,
 				parents[identity], db, home)
 			# All catalog/default-route/lineage IO ran outside the registry lock.
@@ -579,6 +622,8 @@ async def native_runtime(request, profile):
 	value["sessions"] = await asyncio.to_thread(authority_runtime_rows, db_path, value["sessions"])
 	for row in value["sessions"]:
 		row["running_subagents"] = None
+		# Authority rows expose no process ownership; unknown never means idle.
+		row["awaiting_processes"] = None
 		# Authority rows carry no turn start; Desktop falls back to the hook-recorded open turn.
 		row["turn_started_at"] = None
 		try:

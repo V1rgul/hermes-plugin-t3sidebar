@@ -60,6 +60,10 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator('[data-session-id="approval"]').waitFor();
   await page.waitForFunction(() => document.querySelector('[data-session-id="root"]')?.dataset.working === 'true');
+  check('a single Snoozed card reserves no blank space below it', await page.locator('[data-section="snoozed"]').evaluate(el => {
+    const body = el.querySelector('.sf-section-body'), cards = body.querySelectorAll('.sf-row');
+    return cards.length === 1 && Math.abs(body.getBoundingClientRect().bottom - cards[0].getBoundingClientRect().bottom) <= 1 && body.scrollHeight <= body.clientHeight;
+  }));
   await page.locator('[data-session-id="readme"] .sf-open').focus();
   await page.getByRole('searchbox').click();
   await page.keyboard.type('s');
@@ -978,7 +982,7 @@ try {
     }, count);
     await page.waitForFunction(count => (document.querySelector('[data-section="pinned"]')?.querySelectorAll('.sf-row').length || 0) === count, count);
     if (count === 1) check('Pinned uses natural flex sizing rather than a calculated grid track', await page.locator('[data-section="pinned"]').evaluate(el => getComputedStyle(el.parentElement).display === 'flex' && getComputedStyle(el).flexGrow === '0' && !el.parentElement.style.gridTemplateRows));
-    if (!count) check('empty Pinned reserves no grid space and Ready starts at the top', !await page.locator('[data-section="pinned"]').count() && await page.locator('.sf-scroll').evaluate(list => Math.abs(list.getBoundingClientRect().top - list.querySelector('[data-section="active"]').getBoundingClientRect().top) <= 1));
+    if (!count) check('empty Pinned reserves no space and Ready starts at the top', await page.locator('[data-section="pinned"]').evaluate(el => el.getBoundingClientRect().height === 0 && !el.querySelector('.sf-row')) && await page.locator('.sf-scroll').evaluate(list => Math.abs(list.getBoundingClientRect().top - list.querySelector('[data-section="active"]').getBoundingClientRect().top) <= 1));
     else check(`Pinned with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="pinned"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - count * 56) <= 1 && Math.abs(el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().bottom - 1) <= 1, count));
   }
 
@@ -1177,6 +1181,48 @@ try {
     }
   }
   await contentBox.evaluate(el => el.remove());
+  {
+    // Cards enter and leave by clipping their slot while the card keeps its full height; content-sized shelves follow.
+    const motion = await browser.newPage({ viewport: { width: 900, height: 760 } });
+    motion.on('pageerror', error => errors.push(error));
+    await motion.emulateMedia({ reducedMotion: 'no-preference' });
+    await motion.goto(`http://127.0.0.1:${server.address().port}`);
+    await motion.waitForSelector('[data-session-id="root"][data-working=true]');
+    await motion.waitForTimeout(400);
+    const sample = () => motion.evaluate(() => ({
+      ghosts: [...document.querySelectorAll('[data-exiting=true]')].map(ghost => ({ height: ghost.getBoundingClientRect().height, inert: ghost.inert, hidden: ghost.getAttribute('aria-hidden'), ids: ghost.querySelectorAll('[data-session-id]').length })),
+      entering: [...document.querySelectorAll('.sf-slot:not([data-exiting])')].map(slot => slot.getBoundingClientRect().height).filter(height => height > 0 && height < 55),
+      rows: [...document.querySelectorAll('.sf-row')].every(row => Math.abs(row.getBoundingClientRect().height - 56) < .5),
+      working: document.querySelector('[data-section=working]').getBoundingClientRect().height }));
+    const rest = await sample();
+    await motion.getByRole('searchbox').fill('zzzz-no-match');
+    await motion.waitForTimeout(90);
+    const leaving = await sample();
+    check('search-removed cards collapse as inert, id-free ghosts while each card keeps its full height', leaving.ghosts.length > 0 && leaving.ghosts.every(ghost => ghost.height > 1 && ghost.height < 55 && ghost.inert && ghost.hidden === 'true' && !ghost.ids) && leaving.rows);
+    check('content-sized Working shrinks with its leaving card instead of jumping', leaving.working > 31 && leaving.working < rest.working - 1);
+    await motion.waitForTimeout(400);
+    check('exit ghosts are removed once collapsed', (await sample()).ghosts.length === 0);
+    await motion.getByRole('searchbox').fill('');
+    await motion.waitForTimeout(90);
+    const returning = await sample();
+    check('cards returning from search grow from a clipped slot and Working grows with them', returning.entering.length > 0 && returning.rows && returning.working > 31 && returning.working < rest.working - 1);
+    await motion.waitForTimeout(400);
+    check('returned cards settle at their full stride', (await sample()).entering.length === 0 && Math.abs((await sample()).working - rest.working) < 1);
+    // Moving categories: Ready -> Working leaves a ghost in Ready and grows a slot in Working.
+    await motion.evaluate(async () => {
+      const fixture = window.hermesT3SidebarHarness;
+      const live = fixture.control.live.find(row => row.session_key === 'design');
+      if (live) live.running_subagents = 2;
+      else fixture.control.live.push({ id: 'runtime-design', session_key: 'design', status: 'idle', running_subagents: 2 });
+      await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+    });
+    await motion.locator('[data-section="working"] [data-session-id="design"]').waitFor();
+    const moving = await motion.evaluate(() => ({
+      ghost: !!document.querySelector('[data-section=active] [data-exiting=true]'),
+      slot: document.querySelector('[data-section=working] [data-session-id="design"]').closest('.sf-slot').getBoundingClientRect().height }));
+    check('a card changing category collapses out of Ready and grows into Working', moving.ghost && moving.slot < 55);
+    await motion.close();
+  }
   {
     // Card geometry is themeable: a different content/padding/margin must drive heights, gaps, windowing and shelf minimums alike.
     const geometry = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });

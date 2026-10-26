@@ -76,8 +76,9 @@ export function validState(value) {
   }
   return value;
 }
-// Elapsed Working time counts from the native in-flight turn when the conversation itself runs. A parent kept
-// Working only by subagents counts from its last recorded turn. The hook's open turn covers runtimes without native starts.
+// Elapsed Working time counts from the native in-flight turn when the conversation itself runs (the backend reports a manual
+// compaction's first observation there too). A session kept Working only by subagents or awaited background processes counts
+// from its last recorded turn. The hook's open turn covers runtimes without native starts.
 export function workingSince(status, matches, run) {
   if (status !== 'working') return null;
   const own = matches.filter(item => item.status === 'working' || item.status === 'starting');
@@ -191,7 +192,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     const matches = [...positions].sort((a, b) => a - b).map(index => live[index]);
     // Waiting wins over every metadata shelf and working signal, across the entire lineage.
     const status = !runtimeKnown ? 'unknown' : matches.some(i => i.status === 'waiting') ? 'waiting'
-      : matches.some(i => i.status === 'working' || i.status === 'starting' || Number.isInteger(i.running_subagents) && i.running_subagents > 0) ? 'working'
+      : matches.some(i => i.status === 'working' || i.status === 'starting' || Number.isInteger(i.running_subagents) && i.running_subagents > 0 || i.awaiting_processes === true) ? 'working'
       : matches.some(i => !['idle', 'working', 'starting', 'waiting'].includes(i.status)) ? 'unknown' : 'idle';
     const woke = Number.isFinite(meta.woke_at) && meta.woke_at > 0 || meta.state === 'snoozed' && meta.wake_at <= now;
     const section = status === 'waiting' ? 'active'
@@ -210,8 +211,10 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
   }
   for (const section of SECTIONS) result[section].sort((a, b) => {
     if (section === 'active' && (a.status === 'waiting') !== (b.status === 'waiting')) return a.status === 'waiting' ? -1 : 1;
+    // Working follows elapsed time, longest first, because activity moves on every message; unknown starts follow, by activity.
+    if (section === 'working' && (a.runStartedAt == null) !== (b.runStartedAt == null)) return a.runStartedAt == null ? 1 : -1;
     // Native history has no archive timestamp; archives are ordered by last activity.
-    const delta = section === 'snoozed' ? a.meta.wake_at - b.meta.wake_at : b.activity - a.activity;
+    const delta = section === 'snoozed' ? a.meta.wake_at - b.meta.wake_at : section === 'working' && a.runStartedAt != null ? a.runStartedAt - b.runStartedAt : b.activity - a.activity;
     return delta || a.key.localeCompare(b.key);
   });
   return result;
@@ -573,7 +576,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         if (!target) throw new Error('This project changed or was removed. Refresh and retry.');
         const live = qualified(await fenced(scope, () => ctx.rest('/runtime')), scope, route);
         const ids = new Set(aliases(row));
-        if (live.sessions.some(item => (ids.has(item.session_key) || ids.has(item.id)) && (item.status !== 'idle' || item.running_subagents > 0))) {
+        if (live.sessions.some(item => (ids.has(item.session_key) || ids.has(item.id)) && (item.status !== 'idle' || item.running_subagents > 0 || item.awaiting_processes === true))) {
           throw new Error('Moving requires confirmed idle status; this session is now busy.');
         }
         await client.cancelQueries({ queryKey: scopeKey(scope) }); check(scope);
@@ -754,8 +757,10 @@ const CSS = `
 .sf-shelves{display:grid;flex:1;min-height:0;gap:1px;transition:grid-template-rows .22s ease}
 /* Fixed header minima survive short panes; Archives gets most of the flexible space. */
 .sf-section{display:flex;flex-direction:column;min-height:0;overflow:hidden}.sf-section[data-section=pinned]{flex:0 1 auto;max-height:18%}.sf-section[data-section=active]{grid-row:1}.sf-section[data-section=working]{grid-row:2}.sf-section[data-section=snoozed]{grid-row:3}.sf-section[data-section=archived]{grid-row:4}
-/* Working contributes its intrinsic header + body size to fit-content(18%); animating its own body track keeps the parent cap stable during reversals. */
-.sf-section[data-section=working]{display:grid;grid-template-rows:30px minmax(0,1fr);min-height:31px;transition:grid-template-rows .22s ease}.sf-section[data-section=working][data-closed=true]{grid-template-rows:30px minmax(0,0fr);min-height:30px}.sf-section[data-section=working][data-populated=false]{min-height:30px}.sf-section[data-section=working][data-populated=false] .sf-section-body{display:none}
+/* Working and Snoozed contribute their intrinsic header + body size to a fit-content track; animating their own body track keeps the parent cap stable during reversals. Content sizing also lets the shelves follow cards animating in and out. */
+.sf-section:is([data-section=working],[data-section=snoozed]){display:grid;grid-template-rows:30px minmax(0,1fr);min-height:31px;transition:grid-template-rows .22s ease}.sf-section:is([data-section=working],[data-section=snoozed])[data-closed=true]{grid-template-rows:30px minmax(0,0fr);min-height:30px}.sf-section:is([data-section=working],[data-section=snoozed])[data-populated=false]{min-height:30px}
+/* An empty Pinned stays mounted (zero height, gap cancelled) so its last card can animate out. */
+.sf-section[data-section=pinned][data-populated=false]{margin-bottom:-1px}
 .sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--ui-text-primary) 28%,transparent) transparent}
 /* Fade the bottom edge only while more content lies below, so lists never run hard into the next heading. */
 .sf-section-body[data-more-below=true]{mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:30px;min-height:30px;padding:9px 6px 3px;border:0;background:transparent;color:var(--ui-text-secondary);font-size:11px;text-align:left}.sf-section-label{font-weight:500;color:var(--ui-accent)}.sf-count{color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}.sf-section-label,.sf-count,.sf-section-chevron{flex-shrink:0}.sf-section-line{flex:1;min-width:0;height:1px;background:var(--ui-stroke-secondary)}.sf-section-chevron{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px}
@@ -796,7 +801,9 @@ const CSS = `
 .sf-section[data-pinned=true]{mask:linear-gradient(#000,#000) top/100% 30px no-repeat,linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
 .sf-section[data-pinned=true][data-section=active]{mask:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
 .sf-section[data-closed=true] .sf-section-body{visibility:hidden;transition:visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:background-color .16s ease,box-shadow .16s ease}.sf-custom-time{display:flex;align-items:center;gap:4px}.sf-custom-time input{min-width:0}.sf-custom-time .sf-icon{flex-shrink:0}
-@media(prefers-reduced-motion:reduce){.sf-shelves,.sf-section[data-section=working],.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
+/* Empty-state text waits for leaving cards to collapse instead of appearing under them (visibility only, no fade). */
+@keyframes sf-after-exit{from{visibility:hidden}}.sf-empty{animation:sf-after-exit .22s step-end}
+@media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-section:is([data-section=working],[data-section=snoozed]),.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
 // Monochrome brand paths: Simple Icons 15.20.0 (CC0), fetched from its pinned GitHub tag.
 const PROVIDER_PATHS = {
@@ -1174,7 +1181,10 @@ function pinShelfBodies(shelves, run, current) {
   for (const animation of transitions) animation.currentTime = animation.effect.getComputedTiming().endTime;
   const end = heights();
   transitions.forEach((animation, index) => { animation.currentTime = times[index]; });
+  // Content-sized shelves (Working, Snoozed) follow their cards' own enter/exit motion; pin them only while they fold themselves.
+  const folding = new Set(transitions.map(animation => animation.effect.target));
   sections.forEach((section, index) => {
+    if (['working', 'snoozed'].includes(section.dataset.section) && !folding.has(section)) return;
     const pin = Math.max(start[index], end[index]);
     if (pin > 0) { section.style.setProperty('--sf-pin', `${pin}px`); section.dataset.pinned = 'true'; }
   });
@@ -1190,13 +1200,62 @@ export function cardStride(element) {
     return Number.isFinite(stride) && stride > 0 ? stride : DEFAULT_CARD_STRIDE;
   } catch (_) { return DEFAULT_CARD_STRIDE; }
 }
-function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
+// Cards animate in and out by clipping their slot's height while the card itself keeps its full size. Windowed lists, reduced
+// motion and clients without Web Animations change instantly.
+const CARD_MOTION = { duration: 220, easing: 'ease' };
+const reducedMotion = () => { try { return !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches; } catch (_) { return false; } };
+function animateSlot(slot, from, to) {
+  slot.style.overflow = 'clip';
+  const animation = slot.animate([{ height: `${from}px` }, { height: `${to}px` }], CARD_MOTION);
+  return animation;
+}
+// A leaving card is replaced by an inert, attribute-stripped clone of its last DOM, so it cannot be focused, found by
+// session ID or receive events while it collapses; React never owns it.
+function exitGhost(element) {
+  const ghost = element.cloneNode(true);
+  ghost.setAttribute('aria-hidden', 'true'); ghost.inert = true; ghost.dataset.exiting = 'true';
+  for (const node of [ghost, ...ghost.querySelectorAll('[data-session-id],[id]')]) { node.removeAttribute('data-session-id'); node.removeAttribute('id'); }
+  ghost.style.pointerEvents = 'none';
+  return ghost;
+}
+function SessionWindow({ entries, section, renderRow, navigators, rowRefs, animate = false }) {
   const body = useRef(null), pending = useRef(null), viewportHeight = useRef(null), scrollHeight = useRef(0);
   const [stride, setStride] = useState(DEFAULT_CARD_STRIDE), strideRef = useRef(DEFAULT_CARD_STRIDE);
   useLayoutEffect(() => { const next = cardStride(body.current); strideRef.current = next; setStride(next); }, []);
   const [viewport, setViewport] = useState({ top: 0, height: 560 });
   const [retained, setRetained] = useState(() => new Set()), [focusedKey, setFocusedKey] = useState(null);
   const windowed = entries.length > 80;
+  // Slots by key; the last element of a removed key is kept until its exit ghost is created.
+  const slots = useRef(new Map()), previousKeys = useRef(null), slotRefs = useRef(new Map());
+  const slotRef = key => {
+    if (!slotRefs.current.has(key)) slotRefs.current.set(key, element => { if (element) slots.current.set(key, element); });
+    return slotRefs.current.get(key);
+  };
+  useLayoutEffect(() => {
+    const keys = windowed ? null : entries.map(row => row.key), before = previousKeys.current, container = body.current;
+    previousKeys.current = keys;
+    const motion = animate && keys && before && container && typeof container.animate === 'function' && !reducedMotion();
+    if (motion) {
+      const present = new Set(keys), previous = new Set(before), size = strideRef.current;
+      before.forEach((key, index) => {
+        const element = slots.current.get(key);
+        if (present.has(key) || !element || element.isConnected) return;
+        // Keep the ghost where the card was: before the next card that stayed, in the old order.
+        const next = before.slice(index + 1).find(other => present.has(other)), anchor = next && slots.current.get(next);
+        const ghost = exitGhost(element);
+        container.insertBefore(ghost, anchor?.parentNode === container ? anchor : null);
+        ghost.style.height = '0px';
+        animateSlot(ghost, size, 0).finished.then(() => ghost.remove(), () => ghost.remove());
+      });
+      for (const key of keys) {
+        const slot = slots.current.get(key);
+        if (previous.has(key) || !slot) continue;
+        animateSlot(slot, 0, size).finished.then(() => { slot.style.removeProperty('overflow'); }, () => {});
+      }
+    }
+    const present = new Set(keys || entries.map(row => row.key));
+    for (const key of [...slots.current.keys()]) if (!present.has(key)) { slots.current.delete(key); slotRefs.current.delete(key); }
+  });
   const retain = useCallback((key, keep) => setRetained(previous => {
     if (previous.has(key) === keep) return previous;
     const next = new Set(previous); if (keep) next.add(key); else next.delete(key); return next;
@@ -1257,7 +1316,8 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs }) {
     onFocusCapture: event => { const row = event.target.closest('[data-session-id]'); if (row) setFocusedKey(row.dataset.sessionId); },
     onBlurCapture: event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusedKey(null); },
     style: { position: 'relative', height: windowed ? entries.length * stride : undefined } },
-    ...indexes.map(index => h('div', { key: entries[index].key, style: windowed ? { position: 'absolute', top: index * stride, left: 0, right: 0 } : undefined }, renderRow(entries[index], retain))));
+    ...indexes.map(index => h('div', { key: entries[index].key, ref: windowed ? undefined : slotRef(entries[index].key), className: 'sf-slot',
+      style: windowed ? { position: 'absolute', top: index * stride, left: 0, right: 0 } : undefined }, renderRow(entries[index], retain))));
 }
 export function HermesT3Sidebar({ ctx, controller }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
@@ -1387,6 +1447,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const metadata = useQuery({ ...opts, queryKey: [...key, 'metadata'], queryFn: () => controller.metadata(scope), enabled: !mutation.isPending });
   const expanded = useQuery({ ...opts, staleTime: Infinity, refetchInterval: false, queryKey: [...key, 'expanded'], enabled: limit > 0, queryFn: () => controller.expanded(scope, limit) });
   const archives = useQuery({ ...opts, queryKey: [...key, 'archives'], queryFn: () => controller.archives(scope, archiveLimit) });
+  // Cards animate in and out only once every feed has answered, so the first load and the first runtime/metadata pass
+  // (which moves cards between categories) render instantly.
+  const loaded = [sessions, runtime, metadata, archives].every(query => query.data !== undefined || query.isError);
+  const [settled, setSettled] = useState(false);
+  useEffect(() => { if (loaded) setSettled(true); }, [loaded]);
   const previousLimits = useRef({ limit, archiveLimit });
   useEffect(() => {
     // One aggregate per feed avoids retaining a separate overlapping prefix after every expansion. Only its requested page depth changes.
@@ -1414,15 +1479,15 @@ function ScopedSidebar({ ctx, controller, scope }) {
     classified[section].filter(row => (!row.newSession || emptyDrafts.has(draftIdentity(row)) || ['waiting', 'working'].includes(row.status)) && matchesFilters(row, tokens, project, searchIndex))])), [classified, emptyDrafts, tokens, project, searchIndex]);
   const searching = !!query.trim();
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
-  // Working and Snoozed show up to two whole cards before Archived takes the space, never reserving room they cannot fill;
-  // Capping at 20% of the shelves keeps every heading visible and Archived dominant in short panes.
-  const cardsMinimum = count => `min(calc(30px + ${Math.min(count, 2)} * var(--sf-card-stride)),20%)`;
+  // Working and Snoozed fit their content up to two whole cards (at least 18%) before Archived takes the space, never
+  // reserving room they cannot fill. Capping at 20% of the shelves keeps every heading visible and Archived dominant in short
+  // panes. The track never depends on the card count: content sizing follows cards animating in and out.
+  const contentTrack = 'fit-content(max(18%,min(calc(30px + 2 * var(--sf-card-stride)),20%)))';
   const sectionTrack = section => {
     const count = sections[section].length;
-    // CSS owns Working's content fit and body-track fold animation; the parent only bounds it.
-    if (section === 'working') return `fit-content(max(18%,${cardsMinimum(count)}))`;
+    // CSS owns Working's and Snoozed's content fit and body-track fold animation; the parent only bounds them.
+    if (section === 'working' || section === 'snoozed') return contentTrack;
     if (isClosed(section)) return 'minmax(30px,0fr)';
-    if (section === 'snoozed' && count) return `minmax(${cardsMinimum(count)},.65fr)`;
     return `minmax(31px,${section === 'archived' && count ? 3 : count ? .65 : .25}fr)`;
   };
   const filtering = searching || project !== '*';
@@ -1511,9 +1576,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
   const renderSection = section => {
     const entries = sections[section], closed = isClosed(section);
-    const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs });
+    const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs, animate: settled });
     const headerless = section === 'active' || section === 'pinned';
-    if (section === 'pinned' && !entries.length) return null;
     return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed },
       !headerless ? h('button', { type: 'button', className: 'sf-section-toggle', 'aria-expanded': !closed, 'aria-label': `${LABELS[section]} (${entries.length})`,
         onClick: () => setCollapsed(previous => ({ ...previous, [section]: !previous[section] })) },
@@ -1521,17 +1585,17 @@ function ScopedSidebar({ ctx, controller, scope }) {
         h('span', { className: 'sf-section-line', 'aria-hidden': true }),
         h('span', { className: 'sf-section-chevron', 'aria-hidden': true }, icon(closed ? 'ChevronRight' : 'ChevronUp', closed ? '›' : '⌃'))) : null,
       h('div', { className: 'sf-section-body', 'aria-label': `${section === 'active' ? 'Ready' : LABELS[section]} sessions`, 'aria-hidden': closed || undefined, inert: closed || undefined, tabIndex: -1 },
-        section === 'archived' && archives.isError ? h('div', { className: 'sf-empty', role: 'alert' }, `Archives unavailable: ${archives.error.message}`) : entries.length ? items : section === 'active' && filtering ? null : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : section === 'archived' && archives.isLoading ? 'Loading archives…' : 'No sessions'),
+        section === 'archived' && archives.isError ? h('div', { className: 'sf-empty', role: 'alert' }, `Archives unavailable: ${archives.error.message}`) : items, entries.length || section === 'archived' && archives.isError || section === 'pinned' || section === 'working' || section === 'active' && filtering ? null : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : section === 'archived' && archives.isLoading ? 'Loading archives…' : 'No sessions'),
         section === 'archived' && !archives.isError && archives.data?.has_more ? h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: archives.isFetching, onClick: () => setArchiveLimit(previous => previous + 1) }, 'Browse older archives') : null));
 
   };
   // Toolbar/popover/error state is not a list input: retain its element tree,
   // not only the cards, so these interactions never walk thousands of rows.
-  const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, activeId, activeOwner,
+  const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, settled, activeId, activeOwner,
     scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, emptyDrafts,
     archives.isError, archives.error, archives.isLoading, archives.isFetching, archives.data?.has_more]);
   const shelfTracks = `minmax(0,1fr) ${['working', 'snoozed', 'archived'].map(sectionTrack).join(' ')}`;
-  const shelvesRef = useRef(null), motionRun = useRef(0), motionKey = useRef(null), shelfMotion = `${shelfTracks}|${isClosed('working')}`;
+  const shelvesRef = useRef(null), motionRun = useRef(0), motionKey = useRef(null), shelfMotion = `${shelfTracks}|${isClosed('working')}|${isClosed('snoozed')}`;
   useLayoutEffect(() => {
     const previous = motionKey.current; motionKey.current = shelfMotion;
     const shelves = shelvesRef.current;
@@ -1598,7 +1662,9 @@ export default {
       const history = /^(message\.complete|gateway\.(ready|connected|reconnected)|sessions\.changed|session\.(title|created|deleted|archived|unarchived|stored|saved|compressed|reset|imported))$/.test(type)
         || type === 'session.updated' && !!event.payload?.operation;
       const runtime = history || /^(session\.|approval\.|question\.|server_request\.)/.test(type)
-        || /^(message\.start|subagent\.(start|complete))$/.test(type);
+        || /^(message\.start|subagent\.(start|complete))$/.test(type)
+        // A manual compaction marks the session busy without a turn; the backend times it from its first observation.
+        || type === 'status.update' && ['compressing', 'compacting'].includes(event.payload?.kind);
       if (!runtime) return;
       if (pending && sameScope(pending.scope, scope)) { pending.history ||= history; return; }
       const work = pending = { scope, history };
