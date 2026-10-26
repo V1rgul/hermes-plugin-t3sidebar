@@ -165,7 +165,7 @@ try {
   check('Working recedes its title, not the whole card', await page.locator('[data-session-id="root"]').evaluate(el => getComputedStyle(el).opacity) === '1' && await titleColor('root') === await tokenColor(page.locator('[data-session-id="root"]'), '--ui-text-secondary'));
   check('Working blue mixes Desktop blue with the base text color so it stays readable in dark themes', await page.locator('[data-session-id="root"] .sf-time').evaluate(el => {
     const color = value => { const probe = document.createElement('span'); probe.style.color = value; el.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; };
-    return getComputedStyle(el).color === color('oklch(from color-mix(in oklab,var(--ui-blue) 68%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.7) h)') && getComputedStyle(el).color !== color('var(--ui-blue)');
+    return getComputedStyle(el).color === color('oklch(from color-mix(in oklab,var(--ui-blue) 62%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.6) h)') && getComputedStyle(el).color !== color('var(--ui-blue)');
   }));
   check('snooze status alarm draws in a 16px box with a 1px line, as large as the Working circle', await page.locator('.sf-snooze-time svg').first().evaluate(el => el.getBoundingClientRect().width === 16 && getComputedStyle(el).strokeWidth === '1.6px'));
   check('Working card text uses the native blue theme token', await page.locator('[data-session-id="root"] .sf-time').evaluate(el => {
