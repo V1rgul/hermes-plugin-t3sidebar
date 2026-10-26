@@ -530,7 +530,7 @@ test('snooze menu actions use the requested leading icons while its combined inf
   await click(row('snoozed').querySelector('[aria-label="Snooze session"]'));
   const actions = [...$('[role=dialog]').querySelectorAll('.sf-menu-action')];
   assert.deepEqual(actions.map(node => node.querySelector('[data-codicon]')?.getAttribute('data-codicon') || node.querySelector('[data-icon]')?.getAttribute('data-icon')),
-    ['AlarmOff', 'Clock', 'Clock', 'Sun', 'calendar']);
+    ['AlarmOff', 'ClockHour1', 'ClockHour3', 'Sun', 'calendar']);
   for (const node of actions) {
     assert.equal(node.firstElementChild.className, 'sf-menu-icon');
     assert.equal(node.firstElementChild.getAttribute('aria-hidden'), 'true');
@@ -603,8 +603,10 @@ test('React hover snooze preset and custom validation, no redundant context Rest
   await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Unsnooze')); assert.equal(row('design').closest('section'), shelf('Ready'));
   await click(row('design').querySelector('[aria-label="Snooze session"]')); await input($('input[type=datetime-local]'), '2020-01-01T12:00');
   assert.equal(button('Snooze until chosen time'), undefined);
+  assert.equal(button('Apply custom snooze').dataset.valid, 'false', 'a past time is not marked valid');
   await click(button('Apply custom snooze')); assert.match($('[role=alert]').textContent, /future/);
   await input($('input[type=datetime-local]'), '2030-01-01T12:00');
+  assert.equal(button('Apply custom snooze').dataset.valid, 'true', 'a valid future time turns the checkmark green');
   await act(async () => $('input[type=datetime-local]').closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))); await tick();
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
 });

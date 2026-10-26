@@ -225,6 +225,11 @@ try {
       const box = el.getBoundingClientRect(), style = getComputedStyle(el);
       return box.width === 15 && box.height === 15 && style.strokeWidth === '1.6px' && style.flexShrink === '0';
     }));
+    check(`${id} hover action icons and labels use the primary text color, with a 1px Archive line`, await card.locator('.sf-hover').evaluate(strip => {
+      const probe = document.createElement('span'); probe.style.color = 'var(--ui-text-primary)'; strip.append(probe); const primary = getComputedStyle(probe).color; probe.remove();
+      const archive = strip.querySelector('.sf-archive svg');
+      return [...strip.querySelectorAll('.sf-icon')].every(button => getComputedStyle(button).color === primary) && getComputedStyle(archive).strokeWidth === '2px';
+    }));
     check(`${id} hover actions appear without an opacity fade`, await card.locator('.sf-hover').evaluate(el => getComputedStyle(el).visibility === 'visible' && getComputedStyle(el).opacity === '1' && !/opacity/.test(getComputedStyle(el).transitionProperty)));
     // Desktop's SDK Button is `transition-all duration-100` (a Tailwind utility class), which also transitions inherited visibility.
     const desktopButton = await page.addStyleTag({ content: ':where(.sf-row button){transition:all 100ms}' });
@@ -263,13 +268,24 @@ try {
   await page.getByRole('dialog', { name: 'Snooze session', exact: true }).waitFor();
   const snoozeDialog = page.getByRole('dialog', { name: 'Snooze session', exact: true });
   const customTimeAligned = () => snoozeDialog.locator('form').evaluate(form => {
-    const icon = form.querySelector('.sf-menu-icon').getBoundingClientRect();
-    const custom = form.querySelector('.sf-custom-snooze');
-    const label = document.createRange(); label.selectNodeContents(custom.firstChild);
+    const preset = form.querySelector('.sf-snooze-action'), icon = preset.querySelector('.sf-menu-icon').getBoundingClientRect(), label = preset.querySelector('.sf-menu-label').getBoundingClientRect();
+    const custom = form.querySelector('.sf-custom-snooze'), calendar = custom.querySelector('.sf-menu-icon').getBoundingClientRect();
     const input = custom.querySelector('input').getBoundingClientRect();
-    return Math.abs(label.getBoundingClientRect().left - icon.left) < 1 && Math.abs(input.left - icon.left) < 1;
+    return !/Custom|local time/.test(custom.textContent) && custom.querySelector('[data-icon=CalendarTime]') && Math.abs(calendar.left - icon.left) < 1 && Math.abs(input.left - label.left) < 1;
   });
-  check('custom local-time label and input align with preset action icons', await customTimeAligned());
+  check('custom time has a calendar in the preset icon column and its field starts at the preset labels, without a text label', await customTimeAligned());
+  const check_ = snoozeDialog.getByRole('button', { name: 'Apply custom snooze', exact: true });
+  const green = await check_.evaluate(el => { const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; });
+  await snoozeDialog.locator('input[type=datetime-local]').fill('2020-01-01T12:00');
+  const pastColor = await check_.evaluate(el => getComputedStyle(el).color);
+  await snoozeDialog.locator('input[type=datetime-local]').fill(`${new Date().getFullYear() + 2}-01-01T12:00`);
+  check('custom checkmark turns green only for a valid future time', pastColor !== green && await check_.evaluate(el => getComputedStyle(el).color) === green);
+  check('custom checkmark is a bold, filled 28px button', await check_.evaluate(el => getComputedStyle(el.querySelector('svg')).strokeWidth === '3.5px' && el.getBoundingClientRect().width === 28 && getComputedStyle(el).backgroundColor !== 'rgba(0, 0, 0, 0)'));
+  check('custom checkmark is centred in its button', await check_.evaluate(el => {
+    const b = el.getBoundingClientRect(), s = el.querySelector('svg').getBoundingClientRect();
+    return Math.abs((s.left + s.right) / 2 - (b.left + b.right) / 2) < .5 && Math.abs((s.top + s.bottom) / 2 - (b.top + b.bottom) / 2) < .5;
+  }));
+  await snoozeDialog.locator('input[type=datetime-local]').fill('');
   const snoozeAnchor = design.locator('[aria-label="Snooze session"]');
   const anchorBefore = await snoozeAnchor.evaluate(el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; });
   const menuBefore = await snoozeDialog.boundingBox();
@@ -374,11 +390,11 @@ try {
     const r = el.getBoundingClientRect(), style = getComputedStyle(el);
     return Math.abs(date.top - remaining.top) < 1 && date.right < remaining.left && Math.abs(remaining.right - r.right + parseFloat(style.paddingRight) + parseFloat(style.borderRightWidth)) < 1 && el.scrollWidth <= el.clientWidth;
   }));
-  check('custom local-time label and input also align with icons in an existing snooze menu', await customTimeAligned());
+  check('custom calendar and field also align with the presets in an existing snooze menu', await customTimeAligned());
   await snoozeDialog.screenshot({ path: join(screenshotDir, 'snoozed-menu.png') });
-  check('Snooze actions use AlarmOff, Clock, Clock, Sun and calendar as aligned leading icons', await snoozeDialog.locator('.sf-menu-action').evaluateAll(actions => {
+  check('Snooze actions use AlarmOff, ClockHour1, ClockHour3, Sun and calendar as aligned leading icons', await snoozeDialog.locator('.sf-menu-action').evaluateAll(actions => {
     const names = actions.map(el => el.querySelector('[data-codicon]')?.dataset.codicon || el.querySelector('[data-icon]')?.dataset.icon);
-    return JSON.stringify(names) === JSON.stringify(['AlarmOff', 'Clock', 'Clock', 'Sun', 'calendar']) && actions.every(el => {
+    return JSON.stringify(names) === JSON.stringify(['AlarmOff', 'ClockHour1', 'ClockHour3', 'Sun', 'calendar']) && actions.every(el => {
       const icon = el.querySelector('.sf-menu-icon'), label = el.querySelector('.sf-menu-label');
       const i = icon.getBoundingClientRect(), l = label.getBoundingClientRect();
       return el.firstElementChild === icon && icon.getAttribute('aria-hidden') === 'true' && i.width === 14 && i.right < l.left && Math.abs(i.top + i.height / 2 - l.top - l.height / 2) < 1;

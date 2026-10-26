@@ -242,8 +242,8 @@ export function snoozePresets(now = Date.now(), presetTime = '09:00') {
   const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(hour, minute, 0, 0);
   // Calendar arithmetic preserves the configured local time across daylight-saving changes.
   const monday = new Date(now); monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7)); monday.setHours(hour, minute, 0, 0);
-  return [{ label: 'In 1 hour', icon: 'Clock', wake_at: Math.floor(now / 1000) + 3600 },
-    { label: 'In 3 hours', icon: 'Clock', wake_at: Math.floor(now / 1000) + 10800 },
+  return [{ label: 'In 1 hour', icon: 'ClockHour1', wake_at: Math.floor(now / 1000) + 3600 },
+    { label: 'In 3 hours', icon: 'ClockHour3', wake_at: Math.floor(now / 1000) + 10800 },
     { label: `Tomorrow at ${labelTime}`, icon: 'Sun', wake_at: Math.floor(tomorrow.getTime() / 1000) },
     { label: `Next Monday at ${labelTime}`, codicon: 'calendar', wake_at: Math.floor(monday.getTime() / 1000) }];
 }
@@ -809,7 +809,7 @@ const CSS = `
 .sf-open{display:flex;flex-direction:column;justify-content:center;gap:3px;width:100%;height:100%;min-width:0;padding:var(--sf-card-padding,6px) 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}/* Quieter than the other metadata. The filled provider logo covers about 2.3x more of its box than digits do, so at equal colour it reads heavier; 0.7 opacity (about the square root of that ratio) evens them out. */
 .sf-row .sf-token,.sf-row .sf-provider{color:color-mix(in srgb,var(--ui-base,var(--ui-text-primary)) 30%,transparent)}.sf-row .sf-provider{opacity:.7}
 .sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-time{display:inline-flex;align-items:center}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}/* Equal top and right insets; 4px also centres the 25px strip on the 19px metadata line. */
-.sf-hover{position:absolute;right:4px;top:4px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}/* The SDK Button's transition-all would keep hidden actions visible for its 100ms: swap instantly. */.sf-hover .sf-icon{transition:none}/* Desktop's buttons draw both hover icons in 12px boxes, where the round alarm (about 9px of ink) reads smaller than the square Archive mark (about 10px). A 15px box with a 1.6 stroke keeps its 1px line and gives about 10.7px of round ink, optically level with Archive. */.sf-hover .sf-icon svg[data-icon^=Alarm]{width:15px;height:15px;flex-shrink:0;stroke-width:1.6}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
+.sf-hover{position:absolute;right:4px;top:4px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}/* The SDK Button's transition-all would keep hidden actions visible for its 100ms: swap instantly. */.sf-hover .sf-icon{transition:none}/* Desktop's buttons draw both hover icons in 12px boxes, where the round alarm (about 9px of ink) reads smaller than the square Archive mark (about 10px). A 15px box with a 1.6 stroke keeps its 1px line and gives about 10.7px of round ink, optically level with Archive. */.sf-hover .sf-icon svg[data-icon^=Alarm]{width:15px;height:15px;flex-shrink:0;stroke-width:1.6}/* Desktop's ghost buttons use the secondary text color, and its 12px icon boxes thin the 1.6-stroke Archive mark to 0.8px: hover actions use the primary text color and a 1px Archive line, like the alarm. */.sf .sf-hover .sf-icon{color:var(--ui-text-primary)}.sf-hover .sf-archive svg{stroke-width:2}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
 .sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
 .sf-row[data-menu-open=true] .sf-hover{visibility:visible}.sf-row[data-menu-open=true] .sf-provider,.sf-row[data-menu-open=true] .sf-token,.sf-row[data-menu-open=true] .sf-time{visibility:hidden}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
@@ -834,7 +834,7 @@ const CSS = `
 .sf-section[data-pinned=true]>.sf-section-body{flex:none}
 .sf-section[data-pinned=true]{mask:linear-gradient(#000,#000) top/100% 30px no-repeat,linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
 .sf-section[data-pinned=true][data-section=active]{mask:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
-.sf-section[data-closed=true] .sf-section-body{visibility:hidden;transition:visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:background-color .16s ease,box-shadow .16s ease}.sf-custom-time{display:flex;align-items:center;gap:4px}.sf-custom-time input{min-width:0}.sf-custom-time .sf-icon{flex-shrink:0}
+.sf-section[data-closed=true] .sf-section-body{visibility:hidden;transition:visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:background-color .16s ease,box-shadow .16s ease}.sf-custom-time{display:flex;align-items:center;gap:8px}/* The custom checkmark is a visible button (filled like a control), bold (Tabler stroke 2 is 1px in Desktop's 12px icon box; 3.5 draws about 1.75px), and green once the time is valid. */.sf-menu .sf-custom-time .sf-icon{width:28px;height:28px;padding:0;justify-content:center;border-radius:4px;background:var(--ui-control-hover-background,var(--ui-bg-quaternary))}.sf-menu .sf-custom-time .sf-icon svg{stroke-width:3.5}.sf-menu .sf-custom-time .sf-icon[data-valid=true]{color:var(--ui-green,#1f8a65);background:color-mix(in srgb,var(--ui-green,#1f8a65) 18%,transparent)}.sf-custom-time input{min-width:0;flex:1}.sf-custom-time .sf-icon{flex-shrink:0}
 /* Empty-state text waits for leaving cards to collapse instead of appearing under them (visibility only, no fade). */
 @keyframes sf-after-exit{from{visibility:hidden}}.sf-empty{animation:sf-after-exit .22s step-end}
 @media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
@@ -907,8 +907,11 @@ function statusIcon(status) {
   return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
     STATUS_ICONS[status].map(d => h('path', { key: d, d })));
 }
-// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm and folder glyphs.
+// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour and folder glyphs.
 const BUNDLED_ICONS = {
+  ClockHour1: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 7v5', 'M12 12l2 -3'],
+  ClockHour3: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 12h3.5', 'M12 7v5'],
+  CalendarTime: ['M11.795 21h-6.795a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v4', 'M14 18a4 4 0 1 0 8 0a4 4 0 1 0 -8 0', 'M15 3v4', 'M7 3v4', 'M3 11h16', 'M18 16.496v1.504l1 1'],
   FolderCog: ['M12.5 19h-7.5a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v3', 'M17.001 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M19.001 15.5v1.5', 'M19.001 21v1.5', 'M22.032 17.25l-1.299 .75', 'M17.27 20l-1.3 .75', 'M15.97 17.25l1.3 .75', 'M20.733 20l1.3 .75'],
   FolderSymlink: ['M3 21v-4a3 3 0 0 1 3 -3h5', 'M8 17l3 -3l-3 -3', 'M3 11v-5a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8'],
   Alarm: ['M5 13a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M12 10l0 3l2 0', 'M7 4l-2.75 2', 'M17 4l2.75 2'],
@@ -1115,6 +1118,7 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
   };
   const action = (text, name, payload) => h(MenuAction, { key: text, name, disabled: disabled || busy, onClick: () => run(payload) }, text);
 
+  const customValid = (() => { try { parseLocalWake(value); return true; } catch (_) { return false; } })();
   const custom = event => {
     event.preventDefault();
     try { const wake_at = parseLocalWake(value); setError(''); run({ action: 'snooze', wake_at }); } catch (err) { setError(err.message); }
@@ -1126,9 +1130,11 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
         h('span', { className: 'sf-snooze-remaining' }, snoozeDetail)) : null,
       row.meta.state === 'snoozed' ? h(MenuAction, { name: 'AlarmOff', className: 'sf-unsnooze sf-snooze-action', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'restore' }) }, 'Unsnooze') : null,
       ...snoozePresets(Date.now(), presetTime).map(preset => h(MenuAction, { key: preset.label, name: preset.icon, codicon: preset.codicon, className: 'sf-snooze-action', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
-      h('label', { className: 'sf-custom-snooze' }, 'Custom · local time', h('span', { className: 'sf-custom-time' },
+      // Custom time: a calendar in the preset icon column, then the field and its checkmark, which turns green once the value is a
+      // valid future local time. An invalid value can still be submitted, to explain what is wrong.
+      h('label', { className: 'sf-custom-snooze sf-custom-time' }, h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, icon('CalendarTime')),
         h('input', { type: 'datetime-local', value, disabled: disabled || snoozeDisabled, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
-        h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value }))))
+        h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value, 'data-valid': customValid })))
       : h('div', null,
         row.archived !== true ? action(row.meta.pinned ? 'Unpin' : 'Pin', 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
         h(MenuAction, { name: 'Pencil', disabled: busy || !row.runtimeId, onClick: () => setRenaming(true) }, 'Rename'),
