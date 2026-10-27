@@ -337,6 +337,17 @@ class StandaloneRuntime(unittest.TestCase):
 			self.runtime_row()
 			self.assertEqual(read.call_count, 1)
 
+	def test_watched_subagent_runs_are_not_sidebar_rows(self):
+		# Desktop's lazy watch session on a delegated child registers it as a runtime; native listings hide it by its delegate marker.
+		with closing(SessionDB(self.current / "native.sqlite3")) as db:
+			db.create_session("delegate-child", "desktop", model_config={"_delegate_from": "collision"})
+			db.create_session("worker-child", "subagent", model_config={"_delegate_from": "collision"})
+		self.registry["runtime-delegate"] = {**self.session("delegate-child", self.current), "running": False}
+		self.registry["runtime-worker"] = {**self.session("worker-child", self.current), "running": False}
+		response = self.client.get("/runtime?profile=exact-profile")
+		self.assertEqual(response.status_code, 200, response.text)
+		self.assertEqual([row["id"] for row in response.json()["sessions"]], ["runtime-a"])
+
 	def test_real_launch_profile_none_sentinel_keeps_current_runtime_readable(self):
 		with patch.object(native_server, "_profile_home", NATIVE_PROFILE_HOME), patch.object(native_server, "_hermes_home", self.current), patch.object(native_server, "_canonical_profile_request", side_effect=lambda name: name), patch("hermes_cli.profiles.get_profile_dir", side_effect=lambda name: self.homes[name]):
 			self.assertIsNone(native_server._profile_home("exact-profile"))

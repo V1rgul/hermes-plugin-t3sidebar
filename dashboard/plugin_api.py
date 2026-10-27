@@ -336,6 +336,21 @@ def standalone_subagent_count(server, row, snapshot, db, home):
 		return None
 
 
+def subagent_run(record):
+	"""Delegated subagent runs are never sidebar conversations. Desktop's lazy watch session on a child puts it in the runtime registry, while native listings hide it by the same `model_config._delegate_from` marker (worker children also store source `subagent`)."""
+	if not record:
+		return False
+	if str(record.get("source") or "").strip().lower() == "subagent":
+		return True
+	config = record.get("model_config")
+	if isinstance(config, str):
+		try:
+			config = json.loads(config)
+		except (ValueError, RecursionError):
+			return False
+	return isinstance(config, dict) and config.get("_delegate_from") is not None
+
+
 def runtime_retired(db, row):
 	"""A missing row can be an unsaved draft; only native retirement proves deletion."""
 	from hermes_state_mutation_retirement import retired_session
@@ -538,7 +553,7 @@ def standalone_runtime(request, profile, actor):
 			source = record.get("source") if record is not None else captured.get("source")
 			if not isinstance(source, str) or not source.strip():
 				raise HTTPException(503, "standalone_session_source_unavailable")
-			if source.strip().lower() in {*INTERNAL_LISTING_SOURCES, "cron"}:
+			if source.strip().lower() in {*INTERNAL_LISTING_SOURCES, "cron", "subagent"} or subagent_run(record):
 				continue
 			item = {k: row[k] for k in ("id", "session_key", "status", "current", "last_active", "started_at", "model", "title")}
 			item["message_count"] = runtime_message_count(
@@ -573,10 +588,11 @@ def authority_runtime_rows(db_path, rows):
 
 	with_db = SessionDB(db_path, read_only=True)
 	try:
-		rows = [row for row in rows if row.get("source") not in {*INTERNAL_LISTING_SOURCES, "cron"}
+		rows = [row for row in rows if row.get("source") not in {*INTERNAL_LISTING_SOURCES, "cron", "subagent"}
 			and not runtime_retired(with_db, row)]
 		stored = with_db._get_session_rich_rows_batch(
 			{row.get("session_key") or row["id"] for row in rows}, compact_rows=True)
+		rows = [row for row in rows if not subagent_run(stored.get(row.get("session_key") or row["id"]))]
 		projects = card_projects(with_db) if rows else []
 		result = []
 		for row in rows:

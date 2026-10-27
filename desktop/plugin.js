@@ -87,7 +87,7 @@ export function workingSince(status, matches, run) {
   if (!run) return null;
   return own.length && run.ended_at != null ? null : run.started_at;
 }
-export const visibleSource = row => !['cron', 'tool', 'oneshot', 'kanban'].includes(String(row.source || '').toLowerCase());
+export const visibleSource = row => !['cron', 'tool', 'oneshot', 'kanban', 'subagent'].includes(String(row.source || '').toLowerCase());
 export function compactTokens(row) {
   const valid = value => Number.isFinite(value) && value >= 0;
   const total = valid(row.total_tokens) ? row.total_tokens : valid(row.input_tokens) && valid(row.output_tokens) ? row.input_tokens + row.output_tokens : null;
