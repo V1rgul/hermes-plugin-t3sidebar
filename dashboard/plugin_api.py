@@ -113,6 +113,7 @@ class CompletionMetadata(BaseModel):
 class RunMetadata(BaseModel):
 	started_at: float = Field(gt=0, allow_inf_nan=False)
 	ended_at: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+	pending: bool = False
 
 
 class FlowState(BaseModel):

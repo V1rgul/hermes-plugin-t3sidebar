@@ -1800,17 +1800,28 @@ test('Working sorts by elapsed time, shortest first, not by activity; unknown st
   assert.deepEqual(flow.buildSections(rows, { sessions: {} }, live, { now: 100 }).working.map(row => row.id), ['unknown-new', 'recent', 'mid', 'long', 'unknown-old']);
 });
 test('Working time prefers the native in-flight turn, keeps a subagent parent on its last turn and never shows a finished turn as current', () => {
-  const run = { started_at: 100, ended_at: 160 }, open = { started_at: 200, ended_at: null };
+  const run = { started_at: 100, ended_at: 160 }, open = { started_at: 260, ended_at: null };
   assert.equal(flow.workingSince('idle', [{ status: 'working', turn_started_at: 300 }], open), null);
   assert.equal(flow.workingSince('working', [{ status: 'working', turn_started_at: 300 }, { status: 'starting', turn_started_at: 250 }], open), 250);
   // Authority runtimes have no native start: use the hook's open turn, never the previous finished one.
-  assert.equal(flow.workingSince('working', [{ status: 'working', turn_started_at: null }], open), 200);
+  assert.equal(flow.workingSince('working', [{ status: 'working', turn_started_at: null }], open), 260);
   assert.equal(flow.workingSince('working', [{ status: 'working' }], run), null);
   // An idle parent kept Working by subagents counts from its last turn, even after that turn ended.
   assert.equal(flow.workingSince('working', [{ status: 'idle', running_subagents: 2 }], run), 100);
   assert.equal(flow.workingSince('working', [{ status: 'idle', running_subagents: 2 }], undefined), null);
   // Awaited background processes keep an idle session Working from its last turn, like subagents.
   assert.equal(flow.workingSince('working', [{ status: 'idle', awaiting_processes: true }], run), 100);
+});
+test('Working time keeps the user work start across automatic wake-ups', () => {
+  const pending = { started_at: 100, ended_at: 160, pending: true }, continued = { started_at: 100, ended_at: null, pending: false };
+  // Before the hook sees the wake-up turn, and once it has kept the start.
+  assert.equal(flow.workingSince('working', [{ status: 'working', turn_started_at: 300 }], pending), 100);
+  assert.equal(flow.workingSince('working', [{ status: 'working', turn_started_at: 300 }], continued), 100);
+  assert.equal(flow.workingSince('working', [{ status: 'working' }], pending), 100);
+  // A user turn the hook restarted counts from the earlier native start.
+  assert.equal(flow.workingSince('working', [{ status: 'working', turn_started_at: 300 }], { started_at: 301, ended_at: null, pending: false }), 300);
+  assert.equal(flow.validState({ version: 1, sessions: {}, runs: { a: pending } }).runs.a.pending, true);
+  assert.throws(() => flow.validState({ version: 1, sessions: {}, runs: { a: { ...pending, pending: 1 } } }), /Invalid turn start/);
 });
 
 test('awaited background processes count as Working; unknown or false do not', () => {

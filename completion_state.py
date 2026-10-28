@@ -49,16 +49,18 @@ class CompletionStore:
                 PRIMARY KEY (session_id, turn_id)
             )
         """)
-        # Latest human turn per conversation root. It outlives the turn (ended_at) so a parent kept
-        # Working by its subagents still has a start to count from.
+        # Latest human turn per conversation root. started_at is when the user's work began, kept across automatic wake-ups. It outlives the turn (ended_at) so a parent kept Working by its subagents still has a start to count from; pending records that the turn ended with background work that will wake the conversation again.
         connection.execute("""
             CREATE TABLE IF NOT EXISTS session_runs (
                 session_id TEXT PRIMARY KEY,
                 started_at REAL NOT NULL CHECK (started_at > 0),
                 ended_at REAL CHECK (ended_at IS NULL OR ended_at > 0),
-                turn_id TEXT NOT NULL CHECK (length(turn_id) BETWEEN 1 AND 256)
+                turn_id TEXT NOT NULL CHECK (length(turn_id) BETWEEN 1 AND 256),
+                pending INTEGER NOT NULL DEFAULT 0 CHECK (pending IN (0, 1))
             )
         """)
+        if "pending" not in {row[1] for row in connection.execute("PRAGMA table_info(session_runs)")}:
+            connection.execute("ALTER TABLE session_runs ADD COLUMN pending INTEGER NOT NULL DEFAULT 0 CHECK (pending IN (0, 1))")
 
     @staticmethod
     def read(connection):
@@ -74,9 +76,9 @@ class CompletionStore:
     def read_runs(connection):
         """Turn start/end times only; turn identities stay backend-private."""
         return {
-            sid: {"started_at": started_at, "ended_at": ended_at}
-            for sid, started_at, ended_at in connection.execute(
-                "SELECT session_id, started_at, ended_at FROM session_runs ORDER BY session_id")
+            sid: {"started_at": started_at, "ended_at": ended_at, "pending": bool(pending)}
+            for sid, started_at, ended_at, pending in connection.execute(
+                "SELECT session_id, started_at, ended_at, pending FROM session_runs ORDER BY session_id")
         }
 
     def _write(self, statement, parameters):
@@ -95,24 +97,36 @@ class CompletionStore:
         finally:
             connection.close()
 
-    def begin_run(self, session_id, turn_id, started_at):
-        """A newer turn replaces the conversation's previous turn."""
+    def begin_run(self, session_id, turn_id, started_at, heartbeat_fired_at=None):
+        """A newer turn replaces the conversation's previous turn, and restarts the work time unless it is a wake-up.
+
+        A wake-up follows a turn that ended with background work pending, or a heartbeat fired since that turn ended.
+        A previous turn that never ended (its runtime skipped the end hook) is no evidence of either.
+        """
         validate_session_id(session_id)
         validate_done_token(turn_id)
         if type(started_at) is not float or not math.isfinite(started_at) or started_at <= 0:
             raise ValueError("started_at must be a positive finite UTC epoch timestamp")
+        if heartbeat_fired_at is not None and (type(heartbeat_fired_at) is not float or not math.isfinite(heartbeat_fired_at)):
+            raise ValueError("heartbeat_fired_at must be a finite UTC epoch timestamp")
         self._write("""
-            INSERT INTO session_runs (session_id, started_at, ended_at, turn_id) VALUES (?, ?, NULL, ?)
-            ON CONFLICT(session_id) DO UPDATE SET started_at = excluded.started_at, ended_at = NULL, turn_id = excluded.turn_id
-        """, (session_id, started_at, turn_id))
+            INSERT INTO session_runs (session_id, started_at, ended_at, turn_id, pending) VALUES (?, ?, NULL, ?, 0)
+            ON CONFLICT(session_id) DO UPDATE SET
+                started_at = CASE WHEN session_runs.ended_at IS NOT NULL AND (session_runs.pending = 1 OR ? > session_runs.ended_at)
+                    THEN session_runs.started_at ELSE excluded.started_at END,
+                ended_at = NULL, pending = 0, turn_id = excluded.turn_id
+        """, (session_id, started_at, turn_id, heartbeat_fired_at))
 
-    def end_run(self, turn_id):
+    def end_run(self, turn_id, pending=False):
         """End only this exact turn, so a racing next turn stays open; return whether it was open."""
         validate_done_token(turn_id)
+        if type(pending) is not bool:
+            raise ValueError("pending must be a bool")
         now = float(self.clock())
         if not math.isfinite(now) or now <= 0:
             raise ValueError("clock must return a positive finite UTC epoch timestamp")
-        return self._write("UPDATE session_runs SET ended_at = ? WHERE turn_id = ? AND ended_at IS NULL", (now, turn_id)) > 0
+        return self._write("UPDATE session_runs SET ended_at = ?, pending = ? WHERE turn_id = ? AND ended_at IS NULL",
+            (now, int(pending), turn_id)) > 0
 
     @staticmethod
     def acknowledge(connection, session_id, done_token):

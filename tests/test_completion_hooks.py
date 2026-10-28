@@ -4,6 +4,7 @@ from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 import importlib
 import importlib.util
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -355,9 +356,71 @@ class CompletionHookTests(unittest.TestCase):
 		second = self.runs()["human"]["started_at"]
 		self.assertGreaterEqual(second, first)
 		self.end(turn="first")
-		self.assertEqual(self.runs(), {"human": {"started_at": second, "ended_at": None}})
+		self.assertEqual(self.runs(), {"human": {"started_at": second, "ended_at": None, "pending": False}})
 		self.end(turn="second")
 		self.assertIsNotNone(self.runs()["human"]["ended_at"])
+
+	def test_wake_ups_keep_the_user_work_start_until_the_next_user_turn(self):
+		self.begin(turn="user")
+		start = self.runs()["human"]["started_at"]
+		# Subagents still running at the end: their result's turn continues the work time.
+		self.delegate()
+		self.end(turn="user")
+		self.assertTrue(self.runs()["human"]["pending"])
+		self.begin(turn="subagent-result")
+		self.assertEqual(self.runs()["human"]["started_at"], start)
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			connection.execute("UPDATE async_delegations SET state = 'completed', delivery_state = 'delivered'")
+			connection.commit()
+		# A background process that will report back, checked for this turn's task and session.
+		with patch.object(hooks, "awaits_processes", return_value=True) as awaits:
+			self.end(turn="subagent-result")
+		awaits.assert_called_once_with({"human", "task"})
+		self.begin(turn="process-notice")
+		self.assertEqual(self.runs()["human"]["started_at"], start)
+		self.end(turn="process-notice")
+		self.assertFalse(self.runs()["human"]["pending"])
+		# A /heartbeat firing recorded since that end is this turn's; the next user turn follows the heartbeat turn's end.
+		self.db.set_meta("heartbeat:human", json.dumps({"status": "active", "last_fired_at": time.time()}))
+		self.begin(turn="heartbeat")
+		self.assertEqual(self.runs()["human"]["started_at"], start)
+		self.end(turn="heartbeat")
+		time.sleep(0.01)
+		self.begin(turn="next-user")
+		self.assertGreater(self.runs()["human"]["started_at"], start)
+
+	def test_a_result_still_undelivered_continues_only_if_it_finished_during_the_turn(self):
+		# Already finished and undelivered at the start: this turn consumes it (or it is stale), nothing is left to wake.
+		self.delegate("stale", state="completed")
+		self.begin(turn="user")
+		start = self.runs()["human"]["started_at"]
+		# A fast child dispatched and finished within the turn still has to deliver its result.
+		self.delegate("fast", state="completed")
+		self.end(turn="user")
+		self.assertTrue(self.runs()["human"]["pending"])
+		self.begin(turn="fast-result")
+		self.assertEqual(self.runs()["human"]["started_at"], start)
+		self.end(turn="fast-result")
+		self.assertFalse(self.runs()["human"]["pending"])
+
+	def test_processes_spawned_before_compression_still_count(self):
+		self.db.end_session("human", "compression")
+		self.db.create_session("tip", "cli", parent_session_id="human")
+		self.begin(session="tip", turn="tip-turn", task_id="tip")
+		with patch.object(hooks, "awaits_processes", return_value=False) as awaits:
+			self.end(session="tip", turn="tip-turn", task_id="tip")
+		awaits.assert_called_once_with({"human", "tip"})
+
+	def test_stop_does_not_carry_pending_work_into_the_next_turn(self):
+		self.begin(turn="user")
+		start = self.runs()["human"]["started_at"]
+		self.delegate()
+		with patch.object(hooks, "awaits_processes", return_value=True):
+			self.end(turn="user", completed=False, interrupted=True)
+		self.assertFalse(self.runs()["human"]["pending"])
+		time.sleep(0.01)
+		self.begin(turn="next-user")
+		self.assertGreater(self.runs()["human"]["started_at"], start)
 
 	def test_non_human_turns_and_timer_write_failures_never_affect_done(self):
 		self.begin(turn="worker", platform="cron")

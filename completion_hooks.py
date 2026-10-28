@@ -10,7 +10,9 @@ Skipped/timed-out hooks remain best effort and must never block agent activity.
 from collections import OrderedDict
 from contextlib import closing
 from dataclasses import dataclass
+import json
 import logging
+import math
 from pathlib import Path
 import sqlite3
 from threading import RLock
@@ -40,6 +42,7 @@ class NativeSnapshot:
 	delegations: frozenset[str]
 	live: bool
 	archived: bool
+	undelivered: frozenset[str] = frozenset()
 
 
 def native_snapshot(home, session_id, *, dispatched_before=None):
@@ -98,16 +101,46 @@ def native_snapshot(home, session_id, *, dispatched_before=None):
 		if {row[0] for row in flags} != aliases or any(not _human(row[1]) for row in flags):
 			return None
 		rows = connection.execute(
-			f"SELECT delegation_id, state, dispatched_at FROM async_delegations WHERE "
+			f"SELECT delegation_id, state, dispatched_at, delivery_state FROM async_delegations WHERE "
 			f"parent_session_id IN ({placeholders}) OR origin_session_id IN ({placeholders}) "
 			f"OR origin_ui_session_id IN ({placeholders})", ids * 3,
 		).fetchall()
 	# A timed-out begin worker may finish after tools have already dispatched.
 	# Its baseline must not absorb children created since this hook began.
-	delegations = frozenset(_identifier(row[0]) for row in rows
-		if dispatched_before is None or row[2] < dispatched_before)
+	baseline = [row for row in rows if dispatched_before is None or row[2] < dispatched_before]
+	delegations = frozenset(_identifier(row[0]) for row in baseline)
+	# Finished children whose result still has to wake the parent (native _persist_completion sets delivery_state='pending').
+	undelivered = frozenset(_identifier(row[0]) for row in baseline if row[1] in TERMINAL_DELEGATIONS and row[3] == "pending")
 	return NativeSnapshot(root, aliases, delegations,
-		any(row[1] not in TERMINAL_DELEGATIONS for row in rows), any(row[2] for row in flags))
+		any(row[1] not in TERMINAL_DELEGATIONS for row in rows), any(row[2] for row in flags), undelivered)
+
+
+def heartbeat_fired_at(home, aliases):
+	"""Latest /heartbeat firing across the lineage, or None.
+
+	Native records each firing before the turn it starts (hermes_cli.heartbeat.HeartbeatManager.due_prompt) and only after claiming an idle session, so a firing newer than the previous turn's end identifies this turn as the heartbeat's.
+	"""
+	ids = sorted(aliases)
+	try:
+		with closing(sqlite3.connect((home / "state.db").as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
+			values = connection.execute(f"SELECT value FROM state_meta WHERE key IN ({','.join('?' for _ in ids)})",
+				[f"heartbeat:{sid}" for sid in ids]).fetchall()
+		fired = [json.loads(value).get("last_fired_at") for (value,) in values]
+	except Exception:
+		return None
+	fired = [float(value) for value in fired if type(value) in (int, float) and math.isfinite(value)]
+	return max(fired, default=None)
+
+
+def awaits_processes(owners):
+	"""Native predicate: a background process started by these task/session ids will still report back into the conversation."""
+	try:
+		from tools.process_registry import process_registry
+		from tools.process_registry_awaiting import awaits_notification
+
+		return bool(awaits_notification(process_registry, owners))
+	except Exception:
+		return False
 
 
 def restore_archived_activity(home, session_id, before):
@@ -205,6 +238,7 @@ class CompletionObserver:
 				pending = (started, None)
 				self._receipts[key] = pending
 			snapshot = native_snapshot(self.home, sid, dispatched_before=started_wall)
+			fired = heartbeat_fired_at(self.home, snapshot.aliases) if snapshot is not None else None
 			with self._lock:
 				now = self.clock()
 				self._prune(now)
@@ -220,15 +254,15 @@ class CompletionObserver:
 					self._prune(now)
 					# Still under the end fence: a turn that already ended can never leave a start behind.
 					if snapshot is not None:
-						self._begin_run(snapshot.root, key[1], started_wall)
+						self._begin_run(snapshot.root, key[1], started_wall, fired)
 		except Exception:
 			log.debug("Completion begin observation unavailable")
 		return None
 
-	def _begin_run(self, root, turn_id, started_wall):
+	def _begin_run(self, root, turn_id, started_wall, heartbeat_fired_at):
 		# Independent of Done admission: a failed timer write must not discard the receipt.
 		try:
-			self.store.begin_run(root, turn_id, float(started_wall))
+			self.store.begin_run(root, turn_id, float(started_wall), heartbeat_fired_at)
 		except Exception:
 			log.debug("Turn start unavailable")
 
@@ -247,18 +281,27 @@ class CompletionObserver:
 				# Also fence begins whose timeout worker has not returned yet.
 				self._receipts[key] = (now, None)
 				self._prune(now)
+			# Background work still running wakes this conversation again, so its next turn continues the user's work time: live children, children that finished during this turn with their result still undelivered (those already undelivered at its start are what this turn consumes, or stale), and notifying processes of any lineage id, since compression rotates the owning key. A Stop suppresses those wake-ups until the user's next prompt (native _notif_claim_turn). Without a begin snapshot this turn recorded no start to continue.
+			before = receipt[1] if receipt is not None else None
+			after = None
+			if before is not None and interrupted is not True:
+				try:
+					after = native_snapshot(self.home, sid)
+				except Exception:
+					log.debug("Turn end snapshot unavailable")
+			pending = before is not None and interrupted is not True and (
+				bool(after and (after.live or after.undelivered - before.undelivered))
+				or awaits_processes({sid, key[0], *before.aliases}))
 			# Every outcome ends this exact turn; its start stays for subagent-only Working parents.
 			try:
-				self.store.end_run(key[1])
+				self.store.end_run(key[1], pending)
 			except Exception:
 				log.debug("Turn end unavailable")
 			if (completed is not True or failed is not False or interrupted is not False
 					or (platform and not _human(platform)) or receipt is None):
 				return None
-			before = receipt[1]
 			if before is None:
 				return None
-			after = native_snapshot(self.home, sid)
 			if (after is None or after.root != before.root or after.live or after.archived
 					or not after.delegations <= before.delegations):
 				return None

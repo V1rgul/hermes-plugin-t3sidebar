@@ -80,20 +80,19 @@ export function validState(value) {
   }
   if (value.runs !== undefined) {
     if (!value.runs || typeof value.runs !== 'object' || Array.isArray(value.runs)) throw new Error('Invalid turn state.');
-    for (const item of Object.values(value.runs)) if (!item || !Number.isFinite(item.started_at) || item.started_at <= 0 || item.ended_at != null && !(Number.isFinite(item.ended_at) && item.ended_at > 0)) throw new Error('Invalid turn start.');
+    for (const item of Object.values(value.runs)) if (!item || !Number.isFinite(item.started_at) || item.started_at <= 0 || item.ended_at != null && !(Number.isFinite(item.ended_at) && item.ended_at > 0) || item.pending !== undefined && typeof item.pending !== 'boolean') throw new Error('Invalid turn start.');
   }
   return value;
 }
-// Elapsed Working time counts from the native in-flight turn when the conversation itself runs (the backend reports a manual
-// compaction's first observation there too). A session kept Working only by subagents or awaited background processes counts
-// from its last recorded turn. The hook's open turn covers runtimes without native starts.
+// Elapsed Working time counts from when the user's work began: the hook keeps that start across automatic wake-ups (subagent results, background-process notices, heartbeats) while its turn is open or ended with background work pending, otherwise the native in-flight turn is the start (the backend reports a manual compaction's first observation there too). A session kept Working only by subagents or awaited background processes counts from the hook's start. The hook's open turn covers runtimes without native starts.
 export function workingSince(status, matches, run) {
   if (status !== 'working') return null;
   const own = matches.filter(item => item.status === 'working' || item.status === 'starting');
   const native = own.map(item => item.turn_started_at).filter(value => Number.isFinite(value) && value > 0);
-  if (native.length) return Math.min(...native);
+  const continued = run && (run.ended_at == null || run.pending === true) ? run.started_at : null;
+  if (native.length) return Math.min(...native, ...(continued == null ? [] : [continued]));
   if (!run) return null;
-  return own.length && run.ended_at != null ? null : run.started_at;
+  return own.length && continued == null ? null : run.started_at;
 }
 export const visibleSource = row => !['cron', 'tool', 'oneshot', 'kanban', 'subagent'].includes(String(row.source || '').toLowerCase());
 // The conversation's own turn is in flight: a bare "starting" (agent rebuild on open) is not work.

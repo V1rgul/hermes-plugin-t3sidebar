@@ -72,19 +72,50 @@ class CompletionTests(unittest.TestCase):
     def test_turn_starts_are_shared_content_free_and_ended_per_exact_turn(self):
         one, two = self.client(), self.client()
         self.producer.begin_run("same", "turn-1", 1000.5)
-        self.assertEqual(self.state(one)["runs"], {"same": {"started_at": 1000.5, "ended_at": None}})
+        self.assertEqual(self.state(one)["runs"], {"same": {"started_at": 1000.5, "ended_at": None, "pending": False}})
         self.assertEqual(self.state(one), self.state(two))
         self.producer.begin_run("same", "turn-2", 1001.0)
         self.assertFalse(self.producer.end_run("turn-1"))
-        self.assertEqual(self.state(two)["runs"], {"same": {"started_at": 1001.0, "ended_at": None}})
+        self.assertEqual(self.state(two)["runs"], {"same": {"started_at": 1001.0, "ended_at": None, "pending": False}})
         self.assertTrue(self.producer.end_run("turn-2"))
         self.assertFalse(self.producer.end_run("turn-2"))
-        self.assertEqual(self.state(one)["runs"], {"same": {"started_at": 1001.0, "ended_at": self.now}})
+        self.assertEqual(self.state(one)["runs"], {"same": {"started_at": 1001.0, "ended_at": self.now, "pending": False}})
         self.producer.begin_run("same", "turn-3", 1002.0)
-        self.assertEqual(self.state(one)["runs"], {"same": {"started_at": 1002.0, "ended_at": None}})
+        self.assertEqual(self.state(one)["runs"], {"same": {"started_at": 1002.0, "ended_at": None, "pending": False}})
         for invalid in (0.0, -1.0, float("nan"), float("inf"), 5):
             with self.assertRaises(ValueError):
                 self.producer.begin_run("same", "turn-3", invalid)
+
+    def test_wake_ups_keep_the_work_start_and_a_user_turn_restarts_it(self):
+        client = self.client()
+        runs = lambda: self.state(client)["runs"]["same"]
+        self.producer.begin_run("same", "user", 1000.0)
+        self.producer.end_run("user", pending=True)
+        self.assertEqual(runs(), {"started_at": 1000.0, "ended_at": self.now, "pending": True})
+        # The background work's wake-up continues; its own end has nothing left pending.
+        self.producer.begin_run("same", "notice", 1001.0)
+        self.assertEqual(runs(), {"started_at": 1000.0, "ended_at": None, "pending": False})
+        self.producer.end_run("notice")
+        # A heartbeat fired since that end continues too; an older firing does not.
+        self.producer.begin_run("same", "heartbeat", 1002.0, heartbeat_fired_at=self.now + 1)
+        self.assertEqual(runs()["started_at"], 1000.0)
+        self.producer.end_run("heartbeat")
+        self.producer.begin_run("same", "next-user", 1003.0, heartbeat_fired_at=self.now - 1)
+        self.assertEqual(runs()["started_at"], 1003.0)
+        # A turn whose end never arrived is no evidence of a wake-up.
+        self.producer.begin_run("same", "unended-successor", 1004.0, heartbeat_fired_at=self.now + 1)
+        self.assertEqual(runs()["started_at"], 1004.0)
+        for invalid in (1, "x", None):
+            with self.assertRaises(ValueError):
+                self.producer.end_run("unended-successor", pending=invalid)
+
+    def test_legacy_turn_table_gains_pending_on_first_read(self):
+        self.path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute("CREATE TABLE session_runs (session_id TEXT PRIMARY KEY, started_at REAL NOT NULL CHECK (started_at > 0), ended_at REAL CHECK (ended_at IS NULL OR ended_at > 0), turn_id TEXT NOT NULL CHECK (length(turn_id) BETWEEN 1 AND 256))")
+            connection.execute("INSERT INTO session_runs VALUES ('same', 1000.0, 1001.0, 'old')")
+            connection.commit()
+        self.assertEqual(self.state(self.client())["runs"], {"same": {"started_at": 1000.0, "ended_at": 1001.0, "pending": False}})
 
     def test_two_independent_apps_observe_and_share_exact_ack(self):
         one, two = self.client(), self.client()
