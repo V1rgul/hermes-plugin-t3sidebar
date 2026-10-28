@@ -281,8 +281,10 @@ class CollectorTests(unittest.TestCase):
 		refreshed = []
 		with patch.object(limits, "_native_symbols", return_value=self.symbols(cache, refreshed, pool)):
 			readings = limits.collect_native(join_timeout=5)
-		(reading,) = readings
-		self.assertEqual(reading["provider"], "openai-codex")
+		# An emptied pool key is reported as logged out; a provider outside the vetted set is never sampled.
+		self.assertEqual([(r["provider"], r["error"], r["accounts"]) for r in readings[:1]], [("anthropic", "logged_out", [])])
+		reading = readings[1]
+		self.assertEqual([r["provider"] for r in readings], ["anthropic", "openai-codex"])
 		by_id = {a["id"]: a for a in reading["accounts"]}
 		self.assertEqual(list(by_id), ["7c202b", "7ad3ca", "dead01", "empty1", "fail01", "old001"])
 		self.assertEqual([r["identity_id"] for r in refreshed[0]], ["id:tok-a", "id:tok-b", "id:fails", "id:old"])
@@ -298,7 +300,10 @@ class CollectorTests(unittest.TestCase):
 		self.assertNotIn("id:", repr(readings))
 		with tempfile.TemporaryDirectory() as temp:
 			path = Path(temp) / "limits.sqlite3"
-			limits.LimitsStore(path).record(readings, checked_at=time.time())
+			store = limits.LimitsStore(path)
+			store.record(readings, checked_at=time.time())
+			payload = limits.limits_payload(store, hours=24, now=time.time())
+			self.assertEqual({p["provider"]: (p["auth"], p["error"], len(p["accounts"])) for p in payload["providers"]}, {"anthropic": ("logged_out", None, 0), "openai-codex": ("ok", None, 6)})
 			self.assertNotIn(b"tok-", path.read_bytes())
 			self.assertNotIn(b"example", path.read_bytes())
 

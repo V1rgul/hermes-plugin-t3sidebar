@@ -149,7 +149,7 @@ export const ctx = {
       if (control.usageError) throw new Error(control.usageError);
       const params = new URLSearchParams(path.split('?')[1] || '');
       if (path.startsWith('/usage/history?')) return clone(control.usageHistory ?? syntheticUsageHistory(Number(params.get('days')), params.get('tz')));
-      if (path.startsWith('/usage/limits?')) return clone(control.usageLimits ?? syntheticUsageLimits());
+      if (path.startsWith('/usage/limits?')) return clone(control.usageLimits ?? syntheticUsageLimits(Math.min(840, Number(params.get('hours')) || 168)));
     }
     if (path === '/environment') return { profile: control.homeProfile || host.state.profile.get(), home: control.home || '/home/fixture' };
     if (path === '/state') {
@@ -304,12 +304,27 @@ export function loadDenseFixtures() {
   }
   queryClient.clear(); switchScope('synthetic-layout-source');
 }
+function fixtureMidnight(seconds, tz) {
+  let format;
+  try { format = new Intl.DateTimeFormat('en-US', { timeZone: tz || undefined, hourCycle: 'h23', hour: 'numeric', minute: 'numeric', second: 'numeric' }); }
+  catch (_) { format = new Intl.DateTimeFormat('en-US', { hourCycle: 'h23', hour: 'numeric', minute: 'numeric', second: 'numeric' }); }
+  let t = Math.floor(seconds);
+  for (let guard = 0; guard < 4; guard++) {
+    const parts = Object.fromEntries(format.formatToParts(new Date(t * 1000)).map(part => [part.type, Number(part.value)]));
+    const since = parts.hour * 3600 + parts.minute * 60 + parts.second;
+    if (!since) break;
+    // After the first correction a DST shift can leave t just before midnight; step forward instead of a whole day back.
+    t += guard > 0 && parts.hour >= 12 ? 86400 - since : -since;
+  }
+  return t;
+}
 // Synthetic usage fixtures shaped like the frozen /usage/history and /usage/limits contract; deterministic apart from the clock.
 const FIXTURE_MODELS = [['openai-codex', 'gpt-6.1-sol', 1], ['openai-codex', 'gpt-6.1-mini', 0.35], ['anthropic', 'claude-opus-5', 0.6], ['anthropic', 'claude-haiku-5', 0.2], ['copilot', 'gpt-5.5', 0.12]];
 export function syntheticUsageHistory(days = 7, tz = 'UTC') {
-  const hourly = days === 1, step = hourly ? 3600 : 86400, count = hourly ? 24 : days;
-  const end = Math.floor(Date.now() / 1000 / step) * step;
-  const buckets = Array.from({ length: count }, (_, index) => end - (count - 1 - index) * step);
+  const hourly = days === 1, count = hourly ? 24 : days;
+  const end = Math.floor(Date.now() / 1000 / 3600) * 3600;
+  // Daily buckets start at local midnights in the requested zone, like the backend's.
+  const buckets = Array.from({ length: count }, (_, index) => hourly ? end - (count - 1 - index) * 3600 : fixtureMidnight(end - (count - 1 - index) * 86400, tz));
   const wave = (index, phase) => Math.max(0, Math.sin(index * 0.9 + phase) * 0.5 + 0.6 + ((index * 7 + phase * 13) % 5) / 10);
   const by_model = FIXTURE_MODELS.map(([provider, model, weight], seriesIndex) => {
     const tokens = buckets.map((_, index) => Math.round(wave(index, seriesIndex) * weight * (hourly ? 900_000 : 14_000_000)));
@@ -328,32 +343,47 @@ export function syntheticUsageHistory(days = 7, tz = 'UTC') {
   return { generated_at: Date.now() / 1000, days, tz, resolution: hourly ? 'hour' : 'day', buckets, by_provider, by_model,
     totals: { tokens: total('tokens'), cost_usd: total('cost_usd'), user_messages: total('user_messages') }, pricing_missing: ['copilot/gpt-5.5'], approximate: true };
 }
-export function syntheticUsageLimits() {
-  const now = Date.now() / 1000;
+// Two Codex accounts drained in pool priority order by an office-hours workload: ten days of 15-minute samples with weekly resets as
+// visible step-ups, and a weekday drain that empties the pool before either account's next weekly reset. The weekday/hour profile
+// follows the local clock, so nights and weekends line up with the charts' midnight gridlines.
+const LIMIT_WEEK = 604800, LIMIT_FIVE_HOURS = 18000;
+const resetAfter = (anchor, period, t) => anchor - (Math.ceil((anchor - t) / period) - 1) * period;
+function limitLoad(t) {
+  const date = new Date(t * 1000), day = date.getDay(), hour = date.getHours() + date.getMinutes() / 60;
+  if (day === 0 || day === 6) return hour >= 10 && hour < 18 ? 0.4 : 0;
+  return hour >= 9 && hour < 12 ? 4 : hour >= 12 && hour < 14 ? 1.5 : hour >= 14 && hour < 19 ? 4.5 : hour >= 19 && hour < 23 ? 1 : 0;
+}
+export function syntheticUsageLimits(hours = 168) {
+  const now = Date.now() / 1000, step = 900, fetched = now - 140, from = Math.floor(now / step) * step - 10 * 86400;
   const accounts = [
-    { id: 'acct-a1', label: 'chatgpt1', priority: 1, plan: 'pro', banked_resets: 2, drain: 1.2, weekly: now + 2.6 * 86400 },
-    { id: 'acct-a2', label: 'chatgpt2', priority: 2, plan: 'pro', banked_resets: null, drain: 0.5, weekly: now + 4.1 * 86400 },
-    { id: 'acct-a3', label: 'chatgpt3', priority: 3, plan: 'plus', banked_resets: 0, drain: 0.2, weekly: now + 6.3 * 86400 }
-  ];
+    { id: 'acct-team', label: 'chatgptvitibot', priority: 0, plan: 'team', banked_resets: 0, weekly: now + 4.2 * 86400, five: now + 1.3 * 3600, remaining: 40 },
+    { id: 'acct-prolite', label: 'chatgpt1', priority: 1, plan: 'prolite', banked_resets: 1, weekly: now + 5.6 * 86400, five: now + 3.1 * 3600, remaining: 85 }
+  ].map(account => ({ ...account, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: resetAfter(account.five, LIMIT_FIVE_HOURS, from), fiveUsed: 0 }));
   const history = [];
-  // Remaining at time t declines linearly since the account's last weekly reset, which is when it was last full.
-  const remainingAt = (account, t) => { const start = account.weekly - Math.ceil((account.weekly - t) / 604800) * 604800; return Math.max(0, 100 - account.drain * (t - start) / 3600); };
-  for (let t = Math.floor(now / 1800) * 1800 - 168 * 3600; t <= now; t += 1800) {
-    for (const account of accounts) history.push({ t, account: account.id, window: 'weekly', remaining_percent: Math.round(remainingAt(account, t) * 10) / 10, resets_at: account.weekly - Math.ceil((account.weekly - t) / 604800 - 1) * 604800 });
+  const round = value => Math.round(value * 10) / 10;
+  const fiveLeft = account => Math.max(0, 100 - account.fiveUsed * 3.5);
+  for (let t = from, index = 0; t < fetched; index++) {
+    const next = Math.min(t + step, fetched);
+    // Deterministic ±40% jitter so the drain is not a ruler-straight line.
+    let need = limitLoad(t) * (0.6 + (index * 37 % 17) / 20) * (next - t) / 3600;
+    for (const account of accounts) { const take = Math.min(account.remaining, need); account.remaining -= take; account.fiveUsed += take; need -= take; if (need <= 0) break; }
+    for (const account of accounts) {
+      if (account.weekReset <= next) { account.remaining = 100; account.weekReset += LIMIT_WEEK; }
+      if (account.fiveReset <= next) { account.fiveUsed = 0; account.fiveReset += LIMIT_FIVE_HOURS; }
+    }
+    t = next;
+    if (t >= now - hours * 3600) for (const account of accounts) history.push(
+      { t, account: account.id, window: 'five_hour', remaining_percent: round(fiveLeft(account)), resets_at: account.fiveReset },
+      { t, account: account.id, window: 'weekly', remaining_percent: round(account.remaining), resets_at: account.weekReset });
   }
-  return { generated_at: now, sampler: { interval_s: 300, started_at: now - 7 * 86400, last_run_at: now - 140, last_error: null }, providers: [
+  return { generated_at: now, sampler: { interval_s: 300, started_at: now - 10 * 86400, last_run_at: fetched, last_error: null }, providers: [
     { provider: 'openai-codex', label: 'OpenAI Codex', history, accounts: accounts.map(account => ({ id: account.id, label: account.label, priority: account.priority, plan: account.plan, banked_resets: account.banked_resets,
-      fetched_at: now - 140, stale: false, error: null, windows: [
-        { key: 'five_hour', label: '5-hour', window_seconds: 18000, scope: 'account', model: null, used_percent: 30, remaining_percent: 70 - account.priority * 10, resets_at: now + account.priority * 3600 },
-        { key: 'weekly', label: 'Weekly', window_seconds: 604800, scope: 'account', model: null, used_percent: 100 - remainingAt(account, now), remaining_percent: Math.round(remainingAt(account, now) * 10) / 10, resets_at: account.weekly },
-        { key: 'weekly:gpt-6.1-sol', label: 'Weekly · gpt-6.1-sol', window_seconds: 604800, scope: 'model', model: 'gpt-6.1-sol', used_percent: 10, remaining_percent: 90, resets_at: account.weekly }
+      fetched_at: fetched, stale: false, error: null, windows: [
+        { key: 'five_hour', label: '5-hour', window_seconds: LIMIT_FIVE_HOURS, scope: 'account', model: null, used_percent: round(100 - fiveLeft(account)), remaining_percent: round(fiveLeft(account)), resets_at: account.fiveReset },
+        { key: 'weekly', label: 'Weekly', window_seconds: LIMIT_WEEK, scope: 'account', model: null, used_percent: round(100 - account.remaining), remaining_percent: round(account.remaining), resets_at: account.weekReset }
       ] })) },
-    { provider: 'anthropic', label: 'Anthropic', history: [], accounts: [
-      { id: 'acct-b1', label: 'claude-max', priority: 1, plan: 'max', banked_resets: null, fetched_at: now - 3 * 3600, stale: true, error: null,
-        windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, scope: 'account', model: null, used_percent: 61, remaining_percent: 39, resets_at: now + 86400 }] },
-      { id: 'acct-b2', label: 'claude-team', priority: 2, plan: null, banked_resets: null, fetched_at: null, stale: false, error: 'HTTP 401 from usage endpoint',
-        windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, scope: 'account', model: null, used_percent: null, remaining_percent: null, resets_at: null }] }
-    ] }
+    // Hermes knows the provider but holds no usable credential for it.
+    { provider: 'anthropic', label: 'Anthropic', auth: 'logged_out', auth_reason: 'No usable Anthropic credential in the Hermes pool', accounts: [], history: [] }
   ] };
 }
 export function Button({ variant, size, children, ...props }) { return h('button', props, children); }

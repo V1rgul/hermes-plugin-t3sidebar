@@ -1923,8 +1923,13 @@ export const USAGE_ROUTE = '/t3sidebar-usage';
 const USAGE_ROOT = 'hermes-t3sidebar-usage';
 const USAGE_PREFERENCES_KEY = 'usage-preferences';
 const HOUR_S = 3600, DAY_S = 86400;
-export const USAGE_DEFAULTS = Object.freeze({ tab: 'usage', days: 7, split: 'provider', mode: 'stacked', horizon: 7, window: 'weekly', provider: null });
-const USAGE_CHOICES = { tab: ['usage', 'limits'], days: [1, 7, 30, 90], split: ['provider', 'model'], mode: ['stacked', 'independent'], horizon: [1, 3, 7] };
+// Lookback stops (hours) for the projection's drain average; the slider moves between these discrete stops.
+export const LOOKBACK_STOPS = Object.freeze([1, 2, 5, 12, 24, 48, 72, 168, 360, 720]);
+export const lookbackLabel = hours => hours % 24 === 0 ? `${hours / 24}d` : `${hours}h`;
+// The Limits history must cover both the chart's past (a week) and the drain lookback, within the backend's 840-hour cap.
+export const limitsHistoryHours = lookback => Math.min(840, Math.max(168, Number.isFinite(lookback) ? lookback : 0));
+export const USAGE_DEFAULTS = Object.freeze({ tab: 'usage', days: 7, split: 'provider', mode: 'stacked', horizon: 7, lookback: 12, window: 'weekly', provider: null });
+const USAGE_CHOICES = { tab: ['usage', 'limits'], days: [1, 7, 30, 90], split: ['provider', 'model'], mode: ['stacked', 'independent'], horizon: [1, 3, 7], lookback: LOOKBACK_STOPS };
 export function validUsagePreferences(value) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const result = { ...USAGE_DEFAULTS };
@@ -1951,9 +1956,9 @@ const compactNumber = Intl.NumberFormat('en', { notation: 'compact', maximumFrac
 const integerNumber = Intl.NumberFormat('en', { maximumFractionDigits: 0 });
 const usdNumber = Intl.NumberFormat('en', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export const USAGE_METRICS = [
-  { key: 'tokens', title: 'Tokens', format: value => compactNumber.format(value), integer: true },
-  { key: 'cost_usd', title: 'Cost', subtitle: 'API-equivalent', format: value => usdNumber.format(value), integer: false },
-  { key: 'user_messages', title: 'User messages', format: value => integerNumber.format(value), integer: true }
+  { key: 'tokens', title: 'Tokens', unit: 'tokens/day', format: value => compactNumber.format(value), integer: true },
+  { key: 'cost_usd', title: 'Cost', subtitle: 'API-equivalent', unit: '$/day', format: value => usdNumber.format(value), integer: false },
+  { key: 'user_messages', title: 'User messages', unit: 'messages/day', format: value => integerNumber.format(value), integer: true }
 ];
 export function validUsageHistory(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.buckets) || !value.buckets.every(Number.isFinite)) throw new Error('Unsupported usage history response.');
@@ -1963,7 +1968,8 @@ export function validUsageHistory(value) {
 export function validUsageLimits(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.providers)) throw new Error('Unsupported usage limits response.');
   const providers = value.providers.filter(item => item && typeof item.provider === 'string').map(item => ({
-    ...item, accounts: Array.isArray(item.accounts) ? item.accounts.filter(account => account && typeof account.id === 'string').map(account => ({ ...account, windows: Array.isArray(account.windows) ? account.windows.filter(win => win && typeof win.key === 'string') : [] })) : [],
+    // Only an explicit logged_out marks a provider without a usable credential; anything else keeps the normal view.
+    ...item, auth: item.auth === 'logged_out' ? 'logged_out' : 'ok', auth_reason: typeof item.auth_reason === 'string' && item.auth_reason ? item.auth_reason : null, accounts: Array.isArray(item.accounts) ? item.accounts.filter(account => account && typeof account.id === 'string').map(account => ({ ...account, windows: Array.isArray(account.windows) ? account.windows.filter(win => win && typeof win.key === 'string') : [] })) : [],
     history: Array.isArray(item.history) ? item.history : []
   }));
   return { ...value, providers, sampler: value.sampler && typeof value.sampler === 'object' ? value.sampler : null };
@@ -2030,27 +2036,97 @@ export function seriesColors(series, split) {
   }
   return colors;
 }
+// Charts plot rates per day so the 24h view (hourly buckets) and the daily periods read in the same unit.
+export const perDayFactor = resolution => resolution === 'hour' ? 24 : 1;
 export function buildUsageCharts(history, split, mode) {
+  const resolution = history.resolution === 'hour' ? 'hour' : 'day', factor = perDayFactor(resolution), tz = typeof history.tz === 'string' && history.tz ? history.tz : undefined;
   const all = USAGE_METRICS.map(metric => ({ metric, series: usageSeries(history, split, metric.key) }));
   // One color map across the three charts, so a series keeps its color even where it is absent from one metric.
   const colors = seriesColors(all.flatMap(chart => chart.series), split);
-  return { buckets: history.buckets, resolution: history.resolution === 'hour' ? 'hour' : 'day', colors, charts: all.map(({ metric, series }) => {
-    const { layers, max } = chartLayers(series, mode);
+  return { buckets: history.buckets, resolution, factor, tz, colors, ...usageAxis(history.buckets, resolution, tz), charts: all.map(({ metric, series }) => {
+    const { layers, max } = chartLayers(series.map(item => ({ ...item, values: item.values.map(value => value * factor) })), mode);
+    // Totals stay the actual amounts for the period; only the plotted rates are scaled.
     return { metric, series, layers, scale: niceScale(max, 4, metric.integer), total: series.reduce((sum, item) => sum + item.total, 0) };
   }) };
 }
 const formatterCache = new Map();
-function dateFormat(options, timeZone) {
-  const key = JSON.stringify([options, timeZone || null]);
+function dateFormat(options, timeZone, locale) {
+  const key = JSON.stringify([options, timeZone || null, locale || null]);
   let formatter = formatterCache.get(key);
   if (!formatter) {
-    try { formatter = new Intl.DateTimeFormat(undefined, { ...options, timeZone: timeZone || undefined }); }
-    catch (_) { formatter = new Intl.DateTimeFormat(undefined, options); }
+    try { formatter = new Intl.DateTimeFormat(locale, { ...options, timeZone: timeZone || undefined }); }
+    catch (_) { formatter = new Intl.DateTimeFormat(locale, options); }
     formatterCache.set(key, formatter);
   }
   return formatter;
 }
 const formatAt = (seconds, options, timeZone) => dateFormat(options, timeZone).format(new Date(seconds * 1000));
+// Numeric wall-clock fields in a zone; a fixed locale and h23 keep them parseable whatever the user's locale.
+const PARTS_FORMAT = { year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hourCycle: 'h23' };
+function zonedParts(seconds, timeZone) {
+  const parts = {};
+  for (const part of dateFormat(PARTS_FORMAT, timeZone, 'en-US').formatToParts(new Date(seconds * 1000))) if (part.type !== 'literal') parts[part.type] = Number(part.value);
+  return parts;
+}
+const dayKey = parts => parts.year * 10000 + parts.month * 100 + parts.day;
+// Local midnight of the day containing seconds. Subtracting the wall-clock time since midnight can miss by the DST shift of that
+// day, so the result is rechecked and nudged until it reads 00:00:00 on the same date.
+export function startOfLocalDay(seconds, timeZone) {
+  const base = Math.floor(seconds), key = dayKey(zonedParts(base, timeZone));
+  let t = base;
+  for (let guard = 0; guard < 4; guard++) {
+    const parts = zonedParts(t, timeZone), since = parts.hour * 3600 + parts.minute * 60 + parts.second;
+    if (dayKey(parts) === key) { if (!since) break; t -= since; } else t += DAY_S - since;
+  }
+  return t;
+}
+// Every local midnight in [start, end]; stepping 30 hours past a midnight always lands in the next day, even on 23- or 25-hour days.
+export function localMidnights(start, end, timeZone) {
+  const result = [];
+  for (let t = startOfLocalDay(start, timeZone), guard = 0; t <= end && guard < 1000; t = startOfLocalDay(t + 30 * HOUR_S, timeZone), guard++) if (t >= start) result.push(t);
+  return result;
+}
+// Axis labels name the month only on the first label and where it changes ("Oct 30, 31, Nov 1, 2"). Hourly labels give the hour,
+// with the date on the first label and in place of the hour at midnight.
+export function axisLabels(times, timeZone, resolution) {
+  let previous = null;
+  return times.map((t, index) => {
+    const parts = zonedParts(t, timeZone), month = parts.year * 12 + parts.month;
+    let label;
+    if (resolution === 'hour') {
+      const midnight = parts.hour === 0 && parts.minute === 0;
+      label = formatAt(t, midnight ? { month: 'short', day: 'numeric' } : index === 0 ? { month: 'short', day: 'numeric', hour: 'numeric' } : { hour: 'numeric' }, timeZone);
+    } else label = formatAt(t, index === 0 || month !== previous ? { month: 'short', day: 'numeric' } : { day: 'numeric' }, timeZone);
+    previous = month;
+    return label;
+  });
+}
+// Usage charts: daily buckets start at local midnights (backend contract), so each one is a day line; hourly buckets get a line
+// only where the bucket starts at midnight. Hourly labels sit on every third local hour, which always includes midnight.
+export function usageAxis(buckets, resolution, timeZone) {
+  const count = buckets.length;
+  if (resolution === 'hour') {
+    const parts = buckets.map(t => zonedParts(t, timeZone));
+    const labelIndexes = parts.flatMap((item, index) => item.minute === 0 && item.hour % 3 === 0 ? [index] : []);
+    return { dayLines: parts.flatMap((item, index) => item.hour === 0 && item.minute === 0 ? [index] : []), labelIndexes, labels: axisLabels(labelIndexes.map(index => buckets[index]), timeZone, 'hour') };
+  }
+  // Every labelStep-th bucket plus the last one, dropping a regular label that would crowd the right-aligned last label.
+  const labelStep = Math.max(1, Math.ceil(count / 8));
+  const labelIndexes = buckets.flatMap((_, index) => index !== count - 1 && (index % labelStep || count - 1 - index < labelStep / 2) ? [] : [index]);
+  return { dayLines: buckets.map((_, index) => index), labelIndexes, labels: axisLabels(labelIndexes.map(index => buckets[index]), timeZone, 'day') };
+}
+// Limits axis: one label per local midnight (thinned to at most maxLabels) for multi-day spans, otherwise every few local hours.
+export function timeAxisTicks(start, end, timeZone, maxLabels = 10) {
+  if (end - start > 2.5 * DAY_S) {
+    const days = localMidnights(start, end, timeZone), step = Math.max(1, Math.ceil(days.length / maxLabels));
+    return { resolution: 'day', times: days.filter((_, index) => index % step === 0) };
+  }
+  // Quarter-hour candidates also catch whole local hours in zones with half-hour offsets.
+  const candidates = [];
+  for (let t = Math.ceil(start / 900) * 900; t <= end; t += 900) { const parts = zonedParts(t, timeZone); if (parts.minute === 0) candidates.push({ t, hour: parts.hour }); }
+  for (const stepH of [1, 2, 3, 6, 12]) { const times = candidates.filter(item => item.hour % stepH === 0).map(item => item.t); if (times.length <= maxLabels || stepH === 12) return { resolution: 'hour', times }; }
+  return { resolution: 'hour', times: [] };
+}
 export function formatDurationShort(seconds) {
   if (!Number.isFinite(seconds)) return '—';
   const value = Math.max(0, seconds), days = Math.floor(value / DAY_S), hours = Math.floor(value % DAY_S / HOUR_S), minutes = Math.floor(value % HOUR_S / 60);
@@ -2086,8 +2162,10 @@ export function pooledHistory(samples) {
   }
   return points;
 }
-// Pooled consumption in percentage points per hour over the lookback, or null without at least 15 minutes of paired readings.
-export function drainRate(samples, now, lookbackS = 6 * HOUR_S) {
+// Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those
+// readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in
+// percentage points per hour, or null without at least 15 minutes of paired readings.
+export function drainStats(samples, now, lookbackS = 12 * HOUR_S) {
   const from = now - lookbackS, groups = new Map();
   for (const sample of samples) if (sample.t >= from && sample.t <= now) { if (!groups.has(sample.account)) groups.set(sample.account, []); groups.get(sample.account).push(sample); }
   let consumed = 0, first = Infinity, last = -Infinity, pairs = 0;
@@ -2103,7 +2181,27 @@ export function drainRate(samples, now, lookbackS = 6 * HOUR_S) {
       if (!restarted) consumed += before.value - after.value;
     }
   }
-  return pairs && last - first >= 15 * 60 ? consumed / ((last - first) / HOUR_S) : null;
+  const coveredS = pairs ? last - first : 0;
+  return { rate: coveredS >= 15 * 60 ? consumed / (coveredS / HOUR_S) : null, coveredS, consumed, lookbackS,
+    // Sampling gaps at either edge are normal; only a real shortfall (over a quarter of the lookback, capped at 30 minutes) is partial.
+    partial: coveredS < lookbackS - Math.min(30 * 60, lookbackS / 4) };
+}
+export const drainRate = (samples, now, lookbackS) => drainStats(samples, now, lookbackS).rate;
+// First time the projected pool reaches zero, interpolated along its piecewise-linear points, or null if it never empties.
+// Only the first crossing matters: a later reset that refills the pool does not move it.
+export function firstEmpty(points) {
+  const empty = value => value <= 1e-6;
+  if (!points?.length) return null;
+  if (empty(points[0].value)) return points[0].t;
+  for (let index = 1; index < points.length; index++) {
+    const a = points[index - 1], b = points[index];
+    if (empty(b.value)) return b.t === a.t ? b.t : a.t + a.value / (a.value - b.value) * (b.t - a.t);
+  }
+  return null;
+}
+export function coverageText(seconds) {
+  const hours = seconds / HOUR_S;
+  return hours < 1 ? `${Math.max(1, Math.round(seconds / 60))}m` : hours < 48 ? `${Math.round(hours)}h` : `${Math.round(hours / 24)}d`;
 }
 // Projects the pooled remaining quota from now to now + horizonS. The measured drain is consumed from accounts in pool
 // priority order (lowest number first, the next once one is empty), and each account returns to 100% at its resets_at, its
@@ -2127,7 +2225,7 @@ export function projectPool(accounts, history, windowKey, now, horizonS, options
     state.push({ id: account.id, label: account.label || account.id, priority: Number.isFinite(account.priority) ? account.priority : Infinity, remaining, resetAt, period });
   }
   state.sort((a, b) => a.priority - b.priority || String(a.id).localeCompare(String(b.id)));
-  const measured = Object.hasOwn(options, 'rate') ? options.rate : drainRate(samples, now, options.lookbackS);
+  const stats = Object.hasOwn(options, 'rate') ? { rate: options.rate, coveredS: null, partial: false } : drainStats(samples, now, options.lookbackS), measured = stats.rate;
   const rate = Number.isFinite(measured) && measured >= 0 ? measured : null, drain = rate ?? 0;
   const pool = () => state.reduce((sum, item) => sum + item.remaining, 0);
   const current = pool(), end = now + Math.max(0, horizonS);
@@ -2151,7 +2249,7 @@ export function projectPool(accounts, history, windowKey, now, horizonS, options
   }
   const nextReset = resets.length ? { t: resets[0].t, gain: resets.filter(item => item.t === resets[0].t).reduce((sum, item) => sum + item.gain, 0) }
     : Number.isFinite(firstReset) ? { t: firstReset, gain: null } : null;
-  return { rate, unknown: rate === null, capacity: state.length * 100, current, points, resets, nextReset,
+  return { rate, unknown: rate === null, coveredS: stats.coveredS, partial: rate !== null && stats.partial, capacity: state.length * 100, current, points, resets, nextReset,
     accounts: state.map(item => ({ id: item.id, remaining: item.remaining })), unknownAccounts };
 }
 export function windowCatalog(provider) {
@@ -2199,8 +2297,11 @@ function ScopedUsagePage({ ctx, scope }) {
     // Keep the previous period on screen while another one loads.
     placeholderData: previous => previous,
     queryFn: () => readUsage(ctx, scope, `/usage/history?days=${prefs.days}&tz=${encodeURIComponent(tz)}`, validUsageHistory) });
-  const limits = useQuery({ queryKey: [...key, 'limits'], enabled: prefs.tab === 'limits', staleTime: 60_000, refetchInterval: 300_000, retry: false,
-    queryFn: () => readUsage(ctx, scope, '/usage/limits?hours=168', validUsageLimits) });
+  const limitsHours = limitsHistoryHours(prefs.lookback);
+  const limits = useQuery({ queryKey: [...key, 'limits', limitsHours], enabled: prefs.tab === 'limits', staleTime: 60_000, refetchInterval: 300_000, retry: false,
+    // A longer lookback refetches more history; the shorter one stays drawn meanwhile.
+    placeholderData: previous => previous,
+    queryFn: () => readUsage(ctx, scope, `/usage/limits?hours=${limitsHours}`, validUsageLimits) });
   const active = prefs.tab === 'limits' ? limits : history;
   return h('div', { className: 'su', 'data-tab': prefs.tab }, h('style', null, USAGE_CSS),
     h('header', { className: 'su-header' },
@@ -2226,17 +2327,15 @@ function UsageHistoryView({ query, prefs }) {
   const empty = !model.charts.some(chart => chart.series.length);
   return h(Fragment, null,
     query.isError ? h(QueryProblem, { query, what: 'Latest usage' }) : null,
-    empty ? h(UsageState, null, 'No usage recorded in this period.') : model.charts.map((chart, index) => h(UsageChart, { key: chart.metric.key, chart, model, mode: prefs.mode, tz: data.tz, hover, setHover, axis: index === model.charts.length - 1 })),
+    empty ? h(UsageState, null, 'No usage recorded in this period.') : model.charts.map((chart, index) => h(UsageChart, { key: chart.metric.key, chart, model, mode: prefs.mode, hover, setHover, axis: index === model.charts.length - 1 })),
     h('p', { className: 'su-footnote' }, 'Per-call timing is reconstructed from message timestamps, so placement within a bucket is approximate. Cost is the API-equivalent price of the same usage, not what a subscription bills.',
       data.pricing_missing.length ? ` No price available for: ${data.pricing_missing.join(', ')} (counted as $0).` : ''));
 }
 const VIEW_W = 1000, VIEW_H = 100;
 // Bucket centers span the full plot width; a single bucket becomes a flat segment across it.
 const bucketX = (index, count) => count > 1 ? index / (count - 1) * VIEW_W : VIEW_W / 2;
-function bucketLabel(model, index, tz, axis) {
-  const at = model.buckets[index];
-  if (model.resolution === 'hour') return formatAt(at, axis ? { hour: 'numeric' } : { weekday: 'short', hour: 'numeric', minute: '2-digit' }, tz);
-  return formatAt(at, axis ? { month: 'short', day: 'numeric' } : { weekday: 'short', month: 'short', day: 'numeric' }, tz);
+function bucketLabel(model, index) {
+  return formatAt(model.buckets[index], model.resolution === 'hour' ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { weekday: 'short', month: 'short', day: 'numeric' }, model.tz);
 }
 function plotKeys(event, count, hover, setHover) {
   const moves = { ArrowLeft: -1, ArrowRight: 1 };
@@ -2244,7 +2343,11 @@ function plotKeys(event, count, hover, setHover) {
   if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); setHover(event.key === 'Home' ? 0 : count - 1); }
   if (event.key === 'Escape') setHover(null);
 }
-function UsageChart({ chart, model, mode, tz, hover, setHover, axis }) {
+// Tooltip values are per day like the plot; hourly buckets also show the raw amount of that hour.
+function TipValue({ metric, value, factor }) {
+  return h('b', null, `${metric.format(value * factor)}/day`, factor !== 1 ? h('span', { className: 'su-tip-raw' }, ` · ${metric.format(value)} this hour`) : null);
+}
+function UsageChart({ chart, model, mode, hover, setHover, axis }) {
   const { metric, series, layers, scale } = chart, count = model.buckets.length;
   const y = value => VIEW_H - value / scale.max * VIEW_H;
   const xs = count === 1 ? [0, VIEW_W] : Array.from({ length: count }, (_, index) => bucketX(index, count));
@@ -2258,18 +2361,18 @@ function UsageChart({ chart, model, mode, tz, hover, setHover, axis }) {
     if (!(box.width > 0) || !count) return;
     setHover(clamp(Math.round((event.clientX - box.left) / box.width * (count - 1)), 0, count - 1));
   };
-  const labelStep = Math.max(1, Math.ceil(count / 8));
   return h('section', { className: 'su-chart', 'data-metric': metric.key, 'aria-label': `${metric.title} chart` },
     h('div', { className: 'su-chart-head' }, h('h3', null, metric.title), metric.subtitle ? h('span', { className: 'su-sub' }, metric.subtitle) : null,
-      h('span', { className: 'su-total' }, metric.format(chart.total))),
-    h('div', { className: 'su-legend' }, series.length ? series.map(item => h('span', { key: item.key, className: 'su-legend-item', 'data-series': item.key },
+      h('span', { className: 'su-total' }, metric.format(chart.total), h('span', { className: 'su-total-label' }, ' total'))),
+    h('div', { className: 'su-legend' }, series.length ? series.map(item => h('span', { key: item.key, className: 'su-legend-item', 'data-series': item.key, title: `${item.label}: ${metric.format(item.total)} total in this period` },
       h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', { className: 'su-legend-label' }, item.label), h('b', null, metric.format(item.total))))
       : h('span', { className: 'su-muted' }, 'Nothing in this period')),
-    h('div', { className: 'su-plot-row' },
-      h('div', { className: 'su-yaxis', 'aria-hidden': true }, scale.ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / scale.max * 100}%` } }, metric.format(tick)))),
-      h('div', { className: 'su-plot', tabIndex: 0, 'aria-label': `${metric.title} by ${model.resolution}; use arrow keys to inspect buckets`,
+    h('div', { className: 'su-plot-row su-plot-row-unit' },
+      h('div', { className: 'su-yaxis', 'aria-hidden': true }, h('span', { className: 'su-yunit' }, metric.unit), scale.ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / scale.max * 100}%` } }, metric.format(tick)))),
+      h('div', { className: 'su-plot', tabIndex: 0, 'aria-label': `${metric.title} per day, by ${model.resolution}; use arrow keys to inspect buckets`,
         onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null), onKeyDown: event => plotKeys(event, count, hovered, setHover) },
         h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
+          model.dayLines.map(index => h('line', { key: `d${index}`, className: 'su-day-grid', x1: bucketX(index, count), x2: bucketX(index, count), y1: 0, y2: VIEW_H })),
           scale.ticks.map(tick => h('line', { key: tick, className: 'su-grid', x1: 0, x2: VIEW_W, y1: y(tick), y2: y(tick) })),
           layers.map(layer => {
             const color = model.colors.get(layer.key), top = path(layer.upper);
@@ -2283,12 +2386,11 @@ function UsageChart({ chart, model, mode, tz, hover, setHover, axis }) {
           h('div', { className: 'su-cross', style: { left: `${pct}%` } }),
           layers.map(layer => h('span', { key: layer.key, className: 'su-dot', style: { left: `${pct}%`, bottom: `${layer.upper[hovered] / scale.max * 100}%`, background: model.colors.get(layer.key) } })),
           h('div', { className: 'su-tip', 'data-side': pct > 60 ? 'left' : 'right', style: pct > 60 ? { right: `calc(${100 - pct}% + 10px)` } : { left: `calc(${pct}% + 10px)` } },
-            h('div', { className: 'su-tip-head' }, bucketLabel(model, hovered, tz, false)),
-            ordered.map(item => h('div', { key: item.key, className: 'su-tip-row' }, h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', null, item.label), h('b', null, metric.format(item.values[hovered])))),
-            h('div', { className: 'su-tip-row su-tip-total' }, h('span'), h('span', null, 'Total'), h('b', null, metric.format(series.reduce((sum, item) => sum + item.values[hovered], 0)))))))),
-    // Every labelStep-th bucket plus the last one, dropping a regular label that would crowd the right-aligned last label.
-    axis ? h('div', { className: 'su-xaxis', 'aria-hidden': true }, model.buckets.map((_, index) => index !== count - 1 && (index % labelStep || count - 1 - index < labelStep / 2) ? null
-      : h('span', { key: index, 'data-edge': index === 0 ? 'start' : index === count - 1 ? 'end' : undefined, style: { left: `${bucketX(index, count) / VIEW_W * 100}%` } }, bucketLabel(model, index, tz, true)))) : null);
+            h('div', { className: 'su-tip-head' }, bucketLabel(model, hovered)),
+            ordered.map(item => h('div', { key: item.key, className: 'su-tip-row' }, h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', null, item.label), h(TipValue, { metric, value: item.values[hovered], factor: model.factor }))),
+            h('div', { className: 'su-tip-row su-tip-total' }, h('span'), h('span', null, 'Total'), h(TipValue, { metric, value: series.reduce((sum, item) => sum + item.values[hovered], 0), factor: model.factor })))))),
+    axis ? h('div', { className: 'su-xaxis', 'aria-hidden': true }, model.labelIndexes.map((index, position) => h('span', { key: index, 'data-edge': index === 0 ? 'start' : index === count - 1 ? 'end' : undefined,
+      style: { left: `${bucketX(index, count) / VIEW_W * 100}%` } }, model.labels[position]))) : null);
 }
 const percentText = value => Number.isFinite(value) ? `${Math.round(value)}%` : '—';
 const rateText = rate => rate === null ? 'no drain data' : `~${rate < 10 ? rate.toFixed(1) : Math.round(rate)}% per hour`;
@@ -2300,12 +2402,14 @@ function LimitsView({ query, prefs, update }) {
   // Countdowns and the Now line follow successful polls rather than a separate timer.
   const now = useMemo(() => Date.now() / 1000, [query.dataUpdatedAt]);
   if (!data) return query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…');
-  const provider = data.providers.find(item => item.provider === prefs.provider) || data.providers[0];
+  // Without a saved choice, open the first provider that can show limits rather than a logged-out one.
+  const provider = data.providers.find(item => item.provider === prefs.provider) || data.providers.find(item => item.auth !== 'logged_out') || data.providers[0];
   return h(Fragment, null,
     query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
     data.providers.length > 0 ? h('div', { className: 'su-providers', role: 'group', 'aria-label': 'Provider' }, data.providers.map(item => h('button', { key: item.provider, type: 'button', className: 'su-provider', 'aria-pressed': item === provider,
       style: { '--su-color': providerHueColor(item.provider) }, onClick: () => update({ provider: item.provider }) },
-      item.label || item.provider, h('span', { className: 'su-count', 'aria-label': `${item.accounts.length} accounts` }, item.accounts.length))))
+      item.label || item.provider, item.auth === 'logged_out' ? h('span', { className: 'su-auth' }, 'logged out')
+        : h('span', { className: 'su-count', 'aria-label': `${item.accounts.length} accounts` }, item.accounts.length))))
       : h(UsageState, null, 'No subscription limits recorded yet.'),
     provider ? h(ProviderLimits, { key: provider.provider, provider, prefs, update, now }) : null,
     h(SamplerInfo, { sampler: data.sampler, now }));
@@ -2314,20 +2418,52 @@ function ProviderLimits({ provider, prefs, update, now }) {
   const windows = useMemo(() => windowCatalog(provider), [provider]);
   const selected = windows.find(item => item.key === prefs.window) || windows.find(item => item.key === 'weekly') || windows[0];
   const color = providerHueColor(provider.provider);
+  // Hermes knows the provider but has no usable credential, so there is nothing to sample or project.
+  if (provider.auth === 'logged_out') return h('div', { className: 'su-provider-limits', 'data-auth': 'logged_out', style: { '--su-color': color } },
+    h('div', { className: 'su-state su-logged-out', role: 'status' }, h('div', null, 'Logged out in Hermes — sign in to track limits'), provider.auth_reason ? h('div', { className: 'su-muted' }, provider.auth_reason) : null),
+    provider.accounts.length ? h('div', { className: 'su-accounts' }, provider.accounts.map(account => h(LimitAccount, { key: account.id, account, selected: selected?.key, now }))) : null);
   return h('div', { className: 'su-provider-limits', style: { '--su-color': color } },
     windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windows.map(item => ({ id: item.key, label: item.label })), value: selected.key, onChange: value => update({ window: value }) }) : null,
-    selected ? h(PooledLimitChart, { provider, windowKey: selected.key, now, horizonDays: prefs.horizon, setHorizon: horizon => update({ horizon }) }) : h(UsageState, null, 'No limit windows reported for this provider.'),
+    selected ? h(PooledLimitChart, { provider, windowKey: selected.key, now, horizonDays: prefs.horizon, setHorizon: horizon => update({ horizon }), lookback: prefs.lookback, setLookback: lookback => update({ lookback }) })
+      : h(UsageState, null, 'No limit windows reported for this provider.'),
     h('div', { className: 'su-accounts' }, provider.accounts.length ? provider.accounts.map(account => h(LimitAccount, { key: account.id, account, selected: selected?.key, now }))
       : h(UsageState, null, 'No accounts in this provider pool.')));
 }
-function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon }) {
-  const horizonS = horizonDays * DAY_S;
+// Longest lookback on the left: moving left reaches further into the past. The native value is the visual position (0 = 30d), so
+// arrow keys follow the visual direction (Right = shorter); the preference itself stores hours, never the position.
+export const lookbackPosition = hours => { const index = LOOKBACK_STOPS.indexOf(hours); return LOOKBACK_STOPS.length - 1 - (index < 0 ? LOOKBACK_STOPS.indexOf(USAGE_DEFAULTS.lookback) : index); };
+export const lookbackAtPosition = position => LOOKBACK_STOPS[LOOKBACK_STOPS.length - 1 - clamp(Math.round(Number(position)) || 0, 0, LOOKBACK_STOPS.length - 1)];
+function LookbackSlider({ hours, onChange }) {
+  const last = LOOKBACK_STOPS.length - 1, position = lookbackPosition(hours);
+  return h('div', { className: 'su-lookback' },
+    h('input', { type: 'range', className: 'su-range', min: 0, max: last, step: 1, value: position, 'aria-label': 'Drain average period', 'aria-valuetext': lookbackLabel(hours),
+      // The track is filled from the thumb to the right end (the averaged period reaching back from now); Chromium has no themeable
+      // progress pseudo-element, so the gradient stop is computed from the thumb position.
+      style: { '--su-share': position / last },
+      onChange: event => onChange(lookbackAtPosition(event.target.value)) }),
+    h('span', { className: 'su-lookback-label' }, `Average over ${lookbackLabel(hours)}`));
+}
+// A dimension line under the plot from Now to the first projected zero, with arrowheads and end ticks drawn at fixed pixel size.
+function EmptyMeasure({ fromPct, toPct, text }) {
+  const mid = (fromPct + toPct) / 2;
+  return h('div', { className: 'su-measure', role: 'note', 'aria-label': text },
+    h('div', { className: 'su-measure-span', 'aria-hidden': true, style: { left: `${fromPct}%`, width: `${toPct - fromPct}%` } },
+      h('span', { className: 'su-measure-line' }),
+      h('span', { className: 'su-measure-tick', 'data-end': 'start' }), h('span', { className: 'su-measure-tick', 'data-end': 'end' }),
+      h('svg', { className: 'su-arrow', 'data-end': 'start', viewBox: '0 0 6 8' }, h('path', { d: 'M6,0.5 L0,4 L6,7.5 Z' })),
+      h('svg', { className: 'su-arrow', 'data-end': 'end', viewBox: '0 0 6 8' }, h('path', { d: 'M0,0.5 L6,4 L0,7.5 Z' }))),
+    // Centered on the span; near the left edge it anchors at Now instead so it cannot leave the plot.
+    h('span', { className: 'su-measure-text', 'data-align': mid < 12 ? 'start' : 'center', style: { left: `${mid < 12 ? fromPct : mid}%` } }, text));
+}
+function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon, lookback, setLookback }) {
+  const horizonS = horizonDays * DAY_S, lookbackS = lookback * HOUR_S;
   const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey), [provider, windowKey]);
   const past = useMemo(() => pooledHistory(samples), [samples]);
-  const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS), [provider, windowKey, now, horizonS]);
+  const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS, { lookbackS }), [provider, windowKey, now, horizonS, lookbackS]);
   const [hover, setHover] = useState(null);
   const cap = Math.max(100, projection.capacity, ...past.map(point => point.value));
   const start = now - Math.max(6 * HOUR_S, horizonS * 0.3), end = now + horizonS;
+  const axis = useMemo(() => { const ticks = timeAxisTicks(start, end); return { ...ticks, labels: axisLabels(ticks.times, undefined, ticks.resolution), midnights: localMidnights(start, end) }; }, [start, end]);
   const x = t => (t - start) / (end - start) * VIEW_W, y = value => VIEW_H - value / cap * VIEW_H;
   const pastAt = t => { let value = null; for (const point of past) { if (point.t > t) break; value = point.value; } return value; };
   const projectedAt = t => {
@@ -2349,40 +2485,54 @@ function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon })
   const projectedLine = projection.points.map((point, index) => `${index ? 'L' : 'M'}${x(point.t).toFixed(2)},${y(point.value).toFixed(2)}`).join(' ');
   const projectedArea = `${projectedLine} V${VIEW_H} H${x(now).toFixed(2)} Z`;
   const nowPct = x(now) / VIEW_W * 100;
+  // A pool with no readings is unknown rather than empty, so only a measured pool gets a time to empty.
+  const emptyAt = projection.capacity > 0 ? firstEmpty(projection.points) : null;
+  const emptyPct = emptyAt === null ? null : x(emptyAt) / VIEW_W * 100;
+  const emptyText = emptyAt === null ? null : emptyAt - now < 60 ? 'Empty now' : `Empty in ${formatDurationShort(emptyAt - now)} · ${resetTime(emptyAt, now)}`;
   const hoverT = hover === null ? null : start + hover * (end - start);
   const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
   const move = event => { const box = event.currentTarget.getBoundingClientRect(); if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1)); };
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(share => share * cap);
-  const span = end - start, axisFormat = span <= 2.5 * DAY_S ? { weekday: 'short', hour: 'numeric' } : { month: 'short', day: 'numeric' };
   return h('section', { className: 'su-chart su-pooled', 'data-window': windowKey, 'aria-label': 'Pooled remaining quota' },
     h('div', { className: 'su-headline' },
       // Without any account reading the pool is unknown, not empty.
       h('span', { className: 'su-pool' }, projection.capacity ? percentText(projection.current) : '—'), h('span', { className: 'su-capacity' }, projection.capacity ? `/ ${projection.capacity}% remaining` : 'no account readings yet'),
-      h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate))),
+      h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate)),
+      // Kept out of the slider row: text appearing there while dragging would shift the slider under the pointer.
+      projection.partial ? h('span', { className: 'su-coverage' }, `based on ${coverageText(projection.coveredS)} of data`) : null),
     h('div', { className: 'su-legend' },
       h('span', { className: 'su-legend-item' }, h('span', { className: 'su-legend-line' }), 'Remaining'),
       h('span', { className: 'su-legend-item' }, h('span', { className: 'su-legend-line', 'data-dashed': true }), 'Projected'),
       h('span', { className: 'su-spacer' }),
+      h(LookbackSlider, { hours: lookback, onChange: setLookback }),
       h(Segmented, { label: 'Next', options: [{ id: 1, label: '1d' }, { id: 3, label: '3d' }, { id: 7, label: '7d' }], value: horizonDays, onChange: setHorizon })),
     h('div', { className: 'su-plot-row' },
       h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, `${Math.round(tick)}%`))),
-      h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota over time; use arrow keys to inspect',
+      h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end),
         onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null),
         onKeyDown: event => { const step = { ArrowLeft: -0.02, ArrowRight: 0.02 }[event.key]; if (step) { event.preventDefault(); setHover(clamp((hover ?? nowPct / 100) + step, 0, 1)); } if (event.key === 'Escape') setHover(null); } },
         h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
+          axis.midnights.map(t => h('line', { key: `d${t}`, className: 'su-day-grid', x1: x(t), x2: x(t), y1: 0, y2: VIEW_H })),
           ticks.map(tick => h('line', { key: tick, className: 'su-grid', x1: 0, x2: VIEW_W, y1: y(tick), y2: y(tick) })),
           pastArea ? h('path', { className: 'su-area su-past', d: pastArea }) : null,
           pastLine ? h('path', { className: 'su-line su-past', d: pastLine }) : null,
           h('path', { className: 'su-area su-projected', d: projectedArea }),
           h('path', { className: 'su-line su-projected', d: projectedLine })),
         h('div', { className: 'su-now', style: { left: `${nowPct}%` } }, h('span', null, 'Now')),
+        emptyPct === null ? null : h('span', { className: 'su-empty-dot', title: emptyText, style: { left: `${emptyPct}%` } }),
         hoverValue === null ? null : h(Fragment, null,
           h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
           h('div', { className: 'su-tip su-tip-inline', style: hover > 0.6 ? { right: `calc(${100 - hover * 100}% + 10px)` } : { left: `calc(${hover * 100}% + 10px)` } },
             `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${percentText(hoverValue)} left${hoverT > now ? ' (projected)' : ''}`)))),
-    h('div', { className: 'su-xaxis' }, [0, 0.2, 0.4, 0.6, 0.8, 1].map(share => h('span', { key: share, 'data-edge': share === 0 ? 'start' : share === 1 ? 'end' : undefined, style: { left: `${share * 100}%` } }, formatAt(start + share * span, axisFormat)))),
+    h('div', { className: 'su-xaxis' }, axis.times.map((t, index) => {
+      const share = x(t) / VIEW_W * 100;
+      return h('span', { key: t, 'data-edge': share < 3 ? 'start' : share > 97 ? 'end' : undefined, style: { left: `${share}%` } }, axis.labels[index]);
+    })),
+    emptyPct !== null && emptyPct - nowPct > 0.05 ? h(EmptyMeasure, { fromPct: nowPct, toPct: emptyPct, text: emptyText }) : null,
     h('div', { className: 'su-chart-foot' },
       h('span', null, projection.nextReset ? projection.nextReset.gain === null ? `Next reset · ${resetTime(projection.nextReset.t, now)}` : `Next reset +${Math.round(projection.nextReset.gain)}% · ${resetTime(projection.nextReset.t, now)}` : 'No reset time reported'),
+      emptyText && !(emptyPct - nowPct > 0.05) ? h('span', { className: 'su-empty-note' }, emptyText) : null,
+      emptyAt === null && projection.rate > 0 ? h('span', { className: 'su-empty-note' }, `Not empty within ${horizonDays}d`) : null,
       projection.unknownAccounts.length ? h('span', null, `${projection.unknownAccounts.length} account${projection.unknownAccounts.length === 1 ? '' : 's'} without a reading left out of the pool`) : null));
 }
 function Badge({ tone, title, children }) { return h('span', { className: 'su-badge', 'data-tone': tone, title }, children); }
@@ -2420,7 +2570,7 @@ function SamplerInfo({ sampler, now }) {
   if (!sampler) return h('p', { className: 'su-footnote' }, 'The limits sampler has not reported yet.');
   const parts = [Number.isFinite(sampler.interval_s) ? `Sampled every ${formatDurationShort(sampler.interval_s)}` : 'Sampler running',
     Number.isFinite(sampler.last_run_at) ? `last sample ${formatAt(sampler.last_run_at, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} (${formatDurationShort(now - sampler.last_run_at)} ago)` : 'no sample yet'];
-  return h('p', { className: 'su-footnote' }, `${parts.join(' · ')}. Projections assume the last six hours' pooled drain continues and accounts are used in pool priority order.`,
+  return h('p', { className: 'su-footnote' }, `${parts.join(' · ')}. Projections assume the pooled drain averaged over the selected period continues and accounts are used in pool priority order.`,
     sampler.last_error ? h('span', { className: 'su-error', role: 'alert' }, ` Last sampler error: ${sampler.last_error}`) : null);
 }
 // The page renders in the workspace pane, outside the sidebar stylesheet, so it carries its own theme-variable styles.
@@ -2457,11 +2607,16 @@ const USAGE_CSS = `
 .su-cross{position:absolute;top:0;bottom:0;width:0;border-left:1px dashed var(--ui-text-tertiary);pointer-events:none}
 .su-now{position:absolute;top:-2px;bottom:0;width:0;border-left:1px dashed var(--ui-text-secondary);pointer-events:none}.su-now span{position:absolute;top:0;left:4px;font-size:10px;color:var(--ui-text-tertiary)}
 .su-dot{position:absolute;width:7px;height:7px;margin:0 0 -3.5px -3.5px;border-radius:50%;box-shadow:0 0 0 1.5px var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:none}
-.su-tip{position:absolute;top:4px;z-index:2;min-width:160px;max-width:280px;padding:6px 8px;border:1px solid var(--ui-stroke-secondary);border-radius:6px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));color:var(--ui-text-primary);font-size:11px;pointer-events:none}
+.su-tip{position:absolute;top:4px;z-index:2;min-width:160px;max-width:360px;padding:6px 8px;border:1px solid var(--ui-stroke-secondary);border-radius:6px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));color:var(--ui-text-primary);font-size:11px;pointer-events:none}
 .su-tip-inline{min-width:0;white-space:nowrap}
 .su-tip-head{margin-bottom:3px;color:var(--ui-text-secondary)}
 .su-tip-row{display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:6px}.su-tip-row>span:nth-child(2){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.su-tip-row b{font-weight:500;font-variant-numeric:tabular-nums}
 .su-tip-total{margin-top:3px;padding-top:3px;border-top:1px solid var(--ui-stroke-secondary)}
+.su-plot-row-unit{margin-top:20px}
+.su-yaxis .su-yunit{top:-19px;bottom:auto;left:0;right:auto;transform:none;color:var(--ui-text-tertiary)}
+.su-day-grid{stroke:var(--ui-stroke-secondary);stroke-opacity:.6;stroke-width:1;stroke-dasharray:2 3;vector-effect:non-scaling-stroke}
+.su-total-label{font-size:11px;font-weight:400;color:var(--ui-text-tertiary)}
+.su-tip-raw{font-weight:400;color:var(--ui-text-tertiary)}
 .su-xaxis{position:relative;height:16px;margin-left:56px;font-size:10px;color:var(--ui-text-quaternary)}
 .su-xaxis span{position:absolute;top:2px;transform:translateX(-50%);white-space:nowrap}.su-xaxis span[data-edge=start]{transform:none}.su-xaxis span[data-edge=end]{transform:translateX(-100%)}
 .su-footnote{margin:0;font-size:11px;line-height:1.5;color:var(--ui-text-tertiary)}.su-error{color:var(--ui-red,var(--ui-text-primary))}
@@ -2469,9 +2624,28 @@ const USAGE_CSS = `
 .su-provider{display:inline-flex;align-items:center;gap:6px;margin-bottom:-1px;padding:6px 10px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
 .su-provider:hover{color:var(--ui-text-primary)}.su-provider[aria-pressed=true]{color:var(--ui-text-primary);border-bottom-color:var(--su-color)}
 .su-count{padding:0 5px;border-radius:8px;background:var(--ui-bg-quaternary);font-size:10px;color:var(--ui-text-tertiary)}
+.su-auth{font-size:10px;font-style:italic;color:var(--ui-text-quaternary,var(--ui-text-tertiary))}
+.su-logged-out{display:flex;flex-direction:column;align-items:center;gap:4px}
 .su-provider-limits{display:flex;flex-direction:column;gap:14px}
 .su-headline{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}.su-pool{font-size:24px;font-weight:600;color:var(--su-color);font-variant-numeric:tabular-nums}
-.su-capacity{font-size:13px;color:var(--ui-text-secondary)}.su-rate{margin-left:10px;font-size:12px;color:var(--ui-text-tertiary)}
+.su-capacity{font-size:13px;color:var(--ui-text-secondary)}.su-rate{margin-left:10px;font-size:12px;color:var(--ui-text-tertiary)}.su-coverage{font-size:11px;color:var(--ui-text-quaternary,var(--ui-text-tertiary))}
+.su-lookback{display:inline-flex;align-items:center;gap:8px;font-size:11px;color:var(--ui-text-secondary)}
+.su-lookback-label{min-width:94px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.su-range{-webkit-appearance:none;appearance:none;width:132px;height:16px;margin:0;padding:0;background:transparent;cursor:pointer}
+.su-range{--su-thumb:12px;--su-stop:calc(var(--su-thumb) / 2 + (100% - var(--su-thumb)) * var(--su-share,0));--su-track:linear-gradient(to right,color-mix(in srgb,var(--ui-text-primary) 14%,transparent) var(--su-stop),var(--su-color) var(--su-stop))}
+.su-range::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--su-track)}
+.su-range::-moz-range-track{height:4px;border-radius:2px;background:var(--su-track)}
+.su-range::-webkit-slider-thumb{-webkit-appearance:none;width:var(--su-thumb);height:var(--su-thumb);margin-top:-4px;border:2px solid var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:50%;background:var(--su-color);box-shadow:0 0 0 1px var(--su-color)}
+.su-range::-moz-range-thumb{width:10px;height:10px;border:2px solid var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:50%;background:var(--su-color)}
+.su-range:focus-visible{outline:2px solid var(--ui-accent);outline-offset:2px;border-radius:4px}
+.su-empty-dot{position:absolute;bottom:0;width:9px;height:9px;margin:0 0 -4.5px -4.5px;border:2px solid var(--ui-red,var(--su-color));border-radius:50%;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:none}
+.su-measure{position:relative;height:30px;margin-left:56px;color:var(--ui-text-secondary)}
+.su-measure-span{position:absolute;top:22px;height:0}
+.su-measure-line{position:absolute;left:0;right:0;top:-0.5px;border-top:1px solid currentColor}
+.su-measure-tick{position:absolute;top:-5px;height:10px;width:0;border-left:1px solid currentColor}.su-measure-tick[data-end=start]{left:0}.su-measure-tick[data-end=end]{left:100%;margin-left:-1px}
+.su-arrow{position:absolute;top:-4px;width:6px;height:8px;fill:currentColor;overflow:visible}.su-arrow[data-end=start]{left:0}.su-arrow[data-end=end]{right:0}
+.su-measure-text{position:absolute;top:2px;transform:translateX(-50%);font-size:11px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}.su-measure-text[data-align=start]{transform:none}
+.su-empty-note{color:var(--ui-text-tertiary)}
 .su-legend-line{display:inline-block;width:16px;border-top:2px solid var(--su-color)}.su-legend-line[data-dashed]{border-top-style:dashed}
 .su-chart-foot{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 16px;font-size:11px;color:var(--ui-text-tertiary)}
 .su-accounts{display:flex;flex-direction:column;gap:8px}

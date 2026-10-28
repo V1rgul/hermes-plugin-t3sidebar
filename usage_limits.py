@@ -41,7 +41,7 @@ PROVIDER_LABELS = {"openai-codex": "OpenAI Codex", "anthropic": "Anthropic"}
 # Closed vocabulary so an error string can never carry a message, URL or token.
 ERROR_CLASSES = frozenset({
 	"unavailable", "pool_unreadable", "credential_dead", "no_credential", "no_data",
-	"refresh_failed", "timeout", "internal_error",
+	"refresh_failed", "timeout", "internal_error", "logged_out",
 })
 
 _SECONDS_KEYS = {18000: "five_hour", 604800: "weekly"}
@@ -230,6 +230,8 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time):
 	for provider in sorted(slug for slug in pool if slug in VETTED_PROVIDERS):
 		rows = [row for row in (pool.get(provider) or []) if isinstance(row, dict) and row.get("id")]
 		if not rows:
+			# Hermes keeps the provider's pool key after the last credential is removed or logged out; report it so the page can say so instead of silently omitting the provider. A provider never configured has no key at all.
+			providers.append({"provider": provider, "error": "logged_out", "accounts": []})
 			continue
 		reading = {"provider": provider, "error": None, "accounts": []}
 		providers.append(reading)
@@ -551,7 +553,9 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 			})
 		accounts.sort(key=lambda a: (a["priority"] is None, a["priority"] or 0, a["label"] or "", a["id"]))
 		block["history"].sort(key=lambda point: (point["t"], point["account"], point["window"]))
-		result.append({**block, "accounts": accounts})
+		# A logged-out provider is an authentication state, not a sampling failure.
+		logged_out = block["error"] == "logged_out"
+		result.append({**block, "error": None if logged_out else block["error"], "auth": "logged_out" if logged_out else "ok", "auth_reason": None, "accounts": accounts})
 	if sampler_status is None:
 		sampler_status = store.read_status()
 	return {"generated_at": now, "sampler": _sampler_block(sampler_status), "providers": result}

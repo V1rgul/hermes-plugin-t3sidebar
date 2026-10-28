@@ -1489,9 +1489,31 @@ try {
     // Usage footer and page: the real plugin tree under the mocked SDK (not live Electron), with synthetic usage payloads.
     const usageDir = process.env.USAGE_SCREENSHOT_DIR || '/home/hermes/.hermes/cache/scratch/usage-viz';
     await mkdir(usageDir, { recursive: true });
-    const usage = await browser.newPage({ viewport: { width: 1400, height: 1000 }, deviceScaleFactor: 1, timezoneId: 'Europe/Paris' });
+    const usage = await browser.newPage({ viewport: { width: 1300, height: 1000 }, deviceScaleFactor: 1, timezoneId: 'Europe/Paris' });
     usage.on('pageerror', error => errors.push(error.message));
     await usage.emulateMedia({ reducedMotion: 'reduce' });
+    // A fixed weekday afternoon makes the clock-relative limits fixture (office-hours drain, idle nights and weekends) deterministic,
+    // so the projection reliably empties before the next reset and the screenshots are comparable between runs.
+    await usage.clock.install({ time: new Date('2026-10-28T15:00:00+01:00') });
+    // Day labels name the month only on the first label and where it changes; the rest are bare day numbers.
+    const monthsOnChange = labels => { let month = null; return labels.length > 0 && labels.every((label, index) => {
+      const named = label.match(/^([A-Z][a-z]{2}) \d{1,2}$/);
+      if (!named) return index > 0 && /^\d{1,2}$/.test(label);
+      const changed = named[1] !== month; month = named[1]; return index === 0 || changed;
+    }); };
+    // Local midnights (Europe/Paris page zone) at quarter-hour resolution, counted independently of the plugin's helper.
+    const pageMidnights = (start, end) => usage.evaluate(([from, to]) => {
+      const format = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: 'numeric', hourCycle: 'h23' });
+      let count = 0;
+      for (let t = Math.ceil(from / 900) * 900; t <= to; t += 900) { const parts = Object.fromEntries(format.formatToParts(new Date(t * 1000)).map(part => [part.type, part.value])); if (Number(parts.hour) === 0 && Number(parts.minute) === 0) count++; }
+      return count;
+    }, [start, end]);
+    const axisState = metricSelector => usage.evaluate(selector => {
+      const r = el => el.getBoundingClientRect(), spans = [...document.querySelectorAll(`${selector} .su-xaxis span`)];
+      const boxes = spans.map(r);
+      return { labels: spans.map(span => span.textContent), overlap: boxes.some((box, index) => index > 0 && box.left < boxes[index - 1].right + 2),
+        dayLines: document.querySelectorAll(`${selector} .su-day-grid`).length, units: [...document.querySelectorAll('.su-yunit')].map(el => el.textContent) };
+    }, metricSelector);
     await usage.goto(`http://127.0.0.1:${server.address().port}`);
     await usage.waitForSelector('.sf-row');
     const footer = await usage.evaluate(() => {
@@ -1522,6 +1544,14 @@ try {
     console.log(`USAGE LAYOUT: ${JSON.stringify(layout)}`);
     check('Usage page draws Tokens, Cost and User messages charts on one shared, aligned time axis', layout.charts.join() === 'tokens,cost_usd,user_messages' && layout.aligned && layout.plotWidth > 800 && layout.drawn);
     check('Usage page has no horizontal overflow and keeps labels inside the page', layout.overflowX <= 0 && layout.inside);
+    {
+      const axis7 = await axisState('.su-chart[data-metric="user_messages"]');
+      const buckets = await usage.evaluate(() => window.hermesT3SidebarHarness.syntheticUsageHistory(7, 'Europe/Paris').buckets);
+      const midnights = (await Promise.all(buckets.map(t => pageMidnights(t, t)))).reduce((sum, count) => sum + count, 0);
+      console.log(`USAGE 7D AXIS: ${JSON.stringify({ ...axis7, midnights })}`);
+      check('Usage charts label the vertical axis per day for all three metrics', axis7.units.join() === 'tokens/day,$/day,messages/day');
+      check('Usage 7d day gridlines match the local midnights and labels name the month only once', axis7.dayLines === midnights && midnights === 7 && monthsOnChange(axis7.labels) && !axis7.overlap);
+    }
     const tokensPlot = usage.locator('.su-chart[data-metric="tokens"] .su-plot');
     const plotBox = await tokensPlot.boundingBox();
     await usage.mouse.move(plotBox.x + plotBox.width * 0.72, plotBox.y + plotBox.height / 2);
@@ -1540,6 +1570,35 @@ try {
     await usage.mouse.move(plotBox.x + plotBox.width * 0.2, plotBox.y + plotBox.height / 2);
     await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-independent.png') });
     await usage.mouse.move(5, 5);
+    // 24h: hourly buckets plotted per day, with the date only on the first label and at midnight.
+    await usage.getByRole('button', { name: '24h', exact: true }).click();
+    await usage.waitForFunction(() => document.querySelector('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')?.getAttribute('d').split('L').length === 24);
+    {
+      const axis = await axisState('.su-chart[data-metric="user_messages"]');
+      const buckets = await usage.evaluate(() => window.hermesT3SidebarHarness.syntheticUsageHistory(1, 'Europe/Paris').buckets);
+      const midnights = await pageMidnights(buckets[0], buckets.at(-1));
+      const hourLabels = axis.labels.slice(1).every(label => /^\d{1,2} (AM|PM)$/.test(label) || /^[A-Z][a-z]{2} \d{1,2}$/.test(label));
+      const dated = axis.labels.filter(label => /[A-Z][a-z]{2}/.test(label));
+      console.log(`USAGE 24H AXIS: ${JSON.stringify({ ...axis, midnights })}`);
+      check('Usage 24h view draws one gridline per local midnight and dates only the first label and midnight', axis.dayLines === midnights && midnights === 1 && /^[A-Z][a-z]{2} \d{1,2}, \d{1,2} (AM|PM)$/.test(axis.labels[0]) && hourLabels && dated.length === 2 && !axis.overlap);
+      const box = await usage.locator('.su-chart[data-metric="user_messages"] .su-plot').boundingBox();
+      await usage.mouse.move(box.x + box.width * 0.6, box.y + box.height / 2);
+      const tip = await usage.locator('.su-chart[data-metric="user_messages"] .su-tip-total b').textContent();
+      const [, perDay, hour] = tip.match(/^([\d,]+)\/day · ([\d,]+) this hour$/) || [];
+      check('Usage 24h tooltip shows the per-day rate with the raw hour value', perDay !== undefined && Number(perDay.replace(/,/g, '')) === 24 * Number(hour.replace(/,/g, '')));
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-usage-24h.png') });
+      await usage.mouse.move(5, 5);
+    }
+    await usage.getByRole('button', { name: '30d', exact: true }).click();
+    await usage.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="user_messages"] .su-day-grid').length === 30);
+    {
+      const axis = await axisState('.su-chart[data-metric="user_messages"]');
+      console.log(`USAGE 30D AXIS: ${JSON.stringify(axis)}`);
+      layout = await usageLayout();
+      check('Usage 30d labels name each month once, do not overlap and keep one gridline per day', monthsOnChange(axis.labels) && !axis.overlap && axis.dayLines === 30 && layout.overflowX <= 0 && layout.inside);
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-usage-30d.png') });
+    }
+    await usage.getByRole('button', { name: '7d', exact: true }).click();
     await usage.getByRole('button', { name: 'Limits', exact: true }).click();
     await usage.waitForSelector('.su-pooled .su-line.su-projected');
     const limits = await usage.evaluate(() => {
@@ -1551,11 +1610,92 @@ try {
     });
     console.log(`USAGE LIMITS: ${JSON.stringify(limits)}`);
     check('Limits tab draws the past pool up to Now and a dashed projection to the horizon', limits.nowInside && limits.pastEndsAtNow && limits.projectedStartsAtNow && limits.projectedReachesEnd && limits.dashed);
-    check('Limits tab per-account bars keep pace ticks inside and do not overflow', limits.paces && limits.accounts === 3 && limits.overflowX <= 0);
+    check('Limits tab per-account bars keep pace ticks inside and do not overflow', limits.paces && limits.accounts === 2 && limits.overflowX <= 0);
+    const measure = () => usage.evaluate(() => {
+      const r = el => el.getBoundingClientRect(), span = document.querySelector('.su-measure-span'), dot = document.querySelector('.su-empty-dot');
+      if (!span || !dot) return null;
+      const box = r(span), mark = r(dot), plot = r(document.querySelector('.su-pooled .su-plot')), text = document.querySelector('.su-measure-text'), arrows = [...span.querySelectorAll('.su-arrow')].map(r), ticks = [...span.querySelectorAll('.su-measure-tick')].map(r);
+      return { left: box.left, nowX: r(document.querySelector('.su-pooled .su-now')).left, right: box.right, emptyX: mark.left + mark.width / 2, emptyOnFloor: Math.abs(mark.top + mark.height / 2 - plot.bottom) <= 1,
+        arrows: arrows.length === 2 && Math.abs(arrows[0].left - box.left) <= 0.5 && Math.abs(arrows[1].right - box.right) <= 0.5 && arrows.every(arrow => arrow.width >= 5 && arrow.height >= 7),
+        ticks: ticks.length === 2 && Math.abs(ticks[0].left - box.left) <= 1 && Math.abs(ticks[1].right - box.right) <= 1, belowPlot: box.top > plot.bottom,
+        text: text.textContent, textInside: r(text).left >= plot.left - 0.5 && r(text).right <= plot.right + 0.5 && r(text).bottom <= box.top + 1 };
+    });
+    const rateText = () => usage.locator('.su-rate').textContent();
+    {
+      const geometry = await measure();
+      const plot = await usage.evaluate(() => { const node = document.querySelector('.su-pooled .su-plot'); return [Number(node.dataset.start), Number(node.dataset.end)]; });
+      const axis = await axisState('.su-pooled');
+      const midnights = await pageMidnights(...plot);
+      console.log(`USAGE LIMITS MEASURE: ${JSON.stringify({ geometry, axis, midnights, rate: await rateText() })}`);
+      check('Limits time-to-empty arrow spans Now to the first projected zero below the plot (within 1px)', geometry && Math.abs(geometry.left - geometry.nowX) <= 1 && Math.abs(geometry.right - geometry.emptyX) <= 1 && geometry.emptyOnFloor && geometry.arrows && geometry.ticks && geometry.belowPlot);
+      check('Limits time-to-empty text is centered under the arrow, unclipped and dated', geometry && geometry.textInside && /^Empty in (\d+d \d+h|\d+h \d+m) · \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(geometry.text));
+      check('Limits draws one gridline per local midnight and names each month once', axis.dayLines === midnights && midnights >= 9 && monthsOnChange(axis.labels) && !axis.overlap);
+    }
+    check('Limits lookback slider defaults to 12h', await usage.locator('.su-lookback-label').textContent() === 'Average over 12h');
+    // Pixels along the slider's middle row: the track left of the thumb stays unfilled and the part to its right carries the fill
+    // color (the thumb's own color), since the filled part is the averaged period reaching back from now.
+    const sliderFill = async () => {
+      const slider = usage.locator('.su-lookback input[type=range]'), box = await slider.boundingBox();
+      const png = (await slider.screenshot()).toString('base64');
+      return usage.evaluate(async ([data, width, height, share]) => {
+        const image = new Image(); image.src = `data:image/png;base64,${data}`; await image.decode();
+        const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+        const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
+        const scale = image.width / width, row = Math.round(height / 2 * scale), at = x => [...context.getImageData(Math.round(x * scale), row, 1, 1).data.slice(0, 3)];
+        const thumb = 6 + (width - 12) * share, distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+        const color = at(thumb), left = thumb > 14 ? at(thumb - 10) : null, right = thumb < width - 14 ? at(thumb + 10) : null;
+        return { thumb, color, left, right, leftFilled: left ? distance(left, color) < 40 : null, rightFilled: right ? distance(right, color) < 40 : null };
+      }, [png, box.width, box.height, Number(await slider.evaluate(el => el.style.getPropertyValue('--su-share')))]);
+    };
+    {
+      const fill = await sliderFill();
+      console.log(`USAGE SLIDER FILL: ${JSON.stringify(fill)}`);
+      check('Limits lookback slider runs longest-first and fills the track to the right of the thumb', await usage.locator('.su-lookback input[type=range]').inputValue() === '6' && fill.rightFilled === true && fill.leftFilled === false);
+      const range = usage.locator('.su-lookback input[type=range]');
+      await range.focus(); await usage.keyboard.press('ArrowRight');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-label')?.textContent === 'Average over 5h');
+      const right = await range.getAttribute('aria-valuetext');
+      await usage.keyboard.press('ArrowLeft'); await usage.keyboard.press('ArrowLeft');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-label')?.textContent === 'Average over 1d');
+      check('Limits lookback arrow keys follow the visual direction (Right = shorter) with the stop as aria-valuetext', right === '5h' && await range.getAttribute('aria-valuetext') === '1d');
+      await usage.keyboard.press('ArrowRight');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-label')?.textContent === 'Average over 12h');
+      await range.blur();
+    }
     const pooledPlot = await usage.locator('.su-pooled .su-plot').boundingBox();
     await usage.mouse.move(pooledPlot.x + pooledPlot.width * 0.55, pooledPlot.y + pooledPlot.height / 2);
     check('Limits hover reports a projected value with its local time', /^\w{3} \d{1,2}:\d{2}.* · \d+% left \(projected\)$/.test(await usage.locator('.su-pooled .su-tip').textContent()));
+    await usage.mouse.move(5, 5);
     await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-limits.png') });
+    await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-limits-12h.png') });
+    {
+      const before = { rate: await rateText(), path: await usage.locator('.su-line.su-projected').getAttribute('d'), empty: (await measure())?.right };
+      // Reversed slider: position 3 from the left is 3d (30d, 15d, 7d, 3d, …, 1h).
+      await usage.locator('.su-lookback input[type=range]').fill('3');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-label')?.textContent === 'Average over 3d');
+      const after = { rate: await rateText(), path: await usage.locator('.su-line.su-projected').getAttribute('d'), geometry: await measure() };
+      console.log(`USAGE LIMITS 3D: ${JSON.stringify({ before, after })}`);
+      check('Limits lookback slider changes the drain rate text and the projection', after.rate !== before.rate && /^~\d+(\.\d)?% per hour$/.test(after.rate) && after.path !== before.path && after.geometry && Math.abs(after.geometry.right - before.empty) > 1);
+      check('Limits arrow still spans Now to the moved zero crossing after the slider change', Math.abs(after.geometry.left - after.geometry.nowX) <= 1 && Math.abs(after.geometry.right - after.geometry.emptyX) <= 1 && after.geometry.textInside);
+      check('Limits lookback persists in the usage preferences as hours, not the slider position', await usage.evaluate(() => JSON.parse(localStorage.getItem('hermes.plugin.hermes-t3sidebar.usage-preferences')).lookback) === 72);
+      const fill3d = await sliderFill();
+      check('Limits lookback fill still starts at the moved thumb and runs to the right end', fill3d.rightFilled === true && fill3d.leftFilled === false);
+      // fill() leaves the slider focused; its focus ring is not part of the resting design.
+      await usage.locator('.su-lookback input[type=range]').blur();
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-limits-3d.png') });
+      await usage.locator('.su-lookback input[type=range]').fill('1');
+      await usage.waitForFunction(() => /based on \d+d of data/.test(document.querySelector('.su-coverage')?.textContent || ''));
+      check('Limits lookback beyond the history requests more and says how much data it used', await usage.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'rest' && call[1] === '/usage/limits?hours=360')));
+      await usage.locator('.su-lookback input[type=range]').fill('6');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-label')?.textContent === 'Average over 12h');
+    }
+    await usage.locator('.su-provider', { hasText: 'Anthropic' }).click();
+    {
+      const state = await usage.evaluate(() => ({ text: document.querySelector('[data-auth="logged_out"] .su-logged-out')?.textContent, chart: !!document.querySelector('.su-pooled'), tab: document.querySelector('.su-provider[aria-pressed="true"]')?.textContent }));
+      check('Logged-out Anthropic shows a muted sign-in state without a chart', state.text?.startsWith('Logged out in Hermes — sign in to track limits') && !state.chart && state.tab === 'Anthropiclogged out');
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-limits-logged-out.png') });
+    }
+    await usage.locator('.su-provider', { hasText: 'OpenAI Codex' }).click();
     // A narrow workspace keeps the page usable without horizontal scrolling.
     await usage.setViewportSize({ width: 900, height: 1000 });
     await usage.locator('.su-header').getByRole('button', { name: 'Usage', exact: true }).click();

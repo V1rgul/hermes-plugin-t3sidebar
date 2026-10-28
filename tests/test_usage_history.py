@@ -20,7 +20,7 @@ SPEC.loader.exec_module(history)
 PARIS = ZoneInfo("Europe/Paris")
 NEW_YORK = ZoneInfo("America/New_York")
 SCHEMA = """
-CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, parent_session_id TEXT, title TEXT, started_at REAL NOT NULL);
+CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, parent_session_id TEXT, title TEXT, started_at REAL NOT NULL, model_config TEXT);
 CREATE TABLE messages (
 	id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT, tool_calls TEXT,
 	reasoning TEXT, reasoning_content TEXT, timestamp REAL NOT NULL, token_count INTEGER, active INTEGER NOT NULL DEFAULT 1,
@@ -58,8 +58,8 @@ class Fixture:
 		with closing(sqlite3.connect(self.path)) as conn, conn:
 			conn.execute(sql, args)
 
-	def session(self, session_id, source="desktop", parent=None, started_at=1.0):
-		self.run("INSERT INTO sessions (id, source, parent_session_id, started_at) VALUES (?, ?, ?, ?)", session_id, source, parent, started_at)
+	def session(self, session_id, source="desktop", parent=None, started_at=1.0, model_config=None):
+		self.run("INSERT INTO sessions (id, source, parent_session_id, started_at, model_config) VALUES (?, ?, ?, ?, ?)", session_id, source, parent, started_at, model_config)
 
 	def message(self, session_id, role, timestamp, content="", tool_calls=None, reasoning=None, display_kind=None, compressed=0):
 		self.run(
@@ -266,6 +266,20 @@ class UsageHistoryTests(unittest.TestCase):
 		self.assertEqual(series(payload, "p/m2")["user_messages"][6], 1)
 		self.assertEqual(payload["totals"]["user_messages"], 4)
 		self.assertEqual(series(payload, "p", "by_provider")["user_messages"][6], 4)
+
+	def test_delegated_runs_with_interactive_sources_are_not_user_messages(self):
+		call = self.day[6] + 600
+		# Delegated children often keep the parent's desktop/tui source; only the native marker tells them apart. Malformed configuration must not break the read.
+		for offset, (session_id, config) in enumerate((("parent", '{"provider": "p"}'), ("delegated", '{"_delegate_from": "parent"}'), ("broken", "{not json"))):
+			self.db.session(session_id, "desktop", model_config=config)
+			# Distinct times: identical (time, size) copies are deliberately merged across sessions.
+			self.db.message(session_id, "user", call - 60 - offset, f"prompt for {session_id}")
+			self.db.message(session_id, "assistant", call, "ok")
+			self.db.usage(session_id, "m", "p", call, call, calls=1, input=10)
+		payload = self.payload()
+		self.assertEqual(payload["totals"]["user_messages"], 2)
+		# Their tokens still count: subagent work costs the same.
+		self.assertEqual(payload["totals"]["tokens"], 30)
 
 	def test_unanswered_user_message_goes_to_the_dominant_main_model(self):
 		call = self.day[6] + 600

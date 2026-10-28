@@ -418,14 +418,17 @@ def _session_layouts(conn, db_key, batch, non_human, message_query):
 	rows_by_session = defaultdict(list)
 	for record in conn.execute(f"SELECT {_ROW_COLUMNS} FROM session_model_usage WHERE session_id IN ({placeholders}) AND first_seen IS NOT NULL AND last_seen IS NOT NULL ORDER BY session_id, task, model, billing_provider, billing_base_url, billing_mode", batch):
 		rows_by_session[record[0]].append(_Row(record))
-	sources = dict(conn.execute(f"SELECT id, source FROM sessions WHERE id IN ({placeholders})", batch))
+	# Delegated subagent runs can carry the parent's interactive source (desktop, tui), so source alone would count the parent agent's prompts and steers as the user's; the native `_delegate_from` marker identifies them, as in the sidebar listing.
+	delegated = "CASE WHEN json_valid(model_config) THEN json_extract(model_config, '$._delegate_from') IS NOT NULL ELSE 0 END" if "model_config" in _columns(conn, "sessions") else "0"
+	sources = {session_id: (source, bool(flag)) for session_id, source, flag in conn.execute(
+		f"SELECT id, source, {delegated} FROM sessions WHERE id IN ({placeholders})", batch)}
 	markers = {session_id: (top, count) for session_id, top, count in conn.execute(f"SELECT session_id, MAX(id), COUNT(*) FROM messages WHERE session_id IN ({placeholders}) GROUP BY session_id", batch)}
 	signatures = {}
 	layouts = {}
 	stale = []
 	with _layout_lock:
 		for session_id in batch:
-			human = session_id in sources and sources[session_id] not in non_human
+			human = session_id in sources and sources[session_id][0] not in non_human and not sources[session_id][1]
 			signature = (markers.get(session_id), human, tuple(row.signature for row in rows_by_session[session_id]))
 			signatures[session_id] = signature
 			hit = _layouts.get((db_key, session_id))
