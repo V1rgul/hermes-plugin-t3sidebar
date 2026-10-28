@@ -25,6 +25,14 @@ function readSnoozeTime(ctx) {
 function useSnoozeTime(ctx) {
   return useQuery({ queryKey: SNOOZE_TIME_KEY, queryFn: () => readSnoozeTime(ctx), initialData: () => readSnoozeTime(ctx), staleTime: Infinity }).data;
 }
+// Opt-in detailed Working badge (solid/dashed ring and +N subagents). Off keeps the plain dashed circle and time.
+const WORKING_DETAILS_KEY = ['hermes-t3sidebar-preferences', 'working-details'];
+function readWorkingDetails(ctx) {
+  try { return ctx.storage.get('working-details', false) === true; } catch (_) { return false; }
+}
+function useWorkingDetails(ctx) {
+  return useQuery({ queryKey: WORKING_DETAILS_KEY, queryFn: () => readWorkingDetails(ctx), initialData: () => readWorkingDetails(ctx), staleTime: Infinity }).data;
+}
 const activationEpoch = sdk.atom(gatewayActivationEpoch());
 export const durableId = row => row._lineage_root_id || row.id;
 export const aliases = row => [...new Set([row.id, row.resolved_id, durableId(row), ...(row._lineage_ids || [])].filter(Boolean))];
@@ -88,6 +96,43 @@ export function workingSince(status, matches, run) {
   return own.length && run.ended_at != null ? null : run.started_at;
 }
 export const visibleSource = row => !['cron', 'tool', 'oneshot', 'kanban', 'subagent'].includes(String(row.source || '').toLowerCase());
+// The conversation's own turn is in flight: a bare "starting" (agent rebuild on open) is not work.
+const ownTurn = item => item.status === 'working' || item.status === 'starting' && item.turn_started_at > 0;
+// Running subagents across the card's runtimes, for display. A runtime whose count is unknown in this snapshot lends its
+// last known count (rememberSubagents); runtimes that never reported one are skipped. Null when no runtime has a count.
+function displayedSubagents(matches) {
+  const counts = new Map();
+  for (const item of matches) {
+    const count = Number.isInteger(item.running_subagents) ? item.running_subagents : item.remembered_subagents;
+    if (Number.isInteger(count) && count >= 0) counts.set(item.id || item.session_key, Math.max(count, counts.get(item.id || item.session_key) ?? 0));
+  }
+  return counts.size ? [...counts.values()].reduce((sum, count) => sum + count, 0) : null;
+}
+// When a successful poll cannot read a runtime's subagents (null), keep showing that runtime's last known count instead of
+// dropping it. Display only: classification still uses the fresh value. The memory is per scope and forgets runtimes that
+// leave the snapshot. Returns the same array when nothing was filled in, so memoized classification is unaffected.
+export function rememberSubagents(live, memory, scope) {
+  if (memory.scope !== scope) { memory.scope = scope; memory.counts = new Map(); }
+  const next = new Map();
+  let filled = false;
+  const result = live.map(item => {
+    const id = `${item.session_key}\u0000${item.id}`;
+    if (Number.isInteger(item.running_subagents)) { next.set(id, item.running_subagents); return item; }
+    const last = memory.counts.get(id);
+    if (last === undefined) return item;
+    next.set(id, last); filled = true;
+    return { ...item, remembered_subagents: last };
+  });
+  memory.counts = next;
+  return filled ? result : live;
+}
+// Hover title for a Working card. Null when the subagent count is unknown: the badge then shows only the elapsed time.
+export function workingDetail(row) {
+  if (row.working !== true || !Number.isInteger(row.workingSubagents)) return null;
+  const subagents = row.workingSubagents > 0 ? `${row.workingSubagents} subagent${row.workingSubagents > 1 ? 's' : ''} running` : null;
+  if (row.workingMain) return ['Agent working', subagents].filter(Boolean).join(' · ');
+  return subagents || 'Waiting on a background command';
+}
 export function compactTokens(row) {
   const valid = value => Number.isFinite(value) && value >= 0;
   const total = valid(row.total_tokens) ? row.total_tokens : valid(row.input_tokens) && valid(row.output_tokens) ? row.input_tokens + row.output_tokens : null;
@@ -197,7 +242,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     // only a prompt submitted meanwhile (an in-flight turn with its start) makes it Working. A bare "starting" card stays
     // where it was, without a badge, and is not idle, so archive/delete/move stay refused until the build settles.
     const observed = !runtimeKnown ? 'unknown' : matches.some(i => i.status === 'waiting') ? 'waiting'
-      : matches.some(i => i.status === 'working' || i.status === 'starting' && i.turn_started_at > 0 || Number.isInteger(i.running_subagents) && i.running_subagents > 0 || i.awaiting_processes === true) ? 'working'
+      : matches.some(i => ownTurn(i) || Number.isInteger(i.running_subagents) && i.running_subagents > 0 || i.awaiting_processes === true) ? 'working'
       : matches.some(i => !['idle', 'working', 'starting', 'waiting'].includes(i.status)) ? 'unknown' : matches.some(i => i.status === 'starting') ? 'starting' : 'idle';
     // After a failed poll the last snapshot still places the card, so one failure does not dump every shelf into Ready,
     // but its status is no longer confirmed: reporting unknown keeps archive/delete/move refused until a poll succeeds.
@@ -214,8 +259,13 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     // Runtime last_active is also a resume/reattach clock, not conversation progress.
     const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
     const runtimes = matches.filter(item => typeof item.id === 'string' && item.id && item.id !== item.session_key);
-    result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, runStartedAt: workingSince(status, matches, metadata.runs?.[durableId(row)]), section, status, woke, newSession,
-      runtimeId: runtimes.length === 1 ? runtimes[0].id : null, activity });
+    // The Working badge follows the last snapshot even after a failed poll (status is then unknown, for action safety):
+    // a solid ring when the conversation's own turn runs, dashed when only subagents or a background command keep it busy,
+    // and the running subagent count. Primitive fields keep card memoization exact.
+    const working = observed === 'working';
+    result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, runStartedAt: workingSince(observed, matches, metadata.runs?.[durableId(row)]), section, status, woke, newSession,
+      runtimeId: runtimes.length === 1 ? runtimes[0].id : null, activity,
+      working, workingMain: working && matches.some(ownTurn), workingSubagents: working ? displayedSubagents(matches) : null });
   }
   for (const section of SECTIONS) result[section].sort((a, b) => {
     if (section === 'active' && (a.status === 'waiting') !== (b.status === 'waiting')) return a.status === 'waiting' ? -1 : 1;
@@ -851,7 +901,7 @@ const CSS = `
 .sf-project-icon-categories{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px}.sf-project-submenu .sf-project-icon-category{margin:0}.sf-project-submenu .sf-project-icon-category legend{font-size:10px;margin-bottom:4px}.sf-project-icons{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:2px}.sf-project-icons button{display:flex;align-items:center;justify-content:center;height:25px;min-width:0;padding:3px;border:0;border-radius:4px;background:transparent;color:var(--sf-project-color)}.sf-project-icons button:hover,.sf-project-icons button[aria-pressed=true]{background:var(--ui-control-hover-background);color:var(--sf-project-color)}.sf-submenu-arrow{display:inline-flex;margin-left:auto}
 @media(max-width:520px){.sf-project-icon-categories{grid-template-columns:minmax(0,1fr)}}
 .sf-status{font-weight:600}
-.sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--sf-purple)}.sf-status[data-status=input]{color:var(--ui-orange,#db704b)}.sf-status[data-status=working]{color:var(--sf-blue)}.sf-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.sf-working-duration{font-variant-numeric:tabular-nums}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
+.sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--sf-purple)}.sf-status[data-status=input]{color:var(--ui-orange,#db704b)}.sf-status[data-status=working]{color:var(--sf-blue)}.sf-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.sf-working-duration{font-variant-numeric:tabular-nums}/* The subagent count touches the ring, so the ring and count read as one group apart from the elapsed time. */.sf-subagents{margin-left:-4px;font-weight:400;font-variant-numeric:tabular-nums}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
 /* Folding moves only the section edge: pinned lists keep their size and slide under a fade at that edge instead of resizing (and toggling scrollbars) every frame. */
 .sf-section[data-pinned=true]>.sf-section-body{flex:none}
 .sf-section[data-pinned=true]{mask:linear-gradient(#000,#000) top/100% 30px no-repeat,linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
@@ -919,15 +969,17 @@ function projectMark(project) {
 }
 // T3 Code's Lucide v1.59.0 status glyphs (ISC); the Desktop SDK icon set exports none of them. Circles are written as arcs.
 const STATUS_ICONS = {
+  // Lucide circle: the conversation's own turn is running. The dashed circle means only subagents or a background command are.
+  agent: ['M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0'],
   working: ['M10.1 2.182a10 10 0 0 1 3.8 0', 'M13.9 21.818a10 10 0 0 1-3.8 0', 'M17.609 3.721a10 10 0 0 1 2.69 2.7', 'M2.182 13.9a10 10 0 0 1 0-3.8', 'M20.279 17.609a10 10 0 0 1-2.7 2.69', 'M21.818 10.1a10 10 0 0 1 0 3.8', 'M3.721 6.391a10 10 0 0 1 2.7-2.69', 'M6.391 20.279a10 10 0 0 1-2.69-2.7'],
   input: ['M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719', 'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3', 'M12 17h.01'],
   done: ['M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0', 'm16 9-5.5 5.5L8 12'],
   woke: ['M4 13a8 8 0 1 0 16 0a8 8 0 1 0-16 0', 'M12 9v4l2 2', 'M5 3 2 6', 'm22 6-3-3', 'M6.38 18.7 4 21', 'M17.64 18.67 20 21'],
 };
-function statusIcon(status) {
+function statusIcon(status, glyph = status) {
   // Lucide's stroke 2 keeps Done's rim thicker than the native Codicon pass glyph.
   return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
-    STATUS_ICONS[status].map(d => h('path', { key: d, d })));
+    STATUS_ICONS[glyph].map(d => h('path', { key: d, d })));
 }
 // Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour and folder glyphs.
 const BUNDLED_ICONS = {
@@ -987,8 +1039,8 @@ function MenuAction({ name, codicon, className = '', destructive = false, childr
 }
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
 function Settings({ ctx }) {
-  const client = useQueryClient(), presetTime = useSnoozeTime(ctx);
-  const [error, setError] = useState('');
+  const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx);
+  const [error, setError] = useState(''), [detailsError, setDetailsError] = useState('');
   const save = value => {
     if (!validSnoozeTime(value)) { setError('Choose a valid time.'); return; }
     try {
@@ -997,12 +1049,24 @@ function Settings({ ctx }) {
       client.setQueryData(SNOOZE_TIME_KEY, value); setError('');
     } catch (err) { setError(err.message); }
   };
+  const saveDetails = on => {
+    try {
+      ctx.storage.set('working-details', on);
+      if (ctx.storage.get('working-details') !== on) throw new Error('The Working indicator setting was not saved.');
+      client.setQueryData(WORKING_DETAILS_KEY, on); setDetailsError('');
+    } catch (err) { setDetailsError(err.message); }
+  };
   // The host already supplies the page title and gutters; behavior notes live in docs/behavior.md.
   return h('div', null, h('style', null, SETTINGS_CSS), h(sdk.ListRow ?? SettingsRow, {
     title: 'Snooze preset time',
     description: 'Tomorrow and Next Monday wake at this local time. Existing snoozes keep their time.',
     action: h(sdk.Input, { type: 'time', step: 60, value: presetTime, className: 'sf-snooze-time', 'aria-label': 'Snooze preset time', 'aria-invalid': error ? true : undefined, onChange: event => save(event.target.value) }),
     below: error ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, error) : null
+  }), h(sdk.ToggleRow ?? SettingsToggleRow, {
+    label: 'Detailed Working indicator',
+    description: 'Solid circle while the agent itself works, dashed when only subagents or a background command run, and +N running subagents. Off shows the plain dashed circle.',
+    checked: workingDetails, onChange: saveDetails,
+    below: detailsError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, detailsError) : null
   }));
 }
 // The settings page renders without the sidebar's stylesheet. Masking the native picker button keeps its click-to-open picker while drawing the same alarm as the hover Snooze control instead of a plain clock.
@@ -1011,6 +1075,10 @@ const SETTINGS_CSS = `.sf-snooze-time::-webkit-calendar-picker-indicator{backgro
 // Desktop clients older than the ListRow SDK export still get a usable row.
 function SettingsRow({ title, description, action, below }) {
   return h('div', { style: { display: 'grid', gap: 6, padding: '12px 0' } }, h('div', null, title), h('div', { style: { color: 'var(--ui-text-tertiary)' } }, description), h('div', null, action), below);
+}
+function SettingsToggleRow({ label, description, checked, onChange, below }) {
+  return h(sdk.ListRow ?? SettingsRow, { title: label, description, below,
+    action: h('input', { type: 'checkbox', role: 'switch', checked, 'aria-label': label, onChange: event => onChange(event.target.checked) }) });
 }
 // Approved project metadata palette and Codicons; independent of chrome/theme colors.
 export const PROJECT_ICON_GROUPS = [
@@ -1196,8 +1264,10 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
 export function cardStatus(row, active = false) {
-  return row.status === 'waiting' ? 'input' : row.status === 'working' ? 'working' : row.archived === true ? null : row.woke ? 'woke' : ((!active && row.completion?.done_token) || row.unread === true) ? 'done' : null;
+  return row.status === 'waiting' ? 'input' : isWorking(row) ? 'working' : row.archived === true ? null : row.woke ? 'woke' : ((!active && row.completion?.done_token) || row.unread === true) ? 'done' : null;
 }
+// Working by the latest snapshot, including the last successful one after a failed poll (status unknown).
+const isWorking = row => row.status === 'working' || row.working === true && row.status === 'unknown';
 function useSessionDraft({ row, active, hidden, controller, scope }) {
   const draft = useQuery({
     queryKey: draftKey(scope, row),
@@ -1228,14 +1298,27 @@ function EmptySessionDraft({ row, active, controller, scope, onPresence, refresh
   }, [refreshAt, active, draft.refetch]);
   return null;
 }
-function statusBadge(badge, row, hidden) {
+function statusBadge(badge, row, hidden, details = false) {
+  if (badge === 'working' && !details) {
+    // Default badge: the dashed circle and elapsed time replace the visible Working word; screen readers still hear it.
+    return h('span', { className: 'sf-status', 'data-status': badge }, statusIcon('working'), h('span', { className: 'sf-sr' }, 'Working'),
+      row.runStartedAt ? h(WorkingDuration, { startedAt: row.runStartedAt, hidden }) : null);
+  }
+  if (badge === 'working') {
+    // Without a known subagent count the solid/dashed distinction could mislead, so only the elapsed time remains.
+    const known = Number.isInteger(row.workingSubagents), subagents = known && row.workingSubagents > 0 ? row.workingSubagents : 0;
+    return h('span', { className: 'sf-status', 'data-status': badge, 'data-agent': known ? String(row.workingMain === true) : undefined },
+      known ? statusIcon('working', row.workingMain ? 'agent' : 'working') : null,
+      subagents ? h('span', { className: 'sf-subagents', 'aria-hidden': true }, `+${subagents}`) : null,
+      // The ring, count and elapsed time replace the visible Working word; screen readers still hear it with the details.
+      h('span', { className: 'sf-sr' }, ['Working', workingDetail(row)].filter(Boolean).join(': ')),
+      row.runStartedAt ? h(WorkingDuration, { startedAt: row.runStartedAt, hidden }) : null);
+  }
   return h('span', { className: 'sf-status', 'data-status': badge },
     statusIcon(badge),
-    // The dashed circle and elapsed time replace the visible Working word; screen readers still hear it.
-    badge === 'working' ? h('span', { className: 'sf-sr' }, 'Working') : { done: 'Done', woke: 'Woke', input: 'Input' }[badge],
-    badge === 'working' && row.runStartedAt ? h(WorkingDuration, { startedAt: row.runStartedAt, hidden }) : null);
+    { done: 'Done', woke: 'Woke', input: 'Input' }[badge]);
 }
-function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain, presetTime, snoozeDetail }) {
+function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain, presetTime, snoozeDetail, workingDetails }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
   useEffect(() => { retain?.(row.key, menuOpen || snoozeOpen); return () => retain?.(row.key, false); }, [retain, row.key, menuOpen, snoozeOpen]);
   const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
@@ -1250,12 +1333,12 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
     else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
-  return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': hasDraft, 'data-working': row.status === 'working', 'data-unread': row.archived !== true && (!!(!active && row.completion?.done_token) || row.unread === true || row.woke) || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
+  return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': hasDraft, 'data-working': isWorking(row), 'data-unread': row.archived !== true && (!!(!active && row.completion?.done_token) || row.unread === true || row.woke) || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
     h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${sessionTitle(row)}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
       onClick: open, onFocus: () => onFocus(row.key), onBlur: () => onFocus(null), onKeyDown: keyDown,
-      title: [sessionTitle(row), row.cwd, row.git_branch, row.status === 'waiting' ? 'Waiting for approval or answer' : row.status].filter(Boolean).join('\n') },
+      title: [sessionTitle(row), row.cwd, row.git_branch, row.status === 'waiting' ? 'Waiting for approval or answer' : isWorking(row) ? workingDetails && workingDetail(row) || 'working' : row.status].filter(Boolean).join('\n') },
       h('span', { className: 'sf-card-meta' },
         h('span', { className: 'sf-project' },
           h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: row.project?.color || undefined } }, projectMark(row.project)),
@@ -1265,8 +1348,8 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
         provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, title: row.provider }, provider) : null,
         h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${tokens}` }, tokens),
         // A running snoozed card stays in Snoozed but still shows its Working status, between tokens and the countdown.
-        snoozed && row.status === 'working' ? h('span', { className: 'sf-time sf-snooze-working' }, statusBadge('working', row, hidden)) : null,
-        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row, hidden) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
+        snoozed && isWorking(row) ? h('span', { className: 'sf-time sf-snooze-working' }, statusBadge('working', row, hidden, workingDetails)) : null,
+        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row, hidden, workingDetails) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
       h('span', { className: 'sf-row-title' }, sessionTitle(row))),
     h('div', { className: 'sf-hover' },
       row.archived !== true ? h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },
@@ -1556,7 +1639,7 @@ function ProjectChoice({ choice, selected, scope, controller, filterProject, clo
       onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject, close }) : null));
 }
 function ScopedSidebar({ ctx, controller, scope }) {
-  const presetTime = useSnoozeTime(ctx);
+  const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx);
   const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false), [deleteTarget, setDeleteTarget] = useState(null);
   const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [actionError, setActionError] = useState('');
@@ -1595,6 +1678,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // A failed poll keeps the last successful snapshot (Query retains data on error) instead of emptying the feed, which
   // would drop Working/Snoozed/Archived placement into Ready until the next success. Notes still report the failure.
   const live = runtime.data?.sessions || EMPTY_ROWS;
+  // Last known subagent counts bridge runtimes whose count is momentarily unreadable; reset when the scope changes.
+  const subagentMemory = useRef({ scope: null, counts: new Map() }), scopeId = JSON.stringify(key);
+  const liveCounts = useMemo(() => rememberSubagents(live, subagentMemory.current, scopeId), [live, scopeId]);
   const rich = sessions.data?.sessions || EMPTY_ROWS, extra = sessions.data?.capped ? EMPTY_ROWS : expanded.data?.sessions || EMPTY_ROWS;
   const archivedRows = archives.data?.sessions || EMPTY_ROWS;
   const rows = useMemo(() => mergeRows(rich, extra, live, true, archivedRows), [rich, extra, live, archivedRows]);
@@ -1614,7 +1700,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     }
     return low ? snoozeDeadlines[low - 1] : 0;
   }, [snoozeDeadlines, now]);
-  const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, live, { runtimeKnown, runtimeStale, now: classificationNow }), [rows, metadata.data, live, runtimeKnown, runtimeStale, classificationNow]);
+  const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, liveCounts, { runtimeKnown, runtimeStale, now: classificationNow }), [rows, metadata.data, liveCounts, runtimeKnown, runtimeStale, classificationNow]);
   const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession), [classified]);
   const tokens = useMemo(() => searchTokens(query), [query]);
   // Populate text only for rows actually searched; replacing the classified snapshot also replaces its search index.
@@ -1705,7 +1791,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const disabled = latest.current.disabled;
   const renderRow = (row, retain) => h(MemoSessionRow, { key: row.key, row, retain, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
     draftPresent: row.newSession && emptyDrafts.has(draftIdentity(row)),
-    presetTime, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
+    presetTime, workingDetails, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
   const renderSection = section => {
     const entries = sections[section], closed = isClosed(section);
@@ -1727,7 +1813,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // Toolbar/popover/error state is not a list input: retain its element tree,
   // not only the cards, so these interactions never walk thousands of rows.
   const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, settled, activeId, activeOwner,
-    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, emptyDrafts,
+    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, workingDetails, emptyDrafts,
     archives.isError, archives.error, !archives.data, archives.isLoading, archives.isFetching, archives.data?.has_more]);
   // CSS flex owns every shelf height (see the stylesheet). A pure JavaScript allocator was also built and profiled: pixel heights
   // computed from card counts, exact Ready-first priority even in short panes, and Working/Snoozed capped at 40%. Once fold

@@ -26,7 +26,9 @@ The new-session picker omits Home and its unsupported-creation explanation, whil
 
 ## Running subagents
 
-The runtime snapshot includes a read-only `running_subagents` count. A positive integer adds a Working signal to the parent session across its compression aliases. The existing Waiting, native archive and Snoozed precedence remains intact. Counts are replaced from snapshots rather than accumulated from events, so remounts need no event replay and the last child's completion/cancellation clears the signal on refresh. Unknown or failed reads do not preserve an old positive count. Start/completion events request a refresh; streamed child text and thinking do not fan out snapshot or draft reads.
+The runtime snapshot includes a read-only `running_subagents` count. A positive integer adds a Working signal to the parent session across its compression aliases. The existing Waiting, native archive and Snoozed precedence remains intact. Counts are replaced from snapshots rather than accumulated from events, so remounts need no event replay and the last child's completion/cancellation clears the signal on refresh. Unknown counts never classify a session as Working. Start/completion events request a refresh; streamed child text and thinking do not fan out snapshot or draft reads.
+
+With the Detailed Working indicator setting on, the Working badge displays the count as `+N` (summed across the card's runtimes, a repeated runtime counted once). Display, unlike classification, keeps the last known value: a failed poll keeps the whole last snapshot, and a runtime whose count reads as unknown on a successful poll keeps showing its previous count. That memory is per source/profile/epoch and forgets runtimes that leave the snapshot. A card with no known count shows only its elapsed time.
 
 ## Confirmed deletion
 

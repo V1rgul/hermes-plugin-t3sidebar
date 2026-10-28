@@ -261,7 +261,7 @@ export function reset() {
     { id: 'archived', archived: true, title: 'SDK inventory', cwd: '/projects/hermes-t3sidebar', last_active: now() - 5000 },
     { id: 'legacy', archived: false, title: 'Legacy completed entry', cwd: '/projects/docs', last_active: now() - 6000 }
   ], live: [{ id: 'runtime-approval', session_key: 'approval', status: 'waiting', last_active: now() - 200 },
-    { id: 'runtime-worker', session_key: 'old', status: 'working', last_active: now() - 4 }],
+    { id: 'runtime-worker', session_key: 'old', status: 'working', running_subagents: 0, last_active: now() - 4 }],
     metadata: { version: 1, sessions: {
       approval: { state: 'settled', pinned: true, settled_at: now(), wake_at: null, updated_at: now() },
       pinned: { state: 'active', pinned: true, settled_at: null, wake_at: null, updated_at: now() },
@@ -292,7 +292,7 @@ export function loadDenseFixtures() {
       const id = `synthetic-${section}-${String(i).padStart(3, '0')}`;
       control.rows.push({ id, archived: section === 'archived', title: `SYNTHETIC ${section} ${i} — a deliberately long title for overflow and ellipsis verification`, source: 'desktop', last_active: now() - i,
         cwd: '/synthetic/layout', project: { id: 'synthetic-layout', name: 'Synthetic layout', icon: '◇', is_home: false }, provider: 'anthropic', input_tokens: 1000, output_tokens: 250, total_tokens: 1250 });
-      if (section === 'working') control.live.push({ session_key: id, status: 'working', source: 'desktop' });
+      if (section === 'working') control.live.push({ session_key: id, status: 'working', source: 'desktop', running_subagents: 0 });
       if (['pinned', 'snoozed'].includes(section)) control.metadata.sessions[id] = { state: section === 'pinned' ? 'active' : section, pinned: section === 'pinned', wake_at: now() + 3600, settled_at: null, updated_at: now() };
     }
   }
@@ -302,6 +302,10 @@ export function Button({ variant, size, children, ...props }) { return h('button
 export function Input({ size, prefix, suffix, containerClassName, ...props }) { return h('input', props); }
 // Core Settings row: label + description with the control beside it.
 export function ListRow({ title, description, action, below }) { return h('div', { 'data-list-row': true }, h('div', null, h('span', null, title), description ? h('div', null, description) : null, below), action ? h('div', null, action) : null); }
+// Core Settings on/off row: ListRow with a Switch (role=switch, aria-checked) labelled by the row label.
+export function ToggleRow({ label, description, checked, disabled, onChange, below }) {
+  return h(ListRow, { title: label, description, below, action: h('button', { type: 'button', role: 'switch', 'aria-checked': checked, 'aria-label': label, disabled, onClick: () => onChange(!checked) }) });
+}
 // Public color-picker contract, with cosmetic styling only for the harness.
 export const PROFILE_SWATCHES = Array.from({ length: 12 }, (_, index) => `hsl(${index * 30} 68% 58%)`);
 export function ColorSwatches({ swatches, value, onChange, clearLabel }) {

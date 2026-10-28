@@ -26,8 +26,14 @@ function reference(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown
 		if (!matchesFilters({ ...row, newSession })) continue;
 		const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
 		const runtimes = matches.filter(item => typeof item.id === 'string' && item.id && item.id !== item.session_key);
+		// Displayed subagents: one count per runtime (largest if repeated), summed; null when no runtime reports one.
+		const working = status === 'working', perRuntime = {};
+		for (const item of matches) if (Number.isInteger(item.running_subagents)) perRuntime[item.id || item.session_key] = Math.max(item.running_subagents, perRuntime[item.id || item.session_key] ?? 0);
+		const counts = Object.values(perRuntime);
 		result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, runStartedAt: workingSince(status, matches, metadata.runs?.[durableId(row)]), section, status, woke, newSession,
-			runtimeId: runtimes.length === 1 ? runtimes[0].id : null, activity });
+			runtimeId: runtimes.length === 1 ? runtimes[0].id : null, activity,
+			working, workingMain: working && matches.some(i => i.status === 'working' || i.status === 'starting' && i.turn_started_at > 0),
+			workingSubagents: working && counts.length ? counts.reduce((sum, count) => sum + count, 0) : null });
 	}
 	for (const section of SECTIONS) result[section].sort((a, b) => {
 		if (section === 'active' && (a.status === 'waiting') !== (b.status === 'waiting')) return a.status === 'waiting' ? -1 : 1;

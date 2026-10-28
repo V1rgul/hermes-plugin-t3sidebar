@@ -94,3 +94,38 @@ test('unavailable storage reads leave settings and default presets usable', asyn
 	await click($('[data-session-id="design"] [aria-label="Snooze session"]'));
 	assert.ok(button('Tomorrow at 9:00')); assert.ok(button('Next Monday at 9:00'));
 });
+
+test('the Detailed Working indicator setting defaults off, persists, switches every card without a reload and rejects failed saves', async () => {
+	mock.control.live.find(item => item.id === 'runtime-worker').running_subagents = 2;
+	mock.control.live.push({ id: 'runtime-design', session_key: 'design', status: 'idle', running_subagents: null, awaiting_processes: true });
+	plugin.register(mock.ctx); await render();
+	const toggle = () => $('[role=switch][aria-label="Detailed Working indicator"]');
+	const badge = id => {
+		const status = $(`[data-session-id="${id}"] .sf-status`);
+		return { agent: status.dataset.agent ?? null, glyph: status.querySelector('svg')?.querySelectorAll('path').length ?? 0, count: status.querySelector('.sf-subagents')?.textContent ?? null, label: status.querySelector('.sf-sr').textContent };
+	};
+	const plain = { agent: null, glyph: 8, count: null, label: 'Working' };
+	// Default: the plain dashed circle everywhere, even when the count is unknown, and no details in the hover title.
+	assert.equal(toggle().getAttribute('aria-checked'), 'false');
+	assert.deepEqual(badge('root'), plain);
+	assert.deepEqual(badge('design'), plain);
+	assert.equal($('[data-session-id="root"] .sf-open').title.split('\n').at(-1), 'working');
+	await click(toggle());
+	assert.equal(storage.get('working-details'), true);
+	assert.equal(toggle().getAttribute('aria-checked'), 'true');
+	assert.deepEqual(badge('root'), { agent: 'true', glyph: 1, count: '+2', label: 'Working: Agent working · 2 subagents running' });
+	assert.deepEqual(badge('design'), { agent: null, glyph: 0, count: null, label: 'Working' });
+	assert.equal($('[data-session-id="root"] .sf-open').title.split('\n').at(-1), 'Agent working · 2 subagents running');
+	// Persisted: a fresh mount reads it back.
+	await act(async () => root.unmount()); mock.queryClient.removeQueries({ queryKey: ['hermes-t3sidebar-preferences'] }); await render();
+	assert.equal(toggle().getAttribute('aria-checked'), 'true');
+	assert.deepEqual(badge('root'), { agent: 'true', glyph: 1, count: '+2', label: 'Working: Agent working · 2 subagents running' });
+	await click(toggle());
+	assert.equal(storage.get('working-details'), false);
+	assert.deepEqual(badge('root'), plain);
+	mock.ctx.storage = { ...storage, set() { throw new Error('fixture storage unavailable'); } };
+	await click(toggle());
+	assert.match($('[role=alert]').textContent, /storage unavailable/);
+	assert.equal(toggle().getAttribute('aria-checked'), 'false');
+	assert.deepEqual(badge('root'), plain);
+});

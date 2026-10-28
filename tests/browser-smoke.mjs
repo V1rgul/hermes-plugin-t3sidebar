@@ -146,7 +146,7 @@ try {
   })));
   check('Working shows a still, unfilled dashed circle and the native turn elapsed time instead of a visible label', await page.locator('[data-session-id="root"] .sf-status').evaluate(el => {
     const duration = el.querySelector('.sf-working-duration'), label = el.querySelector('.sf-sr'), disc = el.querySelector('svg[data-status-icon=working]');
-    return !!duration && /^2m$/.test(duration.textContent) && duration.getAttribute('aria-hidden') === 'true' && label?.textContent === 'Working'
+    return !!duration && /^2m$/.test(duration.textContent) && duration.getAttribute('aria-hidden') === 'true' && label?.textContent === 'Working' && el.dataset.agent === undefined
       && label.getBoundingClientRect().width <= 1 && getComputedStyle(disc).animationName === 'none' && disc.querySelectorAll('path').length === 8 && getComputedStyle(disc.querySelector('path')).fill === 'none'
       && duration.getBoundingClientRect().left > disc.getBoundingClientRect().right && getComputedStyle(duration).fontVariantNumeric.includes('tabular-nums');
   }));
@@ -793,17 +793,29 @@ try {
   check('confirmed new empty session shows New session without unavailable project or Untitled text', await empty.locator('.sf-row-title').textContent() === 'New session' && !/Project unavailable|Untitled session/i.test(await empty.innerText()) && await empty.locator('.sf-open').getAttribute('aria-label') === 'New session');
   await page.evaluate(async () => {
     const fixture = window.hermesT3SidebarHarness;
+    // Opt in to the detailed Working indicator for the subagent checks, as the settings switch would.
+    localStorage.setItem('hermes.plugin.hermes-t3sidebar.working-details', 'true');
+    fixture.queryClient.setQueryData(['hermes-t3sidebar-preferences', 'working-details'], true);
     fixture.control.live.find(row => row.session_key === 'design').running_subagents = 2;
     // Its own turn ended after dispatching; the backend keeps that turn's start.
     fixture.control.metadata.runs = { design: { started_at: Date.now() / 1000 - 300, ended_at: Date.now() / 1000 - 240 } };
     await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
   });
   await page.locator('[data-section="working"] [data-session-id="design"]').waitFor();
-  check('idle parent with running subagents shows blue Working counted from its last turn start and stays dimmed', await design.getAttribute('data-working') === 'true' && await design.locator('.sf-status').textContent() === 'Working5m');
+  check('idle parent with running subagents shows blue Working counted from its last turn start and stays dimmed', await design.getAttribute('data-working') === 'true' && await design.locator('.sf-status').textContent() === '+2Working: 2 subagents running5m');
+  check('idle parent draws the dashed ring, then a regular-weight +2 touching it and before the bold elapsed time', await design.locator('.sf-status').evaluate(el => {
+    const ring = el.querySelector('svg[data-status-icon=working]').getBoundingClientRect(), count = el.querySelector('.sf-subagents').getBoundingClientRect(), time = el.querySelector('.sf-working-duration').getBoundingClientRect();
+    const centre = rect => rect.top + rect.height / 2;
+    return el.dataset.agent === 'false' && el.querySelectorAll('svg path').length === 8 && Math.abs(count.left - ring.right) <= 0.5
+      && time.left - count.right >= 3 && Math.abs(centre(count) - centre(time)) <= 1
+      && getComputedStyle(el.querySelector('.sf-subagents')).fontWeight === '400' && getComputedStyle(el.querySelector('.sf-working-duration')).fontWeight === '600';
+  }));
   await page.evaluate(async () => {
     const fixture = window.hermesT3SidebarHarness;
     fixture.control.live.find(row => row.session_key === 'design').running_subagents = 0;
     delete fixture.control.metadata.runs;
+    localStorage.removeItem('hermes.plugin.hermes-t3sidebar.working-details');
+    fixture.queryClient.setQueryData(['hermes-t3sidebar-preferences', 'working-details'], false);
     await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
   });
   await page.locator('[data-section="active"] [data-session-id="design"]').waitFor();
@@ -1125,6 +1137,18 @@ try {
   check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Next Monday at 14:35', exact: true }).count() === 1);
   await page.keyboard.press('Escape');
   await presetSetting.fill('09:00');
+  const detailsSwitch = page.getByRole('switch', { name: 'Detailed Working indicator', exact: true });
+  const rootBadge = () => page.locator('[data-session-id="root"] .sf-status').evaluate(el => ({ agent: el.dataset.agent ?? null, paths: el.querySelectorAll('svg path').length }));
+  check('Detailed Working indicator defaults off with the plain dashed circle', await detailsSwitch.getAttribute('aria-checked') === 'false' && JSON.stringify(await rootBadge()) === JSON.stringify({ agent: null, paths: 8 }));
+  await detailsSwitch.click();
+  await page.waitForFunction(() => document.querySelector('[data-session-id="root"] .sf-status')?.dataset.agent === 'true');
+  check('turning on the detailed indicator draws the solid agent ring without a reload', JSON.stringify(await rootBadge()) === JSON.stringify({ agent: 'true', paths: 1 }));
+  await page.reload();
+  await page.getByRole('button', { name: 'Plugin settings', exact: true }).click();
+  check('detailed indicator setting persists across actual browser reload', await detailsSwitch.getAttribute('aria-checked') === 'true' && (await rootBadge()).agent === 'true');
+  await detailsSwitch.click();
+  await page.waitForFunction(() => document.querySelector('[data-session-id="root"] .sf-status')?.dataset.agent === undefined);
+  check('turning it off restores the plain dashed circle', JSON.stringify(await rootBadge()) === JSON.stringify({ agent: null, paths: 8 }));
   await page.setViewportSize({ width: 1200, height: 900 });
   await page.evaluate(async () => {
     const fixture = window.hermesT3SidebarHarness;

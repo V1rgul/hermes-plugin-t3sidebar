@@ -162,17 +162,22 @@ test('subagent lifecycle events refresh snapshots but streamed text does not fan
 });
 
 test('React reconstructs parent Working from child snapshots on remount and keeps it through a failed poll', async () => {
+  mock.storageData.set('working-details', 'true');
   mock.control.live.push({ id: 'runtime-design', session_key: 'design', status: 'idle', running_subagents: 1 });
   await mount();
   const section = () => row('design').closest('section').getAttribute('aria-label');
+  const badge = () => {
+    const status = row('design').querySelector('.sf-status');
+    return status && { agent: status.dataset.agent, count: status.querySelector('.sf-subagents')?.textContent ?? null, label: status.querySelector('.sf-sr').textContent };
+  };
   assert.equal(section(), 'Working');
-  assert.equal(row('design').querySelector('.sf-status').textContent, 'Working');
+  assert.deepEqual(badge(), { agent: 'false', count: '+1', label: 'Working: 1 subagent running' });
   await remount();
   assert.equal(section(), 'Working');
   mock.control.runtimeError = true; await refresh();
-  // Last-known placement survives, but the unconfirmed status is unknown rather than a stale Working badge.
+  // Last-known placement and badge survive; the unconfirmed status is still unknown so idle-only actions stay refused.
   assert.equal(section(), 'Working');
-  assert.equal(row('design').querySelector('.sf-status'), null);
+  assert.deepEqual(badge(), { agent: 'false', count: '+1', label: 'Working: 1 subagent running' });
   assert.match(row('design').querySelector('.sf-open').getAttribute('aria-label'), /status unknown/);
   mock.control.runtimeError = false; mock.control.live.at(-1).running_subagents = 0; await refresh();
   assert.equal(section(), 'Ready');
@@ -397,7 +402,7 @@ test('a pinned working card keeps its Working status, stays undimmed and follows
   const meta = [...row('root').querySelector('.sf-card-meta').children].map(child => child.className);
   assert.deepEqual(meta.slice(-3), ['sf-token', 'sf-time sf-snooze-working', 'sf-time sf-snooze-time']);
   assert.equal(row('root').querySelector('.sf-snooze-working [data-status=working]')?.textContent, 'Working');
-  assert.equal(row('root').querySelector('.sf-snooze-time [data-status=working]'), null);
+  assert.equal(row('root').querySelector('.sf-snooze-time [data-status=working]') === null, true);
   assert.equal(row('root').querySelector('.sf-snooze-time')?.textContent, '1h');
   mock.control.metadata.sessions.root = { state: 'active', pinned: true };
   await refresh(); assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Pinned');
@@ -491,7 +496,7 @@ for (const status of ['working', 'starting', 'running children', 'waiting', 'unk
     assert.match(row('root').querySelector('.sf-snooze-working [data-status=working]')?.textContent ?? '', /^Working(\d+[smh].*)?$/);
   } else {
     assert.equal(row('root').closest('section'), shelf('Ready'), 'input/unknown safety remains visible');
-    assert.equal(row('root').querySelector('.sf-snooze-time'), null);
+    assert.equal(row('root').querySelector('.sf-snooze-time') === null, true);
   }
   await click(row('root').querySelector('[aria-label="Snooze session"]'));
   assert.equal($('form > button:not(:disabled)').textContent, 'Unsnooze');
@@ -1817,4 +1822,56 @@ test('awaited background processes count as Working; unknown or false do not', (
   }
   // Input still wins over background work.
   assert.equal(flow.buildSections(rows, { sessions: {} }, [{ session_key: 'root', status: 'waiting', awaiting_processes: true }], { now: 100 }).active[0].status, 'waiting');
+});
+
+test('Working badge: solid ring for the conversation turn, dashed otherwise, a +N subagent count, time only when the count is unknown', async () => {
+  const rows = [{ id: 'root', last_active: 10 }];
+  const card = runtime => flow.buildSections(rows, { sessions: {} }, [{ id: 'runtime', session_key: 'root', ...runtime }], { now: 100 }).working[0];
+  const pick = row => ({ working: row.working, main: row.workingMain, subagents: row.workingSubagents, detail: flow.workingDetail(row) });
+  assert.deepEqual(pick(card({ status: 'working', running_subagents: 0 })), { working: true, main: true, subagents: 0, detail: 'Agent working' });
+  assert.deepEqual(pick(card({ status: 'starting', turn_started_at: 50, running_subagents: 3 })), { working: true, main: true, subagents: 3, detail: 'Agent working · 3 subagents running' });
+  assert.deepEqual(pick(card({ status: 'idle', running_subagents: 1 })), { working: true, main: false, subagents: 1, detail: '1 subagent running' });
+  assert.deepEqual(pick(card({ status: 'idle', running_subagents: 0, awaiting_processes: true })), { working: true, main: false, subagents: 0, detail: 'Waiting on a background command' });
+  assert.deepEqual(pick(card({ status: 'working', running_subagents: null })), { working: true, main: true, subagents: null, detail: null });
+  // A repeated runtime counts once; separate runtimes of one lineage add up; a runtime with no count is skipped.
+  const lineage = [{ id: 'root', _lineage_ids: ['tip'], last_active: 10 }];
+  const live = [{ id: 'a', session_key: 'root', status: 'idle', running_subagents: 2 }, { id: 'a', session_key: 'root', status: 'idle', running_subagents: 2 },
+    { id: 'b', session_key: 'tip', status: 'working', running_subagents: 1 }, { id: 'c', session_key: 'tip', status: 'idle', running_subagents: null }];
+  assert.equal(flow.buildSections(lineage, { sessions: {} }, live, { now: 100 }).working[0].workingSubagents, 3);
+  // Idle cards carry no Working fields.
+  assert.deepEqual(pick(flow.buildSections(rows, { sessions: {} }, [{ session_key: 'root', status: 'idle', running_subagents: 0 }], { now: 100 }).active[0]),
+    { working: false, main: false, subagents: null, detail: null });
+
+  mock.storageData.set('working-details', 'true');
+  mock.control.live.find(item => item.id === 'runtime-worker').running_subagents = 2;
+  mock.control.live.push({ id: 'runtime-design', session_key: 'design', status: 'idle', running_subagents: 0, awaiting_processes: true });
+  await mount();
+  const badge = id => {
+    const status = row(id).querySelector('.sf-status');
+    return { agent: status.dataset.agent ?? null, glyph: status.querySelector('svg')?.querySelectorAll('path').length ?? 0, count: status.querySelector('.sf-subagents')?.textContent ?? null,
+      label: status.querySelector('.sf-sr').textContent, title: row(id).querySelector('.sf-open').title.split('\n').at(-1) };
+  };
+  assert.deepEqual(badge('root'), { agent: 'true', glyph: 1, count: '+2', label: 'Working: Agent working · 2 subagents running', title: 'Agent working · 2 subagents running' });
+  assert.deepEqual(badge('design'), { agent: 'false', glyph: 8, count: null, label: 'Working: Waiting on a background command', title: 'Waiting on a background command' });
+  // The count is unreadable on a later successful poll: the last known value stays on screen.
+  mock.control.live.find(item => item.id === 'runtime-worker').running_subagents = null; await refresh();
+  assert.deepEqual(badge('root'), { agent: 'true', glyph: 1, count: '+2', label: 'Working: Agent working · 2 subagents running', title: 'Agent working · 2 subagents running' });
+  // A runtime that never reported a count shows only its elapsed time, without a ring that could mislead.
+  mock.control.live = mock.control.live.filter(item => item.id !== 'runtime-design');
+  mock.control.live.push({ id: 'runtime-design-rebuilt', session_key: 'design', status: 'idle', running_subagents: null, awaiting_processes: true }); await refresh();
+  assert.deepEqual(badge('design'), { agent: null, glyph: 0, count: null, label: 'Working', title: 'working' });
+});
+
+test('remembered subagent counts are per runtime, forgotten when it leaves and reset on scope change', () => {
+  const memory = { scope: null, counts: new Map() };
+  const first = [{ id: 'r1', session_key: 's1', running_subagents: 4 }, { id: 'r2', session_key: 's2', running_subagents: null }];
+  assert.equal(flow.rememberSubagents(first, memory, 'scope-a'), first, 'nothing to fill keeps the same array');
+  const second = [{ id: 'r1', session_key: 's1', running_subagents: null }, { id: 'r2', session_key: 's2', running_subagents: null }];
+  const filled = flow.rememberSubagents(second, memory, 'scope-a');
+  assert.deepEqual(filled.map(item => item.remembered_subagents ?? null), [4, null]);
+  assert.equal(filled[0].running_subagents, null, 'classification still sees the fresh unknown value');
+  assert.equal(flow.rememberSubagents([], memory, 'scope-a').length, 0);
+  assert.equal(flow.rememberSubagents(second, memory, 'scope-a'), second, 'a runtime that left the snapshot is forgotten');
+  flow.rememberSubagents(first, memory, 'scope-a');
+  assert.equal(flow.rememberSubagents(second, memory, 'scope-b'), second, 'another scope starts empty');
 });
