@@ -299,6 +299,9 @@ export function loadDenseFixtures() {
   queryClient.clear(); switchScope('synthetic-layout-source');
 }
 export function Button({ variant, size, children, ...props }) { return h('button', props, children); }
+export function Input({ size, prefix, suffix, containerClassName, ...props }) { return h('input', props); }
+// Core Settings row: label + description with the control beside it.
+export function ListRow({ title, description, action, below }) { return h('div', { 'data-list-row': true }, h('div', null, h('span', null, title), description ? h('div', null, description) : null, below), action ? h('div', null, action) : null); }
 // Public color-picker contract, with cosmetic styling only for the harness.
 export const PROFILE_SWATCHES = Array.from({ length: 12 }, (_, index) => `hsl(${index * 30} 68% 58%)`);
 export function ColorSwatches({ swatches, value, onChange, clearLabel }) {

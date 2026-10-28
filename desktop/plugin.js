@@ -995,16 +995,20 @@ function Settings({ ctx }) {
       client.setQueryData(SNOOZE_TIME_KEY, value); setError('');
     } catch (err) { setError(err.message); }
   };
-  return h('section', { style: { padding: 20, maxWidth: 650, color: 'var(--ui-text-secondary)' } },
-    h('h2', null, 'hermes-t3sidebar'), h('p', null, 'A compact T3-style session browser for the active source and profile.'),
-    h('label', null, 'Snooze preset time ', h('input', { type: 'time', step: 60, value: presetTime, 'aria-label': 'Snooze preset time', onChange: event => save(event.target.value) })),
-    h('p', null, 'Used for Tomorrow and Next Monday in this Desktop client’s local time. Defaults to 09:00; existing snoozes are unchanged.'),
-    error ? h('div', { role: 'alert' }, error) : null,
-    h('p', null, 'Archive and Unarchive change native Hermes archives and keep conversation history. Snoozes return when their chosen time passes; no agent is stopped or awakened, and no prompt is sent.'),
-    h('p', null, 'Use normal layout controls to select hermes-t3sidebar in the left pane or hide the native Sessions pane. hermes-t3sidebar never modifies the core sidebar or conversation workspace.'),
-    h('p', null, 'Project filtering changes this list only. New session asks for a named project before creating an empty session; Home creation is unavailable with the current public workspace contract.'),
-    h('p', null, 'Keyboard: ↑/↓ or Home/End to focus rows; Enter to open; Shift+F10 for actions; Shift+Enter to archive and advance (only with confirmed idle status).'),
-    h('p', null, 'Pins and snoozes belong to this plugin’s backend. Archived includes existing native archives, sorted by last activity, not archive time. Older plugin-only completed entries return to Ready; no history is automatically archived. Missing backend: browsing remains available, organization is read-only.'));
+  // The host already supplies the page title and gutters; behavior notes live in docs/behavior.md.
+  return h('div', null, h('style', null, SETTINGS_CSS), h(sdk.ListRow ?? SettingsRow, {
+    title: 'Snooze preset time',
+    description: 'Tomorrow and Next Monday wake at this local time. Existing snoozes keep their time.',
+    action: h(sdk.Input, { type: 'time', step: 60, value: presetTime, className: 'sf-snooze-time', 'aria-label': 'Snooze preset time', 'aria-invalid': error ? true : undefined, onChange: event => save(event.target.value) }),
+    below: error ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, error) : null
+  }));
+}
+// The settings page renders without the sidebar's stylesheet. Masking the native picker button keeps its click-to-open picker while drawing the same alarm as the hover Snooze control instead of a plain clock.
+const ALARM_MASK = `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>${BUNDLED_ICONS.Alarm.map(d => `<path d='${d}'/>`).join('')}</svg>`)}")`;
+const SETTINGS_CSS = `.sf-snooze-time::-webkit-calendar-picker-indicator{background:currentColor;-webkit-mask:${ALARM_MASK} content-box center/contain no-repeat;mask:${ALARM_MASK} content-box center/contain no-repeat;cursor:pointer}`;
+// Desktop clients older than the ListRow SDK export still get a usable row.
+function SettingsRow({ title, description, action, below }) {
+  return h('div', { style: { display: 'grid', gap: 6, padding: '12px 0' } }, h('div', null, title), h('div', { style: { color: 'var(--ui-text-tertiary)' } }, description), h('div', null, action), below);
 }
 // Approved project metadata palette and Codicons; independent of chrome/theme colors.
 export const PROJECT_ICON_GROUPS = [
