@@ -30,6 +30,40 @@ _completion_spec.loader.exec_module(_completion_module)
 CompletionStore = _completion_module.CompletionStore
 
 
+def _load_sibling(name, filename):
+	# Same fixed-path loading as the completion ledger: Usage page modules live beside it and are never chosen by a request.
+	spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[1] / filename)
+	assert spec is not None and spec.loader is not None
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module
+
+
+usage_history = _load_sibling("hermes_t3sidebar_usage_history", "usage_history.py")
+usage_limits = _load_sibling("hermes_t3sidebar_usage_limits", "usage_limits.py")
+
+
+def default_history_db_path(profile) -> Path:
+	# Core's own store resolution for the served profile; usage_history opens it strictly read-only.
+	from hermes_cli.web_server_sessions import _session_db_path_for_profile
+
+	return _session_db_path_for_profile(profile)
+
+
+def default_limits_path() -> Path:
+	from hermes_constants import get_hermes_home
+
+	return get_hermes_home() / "plugin-data" / "hermes-t3sidebar" / "usage-limits.sqlite3"
+
+
+def ensure_limits_sampler():
+	"""Start (once per process and profile home) the 5-minute limits sampler; returns the running sampler.
+
+	Started from Desktop's routine sidebar polls rather than at import, so the thread inherits the request's profile and secret scope, and test imports of this module never reach live credentials.
+	"""
+	return usage_limits.LimitsSampler(usage_limits.LimitsStore(default_limits_path())).start()
+
+
 SESSION_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
 SessionId = Annotated[str, PathParameter(pattern=SESSION_ID_PATTERN, max_length=256)]
 Action = Literal["settle", "restore", "snooze", "pin", "unpin", "ack_wake", "ack_done"]
@@ -1057,12 +1091,26 @@ async def native_rename(request, profile, session_id, body):
 	return {"ok": True, "profile": profile, "session_id": session_id, "title": title}
 
 
-def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None) -> APIRouter:
-	"""Inject a temporary path and clock for tests; production accepts neither over HTTP."""
+def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None, history_db_path=None, limits_path=None, limits_sampler=None) -> APIRouter:
+	"""Inject a temporary path and clock for tests; production accepts neither over HTTP.
+
+	``limits_sampler`` is a zero-argument starter returning the running sampler. Only the module-level production router passes one, so routers built by tests never sample live provider limits.
+	"""
 	api = APIRouter()
+	# Exposed so tests can assert which router samples without starting it.
+	api.t3sidebar_limits_sampler = limits_sampler
 
 	def store():
 		return HermesT3SidebarStore(path if path is not None else default_state_path(), clock)
+
+	def sampler():
+		if limits_sampler is None:
+			return None
+		try:
+			return limits_sampler()
+		except Exception:
+			# Sampling is best-effort telemetry; it must never fail the sidebar request that happened to start it.
+			return None
 
 	def listing_profile(request, allowed=()):
 		if set(request.query_params) - {"profile", *allowed}:
@@ -1084,6 +1132,8 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		response.headers["Cache-Control"] = "no-store"
 		try:
 			profile = listing_profile(request)
+			# Desktop polls this route constantly, so the sampler starts with the first connected client after a backend restart and then keeps sampling while Desktop is closed.
+			sampler()
 			value = await (runtime_reader or native_runtime)(request, profile)
 			return {**value, "profile": profile}
 		except HTTPException:
@@ -1199,7 +1249,35 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 				raise HTTPException(409, "native_session_archived")
 		return store().mutate(session_id, body)
 
+	@api.get("/usage/history")
+	async def get_usage_history(request: Request, response: Response, days: int = Query(7), tz: str = Query("UTC", min_length=1, max_length=64)):
+		response.headers["Cache-Control"] = "no-store"
+		profile = listing_profile(request, ("days", "tz"))
+		db_path = history_db_path if history_db_path is not None else default_history_db_path(profile)
+		try:
+			# The first cold read takes about a second on a large store and Hermes pricing may load its catalog; keep it off the event loop.
+			value = await asyncio.to_thread(usage_history.history_payload, db_path, days=days, tz=tz, now=clock())
+		except ValueError as exc:
+			raise HTTPException(422, str(exc)) from exc
+		except Exception as exc:
+			raise HTTPException(503, "usage_history_unavailable") from exc
+		return {**value, "profile": profile}
+
+	@api.get("/usage/limits")
+	def get_usage_limits(request: Request, response: Response, hours: int = Query(168, ge=1, le=usage_limits.MAX_HOURS)):
+		response.headers["Cache-Control"] = "no-store"
+		profile = listing_profile(request, ("hours",))
+		running = sampler()
+		limits_store = usage_limits.LimitsStore(limits_path if limits_path is not None else default_limits_path(), clock)
+		try:
+			value = usage_limits.limits_payload(limits_store, hours=hours, now=clock(), sampler_status=running.status() if running is not None else None)
+		except ValueError as exc:
+			raise HTTPException(422, str(exc)) from exc
+		except Exception as exc:
+			raise HTTPException(503, "usage_limits_unavailable") from exc
+		return {**value, "profile": profile}
+
 	return api
 
 
-router = create_router()
+router = create_router(limits_sampler=ensure_limits_sampler)

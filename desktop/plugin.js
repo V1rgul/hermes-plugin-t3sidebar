@@ -1,6 +1,6 @@
 // hermes-t3sidebar — independent T3-inspired session browser; plain disk-plugin ESM.
 import * as sdk from '@hermes/plugin-sdk';
-import { createElement as h, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createElement as h, Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 const { host, useValue, useQuery, useMutation, useQueryClient, queryClient, gatewayActivationEpoch } = sdk;
 export const SECTIONS = ['pinned', 'active', 'working', 'snoozed', 'archived'];
@@ -927,6 +927,8 @@ const CSS = `
 .sf-section[data-closed=true] .sf-section-body{visibility:hidden;transition:visibility 0s .22s}.sf-section-chevron{transition:transform .22s ease}.sf-row{transition:background-color .16s ease,box-shadow .16s ease}.sf-custom-time{display:flex;align-items:center;gap:8px}/* The custom checkmark is a visible button (filled like a control), bold (Tabler stroke 2 is 1px in Desktop's 12px icon box; 3.5 draws about 1.75px), and green once the time is valid. */.sf-menu .sf-custom-time .sf-icon{width:28px;height:28px;padding:0;justify-content:center;border-radius:4px;background:var(--ui-control-hover-background,var(--ui-bg-quaternary))}.sf-menu .sf-custom-time .sf-icon svg{stroke-width:3.5}.sf-menu .sf-custom-time .sf-icon[data-valid=true]{color:var(--ui-green,#1f8a65);background:color-mix(in srgb,var(--ui-green,#1f8a65) 18%,transparent)}.sf-custom-time input{min-width:0;flex:1}.sf-custom-time .sf-icon{flex-shrink:0}
 /* Empty-state text waits for leaving cards to collapse instead of appearing under them (visibility only, no fade). */
 @keyframes sf-after-exit{from{visibility:hidden}}.sf-empty{animation:sf-after-exit .22s step-end}
+/* T3's sidebar utility row: fixed height below the list, so shelves keep their flex allocation within a shorter column. */
+.sf-footer{display:flex;align-items:center;gap:2px;flex-shrink:0;height:36px;padding:4px 6px}.sf .sf-footer .sf-utility{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-secondary);font-size:12px}.sf .sf-footer .sf-utility:hover,.sf .sf-footer .sf-utility:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-footer .sf-utility svg{width:14px;height:14px;flex-shrink:0}
 @media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
 // Monochrome 24x24 provider marks: LobeHub Icons, @lobehub/icons-static-svg 1.95.1 (MIT, Copyright (c) 2023 LobeHub; notice in
@@ -1908,11 +1910,586 @@ function ScopedSidebar({ ctx, controller, scope }) {
         !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null)),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,
+    h(UsageFooter),
     typeof sdk.ConfirmDialog === 'function' ? h(sdk.ConfirmDialog, { open: !!deleteTarget, onClose: () => setDeleteTarget(null),
       title: 'Delete session?', description: `Delete “${deleteTarget ? sessionTitle(deleteTarget) : ''}”? Stored history will be permanently removed. This cannot be undone.`,
       confirmLabel: 'Delete', busyLabel: 'Deleting…', doneLabel: 'Session deleted', destructive: true,
       onConfirm: async () => { controller.check(scope); await controller.delete(scope, deleteTarget); controller.check(scope); } }) : null);
 }
+// ───────────────────────────── Usage page ─────────────────────────────
+// Everything from here to the default export belongs to the /t3sidebar-usage page and the sidebar's Usage footer button.
+// The backend contract (GET /usage/history and /usage/limits) is frozen in the plugin's usage design notes.
+export const USAGE_ROUTE = '/t3sidebar-usage';
+const USAGE_ROOT = 'hermes-t3sidebar-usage';
+const USAGE_PREFERENCES_KEY = 'usage-preferences';
+const HOUR_S = 3600, DAY_S = 86400;
+export const USAGE_DEFAULTS = Object.freeze({ tab: 'usage', days: 7, split: 'provider', mode: 'stacked', horizon: 7, window: 'weekly', provider: null });
+const USAGE_CHOICES = { tab: ['usage', 'limits'], days: [1, 7, 30, 90], split: ['provider', 'model'], mode: ['stacked', 'independent'], horizon: [1, 3, 7] };
+export function validUsagePreferences(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const result = { ...USAGE_DEFAULTS };
+  for (const [key, choices] of Object.entries(USAGE_CHOICES)) if (choices.includes(source[key])) result[key] = source[key];
+  // Window and provider keys come from the backend, so only their shape is checked; the page falls back when they disappear.
+  for (const key of ['window', 'provider']) if (typeof source[key] === 'string' && source[key].length > 0 && source[key].length <= 200) result[key] = source[key];
+  return result;
+}
+export function readUsagePreferences(storage) {
+  try { return validUsagePreferences(storage.get(USAGE_PREFERENCES_KEY, null)); } catch (_) { return { ...USAGE_DEFAULTS }; }
+}
+export function writeUsagePreferences(storage, value) {
+  try { storage.set(USAGE_PREFERENCES_KEY, validUsagePreferences(value)); return true; } catch (_) { return false; }
+}
+// T3 Code's sidebar utility row: a fixed-height footer below the shelves, so the flex shelf allocation only sees a shorter list.
+function UsageFooter() {
+  const open = () => { try { host.navigate(USAGE_ROUTE); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ } };
+  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-utility', onClick: open }, icon('BarChart3', '▥'), h('span', null, 'Usage'));
+  return h('footer', { className: 'sf-footer' }, typeof sdk.Tip === 'function' ? h(sdk.Tip, { label: 'Token usage and subscription limits', side: 'top' }, button) : button);
+}
+const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+const finiteOrNull = value => Number.isFinite(value) ? value : null;
+const compactNumber = Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+const integerNumber = Intl.NumberFormat('en', { maximumFractionDigits: 0 });
+const usdNumber = Intl.NumberFormat('en', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+export const USAGE_METRICS = [
+  { key: 'tokens', title: 'Tokens', format: value => compactNumber.format(value), integer: true },
+  { key: 'cost_usd', title: 'Cost', subtitle: 'API-equivalent', format: value => usdNumber.format(value), integer: false },
+  { key: 'user_messages', title: 'User messages', format: value => integerNumber.format(value), integer: true }
+];
+export function validUsageHistory(value) {
+  if (!value || typeof value !== 'object' || !Array.isArray(value.buckets) || !value.buckets.every(Number.isFinite)) throw new Error('Unsupported usage history response.');
+  for (const field of ['by_provider', 'by_model']) if (value[field] != null && !Array.isArray(value[field])) throw new Error('Unsupported usage history response.');
+  return { ...value, by_provider: value.by_provider || [], by_model: value.by_model || [], pricing_missing: Array.isArray(value.pricing_missing) ? value.pricing_missing.filter(item => typeof item === 'string') : [] };
+}
+export function validUsageLimits(value) {
+  if (!value || typeof value !== 'object' || !Array.isArray(value.providers)) throw new Error('Unsupported usage limits response.');
+  const providers = value.providers.filter(item => item && typeof item.provider === 'string').map(item => ({
+    ...item, accounts: Array.isArray(item.accounts) ? item.accounts.filter(account => account && typeof account.id === 'string').map(account => ({ ...account, windows: Array.isArray(account.windows) ? account.windows.filter(win => win && typeof win.key === 'string') : [] })) : [],
+    history: Array.isArray(item.history) ? item.history : []
+  }));
+  return { ...value, providers, sampler: value.sampler && typeof value.sampler === 'object' ? value.sampler : null };
+}
+// One series per backend entry for the chosen split; series with nothing to draw for this metric are left out of its chart and legend.
+export function usageSeries(history, split, metric) {
+  const count = history?.buckets?.length || 0;
+  const list = history?.[split === 'model' ? 'by_model' : 'by_provider'];
+  const series = (Array.isArray(list) ? list : []).map(item => {
+    const values = Array.from({ length: count }, (_, index) => { const value = Number(item?.[metric]?.[index]); return Number.isFinite(value) && value > 0 ? value : 0; });
+    return { key: String(item?.key ?? ''), label: String(item?.label || item?.key || 'Unknown'), provider: item?.provider ?? null, model: item?.model ?? null, values, total: values.reduce((sum, value) => sum + value, 0) };
+  }).filter(series => series.key && series.total > 0);
+  // The same model can be billed through several providers (or through an unrecorded one), which gives two series one bare model label; name the provider only for those.
+  const labels = new Map();
+  for (const item of series) labels.set(item.label, (labels.get(item.label) || 0) + 1);
+  return series.map(item => labels.get(item.label) > 1 && item.provider ? { ...item, label: `${item.label} · ${item.provider}` } : item);
+}
+// Stacked: each band sits on the running total of the bands before it. Independent: every series starts from zero.
+export function chartLayers(series, mode) {
+  const count = series[0]?.values.length || 0, running = new Array(count).fill(0);
+  let max = 0;
+  const layers = series.map(item => {
+    const lower = mode === 'stacked' ? running.slice() : new Array(count).fill(0);
+    const upper = item.values.map((value, index) => lower[index] + value);
+    if (mode === 'stacked') upper.forEach((value, index) => { running[index] = value; });
+    for (const value of upper) if (value > max) max = value;
+    return { key: item.key, lower, upper };
+  });
+  return { layers, max };
+}
+export function niceScale(peak, count = 4, integer = false) {
+  if (!(peak > 0)) return { max: 1, ticks: [0, 1] };
+  const raw = peak / count, magnitude = 10 ** Math.floor(Math.log10(raw)), normalized = raw / magnitude;
+  let step = (normalized > 5 ? 10 : normalized > 2 ? 5 : normalized > 1 ? 2 : 1) * magnitude;
+  if (integer) step = Math.max(1, Math.round(step));
+  const steps = Math.max(1, Math.ceil(peak / step - 1e-9));
+  return { max: steps * step, ticks: Array.from({ length: steps + 1 }, (_, index) => index * step) };
+}
+// Stable hues per series key. Known providers keep a recognizable hue; other keys hash into the palette, probing past hues close to ones already taken.
+// Mixing with the theme's primary text darkens the swatch in light themes and lightens it in dark ones.
+const PROVIDER_HUES = { 'openai-codex': 160, openai: 160, 'openai-api': 160, anthropic: 45, 'claude-subscription-directsdk-experimental': 45, copilot: 285, 'copilot-acp': 285, gemini: 250, google: 250, openrouter: 330, nous: 200, deepseek: 265, xai: 95, 'xai-oauth': 95, zai: 130, kimi: 15, 'kimi-coding': 15, alibaba: 300, minimax: 350 };
+const SERIES_HUES = [255, 45, 160, 330, 95, 200, 290, 15, 130, 230, 65, 350];
+const providerHueColor = key => usageHueColor(Object.hasOwn(PROVIDER_HUES, key) ? PROVIDER_HUES[key] : SERIES_HUES[hashKey(key) % SERIES_HUES.length]);
+// Yellows and greens need more lightness than blues and purples to read as distinct hues rather than olive at equal chroma.
+const hueLightness = hue => hue >= 70 && hue <= 135 ? 0.8 : hue >= 220 && hue <= 300 ? 0.67 : 0.72;
+export const usageHueColor = hue => `color-mix(in oklab, oklch(${hueLightness(hue)} 0.15 ${hue}) 85%, var(--ui-text-primary))`;
+function hashKey(key) { let value = 2166136261; for (const char of key) { value ^= char.codePointAt(0); value = Math.imul(value, 16777619) >>> 0; } return value; }
+export function seriesColors(series, split) {
+  const providerHue = key => split === 'provider' && Object.hasOwn(PROVIDER_HUES, key.toLowerCase()) ? PROVIDER_HUES[key.toLowerCase()] : null;
+  const keys = [...new Set(series.map(item => item.key))].sort((a, b) => (providerHue(a) === null) - (providerHue(b) === null) || a.localeCompare(b));
+  const used = new Set(), colors = new Map();
+  for (const key of keys) {
+    let hue = providerHue(key);
+    if (hue === null) {
+      // Start at the key's hashed hue and take the first one well away from every hue in use, relaxing the gap only when the palette runs out.
+      const start = hashKey(key) % SERIES_HUES.length, gap = candidate => Math.min(360, ...[...used].map(other => { const d = Math.abs(candidate - other) % 360; return Math.min(d, 360 - d); }));
+      for (const minimum of [45, 25, 1]) {
+        const found = SERIES_HUES.map((_, probe) => SERIES_HUES[(start + probe) % SERIES_HUES.length]).find(candidate => gap(candidate) >= minimum);
+        if (found !== undefined) { hue = found; break; }
+      }
+      hue ??= SERIES_HUES[start];
+    }
+    used.add(hue); colors.set(key, usageHueColor(hue));
+  }
+  return colors;
+}
+export function buildUsageCharts(history, split, mode) {
+  const all = USAGE_METRICS.map(metric => ({ metric, series: usageSeries(history, split, metric.key) }));
+  // One color map across the three charts, so a series keeps its color even where it is absent from one metric.
+  const colors = seriesColors(all.flatMap(chart => chart.series), split);
+  return { buckets: history.buckets, resolution: history.resolution === 'hour' ? 'hour' : 'day', colors, charts: all.map(({ metric, series }) => {
+    const { layers, max } = chartLayers(series, mode);
+    return { metric, series, layers, scale: niceScale(max, 4, metric.integer), total: series.reduce((sum, item) => sum + item.total, 0) };
+  }) };
+}
+const formatterCache = new Map();
+function dateFormat(options, timeZone) {
+  const key = JSON.stringify([options, timeZone || null]);
+  let formatter = formatterCache.get(key);
+  if (!formatter) {
+    try { formatter = new Intl.DateTimeFormat(undefined, { ...options, timeZone: timeZone || undefined }); }
+    catch (_) { formatter = new Intl.DateTimeFormat(undefined, options); }
+    formatterCache.set(key, formatter);
+  }
+  return formatter;
+}
+const formatAt = (seconds, options, timeZone) => dateFormat(options, timeZone).format(new Date(seconds * 1000));
+export function formatDurationShort(seconds) {
+  if (!Number.isFinite(seconds)) return '—';
+  const value = Math.max(0, seconds), days = Math.floor(value / DAY_S), hours = Math.floor(value % DAY_S / HOUR_S), minutes = Math.floor(value % HOUR_S / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return minutes > 0 ? `${minutes}m` : '<1m';
+}
+// Limits ─ samples are { t, account, value, resets_at } with value the remaining percent; unknown readings never become samples.
+export function limitSamples(accounts, history, windowKey) {
+  const samples = [];
+  for (const item of history || []) {
+    if (item?.window !== windowKey || typeof item.account !== 'string' || !Number.isFinite(item.t) || !Number.isFinite(item.remaining_percent)) continue;
+    samples.push({ t: item.t, account: item.account, value: clamp(item.remaining_percent, 0, 100), resets_at: finiteOrNull(item.resets_at) });
+  }
+  // The latest snapshot can be newer than the sampler's last history row.
+  for (const account of accounts || []) {
+    const win = account?.windows?.find(entry => entry?.key === windowKey);
+    if (!win || !Number.isFinite(win.remaining_percent) || !Number.isFinite(account.fetched_at)) continue;
+    const latest = samples.reduce((max, item) => item.account === account.id ? Math.max(max, item.t) : max, -Infinity);
+    if (account.fetched_at > latest) samples.push({ t: account.fetched_at, account: account.id, value: clamp(win.remaining_percent, 0, 100), resets_at: finiteOrNull(win.resets_at) });
+  }
+  return samples.sort((a, b) => a.t - b.t);
+}
+// Pooled remaining over time: each account carries its last reading forward, and the pool sums the accounts seen so far.
+export function pooledHistory(samples) {
+  const last = new Map(), points = [];
+  for (const sample of [...samples].sort((a, b) => a.t - b.t)) {
+    last.set(sample.account, sample.value);
+    let value = 0;
+    for (const item of last.values()) value += item;
+    const point = { t: sample.t, value, count: last.size };
+    if (points.length && points.at(-1).t === sample.t) points[points.length - 1] = point; else points.push(point);
+  }
+  return points;
+}
+// Pooled consumption in percentage points per hour over the lookback, or null without at least 15 minutes of paired readings.
+export function drainRate(samples, now, lookbackS = 6 * HOUR_S) {
+  const from = now - lookbackS, groups = new Map();
+  for (const sample of samples) if (sample.t >= from && sample.t <= now) { if (!groups.has(sample.account)) groups.set(sample.account, []); groups.get(sample.account).push(sample); }
+  let consumed = 0, first = Infinity, last = -Infinity, pairs = 0;
+  for (const list of groups.values()) {
+    list.sort((a, b) => a.t - b.t);
+    for (let index = 1; index < list.length; index++) {
+      const before = list[index - 1], after = list[index];
+      if (after.t <= before.t) continue;
+      first = Math.min(first, before.t); last = Math.max(last, after.t); pairs++;
+      // A rise, or a later reset time, means the window restarted in between. That interval's consumption is unknown,
+      // so it counts as none rather than as negative drain (resets_at jitter of under a minute is not a restart).
+      const restarted = after.value > before.value || after.resets_at !== null && before.resets_at !== null && after.resets_at > before.resets_at + 60;
+      if (!restarted) consumed += before.value - after.value;
+    }
+  }
+  return pairs && last - first >= 15 * 60 ? consumed / ((last - first) / HOUR_S) : null;
+}
+// Projects the pooled remaining quota from now to now + horizonS. The measured drain is consumed from accounts in pool
+// priority order (lowest number first, the next once one is empty), and each account returns to 100% at its resets_at, its
+// next reset following one window_seconds later. Without drain data the projection stays flat apart from those resets.
+export function projectPool(accounts, history, windowKey, now, horizonS, options = {}) {
+  const samples = limitSamples(accounts, history, windowKey);
+  const latest = new Map();
+  for (const sample of samples) if (sample.t <= now) latest.set(sample.account, sample);
+  const state = [], unknownAccounts = [];
+  for (const account of accounts || []) {
+    const win = account?.windows?.find(entry => entry?.key === windowKey), sample = latest.get(account?.id);
+    if (!win && !sample) continue;
+    if (!sample) { unknownAccounts.push(account.id); continue; }
+    const period = Number.isFinite(win?.window_seconds) && win.window_seconds > 0 ? win.window_seconds : null;
+    let remaining = sample.value, resetAt = finiteOrNull(win?.resets_at) ?? sample.resets_at;
+    if (resetAt !== null && resetAt <= now) {
+      // A reset after the reading means the account is full again; one before it is already reflected in the reading.
+      if (resetAt > sample.t) remaining = 100;
+      resetAt = period ? resetAt + (Math.floor((now - resetAt) / period) + 1) * period : null;
+    }
+    state.push({ id: account.id, label: account.label || account.id, priority: Number.isFinite(account.priority) ? account.priority : Infinity, remaining, resetAt, period });
+  }
+  state.sort((a, b) => a.priority - b.priority || String(a.id).localeCompare(String(b.id)));
+  const measured = Object.hasOwn(options, 'rate') ? options.rate : drainRate(samples, now, options.lookbackS);
+  const rate = Number.isFinite(measured) && measured >= 0 ? measured : null, drain = rate ?? 0;
+  const pool = () => state.reduce((sum, item) => sum + item.remaining, 0);
+  const current = pool(), end = now + Math.max(0, horizonS);
+  const firstReset = Math.min(...state.map(item => item.resetAt ?? Infinity));
+  const points = [{ t: now, value: current }], resets = [];
+  let t = now;
+  for (let guard = 0; t < end && guard < 10000; guard++) {
+    const active = drain > 0 ? state.find(item => item.remaining > 0) : undefined;
+    const depletion = active ? t + active.remaining / drain * HOUR_S : Infinity;
+    const next = Math.min(end, depletion, ...state.map(item => item.resetAt ?? Infinity));
+    if (active) active.remaining = next === depletion ? 0 : Math.max(0, active.remaining - drain * (next - t) / HOUR_S);
+    t = next;
+    points.push({ t, value: pool() });
+    if (t >= end) break;
+    let stepped = false;
+    for (const item of state) if (item.resetAt !== null && item.resetAt <= t) {
+      resets.push({ t, account: item.id, label: item.label, gain: 100 - item.remaining });
+      item.remaining = 100; item.resetAt = item.period ? item.resetAt + item.period : null; stepped = true;
+    }
+    if (stepped) points.push({ t, value: pool() });
+  }
+  const nextReset = resets.length ? { t: resets[0].t, gain: resets.filter(item => item.t === resets[0].t).reduce((sum, item) => sum + item.gain, 0) }
+    : Number.isFinite(firstReset) ? { t: firstReset, gain: null } : null;
+  return { rate, unknown: rate === null, capacity: state.length * 100, current, points, resets, nextReset,
+    accounts: state.map(item => ({ id: item.id, remaining: item.remaining })), unknownAccounts };
+}
+export function windowCatalog(provider) {
+  const found = new Map();
+  for (const account of provider?.accounts || []) for (const win of account.windows || []) if (!found.has(win.key)) found.set(win.key, { key: win.key, label: win.label || win.key, seconds: finiteOrNull(win.window_seconds) });
+  for (const item of provider?.history || []) if (typeof item?.window === 'string' && !found.has(item.window)) found.set(item.window, { key: item.window, label: item.window, seconds: null });
+  return [...found.values()].sort((a, b) => windowRank(a.key) - windowRank(b.key) || (a.seconds ?? 0) - (b.seconds ?? 0) || a.key.localeCompare(b.key));
+}
+function windowRank(key) { const base = key.split(':')[0]; return (key.includes(':') ? 10 : 0) + (base === 'five_hour' ? 0 : base === 'weekly' ? 1 : 2); }
+// T3's pace mark: share of the window still to run, which is where an even spend would leave the remaining bar.
+export function paceRemainingPercent(win, now) {
+  if (!Number.isFinite(win?.resets_at) || !Number.isFinite(win?.window_seconds) || win.window_seconds <= 0) return null;
+  return clamp((win.resets_at - now) / win.window_seconds * 100, 0, 100);
+}
+const usageScopeKey = scope => [USAGE_ROOT, scope.connectionId, scope.profile, scope.epoch];
+async function readUsage(ctx, scope, path, validate) {
+  if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load usage.');
+  const value = await ctx.rest(path);
+  if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load usage.');
+  return validate(value);
+}
+export function UsagePage({ ctx }) {
+  const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
+  useValue(host.state.gateway);
+  useValue(activationEpoch);
+  const epoch = gatewayActivationEpoch();
+  const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
+  return h(ScopedUsagePage, { key: JSON.stringify(usageScopeKey(scope)), ctx, scope });
+}
+function Segmented({ label, options, value, onChange, showLabel = true, sizing }) {
+  const items = options.map(option => ({ id: String(option.id), label: option.label }));
+  const pick = id => { const option = options.find(item => String(item.id) === id); if (option) onChange(option.id); };
+  const control = typeof sdk.SegmentedControl === 'function'
+    ? h(sdk.SegmentedControl, { options: items, value: String(value), onChange: pick, sizing })
+    : h('div', { className: 'su-seg' }, items.map(item => h('button', { key: item.id, type: 'button', 'aria-pressed': item.id === String(value), onClick: () => pick(item.id) }, item.label)));
+  return h('div', { className: 'su-control', role: 'group', 'aria-label': label }, showLabel ? h('span', { className: 'su-control-label', 'aria-hidden': true }, label) : null, control);
+}
+function ScopedUsagePage({ ctx, scope }) {
+  const [prefs, setPrefs] = useState(() => readUsagePreferences(ctx.storage));
+  useEffect(() => { writeUsagePreferences(ctx.storage, prefs); }, [ctx, prefs]);
+  const update = useCallback(patch => setPrefs(previous => validUsagePreferences({ ...previous, ...patch })), []);
+  const tz = useMemo(() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (_) { return 'UTC'; } }, []);
+  const key = usageScopeKey(scope);
+  const history = useQuery({ queryKey: [...key, 'history', prefs.days, tz], enabled: prefs.tab === 'usage', staleTime: 60_000, refetchInterval: 300_000, retry: false,
+    // Keep the previous period on screen while another one loads.
+    placeholderData: previous => previous,
+    queryFn: () => readUsage(ctx, scope, `/usage/history?days=${prefs.days}&tz=${encodeURIComponent(tz)}`, validUsageHistory) });
+  const limits = useQuery({ queryKey: [...key, 'limits'], enabled: prefs.tab === 'limits', staleTime: 60_000, refetchInterval: 300_000, retry: false,
+    queryFn: () => readUsage(ctx, scope, '/usage/limits?hours=168', validUsageLimits) });
+  const active = prefs.tab === 'limits' ? limits : history;
+  return h('div', { className: 'su', 'data-tab': prefs.tab }, h('style', null, USAGE_CSS),
+    h('header', { className: 'su-header' },
+      h(Segmented, { label: 'View', showLabel: false, options: [{ id: 'usage', label: 'Usage' }, { id: 'limits', label: 'Limits' }], value: prefs.tab, onChange: tab => update({ tab }) }),
+      prefs.tab === 'usage' ? h(Fragment, null,
+        h(Segmented, { label: 'Period', showLabel: false, options: [{ id: 1, label: '24h' }, { id: 7, label: '7d' }, { id: 30, label: '30d' }, { id: 90, label: '90d' }], value: prefs.days, onChange: days => update({ days }) }),
+        h(Segmented, { label: 'Split', options: [{ id: 'provider', label: 'Provider' }, { id: 'model', label: 'Model' }], value: prefs.split, onChange: split => update({ split }) }),
+        h(Segmented, { label: 'Mode', options: [{ id: 'stacked', label: 'Stacked' }, { id: 'independent', label: 'Independent' }], value: prefs.mode, onChange: mode => update({ mode }) })) : null,
+      h('span', { className: 'su-spacer' }),
+      active.isFetching && active.data ? h('span', { className: 'su-muted', role: 'status' }, 'Updating…') : null,
+      h('button', { type: 'button', className: 'su-icon', 'aria-label': 'Refresh', title: 'Refresh', disabled: active.isFetching, onClick: () => void active.refetch() }, icon('RefreshCw', '↻'))),
+    h('div', { className: 'su-body' }, prefs.tab === 'usage' ? h(UsageHistoryView, { query: history, prefs }) : h(LimitsView, { query: limits, prefs, update })));
+}
+function UsageState({ error = false, children }) { return h('div', { className: 'su-state', role: error ? 'alert' : 'status' }, children); }
+function QueryProblem({ query, what }) {
+  return h(UsageState, { error: true }, `${what} unavailable: ${query.error?.message || 'unknown error'} `, h('button', { type: 'button', className: 'su-link', onClick: () => void query.refetch() }, 'Retry'));
+}
+function UsageHistoryView({ query, prefs }) {
+  const data = query.data;
+  const [hover, setHover] = useState(null);
+  const model = useMemo(() => data ? buildUsageCharts(data, prefs.split, prefs.mode) : null, [data, prefs.split, prefs.mode]);
+  if (!data) return query.isError ? h(QueryProblem, { query, what: 'Usage history' }) : h(UsageState, null, 'Loading usage…');
+  const empty = !model.charts.some(chart => chart.series.length);
+  return h(Fragment, null,
+    query.isError ? h(QueryProblem, { query, what: 'Latest usage' }) : null,
+    empty ? h(UsageState, null, 'No usage recorded in this period.') : model.charts.map((chart, index) => h(UsageChart, { key: chart.metric.key, chart, model, mode: prefs.mode, tz: data.tz, hover, setHover, axis: index === model.charts.length - 1 })),
+    h('p', { className: 'su-footnote' }, 'Per-call timing is reconstructed from message timestamps, so placement within a bucket is approximate. Cost is the API-equivalent price of the same usage, not what a subscription bills.',
+      data.pricing_missing.length ? ` No price available for: ${data.pricing_missing.join(', ')} (counted as $0).` : ''));
+}
+const VIEW_W = 1000, VIEW_H = 100;
+// Bucket centers span the full plot width; a single bucket becomes a flat segment across it.
+const bucketX = (index, count) => count > 1 ? index / (count - 1) * VIEW_W : VIEW_W / 2;
+function bucketLabel(model, index, tz, axis) {
+  const at = model.buckets[index];
+  if (model.resolution === 'hour') return formatAt(at, axis ? { hour: 'numeric' } : { weekday: 'short', hour: 'numeric', minute: '2-digit' }, tz);
+  return formatAt(at, axis ? { month: 'short', day: 'numeric' } : { weekday: 'short', month: 'short', day: 'numeric' }, tz);
+}
+function plotKeys(event, count, hover, setHover) {
+  const moves = { ArrowLeft: -1, ArrowRight: 1 };
+  if (event.key in moves) { event.preventDefault(); setHover(clamp((hover ?? (moves[event.key] > 0 ? -1 : count)) + moves[event.key], 0, count - 1)); }
+  if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); setHover(event.key === 'Home' ? 0 : count - 1); }
+  if (event.key === 'Escape') setHover(null);
+}
+function UsageChart({ chart, model, mode, tz, hover, setHover, axis }) {
+  const { metric, series, layers, scale } = chart, count = model.buckets.length;
+  const y = value => VIEW_H - value / scale.max * VIEW_H;
+  const xs = count === 1 ? [0, VIEW_W] : Array.from({ length: count }, (_, index) => bucketX(index, count));
+  const widen = values => count === 1 ? [values[0], values[0]] : values;
+  const path = values => widen(values).map((value, index) => `${index ? 'L' : 'M'}${xs[index].toFixed(2)},${y(value).toFixed(2)}`).join(' ');
+  const hovered = hover !== null && hover < count ? hover : null;
+  const pct = hovered === null ? null : bucketX(hovered, count) / VIEW_W * 100;
+  const ordered = mode === 'stacked' ? [...series].reverse() : series;
+  const move = event => {
+    const box = event.currentTarget.getBoundingClientRect();
+    if (!(box.width > 0) || !count) return;
+    setHover(clamp(Math.round((event.clientX - box.left) / box.width * (count - 1)), 0, count - 1));
+  };
+  const labelStep = Math.max(1, Math.ceil(count / 8));
+  return h('section', { className: 'su-chart', 'data-metric': metric.key, 'aria-label': `${metric.title} chart` },
+    h('div', { className: 'su-chart-head' }, h('h3', null, metric.title), metric.subtitle ? h('span', { className: 'su-sub' }, metric.subtitle) : null,
+      h('span', { className: 'su-total' }, metric.format(chart.total))),
+    h('div', { className: 'su-legend' }, series.length ? series.map(item => h('span', { key: item.key, className: 'su-legend-item', 'data-series': item.key },
+      h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', { className: 'su-legend-label' }, item.label), h('b', null, metric.format(item.total))))
+      : h('span', { className: 'su-muted' }, 'Nothing in this period')),
+    h('div', { className: 'su-plot-row' },
+      h('div', { className: 'su-yaxis', 'aria-hidden': true }, scale.ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / scale.max * 100}%` } }, metric.format(tick)))),
+      h('div', { className: 'su-plot', tabIndex: 0, 'aria-label': `${metric.title} by ${model.resolution}; use arrow keys to inspect buckets`,
+        onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null), onKeyDown: event => plotKeys(event, count, hovered, setHover) },
+        h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
+          scale.ticks.map(tick => h('line', { key: tick, className: 'su-grid', x1: 0, x2: VIEW_W, y1: y(tick), y2: y(tick) })),
+          layers.map(layer => {
+            const color = model.colors.get(layer.key), top = path(layer.upper);
+            // The area closes along the band below it (stacked) or the zero line (independent), walked backwards.
+            const bottom = widen(layer.lower).map((value, index) => [xs[index], y(value)]).reverse().map(([x, yValue]) => `L${x.toFixed(2)},${yValue.toFixed(2)}`).join(' ');
+            return h('g', { key: layer.key, 'data-series': layer.key },
+              h('path', { className: 'su-area', d: `${top} ${bottom} Z`, style: { fill: color, fillOpacity: mode === 'stacked' ? 0.3 : 0.06 } }),
+              h('path', { className: 'su-line', d: top, style: { stroke: color } }));
+          })),
+        hovered === null ? null : h(Fragment, null,
+          h('div', { className: 'su-cross', style: { left: `${pct}%` } }),
+          layers.map(layer => h('span', { key: layer.key, className: 'su-dot', style: { left: `${pct}%`, bottom: `${layer.upper[hovered] / scale.max * 100}%`, background: model.colors.get(layer.key) } })),
+          h('div', { className: 'su-tip', 'data-side': pct > 60 ? 'left' : 'right', style: pct > 60 ? { right: `calc(${100 - pct}% + 10px)` } : { left: `calc(${pct}% + 10px)` } },
+            h('div', { className: 'su-tip-head' }, bucketLabel(model, hovered, tz, false)),
+            ordered.map(item => h('div', { key: item.key, className: 'su-tip-row' }, h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', null, item.label), h('b', null, metric.format(item.values[hovered])))),
+            h('div', { className: 'su-tip-row su-tip-total' }, h('span'), h('span', null, 'Total'), h('b', null, metric.format(series.reduce((sum, item) => sum + item.values[hovered], 0)))))))),
+    // Every labelStep-th bucket plus the last one, dropping a regular label that would crowd the right-aligned last label.
+    axis ? h('div', { className: 'su-xaxis', 'aria-hidden': true }, model.buckets.map((_, index) => index !== count - 1 && (index % labelStep || count - 1 - index < labelStep / 2) ? null
+      : h('span', { key: index, 'data-edge': index === 0 ? 'start' : index === count - 1 ? 'end' : undefined, style: { left: `${bucketX(index, count) / VIEW_W * 100}%` } }, bucketLabel(model, index, tz, true)))) : null);
+}
+const percentText = value => Number.isFinite(value) ? `${Math.round(value)}%` : '—';
+const rateText = rate => rate === null ? 'no drain data' : `~${rate < 10 ? rate.toFixed(1) : Math.round(rate)}% per hour`;
+function resetTime(seconds, now) {
+  return formatAt(seconds, seconds - now < 6 * DAY_S ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+function LimitsView({ query, prefs, update }) {
+  const data = query.data;
+  // Countdowns and the Now line follow successful polls rather than a separate timer.
+  const now = useMemo(() => Date.now() / 1000, [query.dataUpdatedAt]);
+  if (!data) return query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…');
+  const provider = data.providers.find(item => item.provider === prefs.provider) || data.providers[0];
+  return h(Fragment, null,
+    query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
+    data.providers.length > 0 ? h('div', { className: 'su-providers', role: 'group', 'aria-label': 'Provider' }, data.providers.map(item => h('button', { key: item.provider, type: 'button', className: 'su-provider', 'aria-pressed': item === provider,
+      style: { '--su-color': providerHueColor(item.provider) }, onClick: () => update({ provider: item.provider }) },
+      item.label || item.provider, h('span', { className: 'su-count', 'aria-label': `${item.accounts.length} accounts` }, item.accounts.length))))
+      : h(UsageState, null, 'No subscription limits recorded yet.'),
+    provider ? h(ProviderLimits, { key: provider.provider, provider, prefs, update, now }) : null,
+    h(SamplerInfo, { sampler: data.sampler, now }));
+}
+function ProviderLimits({ provider, prefs, update, now }) {
+  const windows = useMemo(() => windowCatalog(provider), [provider]);
+  const selected = windows.find(item => item.key === prefs.window) || windows.find(item => item.key === 'weekly') || windows[0];
+  const color = providerHueColor(provider.provider);
+  return h('div', { className: 'su-provider-limits', style: { '--su-color': color } },
+    windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windows.map(item => ({ id: item.key, label: item.label })), value: selected.key, onChange: value => update({ window: value }) }) : null,
+    selected ? h(PooledLimitChart, { provider, windowKey: selected.key, now, horizonDays: prefs.horizon, setHorizon: horizon => update({ horizon }) }) : h(UsageState, null, 'No limit windows reported for this provider.'),
+    h('div', { className: 'su-accounts' }, provider.accounts.length ? provider.accounts.map(account => h(LimitAccount, { key: account.id, account, selected: selected?.key, now }))
+      : h(UsageState, null, 'No accounts in this provider pool.')));
+}
+function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon }) {
+  const horizonS = horizonDays * DAY_S;
+  const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey), [provider, windowKey]);
+  const past = useMemo(() => pooledHistory(samples), [samples]);
+  const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS), [provider, windowKey, now, horizonS]);
+  const [hover, setHover] = useState(null);
+  const cap = Math.max(100, projection.capacity, ...past.map(point => point.value));
+  const start = now - Math.max(6 * HOUR_S, horizonS * 0.3), end = now + horizonS;
+  const x = t => (t - start) / (end - start) * VIEW_W, y = value => VIEW_H - value / cap * VIEW_H;
+  const pastAt = t => { let value = null; for (const point of past) { if (point.t > t) break; value = point.value; } return value; };
+  const projectedAt = t => {
+    const points = projection.points;
+    for (let index = 1; index < points.length; index++) {
+      const a = points[index - 1], b = points[index];
+      if (t >= a.t && t <= b.t) return b.t === a.t ? b.value : a.value + (b.value - a.value) * (t - a.t) / (b.t - a.t);
+    }
+    return null;
+  };
+  // The past is a step series (each reading holds until the next) from the axis start, or the first reading after it, to Now.
+  const initial = pastAt(start), inside = past.filter(point => point.t > start && point.t <= now);
+  const sequence = initial !== null ? [{ t: start, value: initial }, ...inside] : inside;
+  let pastLine = null, pastArea = null;
+  if (sequence.length) {
+    pastLine = `M${x(sequence[0].t).toFixed(2)},${y(sequence[0].value).toFixed(2)}` + sequence.slice(1).map(point => ` H${x(point.t).toFixed(2)} V${y(point.value).toFixed(2)}`).join('') + ` H${x(now).toFixed(2)}`;
+    pastArea = `${pastLine} V${VIEW_H} H${x(sequence[0].t).toFixed(2)} Z`;
+  }
+  const projectedLine = projection.points.map((point, index) => `${index ? 'L' : 'M'}${x(point.t).toFixed(2)},${y(point.value).toFixed(2)}`).join(' ');
+  const projectedArea = `${projectedLine} V${VIEW_H} H${x(now).toFixed(2)} Z`;
+  const nowPct = x(now) / VIEW_W * 100;
+  const hoverT = hover === null ? null : start + hover * (end - start);
+  const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
+  const move = event => { const box = event.currentTarget.getBoundingClientRect(); if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1)); };
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map(share => share * cap);
+  const span = end - start, axisFormat = span <= 2.5 * DAY_S ? { weekday: 'short', hour: 'numeric' } : { month: 'short', day: 'numeric' };
+  return h('section', { className: 'su-chart su-pooled', 'data-window': windowKey, 'aria-label': 'Pooled remaining quota' },
+    h('div', { className: 'su-headline' },
+      // Without any account reading the pool is unknown, not empty.
+      h('span', { className: 'su-pool' }, projection.capacity ? percentText(projection.current) : '—'), h('span', { className: 'su-capacity' }, projection.capacity ? `/ ${projection.capacity}% remaining` : 'no account readings yet'),
+      h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate))),
+    h('div', { className: 'su-legend' },
+      h('span', { className: 'su-legend-item' }, h('span', { className: 'su-legend-line' }), 'Remaining'),
+      h('span', { className: 'su-legend-item' }, h('span', { className: 'su-legend-line', 'data-dashed': true }), 'Projected'),
+      h('span', { className: 'su-spacer' }),
+      h(Segmented, { label: 'Next', options: [{ id: 1, label: '1d' }, { id: 3, label: '3d' }, { id: 7, label: '7d' }], value: horizonDays, onChange: setHorizon })),
+    h('div', { className: 'su-plot-row' },
+      h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, `${Math.round(tick)}%`))),
+      h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota over time; use arrow keys to inspect',
+        onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null),
+        onKeyDown: event => { const step = { ArrowLeft: -0.02, ArrowRight: 0.02 }[event.key]; if (step) { event.preventDefault(); setHover(clamp((hover ?? nowPct / 100) + step, 0, 1)); } if (event.key === 'Escape') setHover(null); } },
+        h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
+          ticks.map(tick => h('line', { key: tick, className: 'su-grid', x1: 0, x2: VIEW_W, y1: y(tick), y2: y(tick) })),
+          pastArea ? h('path', { className: 'su-area su-past', d: pastArea }) : null,
+          pastLine ? h('path', { className: 'su-line su-past', d: pastLine }) : null,
+          h('path', { className: 'su-area su-projected', d: projectedArea }),
+          h('path', { className: 'su-line su-projected', d: projectedLine })),
+        h('div', { className: 'su-now', style: { left: `${nowPct}%` } }, h('span', null, 'Now')),
+        hoverValue === null ? null : h(Fragment, null,
+          h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
+          h('div', { className: 'su-tip su-tip-inline', style: hover > 0.6 ? { right: `calc(${100 - hover * 100}% + 10px)` } : { left: `calc(${hover * 100}% + 10px)` } },
+            `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${percentText(hoverValue)} left${hoverT > now ? ' (projected)' : ''}`)))),
+    h('div', { className: 'su-xaxis' }, [0, 0.2, 0.4, 0.6, 0.8, 1].map(share => h('span', { key: share, 'data-edge': share === 0 ? 'start' : share === 1 ? 'end' : undefined, style: { left: `${share * 100}%` } }, formatAt(start + share * span, axisFormat)))),
+    h('div', { className: 'su-chart-foot' },
+      h('span', null, projection.nextReset ? projection.nextReset.gain === null ? `Next reset · ${resetTime(projection.nextReset.t, now)}` : `Next reset +${Math.round(projection.nextReset.gain)}% · ${resetTime(projection.nextReset.t, now)}` : 'No reset time reported'),
+      projection.unknownAccounts.length ? h('span', null, `${projection.unknownAccounts.length} account${projection.unknownAccounts.length === 1 ? '' : 's'} without a reading left out of the pool`) : null));
+}
+function Badge({ tone, title, children }) { return h('span', { className: 'su-badge', 'data-tone': tone, title }, children); }
+function LimitAccount({ account, selected, now }) {
+  const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
+  return h('div', { className: 'su-account', 'data-account': account.id },
+    h('div', { className: 'su-account-head' },
+      h('strong', null, account.label || account.id),
+      account.plan ? h(Badge, null, account.plan) : null,
+      Number.isFinite(account.priority) ? h('span', { className: 'su-muted' }, `priority ${account.priority}`) : null,
+      Number.isFinite(account.banked_resets) ? h(Badge, null, `${account.banked_resets} banked reset${account.banked_resets === 1 ? '' : 's'}`) : null,
+      account.stale ? h(Badge, { tone: 'warn', title: 'The latest reading is older than the cache freshness limit.' }, 'Stale') : null,
+      account.error ? h(Badge, { tone: 'error', title: String(account.error) }, 'Error') : null,
+      h('span', { className: 'su-spacer' }),
+      h('span', { className: 'su-muted' }, Number.isFinite(account.fetched_at) ? `read ${formatDurationShort(now - account.fetched_at)} ago` : 'never read')),
+    account.error ? h('div', { className: 'su-account-error', role: 'alert' }, String(account.error)) : null,
+    windows.length ? h('div', { className: 'su-windows' }, windows.map(win => h(LimitWindowRow, { key: win.key, win, now, selected: win.key === selected })))
+      : h('div', { className: 'su-muted' }, 'No limit windows reported.'));
+}
+function LimitWindowRow({ win, now, selected }) {
+  const remaining = Number.isFinite(win.remaining_percent) ? clamp(win.remaining_percent, 0, 100) : null;
+  const pace = paceRemainingPercent(win, now);
+  const resets = Number.isFinite(win.resets_at) ? win.resets_at > now ? `resets in ${formatDurationShort(win.resets_at - now)}` : 'reset due' : '—';
+  const summary = `${win.label || win.key}: ${remaining === null ? 'unknown' : `${Math.round(remaining)}% left`}${pace === null ? '' : `, ${Math.round(pace)}% of the window left`}`;
+  return h('div', { className: 'su-window', 'data-window': win.key, 'data-selected': selected },
+    h('span', { className: 'su-window-label', title: win.label || win.key }, win.label || win.key),
+    h('div', { className: 'su-bar', role: 'img', 'aria-label': summary, title: pace === null ? summary : `${summary}. The tick marks where an even spend would be.` },
+      h('span', { className: 'su-bar-track' }),
+      remaining ? h('span', { className: 'su-bar-fill', style: { width: `${remaining}%` } }) : null,
+      pace === null ? null : h('span', { className: 'su-pace', style: { left: `clamp(1px, ${pace}%, calc(100% - 1px))` } })),
+    h('span', { className: 'su-window-value' }, remaining === null ? '—' : `${Math.round(remaining)}% left`),
+    h('span', { className: 'su-window-reset', title: Number.isFinite(win.resets_at) ? resetTime(win.resets_at, now) : undefined }, resets));
+}
+function SamplerInfo({ sampler, now }) {
+  if (!sampler) return h('p', { className: 'su-footnote' }, 'The limits sampler has not reported yet.');
+  const parts = [Number.isFinite(sampler.interval_s) ? `Sampled every ${formatDurationShort(sampler.interval_s)}` : 'Sampler running',
+    Number.isFinite(sampler.last_run_at) ? `last sample ${formatAt(sampler.last_run_at, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} (${formatDurationShort(now - sampler.last_run_at)} ago)` : 'no sample yet'];
+  return h('p', { className: 'su-footnote' }, `${parts.join(' · ')}. Projections assume the last six hours' pooled drain continues and accounts are used in pool priority order.`,
+    sampler.last_error ? h('span', { className: 'su-error', role: 'alert' }, ` Last sampler error: ${sampler.last_error}`) : null);
+}
+// The page renders in the workspace pane, outside the sidebar stylesheet, so it carries its own theme-variable styles.
+const USAGE_CSS = `
+.su{box-sizing:border-box;height:100%;overflow-y:auto;padding:14px 24px 28px;font:12px/1.45 var(--font-sans,inherit);color:var(--ui-text-primary)}
+.su *{box-sizing:border-box}.su button{font:inherit}
+.su-header,.su-body{max-width:1100px;margin:0 auto}
+.su-header{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-bottom:16px}
+.su-body{display:flex;flex-direction:column;gap:20px}
+.su-control{display:inline-flex;align-items:center;gap:6px}.su-control-label{font-size:11px;color:var(--ui-text-tertiary)}
+.su-seg{display:inline-flex;gap:2px;padding:2px;border-radius:5px;background:var(--ui-bg-quaternary)}
+.su-seg button{border:0;border-radius:3px;padding:2px 10px;font-size:11px;font-weight:500;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
+.su-seg button[aria-pressed=true]{background:var(--ui-bg-elevated,var(--ui-bg-tertiary));color:var(--ui-text-primary)}
+.su-spacer{flex:1}.su-muted{color:var(--ui-text-tertiary);font-size:11px}
+.su-icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
+.su-icon:hover:not(:disabled){background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.su-icon:disabled{opacity:.5;cursor:default}
+.su button:focus-visible,.su-plot:focus-visible{outline:2px solid var(--ui-accent);outline-offset:1px}
+.su-state{padding:18px;border:1px dashed var(--ui-stroke-secondary);border-radius:6px;color:var(--ui-text-secondary);text-align:center}.su-state[role=alert]{color:var(--ui-red,var(--ui-text-primary))}
+.su-link{padding:0;border:0;background:transparent;color:var(--ui-accent);text-decoration:underline;cursor:pointer}
+.su-chart{display:flex;flex-direction:column;gap:6px;min-width:0}
+.su-chart-head{display:flex;align-items:baseline;gap:8px}.su-chart-head h3{margin:0;font-size:13px;font-weight:600}
+.su-sub{font-size:11px;color:var(--ui-text-tertiary)}.su-total{margin-left:auto;font-size:13px;font-weight:500;font-variant-numeric:tabular-nums}
+.su-legend{display:flex;flex-wrap:wrap;align-items:center;gap:4px 14px;min-height:18px;font-size:11px;color:var(--ui-text-secondary)}
+.su-legend-item{display:inline-flex;align-items:center;gap:5px;min-width:0}.su-legend-item b{font-weight:500;color:var(--ui-text-primary);font-variant-numeric:tabular-nums}
+.su-swatch{display:inline-block;width:8px;height:8px;border-radius:2px;flex-shrink:0}
+.su-plot-row{display:grid;grid-template-columns:56px minmax(0,1fr);margin-top:6px}
+.su-yaxis,.su-plot{position:relative;height:128px}.su-yaxis-tall,.su-plot-tall{height:200px}
+.su-yaxis span{position:absolute;right:8px;transform:translateY(50%);font-size:10px;line-height:1;color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums;white-space:nowrap}
+.su-plot{min-width:0;touch-action:none;cursor:crosshair}.su-plot svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.su-grid{stroke:var(--ui-stroke-secondary);stroke-width:1;vector-effect:non-scaling-stroke}
+.su-line{fill:none;stroke-width:1.5;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.su-past.su-area{fill:var(--su-color);fill-opacity:.22}.su-past.su-line{stroke:var(--su-color)}
+.su-projected.su-area{fill:var(--su-color);fill-opacity:.06}.su-projected.su-line{stroke:var(--su-color);stroke-dasharray:5 4}
+.su-cross{position:absolute;top:0;bottom:0;width:0;border-left:1px dashed var(--ui-text-tertiary);pointer-events:none}
+.su-now{position:absolute;top:-2px;bottom:0;width:0;border-left:1px dashed var(--ui-text-secondary);pointer-events:none}.su-now span{position:absolute;top:0;left:4px;font-size:10px;color:var(--ui-text-tertiary)}
+.su-dot{position:absolute;width:7px;height:7px;margin:0 0 -3.5px -3.5px;border-radius:50%;box-shadow:0 0 0 1.5px var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:none}
+.su-tip{position:absolute;top:4px;z-index:2;min-width:160px;max-width:280px;padding:6px 8px;border:1px solid var(--ui-stroke-secondary);border-radius:6px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));color:var(--ui-text-primary);font-size:11px;pointer-events:none}
+.su-tip-inline{min-width:0;white-space:nowrap}
+.su-tip-head{margin-bottom:3px;color:var(--ui-text-secondary)}
+.su-tip-row{display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:6px}.su-tip-row>span:nth-child(2){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.su-tip-row b{font-weight:500;font-variant-numeric:tabular-nums}
+.su-tip-total{margin-top:3px;padding-top:3px;border-top:1px solid var(--ui-stroke-secondary)}
+.su-xaxis{position:relative;height:16px;margin-left:56px;font-size:10px;color:var(--ui-text-quaternary)}
+.su-xaxis span{position:absolute;top:2px;transform:translateX(-50%);white-space:nowrap}.su-xaxis span[data-edge=start]{transform:none}.su-xaxis span[data-edge=end]{transform:translateX(-100%)}
+.su-footnote{margin:0;font-size:11px;line-height:1.5;color:var(--ui-text-tertiary)}.su-error{color:var(--ui-red,var(--ui-text-primary))}
+.su-providers{display:flex;flex-wrap:wrap;gap:2px;border-bottom:1px solid var(--ui-stroke-secondary)}
+.su-provider{display:inline-flex;align-items:center;gap:6px;margin-bottom:-1px;padding:6px 10px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
+.su-provider:hover{color:var(--ui-text-primary)}.su-provider[aria-pressed=true]{color:var(--ui-text-primary);border-bottom-color:var(--su-color)}
+.su-count{padding:0 5px;border-radius:8px;background:var(--ui-bg-quaternary);font-size:10px;color:var(--ui-text-tertiary)}
+.su-provider-limits{display:flex;flex-direction:column;gap:14px}
+.su-headline{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}.su-pool{font-size:24px;font-weight:600;color:var(--su-color);font-variant-numeric:tabular-nums}
+.su-capacity{font-size:13px;color:var(--ui-text-secondary)}.su-rate{margin-left:10px;font-size:12px;color:var(--ui-text-tertiary)}
+.su-legend-line{display:inline-block;width:16px;border-top:2px solid var(--su-color)}.su-legend-line[data-dashed]{border-top-style:dashed}
+.su-chart-foot{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 16px;font-size:11px;color:var(--ui-text-tertiary)}
+.su-accounts{display:flex;flex-direction:column;gap:8px}
+.su-account{padding:10px 12px;border:1px solid var(--ui-stroke-secondary);border-radius:6px}
+.su-account-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin-bottom:8px}.su-account-head strong{font-weight:600}
+.su-badge{padding:1px 6px;border-radius:8px;background:var(--ui-bg-quaternary);font-size:10px;color:var(--ui-text-secondary)}
+.su-badge[data-tone=warn]{background:color-mix(in srgb,var(--ui-orange,#db704b) 16%,transparent);color:var(--ui-orange,#db704b)}
+.su-badge[data-tone=error]{background:color-mix(in srgb,var(--ui-red,#e5534b) 16%,transparent);color:var(--ui-red,#e5534b)}
+.su-account-error{margin-bottom:6px;font-size:11px;color:var(--ui-red,var(--ui-text-primary))}
+.su-windows{display:flex;flex-direction:column;gap:4px}
+.su-window{display:grid;grid-template-columns:minmax(80px,11rem) minmax(60px,1fr) 4.5rem 8rem;align-items:center;gap:12px;font-size:11px}
+.su-window-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ui-text-secondary)}.su-window[data-selected=true] .su-window-label{color:var(--ui-text-primary);font-weight:500}
+.su-window-value{text-align:right;font-variant-numeric:tabular-nums}.su-window-reset{color:var(--ui-text-tertiary);white-space:nowrap;font-variant-numeric:tabular-nums}
+.su-bar{position:relative;height:16px}.su-bar-track,.su-bar-fill{position:absolute;left:0;top:5px;height:6px;border-radius:3px}
+.su-bar-track{right:0;background:color-mix(in srgb,var(--ui-text-primary) 12%,transparent)}.su-bar-fill{background:var(--su-color)}
+.su-pace{position:absolute;top:1px;width:2px;height:14px;margin-left:-1px;border-radius:1px;background:var(--ui-text-primary)}
+@media(max-width:640px){.su{padding:12px}.su-window{grid-template-columns:minmax(60px,7rem) minmax(40px,1fr) 4rem;}.su-window-reset{display:none}}
+`;
 export default {
   id: 'hermes-t3sidebar', name: 'hermes-t3sidebar', defaultEnabled: false,
   register(ctx) {
@@ -1920,6 +2497,7 @@ export default {
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
     ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx }) });
+    ctx.register({ id: 'usage', area: sdk.ROUTES_AREA ?? 'routes', title: 'Usage', data: { path: USAGE_ROUTE }, render: () => h(UsagePage, { ctx }) });
     let disposed = false, pending = null;
     const disposeEvent = ctx.onEvent('*', event => {
       if (disposed) return;
@@ -1949,6 +2527,6 @@ export default {
         return queryClient.invalidateQueries({ queryKey: scopeKey(scope), predicate: query => resources.includes(query.queryKey[4]), refetchType: 'active' }, { cancelRefetch: false });
       }).catch(() => { /* Query retains errors for the pane's normal recovery UI. */ });
     });
-    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-preferences']) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
+    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-preferences', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
   }
 };

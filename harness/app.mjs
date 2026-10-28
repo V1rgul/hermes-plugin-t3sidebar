@@ -14,8 +14,14 @@ plugin.register(mock.ctx);
 // The running fixture's native in-flight turn began just over two minutes ago.
 mock.control.live.find(item => item.id === 'runtime-worker').turn_started_at = Date.now() / 1000 - 125;
 window.hermesT3SidebarHarness = mock;
+// Route contributions open in the workspace like Desktop's route tiles; ?route=/path opens one directly.
+const route = mock.atom(new URLSearchParams(location.search).get('route') || '/');
+const navigate = mock.host.navigate;
+mock.host.navigate = path => { navigate(path); route.set(path); };
 function Workspace() {
   const id = mock.useValue(mock.host.state.activeSessionId);
+  const path = mock.useValue(route);
+  const page = mock.control.contributions.find(item => item.area === mock.ROUTES_AREA && item.data?.path === path);
   const [backendMissing, setBackendMissing] = useState(false), [runtimeError, setRuntimeError] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const refresh = () => void mock.queryClient.invalidateQueries({ queryKey: scopeKey(captureScope()) });
@@ -23,6 +29,9 @@ function Workspace() {
     h('div', { className: 'harness-top' }, h('strong', null, 'hermes-t3sidebar'), h('span', null, 'Development harness · SYNTHETIC fixtures · not a live Hermes connection')),
     h('div', { className: 'harness-body' },
       h('div', { className: 'harness-sidebar' }, mock.control.contributions[0].render()),
+      page ? h('main', { className: 'harness-main harness-route', 'data-route': path },
+        h('div', { className: 'harness-tabs' }, page.title, h('button', { className: 'harness-back', onClick: () => route.set('/') }, 'Back to workspace')),
+        h('div', { className: 'harness-page' }, page.render())) :
       h('main', { className: 'harness-main' },
         h('div', { className: 'harness-tabs' }, id ? mock.control.rows.find(row => row.id === id)?.title || id : 'New session'),
         h('section', { className: 'harness-content' }, h('span', { className: 'harness-eyebrow' }, 'SYNTHETIC WORKSPACE'),

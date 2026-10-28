@@ -145,6 +145,12 @@ export const ctx = {
   },
   async rest(path, options) {
     calls.push(['rest', path, options]); if (control.backendMissing) throw new Error('404 backend not enabled');
+    if (path.startsWith('/usage/')) {
+      if (control.usageError) throw new Error(control.usageError);
+      const params = new URLSearchParams(path.split('?')[1] || '');
+      if (path.startsWith('/usage/history?')) return clone(control.usageHistory ?? syntheticUsageHistory(Number(params.get('days')), params.get('tz')));
+      if (path.startsWith('/usage/limits?')) return clone(control.usageLimits ?? syntheticUsageLimits());
+    }
     if (path === '/environment') return { profile: control.homeProfile || host.state.profile.get(), home: control.home || '/home/fixture' };
     if (path === '/state') {
       for (const item of Object.values(control.metadata.sessions)) if (item.state === 'snoozed' && item.wake_at <= Date.now() / 1000) Object.assign(item, { state: 'active', woke_at: item.wake_at, updated_at: item.wake_at, wake_at: null });
@@ -298,7 +304,66 @@ export function loadDenseFixtures() {
   }
   queryClient.clear(); switchScope('synthetic-layout-source');
 }
+// Synthetic usage fixtures shaped like the frozen /usage/history and /usage/limits contract; deterministic apart from the clock.
+const FIXTURE_MODELS = [['openai-codex', 'gpt-6.1-sol', 1], ['openai-codex', 'gpt-6.1-mini', 0.35], ['anthropic', 'claude-opus-5', 0.6], ['anthropic', 'claude-haiku-5', 0.2], ['copilot', 'gpt-5.5', 0.12]];
+export function syntheticUsageHistory(days = 7, tz = 'UTC') {
+  const hourly = days === 1, step = hourly ? 3600 : 86400, count = hourly ? 24 : days;
+  const end = Math.floor(Date.now() / 1000 / step) * step;
+  const buckets = Array.from({ length: count }, (_, index) => end - (count - 1 - index) * step);
+  const wave = (index, phase) => Math.max(0, Math.sin(index * 0.9 + phase) * 0.5 + 0.6 + ((index * 7 + phase * 13) % 5) / 10);
+  const by_model = FIXTURE_MODELS.map(([provider, model, weight], seriesIndex) => {
+    const tokens = buckets.map((_, index) => Math.round(wave(index, seriesIndex) * weight * (hourly ? 900_000 : 14_000_000)));
+    const input = tokens.map(value => Math.round(value * 0.2)), output = tokens.map(value => Math.round(value * 0.05)), cache_read = tokens.map((value, index) => value - input[index] - output[index]);
+    return { key: `${provider}/${model}`, label: model, provider, model, tokens, input, output, cache_read, cache_write: tokens.map(() => 0), reasoning: output.map(value => Math.round(value / 3)),
+      cost_usd: provider === 'copilot' ? tokens.map(() => 0) : tokens.map(value => Math.round(value * (provider === 'anthropic' ? 2.4 : 1.1)) / 1e6),
+      user_messages: tokens.map(value => Math.round(value / (hourly ? 120_000 : 600_000))) };
+  });
+  const sum = (list, field) => buckets.map((_, index) => list.reduce((total, item) => total + item[field][index], 0));
+  const fields = ['tokens', 'input', 'output', 'cache_read', 'cache_write', 'reasoning', 'cost_usd', 'user_messages'];
+  const by_provider = [...new Set(by_model.map(item => item.provider))].map(provider => {
+    const members = by_model.filter(item => item.provider === provider);
+    return { key: provider, label: provider, provider, model: null, ...Object.fromEntries(fields.map(field => [field, sum(members, field)])) };
+  });
+  const total = field => by_model.reduce((all, item) => all + item[field].reduce((a, b) => a + b, 0), 0);
+  return { generated_at: Date.now() / 1000, days, tz, resolution: hourly ? 'hour' : 'day', buckets, by_provider, by_model,
+    totals: { tokens: total('tokens'), cost_usd: total('cost_usd'), user_messages: total('user_messages') }, pricing_missing: ['copilot/gpt-5.5'], approximate: true };
+}
+export function syntheticUsageLimits() {
+  const now = Date.now() / 1000;
+  const accounts = [
+    { id: 'acct-a1', label: 'chatgpt1', priority: 1, plan: 'pro', banked_resets: 2, drain: 1.2, weekly: now + 2.6 * 86400 },
+    { id: 'acct-a2', label: 'chatgpt2', priority: 2, plan: 'pro', banked_resets: null, drain: 0.5, weekly: now + 4.1 * 86400 },
+    { id: 'acct-a3', label: 'chatgpt3', priority: 3, plan: 'plus', banked_resets: 0, drain: 0.2, weekly: now + 6.3 * 86400 }
+  ];
+  const history = [];
+  // Remaining at time t declines linearly since the account's last weekly reset, which is when it was last full.
+  const remainingAt = (account, t) => { const start = account.weekly - Math.ceil((account.weekly - t) / 604800) * 604800; return Math.max(0, 100 - account.drain * (t - start) / 3600); };
+  for (let t = Math.floor(now / 1800) * 1800 - 168 * 3600; t <= now; t += 1800) {
+    for (const account of accounts) history.push({ t, account: account.id, window: 'weekly', remaining_percent: Math.round(remainingAt(account, t) * 10) / 10, resets_at: account.weekly - Math.ceil((account.weekly - t) / 604800 - 1) * 604800 });
+  }
+  return { generated_at: now, sampler: { interval_s: 300, started_at: now - 7 * 86400, last_run_at: now - 140, last_error: null }, providers: [
+    { provider: 'openai-codex', label: 'OpenAI Codex', history, accounts: accounts.map(account => ({ id: account.id, label: account.label, priority: account.priority, plan: account.plan, banked_resets: account.banked_resets,
+      fetched_at: now - 140, stale: false, error: null, windows: [
+        { key: 'five_hour', label: '5-hour', window_seconds: 18000, scope: 'account', model: null, used_percent: 30, remaining_percent: 70 - account.priority * 10, resets_at: now + account.priority * 3600 },
+        { key: 'weekly', label: 'Weekly', window_seconds: 604800, scope: 'account', model: null, used_percent: 100 - remainingAt(account, now), remaining_percent: Math.round(remainingAt(account, now) * 10) / 10, resets_at: account.weekly },
+        { key: 'weekly:gpt-6.1-sol', label: 'Weekly · gpt-6.1-sol', window_seconds: 604800, scope: 'model', model: 'gpt-6.1-sol', used_percent: 10, remaining_percent: 90, resets_at: account.weekly }
+      ] })) },
+    { provider: 'anthropic', label: 'Anthropic', history: [], accounts: [
+      { id: 'acct-b1', label: 'claude-max', priority: 1, plan: 'max', banked_resets: null, fetched_at: now - 3 * 3600, stale: true, error: null,
+        windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, scope: 'account', model: null, used_percent: 61, remaining_percent: 39, resets_at: now + 86400 }] },
+      { id: 'acct-b2', label: 'claude-team', priority: 2, plan: null, banked_resets: null, fetched_at: null, stale: false, error: 'HTTP 401 from usage endpoint',
+        windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, scope: 'account', model: null, used_percent: null, remaining_percent: null, resets_at: null }] }
+    ] }
+  ] };
+}
 export function Button({ variant, size, children, ...props }) { return h('button', props, children); }
+export const ROUTES_AREA = 'routes';
+// Public Tip wraps one trigger; the adapter exposes its label as a native title instead of a Radix tooltip.
+export function Tip({ label, children }) { return label ? React.cloneElement(children, { title: children.props.title ?? label }) : children; }
+// Public SegmentedControl contract: pressed state on plain buttons, string ids.
+export function SegmentedControl({ options, value, onChange, className, disabled = false }) {
+  return h('div', { className: `mock-segmented ${className || ''}`.trim() }, options.map(({ id, label }) => h('button', { key: id, type: 'button', 'aria-pressed': value === id, disabled, onClick: () => onChange(id) }, label)));
+}
 export function Input({ size, prefix, suffix, containerClassName, ...props }) { return h('input', props); }
 // Core Settings row: label + description with the control beside it.
 export function ListRow({ title, description, action, below }) { return h('div', { 'data-list-row': true }, h('div', null, h('span', null, title), description ? h('div', null, description) : null, below), action ? h('div', null, action) : null); }
@@ -388,6 +453,6 @@ export const icons = Object.fromEntries(Object.entries({
   MessageSquare: 'M4 4h16v12H9l-5 4V4', Undo2: 'M3 10l5-5M3 10l5 5M3 10h11a6 6 0 0 1 0 12',
   Check: 'M5 12l5 5L20 7', Ellipsis: 'M5 12h1M11 12h1M17 12h1', X: 'M6 6l12 12M6 18L18 6', RefreshCw: 'M20 4v6h-6M20 10a8 8 0 1 0 0 7',
   Copy: 'M9 9h12v12H9ZM5 15H3V3h12v2', FolderOpen: 'M3 5h6l2 3h10v12H3Z', CornerDownLeft: 'M9 10l-5 5 5 5M4 15h12a4 4 0 0 0 4-4V4',
-  Pencil: 'M16 3l5 5-13 13H3v-5ZM14 5l5 5', Trash2: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7'
+  Pencil: 'M16 3l5 5-13 13H3v-5ZM14 5l5 5', BarChart3: 'M3 21h18M6 17V9M11 17V5M16 17v-6M21 17v-3', Trash2: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7'
 }).map(([name, path]) => [name, props => h('svg', { 'data-icon': name, width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: path }))]));
 reset();

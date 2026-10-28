@@ -1147,7 +1147,11 @@ try {
       await page.evaluate(() => { window.hermesT3SidebarHarness.control.archiveError = false; });
     }
 
-    for (const height of [300, 350, 400]) {
+    // The Usage footer is a fixed row below the list. Pad each pane by its height so these cases keep testing the same
+    // list heights they did before the footer existed (the 300px case is the shortest list the flex minima fit with an error note).
+    const footerHeight = await page.locator('.sf-footer').evaluate(el => el.getBoundingClientRect().height);
+    for (const base of [300, 350, 400]) {
+      const height = base + footerHeight;
       await page.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
       const geometry = await page.locator('.sf-scroll').evaluate(list => {
         const bounds = list.getBoundingClientRect();
@@ -1167,10 +1171,10 @@ try {
           })
         };
       });
-      check(`${height}px${banner === 'error' ? ' with error' : ''}: headers and complete scroll bodies fit without outer clipping`, geometry.fits && geometry.headers && geometry.bodies);
-      check(`${height}px ${banner}: tight card text preserves 56px rows and 19px lines`, geometry.tightCards);
-      check(`${height}px ${banner}: no Undo or dismiss-Undo controls`, await noUndo());
-      if (height === 300 && banner === 'error') await page.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, 'short-300-error.png') });
+      check(`${base}px list pane (+${footerHeight}px footer)${banner === 'error' ? ' with error' : ''}: headers and complete scroll bodies fit without outer clipping`, geometry.fits && geometry.headers && geometry.bodies);
+      check(`${base}px list pane ${banner}: tight card text preserves 56px rows and 19px lines`, geometry.tightCards);
+      check(`${base}px list pane ${banner}: no Undo or dismiss-Undo controls`, await noUndo());
+      if (base === 300 && banner === 'error') await page.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, 'short-300-error.png') });
     }
   }
   await page.reload();
@@ -1456,7 +1460,9 @@ try {
   }
   {
     // Card geometry is themeable: a different content/padding/margin must drive heights, gaps, windowing and shelf minimums alike.
-    const geometry = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+    // 936px = the former 900px plus the 36px Usage footer, so the shelves get the list height this case was written for
+    // (the 20% minimum already sits 1px under the formula, so a shorter list pushes rounding past the 1px tolerance).
+    const geometry = await browser.newPage({ viewport: { width: 1200, height: 936 }, deviceScaleFactor: 1 });
     geometry.on('pageerror', error => errors.push(error));
     // Shelf tracks animate when the fixture changes card counts; measure final layout, like the main page.
     await geometry.emulateMedia({ reducedMotion: 'reduce' });
@@ -1478,6 +1484,86 @@ try {
     check('custom card content, padding and margin drive the row height, gap and windowed stride', layout.height === 62 && layout.margin === '2px' && layout.padding === '7px' && layout.step === 62 && layout.spacer === 100 * 62);
     check('custom card geometry drives the two-card shelf minimum', Math.abs(layout.working - Math.max(layout.shelves * .18, Math.min(30 + 2 * 62, layout.shelves * .2))) <= 1);
     await geometry.close();
+  }
+  {
+    // Usage footer and page: the real plugin tree under the mocked SDK (not live Electron), with synthetic usage payloads.
+    const usageDir = process.env.USAGE_SCREENSHOT_DIR || '/home/hermes/.hermes/cache/scratch/usage-viz';
+    await mkdir(usageDir, { recursive: true });
+    const usage = await browser.newPage({ viewport: { width: 1400, height: 1000 }, deviceScaleFactor: 1, timezoneId: 'Europe/Paris' });
+    usage.on('pageerror', error => errors.push(error.message));
+    await usage.emulateMedia({ reducedMotion: 'reduce' });
+    await usage.goto(`http://127.0.0.1:${server.address().port}`);
+    await usage.waitForSelector('.sf-row');
+    const footer = await usage.evaluate(() => {
+      const aside = document.querySelector('.sf'), footer = aside.querySelector('.sf-footer'), list = aside.querySelector('.sf-scroll'), button = footer?.querySelector('.sf-utility');
+      if (!footer || !button) return null;
+      const r = el => el.getBoundingClientRect(), label = button.querySelector('span'), glyph = button.querySelector('svg');
+      return { last: aside.lastElementChild === footer, height: r(footer).height, bottomGap: Math.abs(r(footer).bottom - r(aside).bottom), belowList: r(footer).top >= r(list).bottom - 0.5,
+        button: r(button).height, text: button.textContent, title: button.title, iconBeforeLabel: !!glyph && r(glyph).right <= r(label).left, iconCentered: !!glyph && Math.abs((r(glyph).top + r(glyph).bottom) / 2 - (r(label).top + r(label).bottom) / 2) <= 1 };
+    });
+    console.log(`USAGE FOOTER: ${JSON.stringify(footer)}`);
+    check('Usage footer is a fixed 36px row at the bottom of the pane, below the shelves', footer?.last && footer.height === 36 && footer.bottomGap < 1 && footer.belowList && footer.button === 28);
+    check('Usage footer shows the BarChart3 icon before its label with a tooltip', footer.text === 'Usage' && footer.iconBeforeLabel && footer.iconCentered && footer.title === 'Token usage and subscription limits');
+    const usageButton = usage.locator('.sf-footer').getByRole('button', { name: 'Usage', exact: true });
+    const idle = await usageButton.evaluate(el => getComputedStyle(el).backgroundColor);
+    await usageButton.hover();
+    check('Usage footer button gets the hover background', await usageButton.evaluate(el => getComputedStyle(el).backgroundColor) !== idle);
+    await usageButton.click();
+    check('Usage footer navigates to /t3sidebar-usage', await usage.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'navigate' && call[1] === '/t3sidebar-usage')));
+    await usage.waitForSelector('.su-chart[data-metric="user_messages"] svg g[data-series]');
+    const usageLayout = () => usage.evaluate(() => {
+      const root = document.querySelector('.su'), charts = [...root.querySelectorAll('.su-chart')], r = el => el.getBoundingClientRect();
+      const plots = charts.map(chart => r(chart.querySelector('.su-plot')));
+      const inside = [...root.querySelectorAll('.su-header *, .su-legend *, .su-xaxis span, .su-yaxis span, .su-footnote')].every(el => { const box = r(el), bounds = r(root); return box.width === 0 || box.left >= bounds.left - 0.5 && box.right <= bounds.right + 0.5; });
+      return { overflowX: root.scrollWidth - root.clientWidth, charts: charts.map(chart => chart.dataset.metric), aligned: plots.every(p => Math.abs(p.left - plots[0].left) < 1 && Math.abs(p.width - plots[0].width) < 1), plotWidth: plots[0].width,
+        series: charts.map(chart => chart.querySelectorAll('svg g[data-series]').length), drawn: charts.every(chart => [...chart.querySelectorAll('svg .su-line')].every(path => path.getTotalLength() > 50 && r(path).width > 0.9 * plots[0].width)), inside };
+    });
+    let layout = await usageLayout();
+    console.log(`USAGE LAYOUT: ${JSON.stringify(layout)}`);
+    check('Usage page draws Tokens, Cost and User messages charts on one shared, aligned time axis', layout.charts.join() === 'tokens,cost_usd,user_messages' && layout.aligned && layout.plotWidth > 800 && layout.drawn);
+    check('Usage page has no horizontal overflow and keeps labels inside the page', layout.overflowX <= 0 && layout.inside);
+    const tokensPlot = usage.locator('.su-chart[data-metric="tokens"] .su-plot');
+    const plotBox = await tokensPlot.boundingBox();
+    await usage.mouse.move(plotBox.x + plotBox.width * 0.72, plotBox.y + plotBox.height / 2);
+    const hover = await usage.evaluate(() => {
+      const crosses = [...document.querySelectorAll('.su-cross')].map(el => Math.round(el.getBoundingClientRect().left));
+      const tips = [...document.querySelectorAll('.su-tip')], page = document.querySelector('.su').getBoundingClientRect();
+      return { crosses, tips: tips.length, rows: tips.map(tip => tip.querySelectorAll('.su-tip-row').length), inside: tips.every(tip => { const box = tip.getBoundingClientRect(); return box.left >= page.left && box.right <= page.right; }), flipped: tips.every(tip => tip.dataset.side === 'left') };
+    });
+    check('hovering one chart moves a synchronized crosshair and tooltip on all three', hover.crosses.length === 3 && new Set(hover.crosses).size === 1 && hover.tips === 3 && hover.rows.every(rows => rows >= 3) && hover.inside && hover.flipped);
+    await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-stacked.png') });
+    await usage.getByRole('button', { name: 'Independent', exact: true }).click();
+    await usage.getByRole('button', { name: 'Model', exact: true }).click();
+    await usage.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="tokens"] svg g[data-series]').length === 5);
+    layout = await usageLayout();
+    check('Model split with Independent mode redraws one line per model without overflow', layout.series.join() === '5,4,5' && layout.drawn && layout.overflowX <= 0 && layout.inside);
+    await usage.mouse.move(plotBox.x + plotBox.width * 0.2, plotBox.y + plotBox.height / 2);
+    await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-independent.png') });
+    await usage.mouse.move(5, 5);
+    await usage.getByRole('button', { name: 'Limits', exact: true }).click();
+    await usage.waitForSelector('.su-pooled .su-line.su-projected');
+    const limits = await usage.evaluate(() => {
+      const root = document.querySelector('.su'), r = el => el.getBoundingClientRect(), plot = r(document.querySelector('.su-pooled .su-plot'));
+      const now = r(document.querySelector('.su-now')), past = document.querySelector('.su-line.su-past'), projected = document.querySelector('.su-line.su-projected');
+      const bars = [...document.querySelectorAll('.su-window')].map(row => { const bar = r(row.querySelector('.su-bar')), pace = row.querySelector('.su-pace'); return !pace || r(pace).left >= bar.left - 1 && r(pace).right <= bar.right + 1; });
+      return { overflowX: root.scrollWidth - root.clientWidth, nowInside: now.left > plot.left && now.left < plot.right, pastEndsAtNow: Math.abs(r(past).right - now.left) <= 2, projectedStartsAtNow: Math.abs(r(projected).left - now.left) <= 2,
+        projectedReachesEnd: Math.abs(r(projected).right - plot.right) <= 2, dashed: getComputedStyle(projected).strokeDasharray !== 'none', paces: bars.every(Boolean), accounts: document.querySelectorAll('.su-account').length };
+    });
+    console.log(`USAGE LIMITS: ${JSON.stringify(limits)}`);
+    check('Limits tab draws the past pool up to Now and a dashed projection to the horizon', limits.nowInside && limits.pastEndsAtNow && limits.projectedStartsAtNow && limits.projectedReachesEnd && limits.dashed);
+    check('Limits tab per-account bars keep pace ticks inside and do not overflow', limits.paces && limits.accounts === 3 && limits.overflowX <= 0);
+    const pooledPlot = await usage.locator('.su-pooled .su-plot').boundingBox();
+    await usage.mouse.move(pooledPlot.x + pooledPlot.width * 0.55, pooledPlot.y + pooledPlot.height / 2);
+    check('Limits hover reports a projected value with its local time', /^\w{3} \d{1,2}:\d{2}.* · \d+% left \(projected\)$/.test(await usage.locator('.su-pooled .su-tip').textContent()));
+    await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-limits.png') });
+    // A narrow workspace keeps the page usable without horizontal scrolling.
+    await usage.setViewportSize({ width: 900, height: 1000 });
+    await usage.locator('.su-header').getByRole('button', { name: 'Usage', exact: true }).click();
+    await usage.waitForSelector('.su-chart[data-metric="tokens"]');
+    layout = await usageLayout();
+    check('Usage page fits a narrow workspace without horizontal overflow', layout.overflowX <= 0 && layout.inside && layout.aligned);
+    await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-narrow.png') });
+    await usage.close();
   }
   check('no browser page errors', errors.length === 0);
   console.log(`Browser smoke: ${checks.length} checks passed; screenshots ${screenshotDir}/{frontend,hovered,actions,dense-400,dense-650,short-300-error}.png`);
