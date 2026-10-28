@@ -760,6 +760,24 @@ try {
   check('clearing the focused draft removes its otherwise empty card without deleting or closing the session', await page.evaluate(() => window.hermesT3SidebarHarness.control.live.some(row => row.session_key === 'synthetic-runtime-draft')));
   await page.evaluate(async () => {
     const fixture = window.hermesT3SidebarHarness;
+    fixture.control.rows.push({ id: 'synthetic-runtime-draft', source: 'desktop', message_count: 1, provider: null, total_tokens: 0,
+      cwd: '/synthetic/robot', project: { name: 'Draft robot' } });
+    Object.assign(fixture.control.live.find(row => row.session_key === 'synthetic-runtime-draft'), { message_count: 1, status: 'working', turn_started_at: Date.now() / 1000 });
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  await page.locator('[data-section="working"] [data-session-id="synthetic-runtime-draft"]').waitFor();
+  check('first persisted prompt keeps its runtime provider icon while token usage is still zero', await runtimeDraft.locator('[data-provider-mark="anthropic"]').count() === 1 && await runtimeDraft.locator('.sf-token').textContent() === '0');
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    Object.assign(fixture.control.rows.find(row => row.id === 'synthetic-runtime-draft'), { title: 'First robot response', message_count: 2, provider: 'anthropic', total_tokens: 2000 });
+    Object.assign(fixture.control.live.find(row => row.session_key === 'synthetic-runtime-draft'), { message_count: 2, status: 'idle', provider: null });
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  await runtimeDraft.locator('.sf-row-title').filter({ hasText: 'First robot response' }).waitFor();
+  check('persisted provider takes over after the response without depending on runtime provider metadata', await runtimeDraft.locator('[data-provider-mark="anthropic"]').count() === 1 && await runtimeDraft.locator('.sf-token').textContent() === '2K');
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.rows = fixture.control.rows.filter(row => row.id !== 'synthetic-runtime-draft');
     fixture.control.live = fixture.control.live.filter(row => row.session_key !== 'synthetic-runtime-draft');
     fixture.host.state.focusedStoredSessionId.set('design');
     await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });

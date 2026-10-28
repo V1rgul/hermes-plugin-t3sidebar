@@ -110,6 +110,7 @@ export const sessionTitle = row => row.newSession ? 'New session' : row.title ||
 const draftIdentity = row => JSON.stringify([durableId(row), row.resolved_id || row.id]);
 const draftKey = (scope, row) => ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, durableId(row), row.resolved_id || row.id];
 const knownWorkspace = row => typeof row.cwd === 'string' || row.project?.is_home === true;
+const knownProvider = value => typeof value === 'string' && value.trim().length > 0 && !/^(auto|unknown|default|none)$/i.test(value.trim());
 const searchTokens = query => query.trim().toLowerCase().split(/\s+/).filter(Boolean);
 function matchesFilters(row, tokens, project, index) {
   if (project !== '*' && ((row._limited && !knownWorkspace(row)) || (row.cwd || '') !== project)) return false;
@@ -162,13 +163,14 @@ export function mergeRows(rich, extra = [], live = [], extraRich = false, archiv
     rows.set(row.id, row); known.add(row.id);
   }
   return [...rows.values()].map(row => {
-    const runtime = byStoredId.get(row.id);
-    if (!runtime || !isEmptySession(row, [runtime])) return row;
+    const runtime = byStoredId.get(row.resolved_id || row.id);
+    if (!runtime) return row;
     // Unknown runtime evidence must not erase stored facts. Workspace is one
     // projection: an explicit Home object proves detachment; null alone does not.
     const fields = {};
-    if (knownWorkspace(runtime) && runtime.project) Object.assign(fields, { cwd: runtime.cwd ?? null, project: runtime.project });
-    if (typeof runtime.provider === 'string' && runtime.provider.trim() && !/^(auto|unknown|default|none)$/i.test(runtime.provider.trim())) fields.provider = runtime.provider;
+    if (isEmptySession(row, [runtime]) && knownWorkspace(runtime) && runtime.project) Object.assign(fields, { cwd: runtime.cwd ?? null, project: runtime.project });
+    // The first persisted prompt makes the card nonempty before usage records its provider.
+    if (!knownProvider(row.provider) && knownProvider(runtime.provider)) fields.provider = runtime.provider;
     return { ...row, ...fields };
   });
 }

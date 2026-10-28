@@ -107,6 +107,61 @@ test('missing metadata on a persisted empty row is enriched from its exact runti
 	assert.equal(history.cwd, '/stored'); assert.equal(history.provider, 'openai-codex'); assert.equal(history.project.name, 'Stored');
 });
 
+test('provider icon survives the first prompt becoming persisted while tokens remain zero', async () => {
+	fixtures(); mock.control.mountedDrafts['live-empty'] = 'Unsent fixture prompt';
+	await mount();
+	const provider = () => row('live-empty').querySelector('.sf-provider')?.getAttribute('aria-label');
+	assert.equal(provider(), 'Provider: anthropic');
+	mock.control.mountedDrafts['live-empty'] = '';
+	mock.control.rows.push({ id: 'live-empty', source: 'desktop', message_count: 1, provider: null, total_tokens: 0,
+		cwd: '/stored', project: { name: 'Stored workspace' } });
+	Object.assign(mock.control.live[0], { status: 'working', message_count: 1, turn_started_at: Date.now() / 1000 });
+	await refresh();
+	assert.equal(provider(), 'Provider: anthropic');
+	assert.equal(row('live-empty').querySelector('.sf-token').textContent, '0');
+	assert.equal(row('live-empty').querySelector('.sf-project-name').textContent, 'Stored workspace');
+	assert.equal(row('live-empty').dataset.working, 'true');
+	Object.assign(mock.control.rows.at(-1), { title: 'First response', message_count: 2, provider: 'anthropic', total_tokens: 2000 });
+	Object.assign(mock.control.live[0], { status: 'idle', message_count: 2, provider: null });
+	await refresh();
+	assert.equal(provider(), 'Provider: anthropic');
+	assert.equal(row('live-empty').querySelector('.sf-token').textContent, '2K');
+});
+
+test('runtime provider fallback is independent of message count and preserves concrete stored providers', () => {
+	const runtime = { id: 'rt', session_key: 'new', source: 'desktop', provider: 'anthropic' };
+	for (const message_count of [0, 1, 2, undefined]) {
+		for (const provider of [null, undefined, '', 'auto', ' Unknown ', 'default', 'none', 42]) {
+			const [merged] = mergeRows([{ id: 'new', message_count, provider, total_tokens: 0 }], [], [runtime]);
+			assert.equal(merged.provider, 'anthropic');
+			assert.equal(merged.total_tokens, 0);
+		}
+		for (const provider of ['openai-codex', 'unsupported-explicit-provider']) {
+			const [merged] = mergeRows([{ id: 'new', message_count, provider }], [], [runtime]);
+			assert.equal(merged.provider, provider);
+		}
+		for (const provider of [null, undefined, '', 'auto', ' Unknown ', 'default', 'none', 42]) {
+			const [merged] = mergeRows([{ id: 'new', message_count, provider: null }], [], [{ ...runtime, provider }]);
+			assert.equal(merged.provider, null);
+		}
+	}
+});
+
+test('provider fallback uses only an unambiguous surfaced-tip runtime, not ancestors or internal runs', () => {
+	for (const stored of [
+		{ id: 'tip', _lineage_root_id: 'root', _lineage_ids: ['root', 'tip'] },
+		{ id: 'root', resolved_id: 'tip', _lineage_ids: ['root', 'tip'] }
+	]) {
+		const row = { ...stored, message_count: 1, provider: null };
+		const root = { id: 'rt-root', session_key: 'root', source: 'desktop', provider: 'openai-codex' };
+		const tip = { id: 'rt-tip', session_key: 'tip', source: 'desktop', provider: 'anthropic' };
+		assert.equal(mergeRows([row], [], [root, tip])[0].provider, 'anthropic');
+		for (const live of [[root], [tip, { ...tip, id: 'duplicate-tip' }], ...['cron', 'tool', 'oneshot', 'kanban', 'subagent'].map(source => [{ ...tip, source }])]) {
+			assert.equal(mergeRows([row], [], live)[0].provider, null);
+		}
+	}
+});
+
 test('unknown runtime metadata preserves stored draft project/provider while explicit Home replaces workspace', async () => {
 	fixtures();
 	Object.assign(mock.control.rows[0], { cwd: '/chosen', project: { name: 'Chosen', icon: 'tools', color: '#ff6000' }, provider: 'openai-codex' });
