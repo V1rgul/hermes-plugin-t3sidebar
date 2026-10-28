@@ -23,6 +23,7 @@ async function render(contribution) {
   await tick(); await tick();
 }
 const page = () => mock.control.contributions.find(item => item.id === 'usage');
+const limitsPage = () => mock.control.contributions.find(item => item.id === 'limits');
 afterEach(async () => {
   if (root) { await act(async () => root.unmount()); root = null; }
   mock.control.disposers.forEach(dispose => dispose());
@@ -116,7 +117,10 @@ test('lookback stops are discrete, labeled and drive how much history the limits
   assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(position => usage.lookbackLabel(usage.lookbackAtPosition(position))), ['30d', '15d', '7d', '3d', '2d', '1d', '12h', '5h', '2h', '1h']);
   assert.deepEqual(usage.LOOKBACK_STOPS.map(usage.lookbackPosition), [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
   assert.deepEqual([usage.lookbackPosition(999), usage.lookbackAtPosition(-3), usage.lookbackAtPosition(42), usage.lookbackAtPosition('x')], [6, 720, 1, 720], 'unknown hours show the 12h default; out-of-range positions clamp');
-  assert.deepEqual([1, 12, 168, 360, 720].map(usage.limitsHistoryHours), [168, 168, 168, 360, 720]);
+  assert.deepEqual([1, 12, 168, 360, 720].map(hours => usage.limitsHistoryHours(hours)), [168, 168, 168, 360, 720]);
+  // The 30-day horizon shows nine days of past, which needs more than the default week of history.
+  assert.deepEqual([usage.limitsHistoryHours(12, 7), usage.limitsHistoryHours(12, 30), usage.limitsHistoryHours(360, 30)], [168, 216, 360]);
+  assert.deepEqual([usage.limitsPastSeconds(7 * D) / H, usage.limitsPastSeconds(30 * D) / D, usage.limitsPastSeconds(H) / H], [50.4, 9, 6]);
   assert.equal(usage.limitsHistoryHours(2000), 840, 'the backend caps history at 840 hours');
   assert.deepEqual([usage.coverageText(20 * 60), usage.coverageText(5.4 * H), usage.coverageText(47 * H), usage.coverageText(9.8 * D)], ['20m', '5h', '47h', '10d']);
 });
@@ -221,9 +225,12 @@ test('scales, formats and colors are compact and stable per series key', () => {
 
 test('preferences validate every field and fall back to safe defaults', () => {
   assert.deepEqual(usage.validUsagePreferences(null), usage.USAGE_DEFAULTS);
-  assert.deepEqual(usage.validUsagePreferences({ tab: 'limits', days: 30, split: 'model', mode: 'independent', horizon: 3, lookback: 72, window: 'five_hour', provider: 'anthropic' }),
-    { tab: 'limits', days: 30, split: 'model', mode: 'independent', horizon: 3, lookback: 72, window: 'five_hour', provider: 'anthropic' });
-  assert.deepEqual(usage.validUsagePreferences({ tab: 'x', days: '7', split: 1, mode: 'stack', horizon: 14, lookback: 6, window: '', provider: 5 }), usage.USAGE_DEFAULTS);
+  assert.deepEqual(usage.validUsagePreferences({ days: 30, split: 'model', mode: 'independent', horizon: 30, lookback: 72, window: 'five_hour', provider: 'anthropic' }),
+    { days: 30, split: 'model', mode: 'independent', horizon: 30, lookback: 72, window: 'five_hour', provider: 'anthropic' });
+  assert.deepEqual(usage.validUsagePreferences({ days: '7', split: 1, mode: 'stack', horizon: 14, lookback: 6, window: '', provider: 5 }), usage.USAGE_DEFAULTS);
+  // Preferences saved before the split pages: the Usage|Limits tab is dropped and the retired 1d/3d horizons become 7d.
+  assert.equal(Object.hasOwn(usage.validUsagePreferences({ tab: 'limits' }), 'tab'), false);
+  assert.deepEqual([1, 3, 7, 30].map(horizon => usage.validUsagePreferences({ horizon }).horizon), [7, 7, 7, 30]);
   for (const bad of ['12', 0, 13, 1000, null, Infinity]) assert.equal(usage.validUsagePreferences({ lookback: bad }).lookback, 12, `lookback ${bad} falls back to 12h`);
   mock.control.storageReadError = true;
   assert.deepEqual(usage.readUsagePreferences(mock.ctx.storage), usage.USAGE_DEFAULTS);
@@ -232,28 +239,32 @@ test('preferences validate every field and fall back to safe defaults', () => {
 });
 
 // Sidebar footer and registration -----------------------------------------------------------------------------------
-test('the page registers as a routes contribution and the sidebar footer navigates to it', async () => {
+test('Usage and Limits register as two routes and the sidebar footer has one icon button for each', async () => {
   plugin.register(mock.ctx);
   assert.deepEqual([page().area, page().title, page().data.path], ['routes', 'Usage', '/t3sidebar-usage']);
+  assert.deepEqual([limitsPage().area, limitsPage().title, limitsPage().data.path], ['routes', 'Limits', '/t3sidebar-limits']);
   assert.equal(mock.control.contributions[0].id, 'sidebar', 'the sidebar pane stays the first contribution');
   await render(mock.control.contributions[0]);
   const footer = $('.sf > footer.sf-footer');
   assert.equal(footer !== null, true); assert.equal($('.sf').lastElementChild?.className, 'sf-footer', 'the footer is the last row of the pane');
-  const usageButton = footer.querySelector('button.sf-utility');
-  assert.equal(usageButton.textContent, 'Usage'); assert.equal(usageButton.getAttribute('title'), 'Token usage and subscription limits');
-  assert.equal(usageButton.querySelector('svg')?.getAttribute('data-icon'), 'BarChart3');
-  await click(usageButton);
-  assert.deepEqual(mock.calls.filter(call => call[0] === 'navigate'), [['navigate', '/t3sidebar-usage']]);
+  const buttons = [...footer.querySelectorAll('button.sf-utility')];
+  // Icon-only: the name comes from aria-label and the tooltip, never from visible text.
+  assert.deepEqual(buttons.map(node => [node.getAttribute('aria-label'), node.textContent, node.getAttribute('title'), node.querySelector('svg')?.getAttribute('data-icon')]),
+    [['Usage', '', 'Token usage', 'BarChart3'], ['Limits', '', 'Subscription limits', 'Gauge']]);
+  await click(buttons[0]); await click(buttons[1]);
+  assert.deepEqual(mock.calls.filter(call => call[0] === 'navigate').map(call => call[1]), ['/t3sidebar-usage', '/t3sidebar-limits']);
 });
 
 // Page rendering -----------------------------------------------------------------------------------------------------
 const seriesCount = metric => $$(`.su-chart[data-metric="${metric}"] svg g[data-series]`).length;
 const restPaths = () => mock.calls.filter(call => call[0] === 'rest').map(call => call[1]);
 
-test('the usage tab draws three charts from /usage/history and toggles split and mode', async () => {
+test('the Usage page draws three charts from /usage/history only and toggles split and mode', async () => {
   plugin.register(mock.ctx); await render(page());
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   assert.deepEqual(restPaths(), [`/usage/history?days=7&tz=${encodeURIComponent(tz)}`]);
+  // Each route shows only its own content: no Usage|Limits switch and no limits chart here.
+  assert.deepEqual([$('.su').dataset.view, button('Usage') === undefined, button('Limits') === undefined, $('.su-pooled') === null], ['usage', true, true, true]);
   assert.deepEqual($$('.su-chart').map(node => node.dataset.metric), ['tokens', 'cost_usd', 'user_messages']);
   assert.equal($('.su-chart[data-metric="cost_usd"] .su-sub').textContent, 'API-equivalent');
   assert.deepEqual([seriesCount('tokens'), seriesCount('cost_usd'), seriesCount('user_messages')], [3, 2, 3]);
@@ -291,7 +302,8 @@ test('hovering a bucket synchronizes the crosshair and tooltip across all three 
 });
 
 test('preferences persist through a remount and the page shows empty and error states', async () => {
-  mock.ctx.storage.set('usage-preferences', { tab: 'usage', days: 30, split: 'model', mode: 'independent', horizon: 7 });
+  // Saved before the pages were split: the old tab key must not matter.
+  mock.ctx.storage.set('usage-preferences', { tab: 'limits', days: 30, split: 'model', mode: 'independent', horizon: 7 });
   mock.control.usageHistory = { generated_at: 1, days: 30, tz: 'UTC', resolution: 'day', buckets: [1, 2], by_provider: [], by_model: [], totals: { tokens: 0, cost_usd: 0, user_messages: 0 }, pricing_missing: [] };
   plugin.register(mock.ctx); await render(page());
   assert.match(restPaths()[0], /^\/usage\/history\?days=30&/);
@@ -312,16 +324,17 @@ async function slide(node, value) {
   await tick(); await tick();
 }
 
-test('the limits tab pools accounts, projects resets and lists per-account windows', async () => {
-  mock.ctx.storage.set('usage-preferences', { tab: 'limits' });
-  plugin.register(mock.ctx); await render(page());
-  assert.deepEqual(restPaths(), ['/usage/limits?hours=168']);
+test('the Limits page pools accounts, projects resets and lists per-account windows', async () => {
+  plugin.register(mock.ctx); await render(limitsPage());
+  assert.deepEqual(restPaths(), ['/usage/limits?hours=168'], 'the Limits page fetches only its own endpoint');
+  assert.deepEqual([$('.su').dataset.view, button('Usage') === undefined, $('.su-chart[data-metric]') === null], ['limits', true, true]);
   assert.deepEqual($$('.su-provider').map(node => [node.firstChild.textContent, node.lastChild.textContent, node.getAttribute('aria-pressed')]), [['OpenAI Codex', '2', 'true'], ['Anthropic', 'logged out', 'false']]);
   assert.equal($('.su-pooled').dataset.window, 'weekly', 'weekly is the default window');
   assert.equal($('.su-capacity').textContent, '/ 200% remaining');
   assert.match($('.su-rate').textContent, /^~\d+(\.\d)?% per hour$/);
-  assert.equal($('.su-lookback-label').textContent, 'Average over 12h');
-  assert.match($('.su-chart-foot').textContent, /^Next reset \+\d+% · /);
+  assert.deepEqual([$('.su-lookback-label').textContent, $('.su-lookback-value').textContent], ['Projections based on', '12h']);
+  assert.equal($('.su-legend'), null, 'the Remaining/Projected legend is gone');
+  assert.match($('.su-chart-notes').textContent, /^Next reset \+\d+% · /);
   assert.ok($('.su-pooled .su-line.su-past')); assert.ok($('.su-pooled .su-line.su-projected')); assert.ok($('.su-now'));
   assert.ok($$('.su-pooled .su-day-grid').length >= 9, 'a week of history plus a week ahead crosses at least nine midnights');
   assert.equal($$('.su-account').length, 2);
@@ -331,8 +344,7 @@ test('the limits tab pools accounts, projects resets and lists per-account windo
   assert.equal(first.querySelectorAll('.su-pace').length, 2, 'every window with a length and reset time has a pace tick');
   assert.match(first.querySelector('.su-window[data-window="weekly"] .su-window-reset').textContent, /^resets in 4d \d+h$/);
   assert.match($('.su-footnote').textContent, /^Sampled every 5m · last sample .*averaged over the selected period/);
-  await click(button('3d'));
-  assert.equal(mock.ctx.storage.get('usage-preferences').horizon, 3);
+  assert.equal(button('3d'), undefined, 'the 1d/3d/7d horizon control is gone');
   await click(button('5-hour'));
   assert.equal($('.su-pooled').dataset.window, 'five_hour');
   await click($$('.su-provider')[1]);
@@ -348,21 +360,25 @@ test('the lookback slider moves between stops, changes the drain rate and widens
   const history = [[-10 * H + 30, 90], [-2 * H + 30, 82], [-H + 30, 78], [-30, 74]].map(([offset, value]) => ({ t: now + offset, account: 'a', window: 'weekly', remaining_percent: value, resets_at: now + 5 * D }));
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [{ provider: 'openai-codex', label: 'OpenAI Codex', history,
     accounts: [{ id: 'a', label: 'a', priority: 0, fetched_at: now - 60, windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: 74, resets_at: now + 5 * D }] }] }] };
-  mock.ctx.storage.set('usage-preferences', { tab: 'limits', lookback: 2 });
-  plugin.register(mock.ctx); await render(page());
+  mock.ctx.storage.set('usage-preferences', { lookback: 2 });
+  plugin.register(mock.ctx); await render(limitsPage());
   const slider = $('.su-lookback input[type=range]');
   // Reversed: position 0 is 30d on the left, 9 is 1h on the right, so 2h sits at position 8.
   assert.deepEqual([slider.min, slider.max, slider.step, slider.value, slider.getAttribute('aria-valuetext'), slider.style.getPropertyValue('--su-share')], ['0', '9', '1', '8', '2h', String(8 / 9)]);
   assert.equal($('.su-rate').textContent, '~4.0% per hour');
   assert.equal($('.su-coverage'), null, 'two hours of data cover a two-hour lookback');
-  assert.match($('.su-measure').textContent, /^Empty in 18h \d+m · /, '74 points at about 4 per hour');
+  assert.match($('.su-measure[data-kind="empty"]').textContent, /^Empty in 18h \d+m · /, '74 points at about 4 per hour');
+  assert.equal($('.su-measure[data-kind="average"]').textContent, 'Average over 2h · ~4.0%/h');
   await slide(slider, 6);
   assert.equal($('.su-lookback input[type=range]').getAttribute('aria-valuetext'), '12h');
-  assert.deepEqual([$('.su-lookback-label').textContent, $('.su-rate').textContent, $('.su-coverage').textContent], ['Average over 12h', '~1.6% per hour', 'based on 10h of data']);
+  assert.deepEqual([$('.su-lookback-value').textContent, $('.su-rate').textContent, $('.su-coverage').textContent], ['12h', '~1.6% per hour', 'based on 10h of data']);
+  // The requested twelve hours are drawn even though only ten are covered; the label's title says so.
+  const averaged = $('.su-measure[data-kind="average"]');
+  assert.deepEqual([averaged.textContent, averaged.getAttribute('aria-label')], ['Average over 12h · ~1.6%/h', 'Average over 12h · ~1.6%/h (only 10h of data in that period)']);
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 12);
   assert.equal(restPaths().at(-1), '/usage/limits?hours=168');
   await slide($('.su-lookback input[type=range]'), 1);
-  assert.equal($('.su-lookback-label').textContent, 'Average over 15d');
+  assert.equal($('.su-lookback-value').textContent, '15d');
   assert.equal(restPaths().at(-1), '/usage/limits?hours=360', 'a lookback beyond a week asks for that much history');
   await slide($('.su-lookback input[type=range]'), 9);
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 1, 'the rightmost stop is the shortest lookback');
@@ -370,18 +386,63 @@ test('the lookback slider moves between stops, changes the drain rate and widens
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 720, 'the leftmost stop is the longest lookback');
 });
 
+test('one toggle at the end of the time axis switches the projection between 7 and 30 days', async () => {
+  // A horizon saved by the retired 1d/3d/7d control opens at the 7-day default.
+  mock.ctx.storage.set('usage-preferences', { horizon: 3 });
+  plugin.register(mock.ctx); await render(limitsPage());
+  const toggle = () => $('.su-horizon');
+  const state = () => [toggle().getAttribute('aria-pressed'), toggle().getAttribute('aria-label'), toggle().getAttribute('title'), toggle().querySelector('svg')?.getAttribute('data-icon'), $('.su-pooled').dataset.horizon];
+  const days = () => { const node = $('.su-pooled .su-plot'); return Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100; };
+  assert.deepEqual(state(), ['false', 'Project 30 days ahead', 'Extend the projection to 30 days', 'ArrowBarRight', '7']);
+  assert.equal(toggle().closest('.su-horizon-cell')?.parentElement?.className, 'su-limits-grid', 'the toggle sits in the chart grid beside the axis end');
+  assert.equal(days(), 9.1, 'seven days ahead plus 30% of that before Now');
+  await click(toggle());
+  assert.deepEqual(state(), ['true', 'Project 30 days ahead', 'Shrink the projection back to 7 days', 'ArrowBarLeft', '30']);
+  assert.equal(days(), 39);
+  assert.equal(mock.ctx.storage.get('usage-preferences').horizon, 30);
+  assert.equal(restPaths().at(-1), '/usage/limits?hours=216', 'nine days of past need more than a week of history');
+  await click(toggle());
+  assert.deepEqual([toggle().getAttribute('aria-pressed'), mock.ctx.storage.get('usage-preferences').horizon], ['false', 7]);
+});
+
+test('the averaging period is measured left of Now and cut at the plot edge without a left arrowhead', async () => {
+  plugin.register(mock.ctx); await render(limitsPage());
+  const shape = () => {
+    const span = $('.su-measure[data-kind="average"] .su-measure-span');
+    return { cap: span.dataset.startCap, startArrows: span.querySelectorAll('[data-end="start"]').length, endArrows: span.querySelectorAll('.su-arrow[data-end="end"]').length,
+      endTicks: span.querySelectorAll('.su-measure-tick[data-end="end"]').length, left: parseFloat(span.style.left), right: parseFloat(span.style.left) + parseFloat(span.style.width) };
+  };
+  const nowPct = () => parseFloat($('.su-now').style.left);
+  const near = (a, b) => Math.abs(a - b) < 1e-6;
+  // 7-day horizon: 50.4 hours of past, so 12 hours start 38.4 hours into it.
+  let geometry = shape();
+  assert.deepEqual([geometry.cap, geometry.startArrows, geometry.endArrows, geometry.endTicks], ['true', 2, 1, 1], 'inside the plot both ends get an arrowhead and a tick');
+  assert.ok(near(geometry.left, 38.4 / 218.4 * 100) && near(geometry.right, nowPct()), `12h spans its lookback up to Now (${JSON.stringify(geometry)})`);
+  const label = $('.su-measure[data-kind="average"] .su-measure-text');
+  assert.deepEqual([label.dataset.side, Number(label.dataset.low), near(Number(label.dataset.high), nowPct())], ['left', 0, true], 'the averaging label stays left of Now');
+  await slide($('.su-lookback input[type=range]'), 1);
+  geometry = shape();
+  assert.deepEqual([geometry.cap, geometry.startArrows, geometry.endArrows, geometry.left, near(geometry.right, nowPct())], ['false', 0, 1, 0, true], '15d reaches past the plot: cut at the edge, no left arrowhead or tick');
+  assert.match($('.su-measure[data-kind="average"]').textContent, /^Average over 15d · (~\d+(\.\d)?%\/h|no drain data)$/);
+  await click($('.su-horizon'));
+  assert.equal(shape().cap, 'false', 'nine days of past still start after 15 days back');
+  await slide($('.su-lookback input[type=range]'), 6);
+  geometry = shape();
+  assert.ok(geometry.cap === 'true' && near(geometry.left, (216 - 12) / 936 * 100), '12h sits inside the 30-day chart too');
+});
+
 test('stale, failing and unread accounts keep the normal view', async () => {
-  mock.ctx.storage.set('usage-preferences', { tab: 'limits', provider: 'anthropic' });
+  mock.ctx.storage.set('usage-preferences', { provider: 'anthropic' });
   const now = Date.now() / 1000;
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [{ provider: 'anthropic', label: 'Anthropic', auth: 'ok', history: [], accounts: [
     { id: 'acct-b1', label: 'claude-max', priority: 1, plan: 'max', fetched_at: now - 3 * H, stale: true, error: null, windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: 39, resets_at: now + D }] },
     { id: 'acct-b2', label: 'claude-team', priority: 2, fetched_at: null, stale: false, error: 'HTTP 401 from usage endpoint', windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: null, resets_at: null }] }] }] };
-  plugin.register(mock.ctx); await render(page());
+  plugin.register(mock.ctx); await render(limitsPage());
   assert.equal($('.su-provider .su-count').textContent, '2');
   assert.equal($('.su-capacity').textContent, '/ 100% remaining', 'the account without a reading is left out of the pool');
-  assert.match($('.su-chart-foot').textContent, /1 account without a reading left out of the pool/);
+  assert.match($('.su-chart-notes').textContent, /1 account without a reading left out of the pool/);
   assert.equal($('.su-rate').textContent, 'no drain data');
-  assert.equal($('.su-measure'), null, 'a flat projection never empties');
+  assert.equal($('.su-measure[data-kind="empty"]'), null, 'a flat projection never empties');
   const unknown = $('.su-account[data-account="acct-b2"]');
   assert.equal(unknown.querySelector('.su-window-value').textContent, '—', 'unknown stays a dash, never 0%');
   assert.equal(unknown.querySelector('.su-bar-fill') === null, true);
@@ -390,18 +451,16 @@ test('stale, failing and unread accounts keep the normal view', async () => {
 });
 
 test('a pool with no account readings shows a dash instead of 0%', async () => {
-  mock.ctx.storage.set('usage-preferences', { tab: 'limits' });
   mock.control.usageLimits = { generated_at: 1, sampler: null, providers: [{ provider: 'anthropic', label: 'Anthropic', history: [], accounts: [
     { id: 'x', label: 'x', priority: 1, fetched_at: null, stale: false, error: 'timeout', windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: null, resets_at: null }] }] }] };
-  plugin.register(mock.ctx); await render(page());
+  plugin.register(mock.ctx); await render(limitsPage());
   assert.deepEqual([$('.su-pool').textContent, $('.su-capacity').textContent], ['—', 'no account readings yet']);
   assert.equal($('.su-window-value').textContent, '—');
 });
 
-test('the limits tab reports a missing backend and an empty sampler', async () => {
-  mock.ctx.storage.set('usage-preferences', { tab: 'limits' });
+test('the Limits page reports a missing backend and an empty sampler', async () => {
   mock.control.usageError = 'fixture limits unavailable';
-  plugin.register(mock.ctx); await render(page());
+  plugin.register(mock.ctx); await render(limitsPage());
   assert.equal($('.su-state[role=alert]').textContent, 'Limits unavailable: fixture limits unavailable Retry');
   mock.control.usageError = null; mock.control.usageLimits = { generated_at: 1, sampler: null, providers: [] };
   await click(button('Retry'));

@@ -1147,7 +1147,7 @@ try {
       await page.evaluate(() => { window.hermesT3SidebarHarness.control.archiveError = false; });
     }
 
-    // The Usage footer is a fixed row below the list. Pad each pane by its height so these cases keep testing the same
+    // The Usage/Limits footer is a fixed row below the list. Pad each pane by its height so these cases keep testing the same
     // list heights they did before the footer existed (the 300px case is the shortest list the flex minima fit with an error note).
     const footerHeight = await page.locator('.sf-footer').evaluate(el => el.getBoundingClientRect().height);
     for (const base of [300, 350, 400]) {
@@ -1460,7 +1460,7 @@ try {
   }
   {
     // Card geometry is themeable: a different content/padding/margin must drive heights, gaps, windowing and shelf minimums alike.
-    // 936px = the former 900px plus the 36px Usage footer, so the shelves get the list height this case was written for
+    // 936px = the former 900px plus the 36px Usage/Limits footer, so the shelves get the list height this case was written for
     // (the 20% minimum already sits 1px under the formula, so a shorter list pushes rounding past the 1px tolerance).
     const geometry = await browser.newPage({ viewport: { width: 1200, height: 936 }, deviceScaleFactor: 1 });
     geometry.on('pageerror', error => errors.push(error));
@@ -1516,23 +1516,58 @@ try {
     }, metricSelector);
     await usage.goto(`http://127.0.0.1:${server.address().port}`);
     await usage.waitForSelector('.sf-row');
+    // Footer: T3's utility row of icon-only ghost buttons, one per route, each named by aria-label and a tooltip.
     const footer = await usage.evaluate(() => {
-      const aside = document.querySelector('.sf'), footer = aside.querySelector('.sf-footer'), list = aside.querySelector('.sf-scroll'), button = footer?.querySelector('.sf-utility');
-      if (!footer || !button) return null;
-      const r = el => el.getBoundingClientRect(), label = button.querySelector('span'), glyph = button.querySelector('svg');
+      const aside = document.querySelector('.sf'), footer = aside.querySelector('.sf-footer'), list = aside.querySelector('.sf-scroll'), buttons = [...(footer?.querySelectorAll('.sf-utility') || [])];
+      if (!footer || buttons.length === 0) return null;
+      const r = el => el.getBoundingClientRect(), mid = box => [(box.left + box.right) / 2, (box.top + box.bottom) / 2];
       return { last: aside.lastElementChild === footer, height: r(footer).height, bottomGap: Math.abs(r(footer).bottom - r(aside).bottom), belowList: r(footer).top >= r(list).bottom - 0.5,
-        button: r(button).height, text: button.textContent, title: button.title, iconBeforeLabel: !!glyph && r(glyph).right <= r(label).left, iconCentered: !!glyph && Math.abs((r(glyph).top + r(glyph).bottom) / 2 - (r(label).top + r(label).bottom) / 2) <= 1 };
+        oneRow: buttons.every(button => Math.abs(r(button).top - r(buttons[0]).top) < 0.5) && buttons.every((button, index) => index === 0 || r(button).left >= r(buttons[index - 1]).right),
+        buttons: buttons.map(button => { const glyph = button.querySelector('svg'), [bx, by] = mid(r(button)), [gx, gy] = glyph ? mid(r(glyph)) : [NaN, NaN];
+          return { label: button.getAttribute('aria-label'), text: button.textContent, title: button.title, icon: glyph?.getAttribute('data-icon'), width: r(button).width, height: r(button).height, glyph: glyph ? r(glyph).width : 0, centered: Math.hypot(bx - gx, by - gy) <= 0.5 }; }) };
     });
     console.log(`USAGE FOOTER: ${JSON.stringify(footer)}`);
-    check('Usage footer is a fixed 36px row at the bottom of the pane, below the shelves', footer?.last && footer.height === 36 && footer.bottomGap < 1 && footer.belowList && footer.button === 28);
-    check('Usage footer shows the BarChart3 icon before its label with a tooltip', footer.text === 'Usage' && footer.iconBeforeLabel && footer.iconCentered && footer.title === 'Token usage and subscription limits');
+    check('Footer is a fixed 36px row at the bottom of the pane, below the shelves', footer?.last && footer.height === 36 && footer.bottomGap < 1 && footer.belowList);
+    check('Footer holds two 28px icon-only buttons in one row: Usage (BarChart3) then Limits (Gauge), each with a tooltip', footer?.oneRow && footer.buttons.length === 2
+      && footer.buttons.map(item => [item.label, item.text, item.title, item.icon].join('|')).join() === 'Usage||Token usage|BarChart3,Limits||Subscription limits|Gauge'
+      && footer.buttons.every(item => item.width === 28 && item.height === 28 && item.glyph === 16 && item.centered));
     const usageButton = usage.locator('.sf-footer').getByRole('button', { name: 'Usage', exact: true });
-    const idle = await usageButton.evaluate(el => getComputedStyle(el).backgroundColor);
-    await usageButton.hover();
-    check('Usage footer button gets the hover background', await usageButton.evaluate(el => getComputedStyle(el).backgroundColor) !== idle);
+    const limitsButton = usage.locator('.sf-footer').getByRole('button', { name: 'Limits', exact: true });
+    const idle = await limitsButton.evaluate(el => getComputedStyle(el).backgroundColor);
+    await limitsButton.hover();
+    await usage.waitForSelector('.mock-tip');
+    const footerTip = await usage.evaluate(() => {
+      const r = el => el.getBoundingClientRect(), tips = [...document.querySelectorAll('.mock-tip')], button = r(document.querySelector('.sf-footer .sf-utility[aria-label="Limits"]'));
+      const tip = tips[0] ? r(tips[0]) : null;
+      return { count: tips.length, text: tips[0]?.textContent, above: !!tip && tip.bottom <= button.top, centered: !!tip && tip.left <= (button.left + button.right) / 2 && tip.right >= (button.left + button.right) / 2, inside: !!tip && tip.left >= 0 && tip.top >= 0 };
+    });
+    console.log(`USAGE FOOTER TIP: ${JSON.stringify(footerTip)}`);
+    check('Footer icon hover shows its background and one tooltip above it', await limitsButton.evaluate(el => getComputedStyle(el).backgroundColor) !== idle
+      && footerTip.count === 1 && footerTip.text === 'Subscription limits' && footerTip.above && footerTip.centered && footerTip.inside);
+    {
+      // Close-up of the footer with the Limits tooltip showing: the same harness at 3x, cropped to the sidebar's bottom-left corner.
+      const closeUp = await browser.newPage({ viewport: { width: 1300, height: 1000 }, deviceScaleFactor: 3, timezoneId: 'Europe/Paris' });
+      closeUp.on('pageerror', error => errors.push(error.message));
+      await closeUp.emulateMedia({ reducedMotion: 'reduce' });
+      await closeUp.clock.install({ time: new Date('2026-10-28T15:00:00+01:00') });
+      await closeUp.goto(`http://127.0.0.1:${server.address().port}`);
+      await closeUp.waitForSelector('.sf-row');
+      await closeUp.locator('.sf-footer').getByRole('button', { name: 'Limits', exact: true }).hover();
+      await closeUp.waitForSelector('.mock-tip');
+      const pane = await closeUp.locator('.harness-sidebar').boundingBox();
+      await closeUp.screenshot({ path: join(usageDir, 'v3-footer.png'), clip: { x: pane.x, y: pane.y + pane.height - 84, width: 160, height: 84 } });
+      await closeUp.close();
+    }
     await usageButton.click();
-    check('Usage footer navigates to /t3sidebar-usage', await usage.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'navigate' && call[1] === '/t3sidebar-usage')));
+    check('Usage footer button navigates to /t3sidebar-usage', await usage.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'navigate' && call[1] === '/t3sidebar-usage')));
     await usage.waitForSelector('.su-chart[data-metric="user_messages"] svg g[data-series]');
+    {
+      const state = await usage.evaluate(() => ({ paths: window.hermesT3SidebarHarness.calls.filter(call => call[0] === 'rest' && call[1].startsWith('/usage/')).map(call => call[1].split('?')[0]),
+        title: document.querySelector('.harness-route .harness-tabs')?.firstChild?.textContent, view: document.querySelector('.su')?.dataset.view, limits: !!document.querySelector('.su-pooled, .su-providers'),
+        buttons: [...document.querySelectorAll('.su-header button')].map(button => button.textContent || button.getAttribute('aria-label')) }));
+      check('Usage route shows only usage content and fetches only /usage/history', state.title === 'Usage' && state.view === 'usage' && !state.limits && state.paths.length > 0 && state.paths.every(path => path === '/usage/history')
+        && !state.buttons.includes('Limits') && !state.buttons.includes('Usage'));
+    }
     const usageLayout = () => usage.evaluate(() => {
       const root = document.querySelector('.su'), charts = [...root.querySelectorAll('.su-chart')], r = el => el.getBoundingClientRect();
       const plots = charts.map(chart => r(chart.querySelector('.su-plot')));
@@ -1599,8 +1634,19 @@ try {
       await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-usage-30d.png') });
     }
     await usage.getByRole('button', { name: '7d', exact: true }).click();
-    await usage.getByRole('button', { name: 'Limits', exact: true }).click();
+    const usageRequests = await usage.evaluate(() => window.hermesT3SidebarHarness.calls.filter(call => call[0] === 'rest').length);
+    await limitsButton.click();
     await usage.waitForSelector('.su-pooled .su-line.su-projected');
+    {
+      const state = await usage.evaluate(count => ({ paths: window.hermesT3SidebarHarness.calls.filter(call => call[0] === 'rest').slice(count).map(call => call[1].split('?')[0]).filter(path => path.startsWith('/usage/')),
+        navigated: window.hermesT3SidebarHarness.calls.some(call => call[0] === 'navigate' && call[1] === '/t3sidebar-limits'),
+        title: document.querySelector('.harness-route .harness-tabs')?.firstChild?.textContent, view: document.querySelector('.su')?.dataset.view, usageCharts: document.querySelectorAll('.su-chart[data-metric]').length,
+        legend: document.querySelectorAll('.su-pooled .su-legend').length, segmented: [...document.querySelectorAll('.su-pooled [aria-pressed]')].map(button => button.textContent).filter(Boolean) }), usageRequests);
+      console.log(`USAGE LIMITS ROUTE: ${JSON.stringify(state)}`);
+      check('Limits footer button opens /t3sidebar-limits, which shows only limits and fetches only /usage/limits', state.navigated && state.title === 'Limits' && state.view === 'limits' && state.usageCharts === 0
+        && state.paths.length > 0 && state.paths.every(path => path === '/usage/limits'));
+      check('Limits chart has no Remaining/Projected legend and no 1d/3d/7d horizon control', state.legend === 0 && !state.segmented.some(label => /^\d+d$/.test(label)));
+    }
     const limits = await usage.evaluate(() => {
       const root = document.querySelector('.su'), r = el => el.getBoundingClientRect(), plot = r(document.querySelector('.su-pooled .su-plot'));
       const now = r(document.querySelector('.su-now')), past = document.querySelector('.su-line.su-past'), projected = document.querySelector('.su-line.su-projected');
@@ -1611,27 +1657,72 @@ try {
     console.log(`USAGE LIMITS: ${JSON.stringify(limits)}`);
     check('Limits tab draws the past pool up to Now and a dashed projection to the horizon', limits.nowInside && limits.pastEndsAtNow && limits.projectedStartsAtNow && limits.projectedReachesEnd && limits.dashed);
     check('Limits tab per-account bars keep pace ticks inside and do not overflow', limits.paces && limits.accounts === 2 && limits.overflowX <= 0);
+    // Measurement row under the plot: the averaging period left of Now and the time to empty right of it, on one row.
     const measure = () => usage.evaluate(() => {
-      const r = el => el.getBoundingClientRect(), span = document.querySelector('.su-measure-span'), dot = document.querySelector('.su-empty-dot');
-      if (!span || !dot) return null;
-      const box = r(span), mark = r(dot), plot = r(document.querySelector('.su-pooled .su-plot')), text = document.querySelector('.su-measure-text'), arrows = [...span.querySelectorAll('.su-arrow')].map(r), ticks = [...span.querySelectorAll('.su-measure-tick')].map(r);
-      return { left: box.left, nowX: r(document.querySelector('.su-pooled .su-now')).left, right: box.right, emptyX: mark.left + mark.width / 2, emptyOnFloor: Math.abs(mark.top + mark.height / 2 - plot.bottom) <= 1,
-        arrows: arrows.length === 2 && Math.abs(arrows[0].left - box.left) <= 0.5 && Math.abs(arrows[1].right - box.right) <= 0.5 && arrows.every(arrow => arrow.width >= 5 && arrow.height >= 7),
-        ticks: ticks.length === 2 && Math.abs(ticks[0].left - box.left) <= 1 && Math.abs(ticks[1].right - box.right) <= 1, belowPlot: box.top > plot.bottom,
-        text: text.textContent, textInside: r(text).left >= plot.left - 0.5 && r(text).right <= plot.right + 0.5 && r(text).bottom <= box.top + 1 };
+      const r = el => el.getBoundingClientRect(), plotNode = document.querySelector('.su-pooled .su-plot'), plot = r(plotNode), nowX = r(document.querySelector('.su-pooled .su-now')).left;
+      const start = Number(plotNode.dataset.start), end = Number(plotNode.dataset.end), xAt = t => plot.left + (t - start) / (end - start) * plot.width;
+      const part = kind => {
+        const node = document.querySelector(`.su-measure[data-kind="${kind}"]`);
+        if (!node) return null;
+        const span = node.querySelector('.su-measure-span'), box = r(span), text = node.querySelector('.su-measure-text'), label = r(text);
+        const arrows = Object.fromEntries([...span.querySelectorAll('.su-arrow')].map(el => [el.dataset.end, r(el)])), ticks = Object.fromEntries([...span.querySelectorAll('.su-measure-tick')].map(el => [el.dataset.end, r(el)]));
+        // A span narrower than its arrowheads draws them outside, their tips still on the span ends.
+        const tight = span.dataset.tight === 'true', tip = (end, arrow) => end === 'start' ? (tight ? arrow.right : arrow.left) : (tight ? arrow.left : arrow.right);
+        return { left: box.left, right: box.right, top: box.top, tight, arrows: Object.keys(arrows).sort().join(), ticks: Object.keys(ticks).sort().join(),
+          arrowsAtEnds: tight === box.width < 16 && Object.entries(arrows).every(([end, arrow]) => arrow.width >= 5 && arrow.height >= 7 && Math.abs(tip(end, arrow) - (end === 'start' ? box.left : box.right)) <= 0.5),
+          ticksAtEnds: Object.entries(ticks).every(([end, tick]) => Math.abs((end === 'start' ? tick.left : tick.right) - (end === 'start' ? box.left : box.right)) <= 1),
+          text: text.textContent, label: { left: label.left, right: label.right, top: label.top, bottom: label.bottom }, full: text.scrollWidth <= text.clientWidth + 0.5, aboveLine: label.bottom <= box.top + 1 };
+      };
+      const dot = document.querySelector('.su-empty-dot'), mark = dot ? r(dot) : null, lookback = Number(document.querySelector('.su-lookback input[type=range]').getAttribute('aria-valuetext').replace(/[hd]$/, '')) * (/d$/.test(document.querySelector('.su-lookback input[type=range]').getAttribute('aria-valuetext')) ? 86400 : 3600);
+      const nowT = start + (nowX - plot.left) / plot.width * (end - start);
+      const slider = r(document.querySelector('.su-lookback')), row = r(document.querySelector('.su-measures'));
+      return { plotLeft: plot.left, plotRight: plot.right, plotBottom: plot.bottom, nowX, lookbackX: xAt(nowT - lookback), emptyX: mark ? mark.left + mark.width / 2 : null, emptyOnFloor: mark ? Math.abs(mark.top + mark.height / 2 - plot.bottom) <= 1 : null,
+        average: part('average'), empty: part('empty'), rowTop: row.top, rowBottom: row.bottom, sliderTop: slider.top, sliderLeft: slider.left };
     });
+    // The averaging span reaches from max(plot edge, Now − lookback) to Now; the left arrowhead and tick exist only when its start is on the plot.
+    const averageOk = geometry => {
+      const average = geometry?.average;
+      if (!average) return false;
+      const clipped = geometry.lookbackX < geometry.plotLeft;
+      return Math.abs(average.right - geometry.nowX) <= 1 && Math.abs(average.left - (clipped ? geometry.plotLeft : geometry.lookbackX)) <= 1 && average.arrowsAtEnds && average.ticksAtEnds
+        && average.arrows === (clipped ? 'end' : 'end,start') && average.ticks === (clipped ? 'end' : 'end,start') && average.top > geometry.plotBottom;
+    };
+    // Both labels sit inside the plot on their own side of Now, fully shown, apart from each other and above the slider row.
+    const labelsOk = (geometry, { full = true } = {}) => {
+      const { average, empty } = geometry;
+      const separate = !average || !empty || average.label.right + 4 <= empty.label.left;
+      return separate && [average, empty].filter(Boolean).every(part => (part.full || !full) && part.aboveLine && part.label.left >= geometry.plotLeft - 0.5 && part.label.right <= geometry.plotRight + 0.5 && part.label.bottom <= geometry.sliderTop)
+        && (!average || average.label.right <= geometry.nowX) && (!empty || empty.label.left >= geometry.nowX) && geometry.sliderTop >= geometry.rowBottom - 0.5;
+    };
     const rateText = () => usage.locator('.su-rate').textContent();
+    const lookbackValue = () => usage.locator('.su-lookback-value').textContent();
     {
       const geometry = await measure();
       const plot = await usage.evaluate(() => { const node = document.querySelector('.su-pooled .su-plot'); return [Number(node.dataset.start), Number(node.dataset.end)]; });
       const axis = await axisState('.su-pooled');
       const midnights = await pageMidnights(...plot);
       console.log(`USAGE LIMITS MEASURE: ${JSON.stringify({ geometry, axis, midnights, rate: await rateText() })}`);
-      check('Limits time-to-empty arrow spans Now to the first projected zero below the plot (within 1px)', geometry && Math.abs(geometry.left - geometry.nowX) <= 1 && Math.abs(geometry.right - geometry.emptyX) <= 1 && geometry.emptyOnFloor && geometry.arrows && geometry.ticks && geometry.belowPlot);
-      check('Limits time-to-empty text is centered under the arrow, unclipped and dated', geometry && geometry.textInside && /^Empty in (\d+d \d+h|\d+h \d+m) · \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(geometry.text));
+      const empty = geometry.empty;
+      check('Limits time-to-empty arrow spans Now to the first projected zero below the plot (within 1px)', empty && Math.abs(empty.left - geometry.nowX) <= 1 && Math.abs(empty.right - geometry.emptyX) <= 1 && geometry.emptyOnFloor
+        && empty.arrows === 'end,start' && empty.ticks === 'end,start' && empty.arrowsAtEnds && empty.ticksAtEnds && empty.top > geometry.plotBottom);
+      check('Limits time-to-empty text is unclipped and dated', empty && /^Empty in (\d+d \d+h|\d+h \d+m) · \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(empty.text));
+      check('Limits 12h averaging measurement spans Now − 12h to Now on the same row, with arrowheads and ticks at both ends', averageOk(geometry) && geometry.lookbackX > geometry.plotLeft
+        && Math.abs(geometry.average.top - empty.top) <= 0.5 && /^Average over 12h · ~\d+(\.\d)?%\/h$/.test(geometry.average.text));
+      check('Limits measurement labels stay on their side of Now, apart, inside the plot and above the slider', labelsOk(geometry));
       check('Limits draws one gridline per local midnight and names each month once', axis.dayLines === midnights && midnights >= 9 && monthsOnChange(axis.labels) && !axis.overlap);
     }
-    check('Limits lookback slider defaults to 12h', await usage.locator('.su-lookback-label').textContent() === 'Average over 12h');
+    {
+      // Bottom-left control row: "Projections based on", the slider, then its value.
+      const row = await usage.evaluate(() => {
+        const r = el => el.getBoundingClientRect(), foot = document.querySelector('.su-pooled .su-chart-foot'), lookback = foot?.querySelector('.su-lookback'), chart = r(document.querySelector('.su-pooled'));
+        const label = r(lookback.querySelector('.su-lookback-label')), range = r(lookback.querySelector('input[type=range]')), value = r(lookback.querySelector('.su-lookback-value')), plot = r(document.querySelector('.su-pooled .su-plot'));
+        const mid = box => (box.top + box.bottom) / 2;
+        return { first: foot.firstElementChild === lookback, belowPlot: r(lookback).top > plot.bottom, left: r(lookback).left - chart.left, ordered: label.right <= range.left && range.right <= value.left,
+          aligned: Math.abs(mid(label) - mid(range)) <= 1.5 && Math.abs(mid(value) - mid(range)) <= 1.5, label: lookback.querySelector('.su-lookback-label').textContent, value: lookback.querySelector('.su-lookback-value').textContent };
+      });
+      console.log(`USAGE LOOKBACK ROW: ${JSON.stringify(row)}`);
+      check('Limits lookback control sits below the chart at the bottom-left: label, slider, then the value', row.first && row.belowPlot && row.left <= 0.5 && row.ordered && row.aligned && row.label === 'Projections based on' && row.value === '12h');
+    }
     // Pixels along the slider's middle row: the track left of the thumb stays unfilled and the part to its right carries the fill
     // color (the thumb's own color), since the filled part is the averaged period reaching back from now.
     const sliderFill = async () => {
@@ -1653,13 +1744,13 @@ try {
       check('Limits lookback slider runs longest-first and fills the track to the right of the thumb', await usage.locator('.su-lookback input[type=range]').inputValue() === '6' && fill.rightFilled === true && fill.leftFilled === false);
       const range = usage.locator('.su-lookback input[type=range]');
       await range.focus(); await usage.keyboard.press('ArrowRight');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-label')?.textContent === 'Average over 5h');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '5h');
       const right = await range.getAttribute('aria-valuetext');
       await usage.keyboard.press('ArrowLeft'); await usage.keyboard.press('ArrowLeft');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-label')?.textContent === 'Average over 1d');
-      check('Limits lookback arrow keys follow the visual direction (Right = shorter) with the stop as aria-valuetext', right === '5h' && await range.getAttribute('aria-valuetext') === '1d');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '1d');
+      check('Limits lookback arrow keys follow the visual direction (Right = shorter) with the stop as aria-valuetext', right === '5h' && await range.getAttribute('aria-valuetext') === '1d' && await range.getAttribute('aria-label') === 'Projections based on');
       await usage.keyboard.press('ArrowRight');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-label')?.textContent === 'Average over 12h');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '12h');
       await range.blur();
     }
     const pooledPlot = await usage.locator('.su-pooled .su-plot').boundingBox();
@@ -1667,38 +1758,89 @@ try {
     check('Limits hover reports a projected value with its local time', /^\w{3} \d{1,2}:\d{2}.* · \d+% left \(projected\)$/.test(await usage.locator('.su-pooled .su-tip').textContent()));
     await usage.mouse.move(5, 5);
     await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-limits.png') });
-    await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-limits-12h.png') });
+    await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v3-limits-7d-12h.png') });
     {
-      const before = { rate: await rateText(), path: await usage.locator('.su-line.su-projected').getAttribute('d'), empty: (await measure())?.right };
+      const before = { rate: await rateText(), path: await usage.locator('.su-line.su-projected').getAttribute('d'), empty: (await measure()).empty?.right };
       // Reversed slider: position 3 from the left is 3d (30d, 15d, 7d, 3d, …, 1h).
       await usage.locator('.su-lookback input[type=range]').fill('3');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-label')?.textContent === 'Average over 3d');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '3d');
       const after = { rate: await rateText(), path: await usage.locator('.su-line.su-projected').getAttribute('d'), geometry: await measure() };
       console.log(`USAGE LIMITS 3D: ${JSON.stringify({ before, after })}`);
-      check('Limits lookback slider changes the drain rate text and the projection', after.rate !== before.rate && /^~\d+(\.\d)?% per hour$/.test(after.rate) && after.path !== before.path && after.geometry && Math.abs(after.geometry.right - before.empty) > 1);
-      check('Limits arrow still spans Now to the moved zero crossing after the slider change', Math.abs(after.geometry.left - after.geometry.nowX) <= 1 && Math.abs(after.geometry.right - after.geometry.emptyX) <= 1 && after.geometry.textInside);
+      check('Limits lookback slider changes the drain rate text and the projection', after.rate !== before.rate && /^~\d+(\.\d)?% per hour$/.test(after.rate) && after.path !== before.path && after.geometry.empty && Math.abs(after.geometry.empty.right - before.empty) > 1);
+      check('Limits arrows still span Now to the moved zero crossing and Now − 3d to Now after the slider change', Math.abs(after.geometry.empty.left - after.geometry.nowX) <= 1 && Math.abs(after.geometry.empty.right - after.geometry.emptyX) <= 1
+        && averageOk(after.geometry) && labelsOk(after.geometry));
       check('Limits lookback persists in the usage preferences as hours, not the slider position', await usage.evaluate(() => JSON.parse(localStorage.getItem('hermes.plugin.hermes-t3sidebar.usage-preferences')).lookback) === 72);
       const fill3d = await sliderFill();
       check('Limits lookback fill still starts at the moved thumb and runs to the right end', fill3d.rightFilled === true && fill3d.leftFilled === false);
-      // fill() leaves the slider focused; its focus ring is not part of the resting design.
-      await usage.locator('.su-lookback input[type=range]').blur();
-      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-limits-3d.png') });
+      // 15 days reach back past the 2.1 days of past on the chart: the averaging line is cut at the plot edge, without a left arrowhead.
       await usage.locator('.su-lookback input[type=range]').fill('1');
       await usage.waitForFunction(() => /based on \d+d of data/.test(document.querySelector('.su-coverage')?.textContent || ''));
       check('Limits lookback beyond the history requests more and says how much data it used', await usage.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'rest' && call[1] === '/usage/limits?hours=360')));
+      const clipped = await measure();
+      console.log(`USAGE LIMITS 15D: ${JSON.stringify(clipped)}`);
+      check('Limits 15d averaging line is clipped at the plot edge with no left arrowhead or tick', clipped.lookbackX < clipped.plotLeft && averageOk(clipped) && clipped.average.arrows === 'end'
+        && /^Average over 15d · ~\d+(\.\d)?%\/h$/.test(clipped.average.text) && labelsOk(clipped));
+      // fill() leaves the slider focused; its focus ring is not part of the resting design.
+      await usage.locator('.su-lookback input[type=range]').blur();
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v3-limits-15d.png') });
       await usage.locator('.su-lookback input[type=range]').fill('6');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-label')?.textContent === 'Average over 12h');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '12h');
+      await usage.locator('.su-lookback input[type=range]').blur();
+    }
+    {
+      // Horizon toggle: one icon button just right of the plot at the x-axis end; 7 days by default, 30 days when pressed.
+      const horizon = usage.locator('.su-pooled .su-horizon');
+      const toggleState = () => usage.evaluate(() => {
+        const r = el => el.getBoundingClientRect(), button = document.querySelector('.su-pooled .su-horizon'), box = r(button), plotNode = document.querySelector('.su-pooled .su-plot'), plot = r(plotNode), axis = r(document.querySelector('.su-pooled .su-xaxis'));
+        const projected = r(document.querySelector('.su-line.su-projected'));
+        return { pressed: button.getAttribute('aria-pressed'), name: button.getAttribute('aria-label'), icon: button.querySelector('svg')?.getAttribute('data-icon'), rightOfPlot: box.left >= plot.right && box.left - plot.right <= 8,
+          atAxis: box.top <= axis.top + 2 && box.bottom >= axis.bottom - 2, inside: box.right <= r(document.querySelector('.su')).right, days: Math.round((Number(plotNode.dataset.end) - Number(plotNode.dataset.start)) / 864) / 100,
+          projectedReachesEnd: Math.abs(projected.right - plot.right) <= 2 };
+      });
+      const initial = await toggleState();
+      await horizon.hover();
+      await usage.waitForSelector('.mock-tip');
+      const tip = await usage.locator('.mock-tip').textContent();
+      console.log(`USAGE HORIZON 7D: ${JSON.stringify({ initial, tip })}`);
+      check('Limits horizon toggle sits at the end of the x axis, defaults to 7 days and offers to extend to 30', initial.pressed === 'false' && initial.name === 'Project 30 days ahead' && initial.icon === 'ArrowBarRight'
+        && initial.rightOfPlot && initial.atAxis && initial.inside && initial.days === 9.1 && tip === 'Extend the projection to 30 days');
+      await horizon.click();
+      await usage.waitForFunction(() => document.querySelector('.su-pooled')?.dataset.horizon === '30');
+      await usage.waitForFunction(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'rest' && call[1] === '/usage/limits?hours=216'));
+      await usage.mouse.move(5, 5);
+      const extended = await toggleState(), geometry = await measure(), axis = await axisState('.su-pooled');
+      const plot = await usage.evaluate(() => { const node = document.querySelector('.su-pooled .su-plot'); return [Number(node.dataset.start), Number(node.dataset.end)]; });
+      const midnights = await pageMidnights(...plot);
+      console.log(`USAGE HORIZON 30D: ${JSON.stringify({ extended, geometry, axis, midnights })}`);
+      check('Limits horizon toggle extends the axis to 30 days, shows the shrink arrow and persists', extended.pressed === 'true' && extended.icon === 'ArrowBarLeft' && extended.days === 39 && extended.projectedReachesEnd
+        && extended.rightOfPlot && extended.atAxis && await usage.evaluate(() => JSON.parse(localStorage.getItem('hermes.plugin.hermes-t3sidebar.usage-preferences')).horizon) === 30);
+      check('Limits 30-day chart keeps one gridline per midnight, readable labels and both measurements', axis.dayLines === midnights && midnights >= 38 && monthsOnChange(axis.labels) && !axis.overlap
+        && averageOk(geometry) && geometry.lookbackX > geometry.plotLeft && labelsOk(geometry));
+      check('Limits 30-day 12h averaging span is too short for inner arrowheads, so they point in from outside', geometry.average.tight && geometry.average.right - geometry.average.left < 16);
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v3-limits-30d.png') });
+      await horizon.click();
+      await usage.waitForFunction(() => document.querySelector('.su-pooled')?.dataset.horizon === '7');
+      await usage.mouse.move(5, 5);
     }
     await usage.locator('.su-provider', { hasText: 'Anthropic' }).click();
     {
       const state = await usage.evaluate(() => ({ text: document.querySelector('[data-auth="logged_out"] .su-logged-out')?.textContent, chart: !!document.querySelector('.su-pooled'), tab: document.querySelector('.su-provider[aria-pressed="true"]')?.textContent }));
       check('Logged-out Anthropic shows a muted sign-in state without a chart', state.text?.startsWith('Logged out in Hermes — sign in to track limits') && !state.chart && state.tab === 'Anthropiclogged out');
-      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-limits-logged-out.png') });
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v3-limits-logged-out.png') });
     }
     await usage.locator('.su-provider', { hasText: 'OpenAI Codex' }).click();
-    // A narrow workspace keeps the page usable without horizontal scrolling.
+    // A narrow workspace keeps both pages usable without horizontal scrolling.
     await usage.setViewportSize({ width: 900, height: 1000 });
-    await usage.locator('.su-header').getByRole('button', { name: 'Usage', exact: true }).click();
+    await usage.waitForSelector('.su-pooled .su-measures');
+    // Labels are re-clamped by a ResizeObserver, whose callback runs with the next frame.
+    await usage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    {
+      const geometry = await measure(), overflow = await usage.evaluate(() => { const root = document.querySelector('.su'); return root.scrollWidth - root.clientWidth; });
+      console.log(`USAGE LIMITS NARROW: ${JSON.stringify({ geometry, overflow })}`);
+      // Too narrow for the whole averaging label left of Now: it is ellipsized (full text in its title) rather than crossing Now.
+      check('Limits page fits a narrow workspace: no overflow and the measurement labels still stay on their side of Now', overflow <= 0 && averageOk(geometry) && labelsOk(geometry, { full: false }));
+    }
+    await usageButton.click();
     await usage.waitForSelector('.su-chart[data-metric="tokens"]');
     layout = await usageLayout();
     check('Usage page fits a narrow workspace without horizontal overflow', layout.overflowX <= 0 && layout.inside && layout.aligned);

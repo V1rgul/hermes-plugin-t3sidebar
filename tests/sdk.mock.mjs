@@ -388,8 +388,35 @@ export function syntheticUsageLimits(hours = 168) {
 }
 export function Button({ variant, size, children, ...props }) { return h('button', props, children); }
 export const ROUTES_AREA = 'routes';
-// Public Tip wraps one trigger; the adapter exposes its label as a native title instead of a Radix tooltip.
-export function Tip({ label, children }) { return label ? React.cloneElement(children, { title: children.props.title ?? label }) : children; }
+// Public Tip wraps one trigger. The adapter keeps the label as a native title (scalar assertions read it) and, like Desktop's
+// Radix tip, shows a bubble beside the trigger while it is hovered or keyboard-focused, so browser captures can show a tooltip.
+// A pointer press closes it, as Radix does.
+export function Tip({ label, side = 'top', children }) {
+  const [anchor, setAnchor] = useState(null);
+  if (!label) return children;
+  const show = event => setAnchor(event.currentTarget.getBoundingClientRect());
+  const hide = () => setAnchor(null);
+  const keyboardFocus = event => { try { if (event.currentTarget.matches(':focus-visible')) show(event); } catch (_) { /* Selector unsupported: no bubble. */ } };
+  const chain = (name, handler) => event => { children.props[name]?.(event); handler(event); };
+  const trigger = React.cloneElement(children, { title: children.props.title ?? label, onPointerEnter: chain('onPointerEnter', show), onPointerLeave: chain('onPointerLeave', hide),
+    onPointerDown: chain('onPointerDown', hide), onFocus: chain('onFocus', keyboardFocus), onBlur: chain('onBlur', hide) });
+  const position = side === 'bottom' ? { left: anchor?.left + anchor?.width / 2, top: anchor?.bottom + 5 } : side === 'left' ? { left: anchor?.left - 5, top: anchor?.top + anchor?.height / 2 }
+    : side === 'right' ? { left: anchor?.right + 5, top: anchor?.top + anchor?.height / 2 } : { left: anchor?.left + anchor?.width / 2, top: anchor?.top - 5 };
+  return h(React.Fragment, null, trigger, anchor ? createPortal(h(TipBubble, { side, position }, label), document.body) : null);
+}
+// Like Radix's collision handling (Desktop passes collisionPadding 12), the bubble shifts back inside the viewport while its arrow
+// keeps pointing at the trigger.
+function TipBubble({ side, position, children }) {
+  const node = useRef(null);
+  useLayoutEffect(() => {
+    const bubble = node.current;
+    bubble.style.marginLeft = '0px';
+    const box = bubble.getBoundingClientRect(), pad = 12;
+    const shift = box.left < pad ? pad - box.left : box.right > innerWidth - pad ? innerWidth - pad - box.right : 0;
+    bubble.style.marginLeft = `${shift}px`; bubble.style.setProperty('--mock-tip-arrow', `calc(50% - ${shift}px)`);
+  });
+  return h('div', { ref: node, role: 'tooltip', className: 'mock-tip', 'data-side': side, style: { position: 'fixed', ...position } }, children);
+}
 // Public SegmentedControl contract: pressed state on plain buttons, string ids.
 export function SegmentedControl({ options, value, onChange, className, disabled = false }) {
   return h('div', { className: `mock-segmented ${className || ''}`.trim() }, options.map(({ id, label }) => h('button', { key: id, type: 'button', 'aria-pressed': value === id, disabled, onClick: () => onChange(id) }, label)));

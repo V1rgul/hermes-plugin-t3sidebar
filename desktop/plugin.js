@@ -928,7 +928,7 @@ const CSS = `
 /* Empty-state text waits for leaving cards to collapse instead of appearing under them (visibility only, no fade). */
 @keyframes sf-after-exit{from{visibility:hidden}}.sf-empty{animation:sf-after-exit .22s step-end}
 /* T3's sidebar utility row: fixed height below the list, so shelves keep their flex allocation within a shorter column. */
-.sf-footer{display:flex;align-items:center;gap:2px;flex-shrink:0;height:36px;padding:4px 6px}.sf .sf-footer .sf-utility{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-secondary);font-size:12px}.sf .sf-footer .sf-utility:hover,.sf .sf-footer .sf-utility:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-footer .sf-utility svg{width:14px;height:14px;flex-shrink:0}
+.sf-footer{display:flex;align-items:center;gap:2px;flex-shrink:0;height:36px;padding:4px 6px}.sf .sf-footer .sf-utility{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-secondary)}.sf .sf-footer .sf-utility:hover,.sf .sf-footer .sf-utility:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-footer .sf-utility svg{width:16px;height:16px;flex-shrink:0}
 @media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
 // Monochrome 24x24 provider marks: LobeHub Icons, @lobehub/icons-static-svg 1.95.1 (MIT, Copyright (c) 2023 LobeHub; notice in
@@ -1003,8 +1003,12 @@ function statusIcon(status, glyph = status) {
   return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
     STATUS_ICONS[glyph].map(d => h('path', { key: d, d })));
 }
-// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour and folder glyphs.
+// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder,
+// gauge and arrow-bar glyphs.
 const BUNDLED_ICONS = {
+  Gauge: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M13.41 10.59l2.59 -2.59', 'M7 12a5 5 0 0 1 5 -5'],
+  ArrowBarRight: ['M20 12l-10 0', 'M20 12l-4 4', 'M20 12l-4 -4', 'M4 4l0 16'],
+  ArrowBarLeft: ['M4 12l10 0', 'M4 12l4 4', 'M4 12l4 -4', 'M20 4l0 16'],
   ClockHour1: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 7v5', 'M12 12l2 -3'],
   ClockHour3: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 12h3.5', 'M12 7v5'],
   CalendarTime: ['M11.795 21h-6.795a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v4', 'M14 18a4 4 0 1 0 8 0a4 4 0 1 0 -8 0', 'M15 3v4', 'M7 3v4', 'M3 11h16', 'M18 16.496v1.504l1 1'],
@@ -1917,19 +1921,28 @@ function ScopedSidebar({ ctx, controller, scope }) {
       onConfirm: async () => { controller.check(scope); await controller.delete(scope, deleteTarget); controller.check(scope); } }) : null);
 }
 // ───────────────────────────── Usage page ─────────────────────────────
-// Everything from here to the default export belongs to the /t3sidebar-usage page and the sidebar's Usage footer button.
-// The backend contract (GET /usage/history and /usage/limits) is frozen in the plugin's usage design notes.
+// Everything from here to the default export belongs to the /t3sidebar-usage and /t3sidebar-limits pages and the sidebar footer
+// buttons that open them. The backend contract (GET /usage/history and /usage/limits) is frozen in the plugin's usage design notes.
 export const USAGE_ROUTE = '/t3sidebar-usage';
+export const LIMITS_ROUTE = '/t3sidebar-limits';
 const USAGE_ROOT = 'hermes-t3sidebar-usage';
 const USAGE_PREFERENCES_KEY = 'usage-preferences';
 const HOUR_S = 3600, DAY_S = 86400;
 // Lookback stops (hours) for the projection's drain average; the slider moves between these discrete stops.
 export const LOOKBACK_STOPS = Object.freeze([1, 2, 5, 12, 24, 48, 72, 168, 360, 720]);
 export const lookbackLabel = hours => hours % 24 === 0 ? `${hours / 24}d` : `${hours}h`;
-// The Limits history must cover both the chart's past (a week) and the drain lookback, within the backend's 840-hour cap.
-export const limitsHistoryHours = lookback => Math.min(840, Math.max(168, Number.isFinite(lookback) ? lookback : 0));
-export const USAGE_DEFAULTS = Object.freeze({ tab: 'usage', days: 7, split: 'provider', mode: 'stacked', horizon: 7, lookback: 12, window: 'weekly', provider: null });
-const USAGE_CHOICES = { tab: ['usage', 'limits'], days: [1, 7, 30, 90], split: ['provider', 'model'], mode: ['stacked', 'independent'], horizon: [1, 3, 7], lookback: LOOKBACK_STOPS };
+// Projection horizons in days. Every provider window lasts at least a week, so a shorter horizon would never show a reset.
+export const HORIZON_DAYS = Object.freeze([7, 30]);
+// The Limits chart shows some past before Now: 30% of the horizon, at least six hours.
+export const limitsPastSeconds = horizonS => Math.max(6 * HOUR_S, horizonS * 0.3);
+// The Limits history must cover the chart's past (at least a week) and the drain lookback, within the backend's 840-hour cap.
+export function limitsHistoryHours(lookback, horizonDays = HORIZON_DAYS[0]) {
+  const past = Math.ceil(limitsPastSeconds((Number.isFinite(horizonDays) ? horizonDays : 0) * DAY_S) / HOUR_S);
+  return Math.min(840, Math.max(168, past, Number.isFinite(lookback) ? lookback : 0));
+}
+export const USAGE_DEFAULTS = Object.freeze({ days: 7, split: 'provider', mode: 'stacked', horizon: 7, lookback: 12, window: 'weekly', provider: null });
+// Unknown keys (such as the former Usage|Limits `tab`) are dropped, and retired horizons (1d, 3d) fall back to the 7-day default.
+const USAGE_CHOICES = { days: [1, 7, 30, 90], split: ['provider', 'model'], mode: ['stacked', 'independent'], horizon: HORIZON_DAYS, lookback: LOOKBACK_STOPS };
 export function validUsagePreferences(value) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const result = { ...USAGE_DEFAULTS };
@@ -1944,11 +1957,21 @@ export function readUsagePreferences(storage) {
 export function writeUsagePreferences(storage, value) {
   try { storage.set(USAGE_PREFERENCES_KEY, validUsagePreferences(value)); return true; } catch (_) { return false; }
 }
-// T3 Code's sidebar utility row: a fixed-height footer below the shelves, so the flex shelf allocation only sees a shorter list.
+// T3 Code's SidebarUtilityItem: icon-only ghost buttons with a tooltip, in one fixed-height footer row below the shelves, so the
+// flex shelf allocation only sees a shorter list.
+const UTILITY_LINKS = [
+  { route: USAGE_ROUTE, label: 'Usage', tip: 'Token usage', icon: 'BarChart3', glyph: '▥' },
+  { route: LIMITS_ROUTE, label: 'Limits', tip: 'Subscription limits', icon: 'Gauge', glyph: '◔' }
+];
+function UtilityLink({ link }) {
+  const open = () => { try { host.navigate(link.route); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ } };
+  const tip = typeof sdk.Tip === 'function';
+  // Without the SDK tooltip, a native title still names the icon on hover.
+  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-sm', className: 'sf-utility', 'aria-label': link.label, title: tip ? undefined : link.tip, 'data-route': link.route, onClick: open }, icon(link.icon, link.glyph));
+  return tip ? h(sdk.Tip, { label: link.tip, side: 'top' }, button) : button;
+}
 function UsageFooter() {
-  const open = () => { try { host.navigate(USAGE_ROUTE); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ } };
-  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-utility', onClick: open }, icon('BarChart3', '▥'), h('span', null, 'Usage'));
-  return h('footer', { className: 'sf-footer' }, typeof sdk.Tip === 'function' ? h(sdk.Tip, { label: 'Token usage and subscription limits', side: 'top' }, button) : button);
+  return h('footer', { className: 'sf-footer' }, UTILITY_LINKS.map(link => h(UtilityLink, { key: link.route, link })));
 }
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 const finiteOrNull = value => Number.isFinite(value) ? value : null;
@@ -2271,13 +2294,14 @@ async function readUsage(ctx, scope, path, validate) {
   if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load usage.');
   return validate(value);
 }
-export function UsagePage({ ctx }) {
+// One component for both route pages; `view` picks the content and the only endpoint that page fetches.
+export function UsagePage({ ctx, view = 'usage' }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
   useValue(host.state.gateway);
   useValue(activationEpoch);
   const epoch = gatewayActivationEpoch();
   const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
-  return h(ScopedUsagePage, { key: JSON.stringify(usageScopeKey(scope)), ctx, scope });
+  return h(ScopedUsagePage, { key: JSON.stringify(usageScopeKey(scope)), ctx, scope, view: view === 'limits' ? 'limits' : 'usage' });
 }
 function Segmented({ label, options, value, onChange, showLabel = true, sizing }) {
   const items = options.map(option => ({ id: String(option.id), label: option.label }));
@@ -2287,33 +2311,40 @@ function Segmented({ label, options, value, onChange, showLabel = true, sizing }
     : h('div', { className: 'su-seg' }, items.map(item => h('button', { key: item.id, type: 'button', 'aria-pressed': item.id === String(value), onClick: () => pick(item.id) }, item.label)));
   return h('div', { className: 'su-control', role: 'group', 'aria-label': label }, showLabel ? h('span', { className: 'su-control-label', 'aria-hidden': true }, label) : null, control);
 }
-function ScopedUsagePage({ ctx, scope }) {
+function ScopedUsagePage({ ctx, scope, view }) {
   const [prefs, setPrefs] = useState(() => readUsagePreferences(ctx.storage));
-  useEffect(() => { writeUsagePreferences(ctx.storage, prefs); }, [ctx, prefs]);
-  const update = useCallback(patch => setPrefs(previous => validUsagePreferences({ ...previous, ...patch })), []);
+  // Both pages share one stored object and can be open in two tabs, so each change is merged into what is stored now rather
+  // than into this page's copy, which would overwrite the other page's later choices.
+  const update = useCallback(patch => {
+    writeUsagePreferences(ctx.storage, { ...readUsagePreferences(ctx.storage), ...patch });
+    setPrefs(previous => validUsagePreferences({ ...previous, ...patch }));
+  }, [ctx]);
   const tz = useMemo(() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (_) { return 'UTC'; } }, []);
   const key = usageScopeKey(scope);
-  const history = useQuery({ queryKey: [...key, 'history', prefs.days, tz], enabled: prefs.tab === 'usage', staleTime: 60_000, refetchInterval: 300_000, retry: false,
+  const history = useQuery({ queryKey: [...key, 'history', prefs.days, tz], enabled: view === 'usage', staleTime: 60_000, refetchInterval: 300_000, retry: false,
     // Keep the previous period on screen while another one loads.
     placeholderData: previous => previous,
     queryFn: () => readUsage(ctx, scope, `/usage/history?days=${prefs.days}&tz=${encodeURIComponent(tz)}`, validUsageHistory) });
-  const limitsHours = limitsHistoryHours(prefs.lookback);
-  const limits = useQuery({ queryKey: [...key, 'limits', limitsHours], enabled: prefs.tab === 'limits', staleTime: 60_000, refetchInterval: 300_000, retry: false,
-    // A longer lookback refetches more history; the shorter one stays drawn meanwhile.
+  const limitsHours = limitsHistoryHours(prefs.lookback, prefs.horizon);
+  const limits = useQuery({ queryKey: [...key, 'limits', limitsHours], enabled: view === 'limits', staleTime: 60_000, refetchInterval: 300_000, retry: false,
+    // A longer lookback or horizon refetches more history; the shorter one stays drawn meanwhile.
     placeholderData: previous => previous,
     queryFn: () => readUsage(ctx, scope, `/usage/limits?hours=${limitsHours}`, validUsageLimits) });
-  const active = prefs.tab === 'limits' ? limits : history;
-  return h('div', { className: 'su', 'data-tab': prefs.tab }, h('style', null, USAGE_CSS),
-    h('header', { className: 'su-header' },
-      h(Segmented, { label: 'View', showLabel: false, options: [{ id: 'usage', label: 'Usage' }, { id: 'limits', label: 'Limits' }], value: prefs.tab, onChange: tab => update({ tab }) }),
-      prefs.tab === 'usage' ? h(Fragment, null,
+  const active = view === 'limits' ? limits : history;
+  const toolbar = h(Fragment, null,
+    h('span', { className: 'su-spacer' }),
+    active.isFetching && active.data ? h('span', { className: 'su-muted', role: 'status' }, 'Updating…') : null,
+    h('button', { type: 'button', className: 'su-icon', 'aria-label': 'Refresh', title: 'Refresh', disabled: active.isFetching, onClick: () => void active.refetch() }, icon('RefreshCw', '↻')));
+  return h('div', { className: 'su', 'data-view': view }, h('style', null, USAGE_CSS),
+    view === 'usage' ? h(Fragment, null,
+      h('header', { className: 'su-header' },
         h(Segmented, { label: 'Period', showLabel: false, options: [{ id: 1, label: '24h' }, { id: 7, label: '7d' }, { id: 30, label: '30d' }, { id: 90, label: '90d' }], value: prefs.days, onChange: days => update({ days }) }),
         h(Segmented, { label: 'Split', options: [{ id: 'provider', label: 'Provider' }, { id: 'model', label: 'Model' }], value: prefs.split, onChange: split => update({ split }) }),
-        h(Segmented, { label: 'Mode', options: [{ id: 'stacked', label: 'Stacked' }, { id: 'independent', label: 'Independent' }], value: prefs.mode, onChange: mode => update({ mode }) })) : null,
-      h('span', { className: 'su-spacer' }),
-      active.isFetching && active.data ? h('span', { className: 'su-muted', role: 'status' }, 'Updating…') : null,
-      h('button', { type: 'button', className: 'su-icon', 'aria-label': 'Refresh', title: 'Refresh', disabled: active.isFetching, onClick: () => void active.refetch() }, icon('RefreshCw', '↻'))),
-    h('div', { className: 'su-body' }, prefs.tab === 'usage' ? h(UsageHistoryView, { query: history, prefs }) : h(LimitsView, { query: limits, prefs, update })));
+        h(Segmented, { label: 'Mode', options: [{ id: 'stacked', label: 'Stacked' }, { id: 'independent', label: 'Independent' }], value: prefs.mode, onChange: mode => update({ mode }) }),
+        toolbar),
+      h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs })))
+      // The provider tabs head the Limits page, so its refresh control sits at the end of that row.
+      : h('div', { className: 'su-body' }, h(LimitsView, { query: limits, prefs, update, toolbar })));
 }
 function UsageState({ error = false, children }) { return h('div', { className: 'su-state', role: error ? 'alert' : 'status' }, children); }
 function QueryProblem({ query, what }) {
@@ -2397,20 +2428,24 @@ const rateText = rate => rate === null ? 'no drain data' : `~${rate < 10 ? rate.
 function resetTime(seconds, now) {
   return formatAt(seconds, seconds - now < 6 * DAY_S ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
-function LimitsView({ query, prefs, update }) {
+function LimitsView({ query, prefs, update, toolbar }) {
   const data = query.data;
   // Countdowns and the Now line follow successful polls rather than a separate timer.
   const now = useMemo(() => Date.now() / 1000, [query.dataUpdatedAt]);
-  if (!data) return query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…');
   // Without a saved choice, open the first provider that can show limits rather than a logged-out one.
-  const provider = data.providers.find(item => item.provider === prefs.provider) || data.providers.find(item => item.auth !== 'logged_out') || data.providers[0];
-  return h(Fragment, null,
-    query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
-    data.providers.length > 0 ? h('div', { className: 'su-providers', role: 'group', 'aria-label': 'Provider' }, data.providers.map(item => h('button', { key: item.provider, type: 'button', className: 'su-provider', 'aria-pressed': item === provider,
+  const providers = data?.providers || [];
+  const provider = providers.find(item => item.provider === prefs.provider) || providers.find(item => item.auth !== 'logged_out') || providers[0];
+  const tabs = h('header', { className: 'su-providers' },
+    providers.length ? h('div', { className: 'su-provider-tabs', role: 'group', 'aria-label': 'Provider' }, providers.map(item => h('button', { key: item.provider, type: 'button', className: 'su-provider', 'aria-pressed': item === provider,
       style: { '--su-color': providerHueColor(item.provider) }, onClick: () => update({ provider: item.provider }) },
       item.label || item.provider, item.auth === 'logged_out' ? h('span', { className: 'su-auth' }, 'logged out')
-        : h('span', { className: 'su-count', 'aria-label': `${item.accounts.length} accounts` }, item.accounts.length))))
-      : h(UsageState, null, 'No subscription limits recorded yet.'),
+        : h('span', { className: 'su-count', 'aria-label': `${item.accounts.length} accounts` }, item.accounts.length)))) : null,
+    toolbar);
+  if (!data) return h(Fragment, null, tabs, query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…'));
+  return h(Fragment, null,
+    tabs,
+    query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
+    providers.length ? null : h(UsageState, null, 'No subscription limits recorded yet.'),
     provider ? h(ProviderLimits, { key: provider.provider, provider, prefs, update, now }) : null,
     h(SamplerInfo, { sampler: data.sampler, now }));
 }
@@ -2436,25 +2471,73 @@ export const lookbackAtPosition = position => LOOKBACK_STOPS[LOOKBACK_STOPS.leng
 function LookbackSlider({ hours, onChange }) {
   const last = LOOKBACK_STOPS.length - 1, position = lookbackPosition(hours);
   return h('div', { className: 'su-lookback' },
-    h('input', { type: 'range', className: 'su-range', min: 0, max: last, step: 1, value: position, 'aria-label': 'Drain average period', 'aria-valuetext': lookbackLabel(hours),
+    h('span', { className: 'su-lookback-label', 'aria-hidden': true }, 'Projections based on'),
+    h('input', { type: 'range', className: 'su-range', min: 0, max: last, step: 1, value: position, 'aria-label': 'Projections based on', 'aria-valuetext': lookbackLabel(hours),
       // The track is filled from the thumb to the right end (the averaged period reaching back from now); Chromium has no themeable
       // progress pseudo-element, so the gradient stop is computed from the thumb position.
       style: { '--su-share': position / last },
       onChange: event => onChange(lookbackAtPosition(event.target.value)) }),
-    h('span', { className: 'su-lookback-label' }, `Average over ${lookbackLabel(hours)}`));
+    // A fixed-width value keeps the row from shifting while the thumb is dragged.
+    h('output', { className: 'su-lookback-value', 'aria-hidden': true }, lookbackLabel(hours)));
 }
-// A dimension line under the plot from Now to the first projected zero, with arrowheads and end ticks drawn at fixed pixel size.
-function EmptyMeasure({ fromPct, toPct, text }) {
-  const mid = (fromPct + toPct) / 2;
-  return h('div', { className: 'su-measure', role: 'note', 'aria-label': text },
-    h('div', { className: 'su-measure-span', 'aria-hidden': true, style: { left: `${fromPct}%`, width: `${toPct - fromPct}%` } },
-      h('span', { className: 'su-measure-line' }),
-      h('span', { className: 'su-measure-tick', 'data-end': 'start' }), h('span', { className: 'su-measure-tick', 'data-end': 'end' }),
-      h('svg', { className: 'su-arrow', 'data-end': 'start', viewBox: '0 0 6 8' }, h('path', { d: 'M6,0.5 L0,4 L6,7.5 Z' })),
-      h('svg', { className: 'su-arrow', 'data-end': 'end', viewBox: '0 0 6 8' }, h('path', { d: 'M0,0.5 L6,4 L0,7.5 Z' }))),
-    // Centered on the span; near the left edge it anchors at Now instead so it cannot leave the plot.
-    h('span', { className: 'su-measure-text', 'data-align': mid < 12 ? 'start' : 'center', style: { left: `${mid < 12 ? fromPct : mid}%` } }, text));
+// Projection horizon toggle at the end of the time axis: the arrow pushes the axis out to 30 days, then pulls it back to 7.
+function HorizonToggle({ days, onChange }) {
+  const extended = days === HORIZON_DAYS[1];
+  const tip = extended ? `Shrink the projection back to ${HORIZON_DAYS[0]} days` : `Extend the projection to ${HORIZON_DAYS[1]} days`;
+  // The accessible name stays constant and aria-pressed carries the state; the tooltip says what a click does next.
+  const button = h('button', { type: 'button', className: 'su-icon su-horizon', 'aria-label': `Project ${HORIZON_DAYS[1]} days ahead`, 'aria-pressed': extended, 'data-horizon': days,
+    title: typeof sdk.Tip === 'function' ? undefined : tip, onClick: () => onChange(extended ? HORIZON_DAYS[0] : HORIZON_DAYS[1]) },
+  icon(extended ? 'ArrowBarLeft' : 'ArrowBarRight', extended ? '⇤' : '⇥'));
+  return typeof sdk.Tip === 'function' ? h(sdk.Tip, { label: tip, side: 'top' }, button) : button;
 }
+// One dimension line under the plot, with arrowheads and end ticks drawn at fixed pixel size. A capped end (`startCap`/`endCap`
+// false) has neither: the line simply runs out at the plot edge.
+function MeasureSpan({ fromPct, toPct, startCap = true, endCap = true }) {
+  return h('div', { className: 'su-measure-span', 'aria-hidden': true, 'data-start-cap': startCap, style: { left: `${fromPct}%`, width: `${toPct - fromPct}%` } },
+    h('span', { className: 'su-measure-line' }),
+    startCap ? h(Fragment, null, h('span', { className: 'su-measure-tick', 'data-end': 'start' }), h('svg', { className: 'su-arrow', 'data-end': 'start', viewBox: '0 0 6 8' }, h('path', { d: 'M6,0.5 L0,4 L6,7.5 Z' }))) : null,
+    endCap ? h(Fragment, null, h('span', { className: 'su-measure-tick', 'data-end': 'end' }), h('svg', { className: 'su-arrow', 'data-end': 'end', viewBox: '0 0 6 8' }, h('path', { d: 'M0,0.5 L6,4 L0,7.5 Z' }))) : null);
+}
+// Text labels are centered on their span but clamped to their side of Now (with a gap), so the averaging label left of Now and
+// the time-to-empty label right of it can never overlap or leave the plot. Clamping needs the rendered text width, so it runs as a
+// layout effect; before that (and in DOM-less tests) the label is simply centered.
+const MEASURE_GAP_PX = 12;
+// A span shorter than its two arrowheads draws them outside, pointing in (the usual dimensioning convention for tight spans).
+const TIGHT_SPAN_PX = 16;
+function placeMeasureLabels(row) {
+  const width = row.getBoundingClientRect().width;
+  if (!(width > 0)) return;
+  for (const span of row.querySelectorAll('.su-measure-span')) span.dataset.tight = String(span.getBoundingClientRect().width < TIGHT_SPAN_PX);
+  for (const label of row.querySelectorAll('.su-measure-text')) {
+    const low = Number(label.dataset.low) / 100 * width + (label.dataset.side === 'right' ? MEASURE_GAP_PX : 0);
+    const high = Number(label.dataset.high) / 100 * width - (label.dataset.side === 'left' ? MEASURE_GAP_PX : 0);
+    label.style.maxWidth = `${Math.max(0, high - low)}px`;
+    const own = label.getBoundingClientRect().width, center = Number(label.dataset.center) / 100 * width;
+    label.style.left = `${clamp(center - own / 2, low, Math.max(low, high - own))}px`;
+    label.style.transform = 'none';
+  }
+}
+function MeasureRow({ nowPct, average, empty }) {
+  const row = useRef(null);
+  useLayoutEffect(() => {
+    const node = row.current;
+    if (!node) return undefined;
+    placeMeasureLabels(node);
+    if (typeof ResizeObserver !== 'function') return undefined;
+    const observer = new ResizeObserver(() => placeMeasureLabels(node));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [nowPct, average?.fromPct, average?.text, empty?.toPct, empty?.text]);
+  const label = (item, side, low, high) => h('span', { className: 'su-measure-text', 'data-side': side, 'data-low': low, 'data-high': high, 'data-center': (item.fromPct + item.toPct) / 2,
+    // The title restores the full text when a narrow plot ellipsizes it.
+    title: item.title || item.text, style: { left: `${(item.fromPct + item.toPct) / 2}%` } }, item.text);
+  return h('div', { className: 'su-measures', ref: row },
+    average ? h('div', { className: 'su-measure', 'data-kind': 'average', role: 'note', 'aria-label': average.title || average.text },
+      h(MeasureSpan, { fromPct: average.fromPct, toPct: average.toPct, startCap: !average.clipped }), label(average, 'left', 0, nowPct)) : null,
+    empty ? h('div', { className: 'su-measure', 'data-kind': 'empty', role: 'note', 'aria-label': empty.text },
+      h(MeasureSpan, { fromPct: empty.fromPct, toPct: empty.toPct }), label(empty, 'right', nowPct, 100)) : null);
+}
+const rateShort = rate => rate === null ? 'no drain data' : `~${rate < 10 ? rate.toFixed(1) : Math.round(rate)}%/h`;
 function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon, lookback, setLookback }) {
   const horizonS = horizonDays * DAY_S, lookbackS = lookback * HOUR_S;
   const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey), [provider, windowKey]);
@@ -2462,7 +2545,7 @@ function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon, l
   const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS, { lookbackS }), [provider, windowKey, now, horizonS, lookbackS]);
   const [hover, setHover] = useState(null);
   const cap = Math.max(100, projection.capacity, ...past.map(point => point.value));
-  const start = now - Math.max(6 * HOUR_S, horizonS * 0.3), end = now + horizonS;
+  const start = now - limitsPastSeconds(horizonS), end = now + horizonS;
   const axis = useMemo(() => { const ticks = timeAxisTicks(start, end); return { ...ticks, labels: axisLabels(ticks.times, undefined, ticks.resolution), midnights: localMidnights(start, end) }; }, [start, end]);
   const x = t => (t - start) / (end - start) * VIEW_W, y = value => VIEW_H - value / cap * VIEW_H;
   const pastAt = t => { let value = null; for (const point of past) { if (point.t > t) break; value = point.value; } return value; };
@@ -2489,24 +2572,25 @@ function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon, l
   const emptyAt = projection.capacity > 0 ? firstEmpty(projection.points) : null;
   const emptyPct = emptyAt === null ? null : x(emptyAt) / VIEW_W * 100;
   const emptyText = emptyAt === null ? null : emptyAt - now < 60 ? 'Empty now' : `Empty in ${formatDurationShort(emptyAt - now)} · ${resetTime(emptyAt, now)}`;
+  const emptyMeasured = emptyPct !== null && emptyPct - nowPct > 0.05;
+  // The averaged period always spans the requested lookback, even when the history covers less (the coverage note says so). When
+  // it reaches back past the plot it is cut at the plot edge without a left arrowhead, since its true start is not on the chart.
+  const averageClipped = now - lookbackS < start, averagePct = averageClipped ? 0 : x(now - lookbackS) / VIEW_W * 100;
+  const averageText = `Average over ${lookbackLabel(lookback)} · ${rateShort(projection.rate)}`;
+  const average = nowPct - averagePct > 0.05 ? { fromPct: averagePct, toPct: nowPct, clipped: averageClipped, text: averageText,
+    title: projection.partial ? `${averageText} (only ${coverageText(projection.coveredS)} of data in that period)` : averageText } : null;
   const hoverT = hover === null ? null : start + hover * (end - start);
   const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
   const move = event => { const box = event.currentTarget.getBoundingClientRect(); if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1)); };
   const ticks = [0, 0.25, 0.5, 0.75, 1].map(share => share * cap);
-  return h('section', { className: 'su-chart su-pooled', 'data-window': windowKey, 'aria-label': 'Pooled remaining quota' },
+  return h('section', { className: 'su-chart su-pooled', 'data-window': windowKey, 'data-horizon': horizonDays, 'aria-label': 'Pooled remaining quota' },
     h('div', { className: 'su-headline' },
       // Without any account reading the pool is unknown, not empty.
       h('span', { className: 'su-pool' }, projection.capacity ? percentText(projection.current) : '—'), h('span', { className: 'su-capacity' }, projection.capacity ? `/ ${projection.capacity}% remaining` : 'no account readings yet'),
       h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate)),
       // Kept out of the slider row: text appearing there while dragging would shift the slider under the pointer.
       projection.partial ? h('span', { className: 'su-coverage' }, `based on ${coverageText(projection.coveredS)} of data`) : null),
-    h('div', { className: 'su-legend' },
-      h('span', { className: 'su-legend-item' }, h('span', { className: 'su-legend-line' }), 'Remaining'),
-      h('span', { className: 'su-legend-item' }, h('span', { className: 'su-legend-line', 'data-dashed': true }), 'Projected'),
-      h('span', { className: 'su-spacer' }),
-      h(LookbackSlider, { hours: lookback, onChange: setLookback }),
-      h(Segmented, { label: 'Next', options: [{ id: 1, label: '1d' }, { id: 3, label: '3d' }, { id: 7, label: '7d' }], value: horizonDays, onChange: setHorizon })),
-    h('div', { className: 'su-plot-row' },
+    h('div', { className: 'su-limits-grid' },
       h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, `${Math.round(tick)}%`))),
       h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end),
         onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null),
@@ -2523,17 +2607,20 @@ function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon, l
         hoverValue === null ? null : h(Fragment, null,
           h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
           h('div', { className: 'su-tip su-tip-inline', style: hover > 0.6 ? { right: `calc(${100 - hover * 100}% + 10px)` } : { left: `calc(${hover * 100}% + 10px)` } },
-            `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${percentText(hoverValue)} left${hoverT > now ? ' (projected)' : ''}`)))),
-    h('div', { className: 'su-xaxis' }, axis.times.map((t, index) => {
-      const share = x(t) / VIEW_W * 100;
-      return h('span', { key: t, 'data-edge': share < 3 ? 'start' : share > 97 ? 'end' : undefined, style: { left: `${share}%` } }, axis.labels[index]);
-    })),
-    emptyPct !== null && emptyPct - nowPct > 0.05 ? h(EmptyMeasure, { fromPct: nowPct, toPct: emptyPct, text: emptyText }) : null,
+            `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${percentText(hoverValue)} left${hoverT > now ? ' (projected)' : ''}`))),
+      h('div', { className: 'su-horizon-cell' }, h(HorizonToggle, { days: horizonDays, onChange: setHorizon })),
+      h('div', { className: 'su-xaxis' }, axis.times.map((t, index) => {
+        const share = x(t) / VIEW_W * 100;
+        return h('span', { key: t, 'data-edge': share < 3 ? 'start' : share > 97 ? 'end' : undefined, style: { left: `${share}%` } }, axis.labels[index]);
+      })),
+      h(MeasureRow, { nowPct, average, empty: emptyMeasured ? { fromPct: nowPct, toPct: emptyPct, text: emptyText } : null })),
     h('div', { className: 'su-chart-foot' },
-      h('span', null, projection.nextReset ? projection.nextReset.gain === null ? `Next reset · ${resetTime(projection.nextReset.t, now)}` : `Next reset +${Math.round(projection.nextReset.gain)}% · ${resetTime(projection.nextReset.t, now)}` : 'No reset time reported'),
-      emptyText && !(emptyPct - nowPct > 0.05) ? h('span', { className: 'su-empty-note' }, emptyText) : null,
-      emptyAt === null && projection.rate > 0 ? h('span', { className: 'su-empty-note' }, `Not empty within ${horizonDays}d`) : null,
-      projection.unknownAccounts.length ? h('span', null, `${projection.unknownAccounts.length} account${projection.unknownAccounts.length === 1 ? '' : 's'} without a reading left out of the pool`) : null));
+      h(LookbackSlider, { hours: lookback, onChange: setLookback }),
+      h('div', { className: 'su-chart-notes' },
+        h('span', null, projection.nextReset ? projection.nextReset.gain === null ? `Next reset · ${resetTime(projection.nextReset.t, now)}` : `Next reset +${Math.round(projection.nextReset.gain)}% · ${resetTime(projection.nextReset.t, now)}` : 'No reset time reported'),
+        emptyText && !emptyMeasured ? h('span', { className: 'su-empty-note' }, emptyText) : null,
+        emptyAt === null && projection.rate > 0 ? h('span', { className: 'su-empty-note' }, `Not empty within ${horizonDays}d`) : null,
+        projection.unknownAccounts.length ? h('span', null, `${projection.unknownAccounts.length} account${projection.unknownAccounts.length === 1 ? '' : 's'} without a reading left out of the pool`) : null)));
 }
 function Badge({ tone, title, children }) { return h('span', { className: 'su-badge', 'data-tone': tone, title }, children); }
 function LimitAccount({ account, selected, now }) {
@@ -2620,7 +2707,7 @@ const USAGE_CSS = `
 .su-xaxis{position:relative;height:16px;margin-left:56px;font-size:10px;color:var(--ui-text-quaternary)}
 .su-xaxis span{position:absolute;top:2px;transform:translateX(-50%);white-space:nowrap}.su-xaxis span[data-edge=start]{transform:none}.su-xaxis span[data-edge=end]{transform:translateX(-100%)}
 .su-footnote{margin:0;font-size:11px;line-height:1.5;color:var(--ui-text-tertiary)}.su-error{color:var(--ui-red,var(--ui-text-primary))}
-.su-providers{display:flex;flex-wrap:wrap;gap:2px;border-bottom:1px solid var(--ui-stroke-secondary)}
+.su-providers{display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--ui-stroke-secondary)}.su-provider-tabs{display:flex;flex-wrap:wrap;gap:2px}
 .su-provider{display:inline-flex;align-items:center;gap:6px;margin-bottom:-1px;padding:6px 10px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
 .su-provider:hover{color:var(--ui-text-primary)}.su-provider[aria-pressed=true]{color:var(--ui-text-primary);border-bottom-color:var(--su-color)}
 .su-count{padding:0 5px;border-radius:8px;background:var(--ui-bg-quaternary);font-size:10px;color:var(--ui-text-tertiary)}
@@ -2630,7 +2717,7 @@ const USAGE_CSS = `
 .su-headline{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}.su-pool{font-size:24px;font-weight:600;color:var(--su-color);font-variant-numeric:tabular-nums}
 .su-capacity{font-size:13px;color:var(--ui-text-secondary)}.su-rate{margin-left:10px;font-size:12px;color:var(--ui-text-tertiary)}.su-coverage{font-size:11px;color:var(--ui-text-quaternary,var(--ui-text-tertiary))}
 .su-lookback{display:inline-flex;align-items:center;gap:8px;font-size:11px;color:var(--ui-text-secondary)}
-.su-lookback-label{min-width:94px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.su-lookback-label{white-space:nowrap}.su-lookback-value{min-width:2.6em;color:var(--ui-text-primary);font-variant-numeric:tabular-nums;white-space:nowrap}
 .su-range{-webkit-appearance:none;appearance:none;width:132px;height:16px;margin:0;padding:0;background:transparent;cursor:pointer}
 .su-range{--su-thumb:12px;--su-stop:calc(var(--su-thumb) / 2 + (100% - var(--su-thumb)) * var(--su-share,0));--su-track:linear-gradient(to right,color-mix(in srgb,var(--ui-text-primary) 14%,transparent) var(--su-stop),var(--su-color) var(--su-stop))}
 .su-range::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--su-track)}
@@ -2639,15 +2726,21 @@ const USAGE_CSS = `
 .su-range::-moz-range-thumb{width:10px;height:10px;border:2px solid var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:50%;background:var(--su-color)}
 .su-range:focus-visible{outline:2px solid var(--ui-accent);outline-offset:2px;border-radius:4px}
 .su-empty-dot{position:absolute;bottom:0;width:9px;height:9px;margin:0 0 -4.5px -4.5px;border:2px solid var(--ui-red,var(--su-color));border-radius:50%;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:none}
-.su-measure{position:relative;height:30px;margin-left:56px;color:var(--ui-text-secondary)}
+/* Pooled chart grid: y-axis | plot | horizon toggle, then the x-axis and the measurement row under the plot column. */
+.su-limits-grid{display:grid;grid-template-columns:56px minmax(0,1fr) 32px;grid-template-rows:auto 16px 30px;margin-top:6px}
+.su-limits-grid>.su-yaxis{grid-area:1/1}.su-limits-grid>.su-plot{grid-area:1/2}.su-limits-grid>.su-xaxis{grid-area:2/2;margin:0}
+.su-horizon-cell{grid-area:1/3/3/4;align-self:end;justify-self:start;margin:0 0 -4px 4px}.su .su-horizon{color:var(--ui-text-secondary)}.su-horizon svg{width:16px;height:16px}
+.su-measures{grid-area:3/2;position:relative;color:var(--ui-text-secondary)}
 .su-measure-span{position:absolute;top:22px;height:0}
 .su-measure-line{position:absolute;left:0;right:0;top:-0.5px;border-top:1px solid currentColor}
 .su-measure-tick{position:absolute;top:-5px;height:10px;width:0;border-left:1px solid currentColor}.su-measure-tick[data-end=start]{left:0}.su-measure-tick[data-end=end]{left:100%;margin-left:-1px}
 .su-arrow{position:absolute;top:-4px;width:6px;height:8px;fill:currentColor;overflow:visible}.su-arrow[data-end=start]{left:0}.su-arrow[data-end=end]{right:0}
-.su-measure-text{position:absolute;top:2px;transform:translateX(-50%);font-size:11px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}.su-measure-text[data-align=start]{transform:none}
+.su-measure-span[data-tight=true] .su-arrow{transform:scaleX(-1)}.su-measure-span[data-tight=true] .su-arrow[data-end=start]{left:-6px}.su-measure-span[data-tight=true] .su-arrow[data-end=end]{right:-6px}
+.su-measure-span[data-tight=true] .su-measure-line{left:-10px;right:-10px}
+.su-measure-text{position:absolute;top:2px;transform:translateX(-50%);overflow:hidden;text-overflow:ellipsis;font-size:11px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .su-empty-note{color:var(--ui-text-tertiary)}
-.su-legend-line{display:inline-block;width:16px;border-top:2px solid var(--su-color)}.su-legend-line[data-dashed]{border-top-style:dashed}
-.su-chart-foot{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 16px;font-size:11px;color:var(--ui-text-tertiary)}
+.su-chart-foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 24px;font-size:11px;color:var(--ui-text-tertiary)}
+.su-chart-notes{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px 16px}
 .su-accounts{display:flex;flex-direction:column;gap:8px}
 .su-account{padding:10px 12px;border:1px solid var(--ui-stroke-secondary);border-radius:6px}
 .su-account-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin-bottom:8px}.su-account-head strong{font-weight:600}
@@ -2671,7 +2764,8 @@ export default {
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
     ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx }) });
-    ctx.register({ id: 'usage', area: sdk.ROUTES_AREA ?? 'routes', title: 'Usage', data: { path: USAGE_ROUTE }, render: () => h(UsagePage, { ctx }) });
+    ctx.register({ id: 'usage', area: sdk.ROUTES_AREA ?? 'routes', title: 'Usage', data: { path: USAGE_ROUTE }, render: () => h(UsagePage, { ctx, view: 'usage' }) });
+    ctx.register({ id: 'limits', area: sdk.ROUTES_AREA ?? 'routes', title: 'Limits', data: { path: LIMITS_ROUTE }, render: () => h(UsagePage, { ctx, view: 'limits' }) });
     let disposed = false, pending = null;
     const disposeEvent = ctx.onEvent('*', event => {
       if (disposed) return;
