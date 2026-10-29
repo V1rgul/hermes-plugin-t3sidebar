@@ -1513,7 +1513,7 @@ try {
     }, metricSelector);
     await usage.goto(`http://127.0.0.1:${server.address().port}`);
     await usage.waitForSelector('.sf-row');
-    // Footer: T3's utility row, the icon-only Usage button then one Limits button, each named by aria-label and a tooltip.
+    // Footer: the single Limits button on the left and T3's icon-only Usage button on the right, each named by aria-label and a tooltip.
     const footer = await usage.evaluate(() => {
       const aside = document.querySelector('.sf'), footer = aside.querySelector('.sf-footer'), list = aside.querySelector('.sf-scroll'), buttons = [...(footer?.querySelectorAll('.sf-utility') || [])];
       if (!footer || buttons.length === 0) return null;
@@ -1525,7 +1525,7 @@ try {
     });
     console.log(`USAGE FOOTER: ${JSON.stringify(footer)}`);
     check('Footer is a fixed 36px row at the bottom of the pane, below the shelves', footer?.last && footer.height === 36 && footer.bottomGap < 1 && footer.belowList);
-    check('Footer has exactly two controls: the 28px icon-only Usage button (BarChart3) with a tooltip, then the single Limits button', footer?.controls.join() === 'sf-utility,sf-limits' && footer.buttons.length === 1
+    check('Footer has exactly two controls: the single Limits button, then the 28px icon-only Usage button (BarChart3) with a tooltip', footer?.controls.join() === 'sf-limits,sf-utility' && footer.buttons.length === 1
       && [footer.buttons[0].label, footer.buttons[0].text, footer.buttons[0].title, footer.buttons[0].icon].join('|') === 'Usage||Token usage|BarChart3'
       && footer.buttons[0].width === 28 && footer.buttons[0].height === 28 && footer.buttons[0].glyph === 16 && footer.buttons[0].centered);
     const usageButton = usage.locator('.sf-footer').getByRole('button', { name: 'Usage', exact: true });
@@ -1549,7 +1549,7 @@ try {
     const footerStatus = () => usage.evaluate(() => {
       const r = el => el.getBoundingClientRect(), footer = document.querySelector('.sf-footer'), button = footer.querySelector('.sf-limits'), usageButton = footer.querySelector('.sf-utility');
       const items = [...footer.querySelectorAll('.sf-limit')], mid = box => (box.top + box.bottom) / 2, rgb = el => { const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1; const paint = canvas.getContext('2d'); paint.fillStyle = getComputedStyle(el).color; paint.fillRect(0, 0, 1, 1); return [...paint.getImageData(0, 0, 1, 1).data.slice(0, 3)]; };
-      return { footerHeight: r(footer).height, overflow: footer.scrollWidth - footer.clientWidth, buttonHeight: r(button).height, afterUsage: r(button).left >= r(usageButton).right, insideFooter: r(button).right <= r(footer).right + 0.5,
+      return { footerHeight: r(footer).height, overflow: footer.scrollWidth - footer.clientWidth, buttonHeight: r(button).height, leftAligned: Math.abs(r(button).left - r(footer).left - 6) < 0.5, rightAligned: Math.abs(r(footer).right - 6 - r(usageButton).right) < 0.5, beforeUsage: r(button).right <= r(usageButton).left, insideFooter: r(button).right <= r(footer).right + 0.5,
         focusables: button.querySelectorAll('button, [tabindex], a, input').length, oneRow: items.every(item => Math.abs(mid(r(item)) - mid(r(usageButton))) < 0.5) && Math.abs(mid(r(button)) - mid(r(usageButton))) < 0.5,
         label: button.getAttribute('aria-label'),
         items: items.map(item => { const value = item.querySelector('.sf-limit-value'), glyph = item.querySelector('[data-verdict-icon]');
@@ -1565,7 +1565,7 @@ try {
       const status = await footerStatus();
       console.log(`USAGE FOOTER STATUS: ${JSON.stringify(status)}`);
       const [codex, anthropic] = status.items;
-      check('Limits button follows Usage in the same 36px row as one 28px control, one item per provider with limits, without overflow', status.footerHeight === 36 && status.afterUsage && status.oneRow && status.buttonHeight === 28 && status.insideFooter
+      check('Limits button is left-aligned and the Usage button right-aligned in the same 36px row, the Limits button one 28px control with one item per provider, without overflow', status.footerHeight === 36 && status.leftAligned && status.rightAligned && status.beforeUsage && status.oneRow && status.buttonHeight === 28 && status.insideFooter
         && status.focusables === 0 && status.items.length === 2 && codex.provider === 'openai-codex' && anthropic.provider === 'anthropic' && status.items.every(item => item.mark && item.inside) && status.overflow <= 0);
       check('Limits items show pooled units in tabular numerals: a red arrow to the floor for Codex missing over two thirds of its capacity, a muted clock-x for Anthropic losing under a third', status.items.every(item => /^\d+(\.\d)?$/.test(item.value) && item.tabular)
         && codex.status === 'short' && codex.severity === 'high' && codex.iconName === 'ArrowBarToDownTouching' && codex.iconColor[0] > codex.iconColor[1] + 40
@@ -1600,7 +1600,7 @@ try {
         await closeUp.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         return closeUp.evaluate(() => {
           const r = el => el.getBoundingClientRect(), footer = document.querySelector('.sf-footer'), button = footer.querySelector('.sf-limits'), strip = button.querySelector('.sf-limits-items'), items = [...footer.querySelectorAll('.sf-limit')];
-          return { pane: r(document.querySelector('.harness-sidebar')).width, height: r(footer).height, overflow: footer.scrollWidth - footer.clientWidth, buttonInside: r(button).right <= r(footer).right + 0.5,
+          return { pane: r(document.querySelector('.harness-sidebar')).width, height: r(footer).height, overflow: footer.scrollWidth - footer.clientWidth, buttonInside: r(button).right <= r(footer.querySelector('.sf-utility')).left + 0.5,
             shown: items.filter(item => r(item).top < r(strip).bottom && r(item).right <= r(button).right + 0.5).length };
         });
       };

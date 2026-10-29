@@ -930,7 +930,7 @@ const CSS = `
 /* T3's sidebar utility row: fixed height below the list, so shelves keep their flex allocation within a shorter column. */
 .sf-footer{display:flex;align-items:center;gap:2px;flex-shrink:0;min-width:0;height:36px;padding:4px 6px}.sf .sf-footer .sf-utility{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-secondary)}.sf .sf-footer .sf-utility:hover,.sf .sf-footer .sf-utility:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-footer .sf-utility svg{width:16px;height:16px;flex-shrink:0}
 /* The single Limits button after Usage, sized to its content but free to shrink: its item strip wraps and clips its second line, so a pane too narrow for every provider drops whole items instead of squeezing or overflowing; clip (not hidden) keeps focus from scrolling it. Without data it is a 28px icon button like Usage. */
-.sf .sf-footer .sf-limits{display:inline-flex;align-items:center;justify-content:flex-start;flex:0 1 auto;gap:0;min-width:0;max-width:100%;height:28px;margin-left:2px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);font:inherit;font-size:11px;font-weight:400;line-height:1;white-space:nowrap;overflow:clip;cursor:pointer}
+.sf-footer-end{display:inline-flex;flex-shrink:0;margin-left:auto}.sf .sf-footer .sf-limits{display:inline-flex;align-items:center;justify-content:flex-start;flex:0 1 auto;gap:0;min-width:0;max-width:100%;height:28px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);font:inherit;font-size:11px;font-weight:400;line-height:1;white-space:nowrap;overflow:clip;cursor:pointer}
 .sf .sf-footer .sf-limits[data-empty=true]{flex-shrink:0;justify-content:center;width:28px;padding:0;color:var(--ui-text-secondary)}.sf-footer .sf-limits[data-empty=true] svg{width:16px;height:16px;flex-shrink:0}
 .sf .sf-footer .sf-limits:hover,.sf .sf-footer .sf-limits:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
 .sf-limits-items{display:flex;flex-wrap:wrap;align-items:center;column-gap:10px;min-width:0;height:28px;overflow:clip}
@@ -1984,8 +1984,10 @@ function UtilityLink({ link }) {
   return tip ? h(sdk.Tip, { label: link.tip, side: 'top' }, button) : button;
 }
 function UsageFooter({ ctx, scope, companion = false }) {
-  return h('footer', { className: 'sf-footer' }, h(UtilityLink, { link: USAGE_LINK }),
-    ctx && scope ? h(LimitsFooterStatus, { ctx, scope, enabled: companion }) : h(LimitsFooterButton, { items: [], now: 0 }));
+  // Providers sit on the left and the Usage stats button on the right; DOM order matches so keyboard focus follows the visual order.
+  return h('footer', { className: 'sf-footer' },
+    ctx && scope ? h(LimitsFooterStatus, { ctx, scope, enabled: companion }) : h(LimitsFooterButton, { items: [], now: 0 }),
+    h('span', { className: 'sf-footer-end' }, h(UtilityLink, { link: USAGE_LINK })));
 }
 // The Limits entry point is one button whatever the data: every provider's mark, pooled units and a verdict glyph (only when the week runs short or wastes quota, coloured by severity), or the gauge alone while there is nothing to show (loading, failure, no companion, no provider with limits), so the page stays reachable and no placeholder or error ever appears in the row.
 function LimitsFooterStatus({ ctx, scope, enabled }) {
