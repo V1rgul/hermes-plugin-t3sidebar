@@ -103,6 +103,7 @@ try {
   await page.getByRole('searchbox').fill('Runtime classification');
   await page.locator('[data-session-id="root"]').waitFor();
   check('search temporarily reveals persisted folded category without catch-up text', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'false' && !await page.getByText('All caught up', { exact: true }).count());
+  check('empty categories have no placeholder text while headings remain visible', !await page.locator('.sf-section .sf-empty').count() && await page.getByRole('button', { name: 'Snoozed (0)', exact: true }).isVisible() && await page.getByRole('button', { name: 'Archived (0)', exact: true }).isVisible());
   await page.locator('.sf-search input').evaluate(el => el.blur());
   await page.mouse.move(1100, 850);
   check('search clear cross stays visible without hover or focus', await page.getByRole('button', { name: 'Clear search', exact: true }).isVisible() && await page.getByRole('button', { name: 'Clear search', exact: true }).evaluate(el => getComputedStyle(el).opacity === '1'));

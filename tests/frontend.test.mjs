@@ -1762,9 +1762,26 @@ test('pin, snooze and restore are reversed through ordinary actions without any 
   assert.equal(row('readme').closest('section'), shelf('Archived')); noUndo();
 });
 
-test('unfiltered empty Ready keeps catch-up while a no-match project filter suppresses it', async () => {
+test('empty categories omit placeholders on first load and after their last card leaves', async () => {
+  mock.control.rows = []; mock.control.live = [];
+  await mount();
+  const assertEmptyCategories = () => {
+    for (const name of ['Pinned', 'Ready', 'Working', 'Snoozed', 'Archived']) {
+      assert.equal(shelf(name).querySelectorAll('.sf-row, .sf-empty').length, 0, name);
+    }
+    for (const name of ['Working', 'Snoozed', 'Archived']) assert.ok(button(`${name} (0)`));
+    assert.doesNotMatch(document.body.textContent, /All caught up|No sessions|No matching sessions/);
+  };
+  assertEmptyCategories();
+  mock.control.rows = [{ id: 'ready', title: 'Existing conversation', message_count: 2 }];
+  await refresh(); assert.ok(row('ready'));
+  mock.control.rows = []; await refresh();
+  assertEmptyCategories();
+});
+
+test('empty Ready has no catch-up message while a no-match project filter retains feedback', async () => {
   mock.control.rows = mock.control.rows.filter(r => r.id === 'archived'); mock.control.live = [];
-  await mount(); assert.match(shelf('Ready').textContent, /All caught up/);
+  await mount(); assert.doesNotMatch(shelf('Ready').textContent, /All caught up|No sessions/);
   await click(button('Filter sessions'));
   // A known project disappears from the loaded data after it has been selected.
   await click(button('Filter by Synthetic Sidebar'));
