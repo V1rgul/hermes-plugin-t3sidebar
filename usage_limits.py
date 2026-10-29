@@ -270,7 +270,7 @@ def _native_symbols():
 
 
 def _claude_code_login(clock=time.time):
-	"""Claude Code's OAuth login on this host as {token, plan, expired}, or None. Read-only: honours CLAUDE_CONFIG_DIR like the CLI, never writes or refreshes."""
+	"""Claude Code's OAuth login on this host as {token, expired}, or None. Read-only: honours CLAUDE_CONFIG_DIR like the CLI, never writes or refreshes."""
 	config = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
 	path = (Path(config).expanduser() if config else Path.home() / ".claude") / ".credentials.json"
 	try:
@@ -279,14 +279,28 @@ def _claude_code_login(clock=time.time):
 		return None
 	if not isinstance(entry, dict) or not isinstance(entry.get("accessToken"), str) or not entry["accessToken"].strip():
 		return None
-	# rateLimitTier (default_claude_max_5x) names the allowance; subscriptionType (team, max) alone does not.
-	plan = next((value for value in (entry.get("rateLimitTier"), entry.get("subscriptionType")) if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_ -]{1,64}", value)), None)
 	expires_ms = entry.get("expiresAt")
 	expired = isinstance(expires_ms, (int, float)) and not isinstance(expires_ms, bool) and expires_ms / 1000.0 <= float(clock())
-	return {"token": entry["accessToken"].strip(), "plan": plan, "expired": expired}
+	return {"token": entry["accessToken"].strip(), "expired": expired}
 
 
-def _collect_claude_code(symbols, clock, login_reader, fetcher):
+def _fetch_claude_profile_plan(token):
+	"""The organization's rate_limit_tier from Anthropic's OAuth profile with Claude Code's token; None on any failure (a 401 is not retried or refreshed)."""
+	import httpx
+	headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "anthropic-beta": "oauth-2025-04-20"}
+	try:
+		with httpx.Client(timeout=CREDITS_TIMEOUT_S, follow_redirects=False) as client:
+			response = client.get("https://api.anthropic.com/api/oauth/profile", headers=headers)
+		if response.status_code != 200:
+			return None
+		organization = response.json().get("organization")
+		tier = organization.get("rate_limit_tier") if isinstance(organization, dict) else None
+	except Exception:
+		return None
+	return tier if isinstance(tier, str) and re.fullmatch(r"[A-Za-z0-9_ -]{1,64}", tier) else None
+
+
+def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=_fetch_claude_profile_plan):
 	"""One Anthropic reading from Claude Code's login, or None when there is no such login."""
 	login = login_reader(clock)
 	if login is None:
@@ -308,7 +322,8 @@ def _collect_claude_code(symbols, clock, login_reader, fetcher):
 		if snapshot is None or not snapshot["windows"]:
 			account["error"] = "refresh_failed"
 		else:
-			snapshot["plan"] = login["plan"] or snapshot["plan"]
+			# Neither the credentials file (its plan fields are often absent) nor Hermes's usage fetch names the allowance; the profile's tier does.
+			snapshot["plan"] = profile_fetcher(login["token"])
 			account["snapshot"] = snapshot
 		return reading
 	finally:
@@ -329,7 +344,7 @@ _CREDITS_LOCK = threading.Lock()
 _CREDITS_READ = {}
 
 
-def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None, claude_login=_claude_code_login, claude_fetcher=None):
+def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None, claude_login=_claude_code_login, claude_fetcher=None, claude_profile=_fetch_claude_profile_plan):
 	"""Trigger Hermes's read-only per-credential refresh for vetted pooled providers, then read each account's cached snapshot.
 
 	Must run inside the target home's context: Hermes keys both auth.json and its usage cache on the active home.
@@ -448,7 +463,7 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 	# Hermes's own anthropic pool wins; only an empty or missing one falls back to Claude Code's login.
 	current = next((reading for reading in providers if reading["provider"] == "anthropic"), None)
 	if current is None or current["error"] == "logged_out":
-		fallback = _collect_claude_code(symbols, clock, claude_login, claude_fetcher)
+		fallback = _collect_claude_code(symbols, clock, claude_login, claude_fetcher, claude_profile)
 		if fallback is not None:
 			providers = sorted([reading for reading in providers if reading is not current] + [fallback], key=lambda reading: reading["provider"])
 	return providers
