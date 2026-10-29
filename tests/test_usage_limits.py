@@ -537,10 +537,22 @@ NO_CLAUDE = lambda clock: None
 
 
 class ClaudeCodeFallbackTests(unittest.TestCase):
-	def collect(self, pool, login, fetcher):
+	def collect(self, pool, login, fetcher, profile=None):
 		symbols = CollectorTests.symbols(CollectorTests(), {}, [], pool)
+		profile = profile or (lambda token: "default_claude_max_5x")
 		with patch.object(limits, "_native_symbols", return_value=symbols):
-			return limits.collect_native(join_timeout=1, claude_login=login, claude_fetcher=fetcher)
+			return limits.collect_native(join_timeout=1, claude_login=login, claude_fetcher=fetcher, claude_profile=profile)
+
+	def test_plan_is_the_profiles_rate_limit_tier(self):
+		fetch = lambda **kwargs: SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
+			SimpleNamespace(label="Current week", used_percent=4.0, reset_at=dt(NOW + 6 * 86400), scope="account"),))
+		tokens = []
+		profile = lambda token: tokens.append(token) or "default_claude_max_5x"
+		readings = self.collect({}, lambda clock: {"token": "tok", "expired": False}, fetch, profile)
+		self.assertEqual((readings[0]["accounts"][0]["snapshot"]["plan"], tokens), ("default_claude_max_5x", ["tok"]))
+		# A failed profile read leaves the plan unknown rather than failing the account.
+		readings = self.collect({}, lambda clock: {"token": "tok", "expired": False}, fetch, lambda token: None)
+		self.assertEqual((readings[0]["accounts"][0]["error"], readings[0]["accounts"][0]["snapshot"]["plan"]), (None, None))
 
 	def test_empty_hermes_pool_reads_claude_codes_login_with_one_explicit_token_fetch(self):
 		calls = []
@@ -550,7 +562,7 @@ class ClaudeCodeFallbackTests(unittest.TestCase):
 			return SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
 				SimpleNamespace(label="Current session", used_percent=36.0, reset_at=dt(NOW + 1200), scope="account"),
 				SimpleNamespace(label="Current week", used_percent=4.0, reset_at=dt(NOW + 6 * 86400), scope="account")))
-		login = {"token": "sk-ant-oat-secret", "plan": "default_claude_max_5x", "expired": False}
+		login = {"token": "sk-ant-oat-secret", "expired": False}
 		readings = self.collect({"anthropic": []}, lambda clock: login, fetch)
 		(reading,) = readings
 		self.assertEqual((reading["provider"], reading["error"]), ("anthropic", None))
@@ -563,9 +575,9 @@ class ClaudeCodeFallbackTests(unittest.TestCase):
 		self.assertEqual(login, {})
 
 	def test_expired_or_failing_login_is_an_account_error_and_no_login_stays_logged_out(self):
-		expired = self.collect({"anthropic": []}, lambda clock: {"token": "t", "plan": None, "expired": True}, lambda **kw: self.fail("an expired token is never sent"))
+		expired = self.collect({"anthropic": []}, lambda clock: {"token": "t", "expired": True}, lambda **kw: self.fail("an expired token is never sent"))
 		self.assertEqual(expired[0]["accounts"][0]["error"], "token_expired")
-		failing = self.collect({}, lambda clock: {"token": "t", "plan": None, "expired": False}, lambda **kw: (_ for _ in ()).throw(RuntimeError("401")))
+		failing = self.collect({}, lambda clock: {"token": "t", "expired": False}, lambda **kw: (_ for _ in ()).throw(RuntimeError("401")))
 		self.assertEqual((failing[0]["provider"], failing[0]["accounts"][0]["error"]), ("anthropic", "refresh_failed"))
 		self.assertEqual(self.collect({"anthropic": []}, NO_CLAUDE, None)[0]["error"], "logged_out")
 		self.assertEqual(self.collect({}, NO_CLAUDE, None), [])
@@ -581,7 +593,7 @@ class ClaudeCodeFallbackTests(unittest.TestCase):
 			body = '{"claudeAiOauth": {"accessToken": "tok", "refreshToken": "r", "expiresAt": 2000000, "subscriptionType": "team", "rateLimitTier": "default_claude_max_5x"}}'
 			path.write_text(body, encoding="utf-8")
 			with patch.dict(limits.os.environ, {"CLAUDE_CONFIG_DIR": temp}):
-				self.assertEqual(limits._claude_code_login(clock=lambda: 1000.0), {"token": "tok", "plan": "default_claude_max_5x", "expired": False})
+				self.assertEqual(limits._claude_code_login(clock=lambda: 1000.0), {"token": "tok", "expired": False})
 				self.assertTrue(limits._claude_code_login(clock=lambda: 3000.0)["expired"])
 				path.write_text("{broken", encoding="utf-8")
 				self.assertIsNone(limits._claude_code_login())
