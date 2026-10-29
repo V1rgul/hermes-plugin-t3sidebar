@@ -123,6 +123,13 @@ class SessionDelete(BaseModel):
 	expected_generation: int = Field(ge=0)
 
 
+class DraftPersist(BaseModel):
+	model_config = ConfigDict(extra="forbid", strict=True)
+
+	# The live runtime holding an unsaved draft; absent when the stored row already exists.
+	runtime_id: str | None = Field(default=None, pattern=SESSION_ID_PATTERN, max_length=256)
+
+
 class SessionTitle(BaseModel):
 	model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -994,6 +1001,7 @@ def native_control_guard(request, profile, unavailable):
 	if authority is not None and (authority.profile_id != str(home)
 		or Path(authority.db.db_path).resolve().parent != home):
 		raise HTTPException(403, "profile_mismatch")
+	return authority
 
 
 def native_title(profile, session_id):
@@ -1063,6 +1071,68 @@ async def native_delete(request, profile, session_id, body):
 	if not absent:
 		value.update(revision=result["revision"], execution_generation=result["execution_generation"])
 	return value
+
+
+def persist_draft_row(profile, session_id, runtime_id, authority):
+	"""Give an unsent draft its stored row now, through the native first-prompt writer.
+
+	Native creates a Desktop session's row only on its first prompt, and Desktop's dead-session prune erases the composer stash of any session whose stored row is missing, so typed but unsent text is lost after navigating away. This runs the exact idempotent INSERT OR IGNORE the first prompt would run, on this process's own live session, and then reads the row back. Returns the stored message count.
+	"""
+	import sys
+	from hermes_constants import get_hermes_home
+	from hermes_cli.web_server_sessions import _open_session_db_for_profile
+	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+
+	home = get_hermes_home().resolve()
+
+	def stored():
+		db = _open_session_db_for_profile(profile, read_only=True)
+		try:
+			if Path(db.db_path).resolve().parent != home:
+				raise HTTPException(403, "profile_mismatch")
+			# Never recreate a deleted session whose runtime is still alive.
+			if runtime_retired(db, {"session_key": session_id, "id": runtime_id}):
+				raise HTTPException(409, "session_retired")
+			row = db.get_session(session_id)
+			return None if row is None else (row.get("message_count"),)
+		finally:
+			db.close()
+
+	if (row := stored()) is not None:
+		return row[0]
+	# Authority-backed topologies keep live sessions in another process; there is no native seam to reach them from here.
+	server = sys.modules.get("tui_gateway.server")
+	ensure = getattr(server, "_ensure_session_db_row", None)
+	if authority is not None or server is None or not callable(ensure):
+		raise HTTPException(503, "draft_persistence_unavailable")
+	if runtime_id is None:
+		raise HTTPException(404, "draft_runtime_not_found")
+	with server._sessions_lock:
+		session = server._sessions.get(runtime_id)
+		parent = session.get("agent") if isinstance(session, dict) else None
+		valid = (isinstance(session, dict) and not session.get("_finalized")
+			and session.get("session_key") == session_id
+			and str(getattr(parent, "session_id", None) or session_id) == session_id
+			and Path(session.get("profile_home") or server._launch_home()).resolve() == home)
+		source = str(session.get("source") or "").strip().lower() if valid else ""
+	if not valid:
+		raise HTTPException(404, "draft_runtime_not_found")
+	# Unknown provenance is not a human draft; internal runs never become sidebar rows.
+	if not source or source in {*INTERNAL_LISTING_SOURCES, "cron", "subagent"}:
+		raise HTTPException(409, "draft_source_unsupported")
+	if ensure(session) is False:
+		raise HTTPException(503, "draft_persistence_failed")
+	# The native writer swallows ordinary failures, so only the stored row proves persistence.
+	if (row := stored()) is None:
+		raise HTTPException(503, "draft_persistence_verification_failed")
+	return row[0]
+
+
+async def native_persist_draft(request, profile, session_id, body):
+	authority = native_control_guard(request, profile, "draft_persistence_context_unavailable")
+	count = await asyncio.to_thread(persist_draft_row, profile, session_id, body.runtime_id, authority)
+	# The stored empty Desktop row is itself the record that this session once held text; nothing else is kept.
+	return {"ok": True, "profile": profile, "session_id": session_id, "message_count": count}
 
 
 async def native_rename(request, profile, session_id, body):
@@ -1215,6 +1285,17 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		except Exception as exc:
 			# Ambiguous failures must retain the original request for exact retry.
 			raise HTTPException(503, "native_delete_unavailable") from exc
+
+	@api.post("/sessions/{session_id}/draft")
+	async def persist_draft(session_id: SessionId, body: DraftPersist, request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		try:
+			profile = listing_profile(request)
+			return await native_persist_draft(request, profile, session_id, body)
+		except HTTPException:
+			raise
+		except Exception as exc:
+			raise HTTPException(503, "draft_persistence_unavailable") from exc
 
 	@api.post("/sessions/{session_id}/title")
 	async def rename_session(session_id: SessionId, body: SessionTitle, request: Request, response: Response):

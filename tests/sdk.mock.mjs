@@ -207,6 +207,20 @@ export const ctx = {
       if (control.deleteLostReply) { control.deleteLostReply = false; throw new Error('fixture reply lost after commit'); }
       return clone(control.deleteResult || receipt.result);
     }
+    if (path.endsWith('/draft') && options?.method === 'POST') {
+      // Off by default, like a backend without the route: existing tests see no persisted drafts.
+      if (!control.draftPersistence) throw new Error('404 draft persistence unavailable');
+      const id = decodeURIComponent(path.slice('/sessions/'.length, -'/draft'.length));
+      (control.draftRequests ||= []).push({ id, body: clone(options.body) });
+      let row = [...control.rows, ...(control.extra || [])].find(item => item.id === id);
+      if (!row) {
+        const runtime = control.live.find(item => item.id === options.body.runtime_id && item.session_key === id);
+        if (!runtime) throw new Error('draft_runtime_not_found');
+        row = { id, source: runtime.source, message_count: 0, cwd: runtime.cwd ?? null, project: runtime.project ?? null, provider: runtime.provider ?? null, last_active: runtime.last_active ?? now() };
+        control.rows.push(row);
+      }
+      return { ok: true, profile: host.state.profile.get(), session_id: control.draftWrongId || id, message_count: row.message_count ?? 0 };
+    }
     if (path.endsWith('/workspace')) {
       const id = decodeURIComponent(path.slice('/sessions/'.length, -'/workspace'.length));
       const row = [...control.rows, ...(control.extra || [])].find(row => row.id === id || row._lineage_root_id === id || row._lineage_ids?.includes(id));

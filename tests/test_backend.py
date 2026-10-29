@@ -393,22 +393,24 @@ class BackendTests(unittest.TestCase):
 			elif isinstance(node, ast.ImportFrom):
 				imports.add(node.module)
 		self.assertEqual(imports, {"asyncio", "importlib.util", "json", "math", "pathlib", "re", "sqlite3", "sys", "threading", "time", "typing", "types", "uuid", "fastapi", "pydantic", "hermes_constants", "hermes_state", "hermes_state_mutation_retirement", "agent.voice_turn_route", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "hermes_cli.web_models", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.session_notifications", "tui_gateway.ws_legacy_fallback"})
-		# Native reads remain read-only; deletion and stored rename delegate to the sanctioned HTTP endpoints.
+		# Native reads remain read-only; deletion and stored rename delegate to the sanctioned HTTP endpoints, and an unsent draft's row is written only by the native first-prompt writer.
 		self.assertNotIn("import tui_gateway.server", source)
+		self.assertEqual(source.count("_ensure_session_db_row"), 1)
 		parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
 		registry_reads = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "server" and node.attr == "_sessions"]
-		self.assertEqual(len(registry_reads), 3)
+		self.assertEqual(len(registry_reads), 4)
 		projection = [node for node in registry_reads for parent in [parents[node]] if isinstance(parent, ast.keyword) and parent.arg == "_sessions"]
 		guards = [node for node in registry_reads for parent in [parents[node]] if isinstance(parent, ast.Attribute) and parent.attr == "get"]
-		self.assertEqual((len(projection), len(guards)), (1, 2))
+		self.assertEqual((len(projection), len(guards)), (1, 3))
 		# Direct lookups only revalidate an exact object from the native scoped
-		# mapper (sid) or its ancillary projection (row id), never scan entries.
+		# mapper (sid) or its ancillary projection (row id), or name the exact
+		# runtime holding a draft (runtime_id), never scan entries.
 		lookups = [lookup for guard in guards for lookup in [parents[parents[guard]]]
 			if isinstance(lookup, ast.Call)]
-		self.assertEqual(len(lookups), 2)
+		self.assertEqual(len(lookups), 3)
 		self.assertTrue(all(len(lookup.args) == 1 and lookup.keywords == [] for lookup in lookups))
 		self.assertEqual({ast.dump(lookup.args[0]) for lookup in lookups},
-			{ast.dump(ast.parse(expr, mode="eval").body) for expr in ('row["id"]', 'sid')})
+			{ast.dump(ast.parse(expr, mode="eval").body) for expr in ('row["id"]', 'sid', 'runtime_id')})
 		self.assertTrue(all(isinstance(node.ctx, ast.Load) for node in registry_reads))
 		self.assertNotIn("session_mutations", source)
 		self.assertNotIn("read_only=False", source)
@@ -433,7 +435,7 @@ class BackendTests(unittest.TestCase):
 		self.assertEqual(manifest["name"], "hermes-t3sidebar")
 		self.assertEqual(manifest["api"], "plugin_api.py")
 		self.assertTrue(manifest["tab"]["hidden"])
-		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/environment", "/runtime", "/sessions", "/archives", "/sessions/{session_id}/archive", "/sessions/{session_id}/snapshot", "/sessions/{session_id}/workspace", "/sessions/{session_id}/delete", "/sessions/{session_id}/title", "/sessions/{session_id}", "/usage/history", "/usage/limits"})
+		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/environment", "/runtime", "/sessions", "/archives", "/sessions/{session_id}/archive", "/sessions/{session_id}/snapshot", "/sessions/{session_id}/workspace", "/sessions/{session_id}/delete", "/sessions/{session_id}/title", "/sessions/{session_id}/draft", "/sessions/{session_id}", "/usage/history", "/usage/limits"})
 
 
 if __name__ == "__main__":
