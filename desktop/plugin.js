@@ -1391,7 +1391,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
           row.project?.name || !row.newSession ? h('span', { className: 'sf-project-name' }, row.project?.name || 'Project unavailable') : null),
         row.status === 'unknown' ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': 'Status unknown' }, '?') : null,
         provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, title: row.provider }, provider) : null,
-        showTokens ? h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${tokens}` }, tokens) : null,
+        showTokens ? h('span', { className: 'sf-token', title: 'Total input and output tokens, including subagents', 'aria-label': `Total tokens: ${tokens}` }, tokens) : null,
         // A running snoozed card stays in Snoozed but still shows its Working status, between tokens and the countdown.
         snoozed && isWorking(row) ? h('span', { className: 'sf-time sf-snooze-working' }, statusBadge('working', row, hidden, workingDetails)) : null,
         h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row, hidden, workingDetails) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),

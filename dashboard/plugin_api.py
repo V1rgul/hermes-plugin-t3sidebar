@@ -766,12 +766,41 @@ def card_billing_providers(db, session_ids):
 	return result
 
 
+def card_subagent_usage(db, seed_ids):
+	"""Delegated subagent sessions below each seed, with their stored token counters: {seed: {child_id: (input, output)}}.
+
+	Mirrors native cascade deletion (`_collect_delegate_child_ids`): a delegate's row names its spawning session in `parent_session_id` and carries the `_delegate_from` marker, which nested delegates and a subagent's own compression continuations (they inherit `model_config` verbatim) also carry, so following only marked children of a seed reaches every subagent segment without entering the conversation's branch/reset forks. One recursive read per batch walks the parent index instead of scanning each card's marker.
+	"""
+	connection = getattr(db, "_conn", None)
+	if not isinstance(connection, sqlite3.Connection) or not seed_ids:
+		return {}
+	result = {}
+	try:
+		rows = connection.execute("""
+			WITH RECURSIVE tree(seed, id) AS (
+				SELECT value, value FROM json_each(?)
+				UNION
+				SELECT tree.seed, child.id FROM tree
+				JOIN sessions child ON child.parent_session_id = tree.id
+				WHERE CASE WHEN json_valid(child.model_config) THEN json_extract(child.model_config, '$._delegate_from') END IS NOT NULL
+			)
+			SELECT tree.seed, s.id, s.input_tokens, s.output_tokens FROM tree JOIN sessions s ON s.id = tree.id WHERE tree.id != tree.seed
+		""", (json.dumps(sorted(seed_ids)),))
+		for seed, sid, inp, out in rows:
+			result.setdefault(seed, {})[sid] = (inp, out)
+	except sqlite3.Error:
+		# Legacy stores without the marker column keep the conversation's own counts rather than failing the listing.
+		return {}
+	return result
+
+
 def card_rows(db, rows):
-	"""Allowlisted card metadata; compression usage is summed once per native segment."""
+	"""Allowlisted card metadata; usage is summed once per native compression segment and delegated subagent session."""
 	rows = list(rows)
 	segment_ids = {sid for row in rows if row.get("_lineage_ids")
 		for sid in [row["id"], *row["_lineage_ids"]]}
 	segments = db._get_session_rich_rows_batch(segment_ids, compact_rows=True) if segment_ids else {}
+	subagents = card_subagent_usage(db, {row["id"] for row in rows} | segment_ids)
 	tips = [segments.get(row["id"], {}) if row.get("_lineage_ids") else row for row in rows]
 	providers = [card_provider(tip.get("model_config")) for tip in tips]
 	# Explicit tip configuration wins over historical billing evidence; unresolved cards still need their complete lineage to detect conflicts.
@@ -784,14 +813,16 @@ def card_rows(db, rows):
 		chain = list(dict.fromkeys([row["id"], *(row.get("_lineage_ids") or [])]))
 		compressed = bool(row.get("_lineage_ids"))
 		usage = [segments.get(sid, {}) for sid in chain] if compressed else [row]
+		# A subagent reached from several segments of this conversation counts once.
+		children = {sid: counts for seed in chain for sid, counts in subagents.get(seed, {}).items() if sid not in chain}
 		if provider is None:
 			candidates = set().union(*(billing.get(sid, set()) for sid in chain))
 			evidence = {name for segment in usage for name in (card_provider(segment.get("model_config")), provider_name(segment.get("billing_provider"))) if name}
 			if len(candidates) == 1 and evidence <= candidates:
 				provider = next(iter(candidates))
 		counts = {}
-		for key in ("input_tokens", "output_tokens"):
-			values = [segment.get(key) for segment in usage]
+		for index, key in enumerate(("input_tokens", "output_tokens")):
+			values = [segment.get(key) for segment in usage] + [child[index] for child in children.values()]
 			counts[key] = sum(values) if all(type(value) is int and value >= 0 for value in values) else None
 		item = {k: v for k, v in row.items() if k in LIST_FIELDS}
 		item["archived"] = bool(row.get("archived", False))

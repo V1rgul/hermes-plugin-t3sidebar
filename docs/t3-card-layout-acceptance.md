@@ -11,7 +11,7 @@ Reference images supplied by the user:
 
 - `upload_walqtj7a.png`: while hovered, show an icon-only clock/Snooze control and a checkmark plus “Settle” control at the card’s top-right. Hide both controls completely when the card is not hovered; preserve the lower title line. Snooze opens its time choices, while Settle performs the existing reversible settlement action.
 
-Provider and token metadata are additional explicit user requirements even when absent from the reference crop. Missing metadata must remain visibly unknown rather than being inferred from the model name. Displayed tokens mean input plus output across unique compression segments; do not double-count cache/reasoning categories.
+Provider and token metadata are additional explicit user requirements even when absent from the reference crop. Missing metadata must remain visibly unknown rather than being inferred from the model name. Displayed tokens mean input plus output across unique compression segments and the delegated subagent sessions they spawned; do not double-count cache/reasoning categories.
 
 ## Required removals and filtering
 

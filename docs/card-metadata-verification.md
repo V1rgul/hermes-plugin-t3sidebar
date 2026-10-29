@@ -7,7 +7,7 @@ The native `/sessions` reader now enriches its allowlisted list rows with:
 - `project`: `{id, name, icon, color, cwd, is_home?}`. Native active projects retain their IDs, custom display names, icons and colors. Matching uses the longest owning folder with a path boundary, including secondary folders; archived projects are excluded. `cwd` is the matched folder. With no match/catalog, a nonempty session cwd produces an honest path/basename fallback. Empty cwd produces `{id: "__no_project__", name: "Home", icon: null, color: null, cwd: null, is_home: true}`.
 - `provider`: an explicit nonempty provider from the surfaced compression tip's `model_config.provider`, then `model_config.gateway_runtime.provider`; otherwise `null`. Invalid JSON, non-object configurations and model-name guesses never establish a provider.
 - `model`: native surfaced-tip model, or `null` when unknown.
-- `input_tokens`, `output_tokens`: sums across unique compression-chain segment IDs. Each unknown/missing/invalid component makes that component's aggregate `null`; known zero stays zero.
+- `input_tokens`, `output_tokens`: sums across unique compression-chain segment IDs plus every delegated subagent session below them (nested delegates and subagent compression continuations included, each counted once; branch/reset forks excluded). Each unknown/missing/invalid component makes that component's aggregate `null`; known zero stays zero.
 - `total_tokens`: input plus output only, or `null` when either aggregate is unknown. Cache and reasoning counters are not added again.
 - `source`: native source provenance.
 

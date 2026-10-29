@@ -87,6 +87,59 @@ class CardMetadata(unittest.TestCase):
 		self.assertEqual(rows["missing"]["total_tokens"], 12)
 		self.assertFalse((self.root / "projects.db").exists())
 
+	def test_subagent_tokens_join_their_conversation_once_across_nesting_and_compression(self):
+		with closing(SessionDB(self.db_path)) as db:
+			for sid, source, parent, config, inp, out in [
+				("root", "cli", None, None, 100, 10),
+				("tip", "cli", "root", None, 200, 20),
+				# Delegates spawned from the earlier segment and from the tip, a nested delegate, and a compressed subagent whose continuation inherits the marker.
+				("sub-a", "subagent", "root", {"_delegate_from": "root"}, 10, 1),
+				("nested", "subagent", "sub-a", {"_delegate_from": "sub-a"}, 40, 4),
+				("sub-b", "subagent", "tip", {"_delegate_from": "tip"}, 20, 2),
+				("sub-b2", "subagent", "sub-b", {"_delegate_from": "tip"}, 30, 3),
+				# A branch is its own card: neither conversation absorbs the other's usage.
+				("branch", "cli", "tip", {"_branched_from": "tip"}, 1000, 100),
+				("branch-sub", "subagent", "branch", {"_delegate_from": "branch"}, 500, 50),
+				("other", "cli", None, None, 7, 3),
+			]:
+				db.create_session(sid, source, parent_session_id=parent, model_config=config)
+				db.update_token_counts(sid, input_tokens=inp, output_tokens=out, model="fixture", absolute=True)
+				if sid in ("root", "sub-b"):
+					db.end_session(sid, "compression")
+		before = self.db_path.read_bytes()
+		with closing(SessionDB(self.db_path, read_only=True)) as db:
+			queries = []
+			assert db._conn is not None
+			db._conn.set_trace_callback(queries.append)
+			rows = {row["id"]: row for row in backend.card_rows(db, db.list_sessions_rich(compact_rows=True))}
+		self.assertEqual(set(rows), {"tip", "branch", "other"})
+		self.assertEqual((rows["tip"]["input_tokens"], rows["tip"]["output_tokens"], rows["tip"]["total_tokens"]), (400, 40, 440))
+		self.assertEqual(rows["branch"]["total_tokens"], 1650)
+		self.assertEqual(rows["other"]["total_tokens"], 10)
+		self.assertEqual(sum("WITH RECURSIVE tree" in sql for sql in queries), 1)
+		self.assertEqual(self.db_path.read_bytes(), before)
+
+	def test_subagent_usage_keeps_unknown_counts_and_ignores_malformed_configs(self):
+		with closing(sqlite3.connect(":memory:")) as connection:
+			connection.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, model_config TEXT, input_tokens INTEGER, output_tokens INTEGER)")
+			connection.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?, ?)", [
+				("known", None, None, 5, 5),
+				("known-sub", "known", '{"_delegate_from":"known"}', 3, 2),
+				("malformed", "known", "{not json", 900, 900),
+				("partial", None, None, 5, 5),
+				("partial-sub", "partial", '{"_delegate_from":"partial"}', None, 2),
+			])
+			rows = {row["id"]: row for row in backend.card_rows(SimpleNamespace(_conn=connection), [{"id": "known", "input_tokens": 5, "output_tokens": 5}, {"id": "partial", "input_tokens": 5, "output_tokens": 5}])}
+		self.assertEqual(rows["known"]["total_tokens"], 15)
+		self.assertIsNone(rows["partial"]["input_tokens"])
+		self.assertEqual(rows["partial"]["output_tokens"], 7)
+		self.assertIsNone(rows["partial"]["total_tokens"])
+		# Stores whose sessions table predates the marker column keep the conversation's own counts.
+		with closing(sqlite3.connect(":memory:")) as connection:
+			connection.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
+			rows = backend.card_rows(SimpleNamespace(_conn=connection), [{"id": "legacy", "input_tokens": 1, "output_tokens": 2}])
+		self.assertEqual(rows[0]["total_tokens"], 3)
+
 	def test_card_message_count_preserves_empty_evidence_without_inventing_unknown_history(self):
 		with closing(SessionDB(self.db_path)) as db:
 			db.create_session("empty", "desktop")
