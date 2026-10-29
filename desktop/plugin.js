@@ -48,6 +48,20 @@ function useShowTokens(ctx) {
   return useQuery({ queryKey: SHOW_TOKENS_KEY, queryFn: () => readShowTokens(ctx), initialData: () => readShowTokens(ctx), staleTime: Infinity }).data;
 }
 const activationEpoch = sdk.atom(gatewayActivationEpoch());
+// Plugin pages currently mounted, newest last. Desktop mounts a route page in the workspace only while the router is on its path and exposes no route state to plugins, so each page publishes its own presence; the sidebar then drops the session highlight and lights the page's footer button, as the native sidebar does on its own pages.
+const shownPages = sdk.atom([]);
+const NO_SESSION = sdk.atom(null);
+function useShowPage(route) {
+  useLayoutEffect(() => {
+    shownPages.set([...shownPages.get(), route]);
+    return () => { const pages = [...shownPages.get()], index = pages.lastIndexOf(route); if (index >= 0) pages.splice(index, 1); shownPages.set(pages); };
+  }, [route]);
+}
+// The page in front of the user, or null while a chat is: a focused session tile keeps its own chat on screen beside a page, and its runtime id then differs from the primary one (hosts without focusedSessionId count as primary).
+export function useShownPage() {
+  const pages = useValue(shownPages), focused = useValue(host.state.focusedSessionId ?? NO_SESSION), primary = useValue(host.state.activeSessionId ?? NO_SESSION);
+  return host.state.focusedSessionId && focused !== primary ? null : pages.at(-1) ?? null;
+}
 export const durableId = row => row._lineage_root_id || row.id;
 export const aliases = row => [...new Set([row.id, row.resolved_id, durableId(row), ...(row._lineage_ids || [])].filter(Boolean))];
 export function seconds(value) {
@@ -933,6 +947,7 @@ const CSS = `
 .sf-footer-end{display:inline-flex;flex-shrink:0;margin-left:auto}.sf .sf-footer .sf-limits{display:inline-flex;align-items:center;justify-content:flex-start;flex:0 1 auto;gap:0;min-width:0;max-width:100%;height:28px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);font:inherit;font-size:11px;font-weight:400;line-height:1;white-space:nowrap;overflow:clip;cursor:pointer}
 .sf .sf-footer .sf-limits[data-empty=true]{flex-shrink:0;justify-content:center;width:28px;padding:0;color:var(--ui-text-secondary)}.sf-footer .sf-limits[data-empty=true] svg{width:16px;height:16px;flex-shrink:0}
 .sf .sf-footer .sf-limits:hover,.sf .sf-footer .sf-limits:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
+/* The footer button of the page in front of the user carries the selected-card background, since no card is selected then. */.sf .sf-footer :is(.sf-utility,.sf-limits)[aria-current=page]{background:var(--ui-bg-quaternary);color:var(--ui-text-primary)}
 .sf-limits-items{display:flex;flex-wrap:wrap;align-items:center;column-gap:10px;min-width:0;height:28px;overflow:clip}
 .sf-limit{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;height:28px}
 .sf-limit svg[data-provider-mark]{width:13px;height:13px;flex-shrink:0;opacity:.7}
@@ -1703,7 +1718,9 @@ function ProjectChoice({ choice, selected, scope, controller, filterProject, clo
 }
 function ScopedSidebar({ ctx, controller, scope }) {
   const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedGap = usePinnedGap(ctx), showTokens = useShowTokens(ctx);
-  const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
+  // No session counts as viewed while a plugin page is shown, so the previous chat neither stays highlighted nor gets its Done/Woke markers acknowledged.
+  const focusedId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner), activeId = useShownPage() ? null : focusedId;
+  const client = useQueryClient();
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false), [deleteTarget, setDeleteTarget] = useState(null);
   const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [actionError, setActionError] = useState('');
   const [emptyDrafts, setEmptyDrafts] = useState(() => new Set());
@@ -1978,9 +1995,9 @@ export function writeUsagePreferences(storage, value) {
 const USAGE_LINK = { route: USAGE_ROUTE, label: 'Usage', tip: 'Token usage', icon: 'BarChart3', glyph: '▥' };
 const openRoute = route => { try { host.navigate(route); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ } };
 function UtilityLink({ link }) {
-  const tip = typeof sdk.Tip === 'function';
+  const tip = typeof sdk.Tip === 'function', current = useShownPage() === link.route;
   // Without the SDK tooltip, a native title still names the icon on hover.
-  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-sm', className: 'sf-utility', 'aria-label': link.label, title: tip ? undefined : link.tip, 'data-route': link.route, onClick: () => openRoute(link.route) }, icon(link.icon, link.glyph));
+  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-sm', className: 'sf-utility', 'aria-label': link.label, title: tip ? undefined : link.tip, 'data-route': link.route, 'aria-current': current ? 'page' : undefined, onClick: () => openRoute(link.route) }, icon(link.icon, link.glyph));
   return tip ? h(sdk.Tip, { label: link.tip, side: 'top' }, button) : button;
 }
 function UsageFooter({ ctx, scope, companion = false }) {
@@ -2002,11 +2019,12 @@ function LimitsFooterStatus({ ctx, scope, enabled }) {
 // One tooltip line per provider, also used (joined) as the button's accessible name: facts only, no advice.
 export const limitsFooterLine = (provider, verdict, now) => `${provider.label || provider.provider}: ${unitsText(verdict.remaining)} / ${unitsText(verdict.capacity)} units · ${verdictText(verdict, now)}`;
 function LimitsFooterButton({ items, now }) {
+  const current = useShownPage() === LIMITS_ROUTE;
   const lines = items.map(({ provider, verdict }) => limitsFooterLine(provider, verdict, now));
   const tip = typeof sdk.Tip === 'function';
   // Block lines keep one provider per tooltip line; the SDK Tip takes a node label.
   const label = lines.length ? h('span', { style: { display: 'block', textAlign: 'left' } }, lines.map(line => h('span', { key: line, style: { display: 'block' } }, line))) : 'Subscription limits';
-  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-limits', 'data-route': LIMITS_ROUTE, 'data-empty': !lines.length,
+  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-limits', 'data-route': LIMITS_ROUTE, 'data-empty': !lines.length, 'aria-current': current ? 'page' : undefined,
     'aria-label': lines.length ? `Limits. ${lines.join('. ')}.` : 'Limits', title: tip ? undefined : lines.length ? lines.join('\n') : 'Subscription limits', onClick: () => openRoute(LIMITS_ROUTE) },
     lines.length ? h('span', { className: 'sf-limits-items' }, items.map(({ provider, verdict }) => h('span', { key: provider.provider, className: 'sf-limit', 'data-provider': provider.provider, 'data-status': verdict.status, 'data-severity': verdict.severity ?? undefined },
       providerMark(provider.provider) || h('span', { className: 'sf-limit-name' }, provider.label || provider.provider),
@@ -2576,6 +2594,7 @@ function updateUsagePreferences(ctx, client, patch) {
 }
 // One component for both route pages; `view` picks the content and the only endpoint that page fetches.
 export function UsagePage({ ctx, view = 'usage' }) {
+  useShowPage(view === 'limits' ? LIMITS_ROUTE : USAGE_ROUTE);
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
   useValue(host.state.gateway);
   useValue(activationEpoch);

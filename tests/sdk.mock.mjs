@@ -28,7 +28,7 @@ const composer = {
 };
 export const host = {
   composer,
-  state: { connectionId: atom('source-a'), profile: atom('default'), gateway: atom('open'), activeSessionId: atom('runtime-design'), focusedStoredSessionId: atom('design'), focusedSessionOwner: atom({ connectionId: 'source-a', profile: 'default' }) },
+  state: { connectionId: atom('source-a'), profile: atom('default'), gateway: atom('open'), activeSessionId: atom('runtime-design'), focusedSessionId: atom('runtime-design'), focusedStoredSessionId: atom('design'), focusedSessionOwner: atom({ connectionId: 'source-a', profile: 'default' }) },
   profileRoutes: async () => [{ connectionId: host.state.connectionId.get(), profile: host.state.profile.get(), targetProfile: host.state.profile.get(), mode: 'remote' }],
   async listPersistedSessions(route, options) { calls.push(['list', route, options]); if (control.listError) throw new Error('fixture list unavailable'); return { sessions: clone(control.rows), total: control.total || control.rows.length, limit: 500, offset: 0 }; },
   async request(method, params) { calls.push([method, params]); if (method === 'session.active_list') { if (control.runtimeError) throw new Error('fixture runtime disconnected'); return { sessions: clone(control.live) }; } if (method === 'session.list') return { sessions: clone(control.extra || []).slice(0, params.limit) }; throw new Error(`Unexpected RPC ${method}`); },
@@ -283,7 +283,7 @@ export function reset() {
   }
   control.projectCatalog = [...new Map(control.rows.map(row => [row.project.id, { ...row.project, folders: [{ path: row.project.cwd }], archived: false }])).values()];
   control.projects = control.projectCatalog.map(project => ({ id: project.id, label: project.cwd === '/projects/hermes-t3sidebar' ? 'Synthetic Sidebar' : project.name, path: project.cwd, icon: project.cwd === '/projects/hermes-t3sidebar' ? 'tools' : project.icon, color: project.color }));
-  host.state.connectionId.set('source-a'); host.state.profile.set('default'); host.state.gateway.set('open'); host.state.activeSessionId.set('runtime-design'); host.state.focusedStoredSessionId.set('design'); host.state.focusedSessionOwner.set({ connectionId: 'source-a', profile: 'default' });
+  host.state.connectionId.set('source-a'); host.state.profile.set('default'); host.state.gateway.set('open'); host.state.activeSessionId.set('runtime-design'); host.state.focusedSessionId.set('runtime-design'); host.state.focusedStoredSessionId.set('design'); host.state.focusedSessionOwner.set({ connectionId: 'source-a', profile: 'default' });
 }
 export function loadArchivePaginationFixtures() {
   control.rows = Array.from({ length: 501 }, (_, i) => ({ id: `synthetic-page-active-${i}`, title: `SYNTHETIC active page ${i}`, archived: false, source: 'desktop' }));

@@ -1231,6 +1231,33 @@ test('qualified focus serializes shared Woke and Done acknowledgments without cr
   assert.equal(button('Undo'), undefined);
 });
 
+test('a shown Usage or Limits page unselects the focused card, keeps its Done and marks its footer button current', async () => {
+  mock.control.metadata.completions = { design: { done_token: 'unseen-turn', done_at: Math.floor(Date.now() / 1000) - 1 } };
+  const pages = createRoot(document.body.appendChild(document.createElement('div')));
+  const show = async view => { await act(async () => { pages.render(view ? React.createElement(QueryClientProvider, { client: mock.queryClient }, React.createElement(flow.UsagePage, { ctx: mock.ctx, view })) : null); }); await tick(); await tick(); };
+  const current = () => all('.sf-row[data-current=true]').map(node => node.dataset.sessionId);
+  const footerCurrent = () => all('.sf-footer [aria-current=page]').map(node => node.dataset.route);
+  try {
+    await show('limits'); await mount();
+    assert.deepEqual(current(), [], 'no card stays selected behind the Limits page');
+    assert.equal(row('design').dataset.current, 'false'); assert.equal(row('design').querySelector('.sf-open').hasAttribute('aria-current'), false);
+    assert.equal(row('design').querySelector('.sf-status')?.dataset.status, 'done', 'the unseen result stays flagged');
+    assert.equal(mock.calls.some(call => call[2]?.body?.action === 'ack_done'), false, 'the page does not acknowledge the previous chat');
+    assert.deepEqual(footerCurrent(), ['/t3sidebar-limits']);
+    await show('usage');
+    assert.deepEqual([current(), footerCurrent()], [[], ['/t3sidebar-usage']]);
+    assert.equal(mock.calls.some(call => call[2]?.body?.action === 'ack_done'), false);
+    await show(null);
+    assert.deepEqual([current(), footerCurrent()], [['design'], []], 'leaving the page reselects the chat');
+    assert.deepEqual(mock.control.metadata.completions, {}, 'the chat shown again acknowledges its result');
+    // A focused session tile beside the page is the chat in front of the user, as in the native sidebar.
+    await show('limits');
+    assert.deepEqual([current(), footerCurrent()], [[], ['/t3sidebar-limits']]);
+    await act(async () => mock.host.state.focusedSessionId.set('runtime-tile')); await tick();
+    assert.deepEqual([current(), footerCurrent()], [['design'], []]);
+  } finally { await act(async () => pages.unmount()); }
+});
+
 test('an older delayed open cannot acknowledge a newer backend completion generation', async () => {
   mock.control.rows.find(item => item.id === 'readme').unread = false;
   const previous = { done_token: 'old-result', done_at: Date.now() / 1000 };

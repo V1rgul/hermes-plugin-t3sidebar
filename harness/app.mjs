@@ -22,6 +22,10 @@ else if (limitsScenario) mock.control.limitsScenario = limitsScenario;
 const route = mock.atom(new URLSearchParams(location.search).get('route') || '/');
 const navigate = mock.host.navigate;
 mock.host.navigate = path => { navigate(path); route.set(path); };
+// Desktop's in-place open and new chat route the workspace back to a chat, which unmounts any page.
+const openSession = mock.host.openSession, newChat = mock.host.newChat;
+mock.host.openSession = async (...args) => { const result = await openSession(...args); route.set('/'); return result; };
+mock.host.newChat = (...args) => { const result = newChat(...args); route.set('/'); return result; };
 function Workspace() {
   const id = mock.useValue(mock.host.state.activeSessionId);
   const path = mock.useValue(route);
