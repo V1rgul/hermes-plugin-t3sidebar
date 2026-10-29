@@ -2325,7 +2325,8 @@ export function drainStats(samples, now, lookbackS = 12 * HOUR_S) {
     }
   }
   const coveredS = pairs ? last - first : 0;
-  return { rate: coveredS >= 15 * 60 ? consumed / (coveredS / HOUR_S) : null, coveredS, consumed, lookbackS,
+  // Whatever history exists is used, however short (Virgile: better a rough rate than none); only fewer than two readings of an account leave the rate unknown.
+  return { rate: coveredS > 0 ? consumed / (coveredS / HOUR_S) : null, coveredS, consumed, lookbackS,
     // Sampling gaps at either edge are normal; only a real shortfall (over a quarter of the lookback, capped at 30 minutes) is partial.
     partial: coveredS < lookbackS - Math.min(30 * 60, lookbackS / 4) };
 }

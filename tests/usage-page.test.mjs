@@ -69,7 +69,8 @@ test('a reset that passed after the last reading counts the account full and sch
 test('without drain data the projection is flat apart from resets, and unknown readings stay out of the pool', () => {
   const now = 1000;
   const accounts = [account('a', 1, 40, now + 2 * H, 5 * H), { id: 'u', priority: 2, fetched_at: null, windows: [{ key: 'weekly', remaining_percent: null, resets_at: null }] }];
-  const result = usage.projectPool(accounts, [{ t: now - 60, account: 'a', window: 'weekly', remaining_percent: 40, resets_at: now + 2 * H }], 'weekly', now, 4 * H, codex);
+  // A single reading: no interval to measure a drain over (two readings, even a minute apart, would give one).
+  const result = usage.projectPool(accounts, [], 'weekly', now, 4 * H, codex);
   assert.equal(result.rate, null); assert.equal(result.unknown, true);
   assert.deepEqual(round(result.points), [[now, 40], [now + 2 * H, 40], [now + 2 * H, 100], [now + 4 * H, 100]]);
   assert.deepEqual(result.unknownAccounts, ['u']); assert.equal(result.capacity, 100);
@@ -95,7 +96,8 @@ test('drain rate pools consumption over the lookback and ignores reset jumps', (
   assert.equal(usage.drainStats(samples, now, 8 * H).partial, false);
   assert.equal(usage.drainStats(samples, now, H).rate, 10, 'one hour sees only the 100→90 drop after the reset');
   assert.equal(usage.drainRate(samples.slice(-1), now), null, 'a single reading has no rate');
-  assert.equal(usage.drainRate([{ t: now - 300, account: 'a', value: 50, resets_at: null }, { t: now, account: 'a', value: 49, resets_at: null }], now), null, 'under 15 minutes of readings is not enough');
+  assert.equal(usage.drainRate([{ t: now - 300, account: 'a', value: 50, resets_at: null }, { t: now, account: 'a', value: 49, resets_at: null }], now), 12, 'two readings five minutes apart are enough: the rate uses whatever history exists');
+  assert.equal(usage.drainRate([{ t: now, account: 'a', value: 50, resets_at: null }], now), null, 'a single reading has no rate');
 });
 
 test('pooled history carries each account forward and sums only accounts seen so far', () => {
@@ -137,7 +139,7 @@ test('the projection rate follows the lookback and reports partial coverage', ()
   const wide = usage.projectPool(accounts, history, 'weekly', now, D, { lookbackS: 30 * D, ...codex });
   assert.deepEqual([wide.rate, wide.coveredS, wide.partial], [31 / 10, 10 * H, true]);
   const none = usage.projectPool(accounts, history.slice(-1), 'weekly', now, D, { lookbackS: 12 * H, ...codex });
-  assert.deepEqual([none.rate, none.partial, round(none.points)], [null, false, [[now, 67], [now + D, 67]]], 'without 15 minutes of data the projection stays flat');
+  assert.deepEqual([none.rate, none.partial, round(none.points)], [null, false, [[now, 67], [now + D, 67]]], 'with a single reading the projection stays flat');
 });
 
 test('the first zero crossing is interpolated and ignores a later refill', () => {
