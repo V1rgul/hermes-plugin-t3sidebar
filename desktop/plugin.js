@@ -2895,11 +2895,11 @@ function placeMarkLabels(layer) {
     if (fit) placed.push(fit); else { label.dataset.side = 'right'; label.dataset.hidden = 'true'; }
   }
 }
-// One account's share of a reset step: a segment from the level before its reset up by what it restores, with the marker dot at its top. Past step-ups are quieter: a hollow dot, no label.
+// Mark the level each account restores with a disc; only the curve connects resets. Past step-ups are quieter: a hollow dot, no label.
 function ResetMark({ item, kind, yPct, lines }) {
   const dot = h('span', { className: 'su-reset-dot', role: 'img', 'aria-label': lines.join('. '), title: typeof sdk.Tip === 'function' ? undefined : lines.join('\n') });
-  return h('span', { className: 'su-reset-mark', 'data-kind': kind, 'data-account': item.id, 'data-base': item.base, 'data-top': item.top, 'data-gain': item.gain, style: { bottom: `${yPct(item.base)}%`, height: `${yPct(item.top) - yPct(item.base)}%` } },
-    h('span', { className: 'su-reset-seg' }), withTip(lines, dot),
+  return h('span', { className: 'su-reset-mark', 'data-kind': kind, 'data-account': item.id, 'data-base': item.base, 'data-top': item.top, 'data-gain': item.gain, style: { bottom: `${yPct(item.top)}%` } },
+    withTip(lines, dot),
     kind === 'projected' ? h('span', { className: 'su-reset-text', 'data-side': 'right', 'aria-hidden': true }, `+${unitsText(item.gain)}`) : null);
 }
 // Banked reset credits expiring at one time: a flag above the plot with its pole on the expiry, and ×N when several expire together.
@@ -3216,18 +3216,14 @@ const USAGE_CSS = `
 .su-waste[data-tight=true] .su-waste-line{top:-10px;bottom:-10px}
 .su-waste-text,.su-reset-text{position:absolute;top:50%;transform:translateY(-50%);padding:0 3px;border-radius:3px;background:color-mix(in srgb,var(--ui-bg-elevated,var(--ui-bg-quaternary)) 80%,transparent);font-size:11px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .su-waste-text[data-side=right]{left:6px}.su-waste-text[data-side=left]{right:6px}.su-waste-text[data-hidden=true],.su-reset-text[data-hidden=true]{visibility:hidden}
-/* Reset markers: each account's share of a step is a solid segment with a dot at its top; accounts resetting together stack on one vertical line. */
+/* Reset discs sit at each account's cumulative level; the curve alone connects them. */
 .su-reset{position:absolute;top:0;bottom:0;width:0}
 .su-reset-mark{position:absolute;left:0;width:0}
-.su-reset-seg{position:absolute;top:0;bottom:0;left:-1px;border-left:2px solid var(--su-color)}
 .su-reset-dot{position:absolute;left:0;top:0;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;border-radius:50%;background:var(--su-color);box-shadow:0 0 0 1.5px var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:auto}
 /* A transparent ring around the dot gives the tooltip a usable hover target. */
 .su-reset-dot::before{content:'';position:absolute;inset:-4px;border-radius:50%}
 .su-reset-text{top:0;color:var(--su-color)}.su-reset-text[data-side=right]{left:7px}.su-reset-text[data-side=left]{right:7px}
-/* Past step-ups are quieter: a hollow dot and a faint segment, no label. */
-.su-reset-mark[data-kind=past] .su-reset-seg{opacity:.45}
-/* A projected step is not realized yet, so it is dashed like the projection line (5 on, 4 off at the same 1.5px weight); only past step-ups stay solid. */
-.su-reset-mark[data-kind=projected] .su-reset-seg{left:-0.75px;width:1.5px;border-left:0;background:repeating-linear-gradient(to bottom,var(--su-color) 0 5px,transparent 5px 9px)}
+/* Past step-ups are quieter: a hollow dot, no label. */
 .su-reset-mark[data-kind=past] .su-reset-dot{width:6px;height:6px;margin:-3px 0 0 -3px;border:1.5px solid var(--su-color);background:var(--ui-bg-elevated,var(--ui-bg-quaternary))}
 /* Banked-credit flags sit above the plot, the pole on the expiry time (the Tabler flag's pole is at x = 5 of 24). */
 .su-flag{position:absolute;bottom:calc(100% + var(--su-flag-row, 0) * 16px);display:inline-flex;align-items:flex-start;gap:1px;margin:0 0 3px calc(-14px * 5 / 24);color:var(--ui-text-secondary);font-size:10px;line-height:12px;font-variant-numeric:tabular-nums;pointer-events:auto}
