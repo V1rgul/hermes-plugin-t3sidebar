@@ -865,7 +865,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
 
 const CSS = `
 /* Desktop's --ui-purple (#9e94d5 in both modes) is 2.7:1 on light backgrounds, and --ui-blue (#0053fd in both modes, Midnight included) about 3.3:1 on dark ones. Mixing in the base text darkens them in light mode and lightens them in dark mode; raising OKLCH chroma restores the saturation the mix removes (blue 62% at ×1.6: saturated yet light enough at 12px). */
-.sf,.sf-menu{--sf-blue:color-mix(in srgb,var(--ui-blue,#0053fd) 66%,var(--ui-base,var(--ui-text-primary)));--sf-blue:oklch(from color-mix(in oklab,var(--ui-blue,#0053fd) 62%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.6) h);--sf-purple:color-mix(in srgb,var(--ui-purple,#9e94d5) 70%,var(--ui-base,var(--ui-text-primary)));--sf-purple:oklch(from color-mix(in oklab,var(--ui-purple,#9e94d5) 65%,var(--ui-base,var(--ui-text-primary))) l calc(c * 2) h)}
+.sf,.sf-menu{--sf-blue:color-mix(in srgb,var(--ui-blue,#0053fd) 66%,var(--ui-base,var(--ui-text-primary)));--sf-blue:oklch(from color-mix(in oklab,var(--ui-blue,#0053fd) 62%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.6) h);--sf-purple:color-mix(in srgb,var(--ui-purple,#9e94d5) 70%,var(--ui-base,var(--ui-text-primary)));--sf-purple:oklch(from color-mix(in oklab,var(--ui-purple,#9e94d5) 65%,var(--ui-base,var(--ui-text-primary))) l calc(c * 2) h);
+  /* Amber for quota that expires unused, from the theme's own orange and yellow (the Limits page declares the same mix). */
+  --sf-waste:color-mix(in oklab,var(--ui-orange,#db704b) 55%,var(--ui-yellow,#c08532))}
 /* Card geometry: --sf-card-content (two text lines), --sf-card-padding and --sf-card-margin (vertical, per side). Defaults are fallbacks rather than declarations, so :root, a theme or any ancestor can set them; the stride used by windowing and shelf minimums derives from them. */
 .sf{--sf-card-stride:calc(var(--sf-card-content,42px) + 2 * var(--sf-card-padding,6px) + 2 * var(--sf-card-margin,1px))}
 .sf{display:flex;flex-direction:column;height:100%;min-height:0;min-width:220px;font:12px/1.4 var(--font-sans,inherit);color:var(--ui-text-primary)}
@@ -929,6 +931,15 @@ const CSS = `
 @keyframes sf-after-exit{from{visibility:hidden}}.sf-empty{animation:sf-after-exit .22s step-end}
 /* T3's sidebar utility row: fixed height below the list, so shelves keep their flex allocation within a shorter column. */
 .sf-footer{display:flex;align-items:center;gap:2px;flex-shrink:0;height:36px;padding:4px 6px}.sf .sf-footer .sf-utility{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-secondary)}.sf .sf-footer .sf-utility:hover,.sf .sf-footer .sf-utility:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-footer .sf-utility svg{width:16px;height:16px;flex-shrink:0}
+/* Limits status after the footer buttons. The group wraps and clips its second line, so a pane too narrow for every provider drops
+   whole items instead of squeezing or overflowing; clip (not hidden) keeps a focused clipped item from scrolling the row. */
+.sf-limits{display:flex;flex-wrap:wrap;align-items:center;flex:1 1 0;min-width:0;height:28px;margin-left:4px;overflow:clip}
+.sf .sf-limit{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;max-width:100%;height:28px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);font:inherit;font-size:11px;line-height:1;cursor:pointer}
+.sf .sf-limit:hover,.sf .sf-limit:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-secondary)}
+.sf-limit svg[data-provider-mark]{width:13px;height:13px;flex-shrink:0;opacity:.7}
+.sf-limit-value{font-variant-numeric:tabular-nums;white-space:nowrap}.sf-limit-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sf-limit .su-verdict-icon{display:inline-flex;flex-shrink:0}.sf-limit .su-verdict-icon svg{width:14px;height:14px}
+.sf-limit[data-status=short] .su-verdict-icon{color:var(--ui-red,#cf2d56)}.sf-limit[data-status=waste] .su-verdict-icon{color:var(--sf-waste)}
 @media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
 // Monochrome 24x24 provider marks: LobeHub Icons, @lobehub/icons-static-svg 1.95.1 (MIT, Copyright (c) 2023 LobeHub; notice in
@@ -1003,8 +1014,7 @@ function statusIcon(status, glyph = status) {
   return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
     STATUS_ICONS[glyph].map(d => h('path', { key: d, d })));
 }
-// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder,
-// gauge and arrow-bar glyphs.
+// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge and arrow-bar glyphs.
 const BUNDLED_ICONS = {
   Gauge: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M13.41 10.59l2.59 -2.59', 'M7 12a5 5 0 0 1 5 -5'],
   ArrowBarRight: ['M20 12l-10 0', 'M20 12l-4 4', 'M20 12l-4 -4', 'M4 4l0 16'],
@@ -1914,15 +1924,13 @@ function ScopedSidebar({ ctx, controller, scope }) {
         !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null)),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
     canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,
-    h(UsageFooter),
+    h(UsageFooter, { ctx, scope, companion: !!sessions.data && !sessions.data.capped }),
     typeof sdk.ConfirmDialog === 'function' ? h(sdk.ConfirmDialog, { open: !!deleteTarget, onClose: () => setDeleteTarget(null),
       title: 'Delete session?', description: `Delete “${deleteTarget ? sessionTitle(deleteTarget) : ''}”? Stored history will be permanently removed. This cannot be undone.`,
       confirmLabel: 'Delete', busyLabel: 'Deleting…', doneLabel: 'Session deleted', destructive: true,
       onConfirm: async () => { controller.check(scope); await controller.delete(scope, deleteTarget); controller.check(scope); } }) : null);
 }
-// ───────────────────────────── Usage page ─────────────────────────────
-// Everything from here to the default export belongs to the /t3sidebar-usage and /t3sidebar-limits pages and the sidebar footer
-// buttons that open them. The backend contract (GET /usage/history and /usage/limits) is frozen in the plugin's usage design notes.
+// ───────────────────────────── Usage page ───────────────────────────── Everything from here to the default export belongs to the /t3sidebar-usage and /t3sidebar-limits pages and the sidebar footer buttons that open them. The backend contract (GET /usage/history and /usage/limits) is frozen in the plugin's usage design notes.
 export const USAGE_ROUTE = '/t3sidebar-usage';
 export const LIMITS_ROUTE = '/t3sidebar-limits';
 const USAGE_ROOT = 'hermes-t3sidebar-usage';
@@ -1957,8 +1965,7 @@ export function readUsagePreferences(storage) {
 export function writeUsagePreferences(storage, value) {
   try { storage.set(USAGE_PREFERENCES_KEY, validUsagePreferences(value)); return true; } catch (_) { return false; }
 }
-// T3 Code's SidebarUtilityItem: icon-only ghost buttons with a tooltip, in one fixed-height footer row below the shelves, so the
-// flex shelf allocation only sees a shorter list.
+// T3 Code's SidebarUtilityItem: icon-only ghost buttons with a tooltip, in one fixed-height footer row below the shelves, so the flex shelf allocation only sees a shorter list.
 const UTILITY_LINKS = [
   { route: USAGE_ROUTE, label: 'Usage', tip: 'Token usage', icon: 'BarChart3', glyph: '▥' },
   { route: LIMITS_ROUTE, label: 'Limits', tip: 'Subscription limits', icon: 'Gauge', glyph: '◔' }
@@ -1970,8 +1977,33 @@ function UtilityLink({ link }) {
   const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-sm', className: 'sf-utility', 'aria-label': link.label, title: tip ? undefined : link.tip, 'data-route': link.route, onClick: open }, icon(link.icon, link.glyph));
   return tip ? h(sdk.Tip, { label: link.tip, side: 'top' }, button) : button;
 }
-function UsageFooter() {
-  return h('footer', { className: 'sf-footer' }, UTILITY_LINKS.map(link => h(UtilityLink, { key: link.route, link })));
+// After the two buttons, one compact status per provider with limits data: its mark, the pooled plan units left, and a verdict glyph only when the week ahead runs short or wastes quota. It renders nothing until data arrives and nothing on failure, so the fixed footer row never shows a placeholder or an error; items that do not fit a narrow pane wrap onto a clipped second line and vanish.
+function UsageFooter({ ctx, scope, companion = false }) {
+  return h('footer', { className: 'sf-footer' }, UTILITY_LINKS.map(link => h(UtilityLink, { key: link.route, link })),
+    ctx && scope ? h(LimitsFooterStatus, { ctx, scope, enabled: companion }) : null);
+}
+function LimitsFooterStatus({ ctx, scope, enabled }) {
+  const client = useQueryClient(), prefs = useUsagePreferences(ctx);
+  // Same key as the Limits page with the same preferences, so both read one cache entry.
+  const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHistoryHours(prefs.lookback, prefs.horizon)), enabled });
+  const now = useMemo(() => Date.now() / 1000, [limits.dataUpdatedAt]);
+  const items = useMemo(() => (limits.data?.providers || []).filter(item => item.auth !== 'logged_out')
+    .map(item => ({ provider: item, verdict: limitsVerdict(item, prefs, now) })).filter(item => item.verdict.capacity > 0), [limits.data, prefs, now]);
+  if (!items.length) return null;
+  return h('div', { className: 'sf-limits', role: 'group', 'aria-label': 'Subscription limits' }, items.map(({ provider, verdict }) => {
+    const name = provider.label || provider.provider;
+    const tip = `${name}: ${unitsText(verdict.remaining)} / ${unitsText(verdict.capacity)} plan units. ${verdictText(verdict, now)}.`;
+    const open = () => {
+      updateUsagePreferences(ctx, client, { provider: provider.provider });
+      try { host.navigate(LIMITS_ROUTE); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ }
+    };
+    const mark = providerMark(provider.provider);
+    const button = h('button', { type: 'button', className: 'sf-limit', 'data-provider': provider.provider, 'data-status': verdict.status, 'aria-label': tip, title: typeof sdk.Tip === 'function' ? undefined : tip, onClick: open },
+      mark || h('span', { className: 'sf-limit-name' }, name),
+      h('span', { className: 'sf-limit-value' }, unitsText(verdict.remaining)),
+      verdictIcon(verdict.status));
+    return typeof sdk.Tip === 'function' ? h(sdk.Tip, { key: provider.provider, label: tip, side: 'top' }, button) : h(Fragment, { key: provider.provider }, button);
+  }));
 }
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 const finiteOrNull = value => Number.isFinite(value) ? value : null;
@@ -2031,8 +2063,7 @@ export function niceScale(peak, count = 4, integer = false) {
   const steps = Math.max(1, Math.ceil(peak / step - 1e-9));
   return { max: steps * step, ticks: Array.from({ length: steps + 1 }, (_, index) => index * step) };
 }
-// Stable hues per series key. Known providers keep a recognizable hue; other keys hash into the palette, probing past hues close to ones already taken.
-// Mixing with the theme's primary text darkens the swatch in light themes and lightens it in dark ones.
+// Stable hues per series key. Known providers keep a recognizable hue; other keys hash into the palette, probing past hues close to ones already taken. Mixing with the theme's primary text darkens the swatch in light themes and lightens it in dark ones.
 const PROVIDER_HUES = { 'openai-codex': 160, openai: 160, 'openai-api': 160, anthropic: 45, 'claude-subscription-directsdk-experimental': 45, copilot: 285, 'copilot-acp': 285, gemini: 250, google: 250, openrouter: 330, nous: 200, deepseek: 265, xai: 95, 'xai-oauth': 95, zai: 130, kimi: 15, 'kimi-coding': 15, alibaba: 300, minimax: 350 };
 const SERIES_HUES = [255, 45, 160, 330, 95, 200, 290, 15, 130, 230, 65, 350];
 const providerHueColor = key => usageHueColor(Object.hasOwn(PROVIDER_HUES, key) ? PROVIDER_HUES[key] : SERIES_HUES[hashKey(key) % SERIES_HUES.length]);
@@ -2092,8 +2123,7 @@ function zonedParts(seconds, timeZone) {
   return parts;
 }
 const dayKey = parts => parts.year * 10000 + parts.month * 100 + parts.day;
-// Local midnight of the day containing seconds. Subtracting the wall-clock time since midnight can miss by the DST shift of that
-// day, so the result is rechecked and nudged until it reads 00:00:00 on the same date.
+// Local midnight of the day containing seconds. Subtracting the wall-clock time since midnight can miss by the DST shift of that day, so the result is rechecked and nudged until it reads 00:00:00 on the same date.
 export function startOfLocalDay(seconds, timeZone) {
   const base = Math.floor(seconds), key = dayKey(zonedParts(base, timeZone));
   let t = base;
@@ -2109,8 +2139,7 @@ export function localMidnights(start, end, timeZone) {
   for (let t = startOfLocalDay(start, timeZone), guard = 0; t <= end && guard < 1000; t = startOfLocalDay(t + 30 * HOUR_S, timeZone), guard++) if (t >= start) result.push(t);
   return result;
 }
-// Axis labels name the month only on the first label and where it changes ("Oct 30, 31, Nov 1, 2"). Hourly labels give the hour,
-// with the date on the first label and in place of the hour at midnight.
+// Axis labels name the month only on the first label and where it changes ("Oct 30, 31, Nov 1, 2"). Hourly labels give the hour, with the date on the first label and in place of the hour at midnight.
 export function axisLabels(times, timeZone, resolution) {
   let previous = null;
   return times.map((t, index) => {
@@ -2124,8 +2153,7 @@ export function axisLabels(times, timeZone, resolution) {
     return label;
   });
 }
-// Usage charts: daily buckets start at local midnights (backend contract), so each one is a day line; hourly buckets get a line
-// only where the bucket starts at midnight. Hourly labels sit on every third local hour, which always includes midnight.
+// Usage charts: daily buckets start at local midnights (backend contract), so each one is a day line; hourly buckets get a line only where the bucket starts at midnight. Hourly labels sit on every third local hour, which always includes midnight.
 export function usageAxis(buckets, resolution, timeZone) {
   const count = buckets.length;
   if (resolution === 'hour') {
@@ -2157,27 +2185,101 @@ export function formatDurationShort(seconds) {
   if (hours > 0) return `${hours}h ${minutes}m`;
   return minutes > 0 ? `${minutes}m` : '<1m';
 }
-// Limits ─ samples are { t, account, value, resets_at } with value the remaining percent; unknown readings never become samples.
-export function limitSamples(accounts, history, windowKey) {
+// Plan capacity ─ pools are measured in plan units, where 20 is one base $20 plan's allowance (ChatGPT Plus, Claude Pro). Units measure capacity relative to that plan, not price, so accounts on different plans add up to what the pool can actually spend.
+export const BASE_PLAN_UNITS = 20;
+export const PLAN_UNITS_NOTE = `${BASE_PLAN_UNITS} plan units = one $20 plan's allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.`;
+// Source: Virgile's figures. Codex capacity is linear in price and the same in every window; Anthropic is not linear in its marketing multipliers and differs per window: Max 20x gets 2x Max 5x in the weekly window but 4x in the five-hour window, and the Anthropic Team/Enterprise seats are assumed by analogy (Standard seat = Pro, Premium seat = Max 5x), not verified figures. A window missing from a row (and any window other than five_hour) uses the weekly weight.
+const PLAN_UNITS = {
+  'openai-codex': {
+    plus: { label: 'Plus', weekly: 20 },
+    team: { label: 'Business', weekly: 20 }, business: { label: 'Business', weekly: 20 }, self_serve_business_usage_based: { label: 'Business', weekly: 20 },
+    self_serve_business_prolite: { label: 'Business Premium', weekly: 100 },
+    prolite: { label: 'Pro 100', weekly: 100 }, pro: { label: 'Pro 200', weekly: 200 }, promax: { label: 'Pro 500', weekly: 500 }
+  },
+  anthropic: {
+    pro: { label: 'Pro', weekly: 20, five_hour: 20 },
+    max_5x: { label: 'Max 5x', weekly: 100, five_hour: 100 },
+    max_20x: { label: 'Max 20x', weekly: 200, five_hour: 400 },
+    standard_seat: { label: 'Standard seat', weekly: 20, five_hour: 20 },
+    premium_seat: { label: 'Premium seat', weekly: 100, five_hour: 100 }
+  }
+};
+// Codex plans whose capacity Virgile has not given: T3 Code's codexPlanLabel names them, and they count as one base plan (flagged).
+const CODEX_PLAN_LABELS = { free: 'Free', go: 'Go', ent26: 'Enterprise', enterprise: 'Enterprise', enterprise_cbp_automation: 'Enterprise', enterprise_cbp_usage_based: 'Enterprise', edu: 'Edu', edu_plus: 'Edu', edu_pro: 'Edu' };
+// Older samples hold Hermes's title-cased plan ("Prolite", "Self Serve Business Usage Based"); folding case and separators recovers the enum.
+const planSlug = plan => typeof plan === 'string' ? plan.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') : '';
+const planFamily = provider => {
+  const id = typeof provider === 'string' ? provider.toLowerCase() : '';
+  return id === 'openai-codex' || id === 'codex' ? 'openai-codex' : id.startsWith('anthropic') || id.startsWith('claude') ? 'anthropic' : null;
+};
+// Anthropic plan strings vary by source (subscriptionType "max", rateLimitTier "default_claude_max_20x", seat tiers), so they are matched by pattern. A bare "max" says nothing about 5x or 20x and stays unknown.
+function anthropicPlanKey(slug) {
+  if (/max/.test(slug) && /(^|_)20_?x($|_)|max_?20($|_)/.test(slug)) return 'max_20x';
+  if (/max/.test(slug) && /(^|_)5_?x($|_)|max_?5($|_)/.test(slug)) return 'max_5x';
+  if (/premium/.test(slug)) return 'premium_seat';
+  if (/standard/.test(slug)) return 'standard_seat';
+  if (/(^|_)pro($|_)/.test(slug)) return 'pro';
+  return null;
+}
+function planEntry(provider, plan) {
+  const family = planFamily(provider), slug = planSlug(plan);
+  if (!slug || !family) return null;
+  // Codex plans are exact enums: "premium" alone must never pick up a Codex row.
+  const key = family === 'anthropic' ? anthropicPlanKey(slug) : slug;
+  return key && Object.hasOwn(PLAN_UNITS[family], key) ? PLAN_UNITS[family][key] : null;
+}
+export function planWeight(provider, plan, windowKey = 'weekly') {
+  const entry = planEntry(provider, plan);
+  if (!entry) return BASE_PLAN_UNITS;
+  const base = String(windowKey ?? '').split(':')[0];
+  return Number.isFinite(entry[base]) ? entry[base] : entry.weekly;
+}
+// True when the plan's capacity is not in the table and the pool counts it as one base plan.
+export const planAssumed = (provider, plan) => planEntry(provider, plan) === null;
+export function planLabel(provider, plan) {
+  const entry = planEntry(provider, plan);
+  if (entry) return entry.label;
+  const slug = planSlug(plan);
+  if (planFamily(provider) === 'openai-codex' && Object.hasOwn(CODEX_PLAN_LABELS, slug)) return CODEX_PLAN_LABELS[slug];
+  return typeof plan === 'string' && plan.trim() ? plan.trim() : null;
+}
+const unitsDecimal = Intl.NumberFormat('en', { maximumFractionDigits: 1 });
+// Whole units are precise enough from 10 up; below that one decimal keeps a small pool from reading 0 while it still has quota.
+export const unitsText = value => !Number.isFinite(value) ? '—' : Math.abs(value) >= 10 ? String(Math.round(value)) : unitsDecimal.format(Math.round(value * 10) / 10);
+// Vertical ticks in plan units: round steps below the capacity plus the capacity itself as the top line, dropping a round step that would crowd it (120 gives 0, 25, 50, 75, 100, 120).
+export function unitTicks(capacity) {
+  const top = capacity > 0 ? capacity : BASE_PLAN_UNITS;
+  const step = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000].find(item => top / item <= 5) ?? Math.ceil(top / 5);
+  const ticks = [];
+  for (let value = 0; value < top - step / 2 - 1e-9; value += step) ticks.push(value);
+  return [...ticks, top];
+}
+// Limits ─ samples are { t, account, value, units, resets_at }: value is the remaining percent, units its share of the account's plan capacity in this window; unknown readings never become samples.
+export function limitSamples(accounts, history, windowKey, provider = null) {
+  const plans = new Map();
+  for (const account of accounts || []) if (account && typeof account.id === 'string') plans.set(account.id, account.plan);
+  const sample = (t, account, remaining, resetsAt) => { const value = clamp(remaining, 0, 100); return { t, account, value, units: value * planWeight(provider, plans.get(account), windowKey) / 100, resets_at: finiteOrNull(resetsAt) }; };
   const samples = [];
   for (const item of history || []) {
     if (item?.window !== windowKey || typeof item.account !== 'string' || !Number.isFinite(item.t) || !Number.isFinite(item.remaining_percent)) continue;
-    samples.push({ t: item.t, account: item.account, value: clamp(item.remaining_percent, 0, 100), resets_at: finiteOrNull(item.resets_at) });
+    samples.push(sample(item.t, item.account, item.remaining_percent, item.resets_at));
   }
   // The latest snapshot can be newer than the sampler's last history row.
   for (const account of accounts || []) {
     const win = account?.windows?.find(entry => entry?.key === windowKey);
     if (!win || !Number.isFinite(win.remaining_percent) || !Number.isFinite(account.fetched_at)) continue;
     const latest = samples.reduce((max, item) => item.account === account.id ? Math.max(max, item.t) : max, -Infinity);
-    if (account.fetched_at > latest) samples.push({ t: account.fetched_at, account: account.id, value: clamp(win.remaining_percent, 0, 100), resets_at: finiteOrNull(win.resets_at) });
+    if (account.fetched_at > latest) samples.push(sample(account.fetched_at, account.id, win.remaining_percent, win.resets_at));
   }
   return samples.sort((a, b) => a.t - b.t);
 }
+// Samples built by hand (tests, older callers) may lack units; their percent then stands in for them.
+const sampleUnits = sample => Number.isFinite(sample.units) ? sample.units : sample.value;
 // Pooled remaining over time: each account carries its last reading forward, and the pool sums the accounts seen so far.
 export function pooledHistory(samples) {
   const last = new Map(), points = [];
   for (const sample of [...samples].sort((a, b) => a.t - b.t)) {
-    last.set(sample.account, sample.value);
+    last.set(sample.account, sampleUnits(sample));
     let value = 0;
     for (const item of last.values()) value += item;
     const point = { t: sample.t, value, count: last.size };
@@ -2185,9 +2287,7 @@ export function pooledHistory(samples) {
   }
   return points;
 }
-// Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those
-// readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in
-// percentage points per hour, or null without at least 15 minutes of paired readings.
+// Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in plan units per hour (a drop on a 100-unit plan weighs five times a drop of the same percent on a 20-unit one), or null without at least 15 minutes of paired readings.
 export function drainStats(samples, now, lookbackS = 12 * HOUR_S) {
   const from = now - lookbackS, groups = new Map();
   for (const sample of samples) if (sample.t >= from && sample.t <= now) { if (!groups.has(sample.account)) groups.set(sample.account, []); groups.get(sample.account).push(sample); }
@@ -2198,10 +2298,9 @@ export function drainStats(samples, now, lookbackS = 12 * HOUR_S) {
       const before = list[index - 1], after = list[index];
       if (after.t <= before.t) continue;
       first = Math.min(first, before.t); last = Math.max(last, after.t); pairs++;
-      // A rise, or a later reset time, means the window restarted in between. That interval's consumption is unknown,
-      // so it counts as none rather than as negative drain (resets_at jitter of under a minute is not a restart).
+      // A rise, or a later reset time, means the window restarted in between. That interval's consumption is unknown, so it counts as none rather than as negative drain (resets_at jitter of under a minute is not a restart).
       const restarted = after.value > before.value || after.resets_at !== null && before.resets_at !== null && after.resets_at > before.resets_at + 60;
-      if (!restarted) consumed += before.value - after.value;
+      if (!restarted) consumed += sampleUnits(before) - sampleUnits(after);
     }
   }
   const coveredS = pairs ? last - first : 0;
@@ -2210,8 +2309,7 @@ export function drainStats(samples, now, lookbackS = 12 * HOUR_S) {
     partial: coveredS < lookbackS - Math.min(30 * 60, lookbackS / 4) };
 }
 export const drainRate = (samples, now, lookbackS) => drainStats(samples, now, lookbackS).rate;
-// First time the projected pool reaches zero, interpolated along its piecewise-linear points, or null if it never empties.
-// Only the first crossing matters: a later reset that refills the pool does not move it.
+// First time the projected pool reaches zero, interpolated along its piecewise-linear points, or null if it never empties. Only the first crossing matters: a later reset that refills the pool does not move it.
 export function firstEmpty(points) {
   const empty = value => value <= 1e-6;
   if (!points?.length) return null;
@@ -2222,15 +2320,30 @@ export function firstEmpty(points) {
   }
   return null;
 }
+// Stretches where the projected pool sits at zero: { start, end }, end being the refill (null when none comes within the horizon). A pool that touches zero exactly at a reset has a zero-length stretch, which callers ignore.
+export function emptySpans(points) {
+  const spans = [], empty = value => value <= 1e-6;
+  for (let index = 0; index < (points?.length || 0); index++) {
+    if (!empty(points[index].value)) continue;
+    const previous = points[index - 1];
+    const start = !previous || empty(previous.value) ? points[index].t : previous.t + previous.value / (previous.value - points[index].value) * (points[index].t - previous.t);
+    let next = index;
+    while (next + 1 < points.length && empty(points[next + 1].value)) next++;
+    // The pool only rises by stepping up at a reset, so the refill happens at the last zero point's time.
+    const end = next + 1 < points.length ? points[next].t : null;
+    if (!previous || !empty(previous.value)) spans.push({ start, end });
+    index = next;
+  }
+  return spans;
+}
 export function coverageText(seconds) {
   const hours = seconds / HOUR_S;
   return hours < 1 ? `${Math.max(1, Math.round(seconds / 60))}m` : hours < 48 ? `${Math.round(hours)}h` : `${Math.round(hours / 24)}d`;
 }
-// Projects the pooled remaining quota from now to now + horizonS. The measured drain is consumed from accounts in pool
-// priority order (lowest number first, the next once one is empty), and each account returns to 100% at its resets_at, its
-// next reset following one window_seconds later. Without drain data the projection stays flat apart from those resets.
+// Projects the pooled remaining quota, in plan units, from now to now + horizonS. Each account holds weight · remaining% / 100 units of its plan's capacity (weight from planWeight for this window). The measured drain is consumed from accounts in pool priority order (lowest number first, the next once one is empty), and each account returns to its full weight at its resets_at, its next reset following one window_seconds later. Whatever an account still holds when it resets expires unused (`lost`). Without drain data the projection stays flat apart from those resets.
 export function projectPool(accounts, history, windowKey, now, horizonS, options = {}) {
-  const samples = limitSamples(accounts, history, windowKey);
+  const provider = options.provider ?? null;
+  const samples = limitSamples(accounts, history, windowKey, provider);
   const latest = new Map();
   for (const sample of samples) if (sample.t <= now) latest.set(sample.account, sample);
   const state = [], unknownAccounts = [];
@@ -2245,35 +2358,87 @@ export function projectPool(accounts, history, windowKey, now, horizonS, options
       if (resetAt > sample.t) remaining = 100;
       resetAt = period ? resetAt + (Math.floor((now - resetAt) / period) + 1) * period : null;
     }
-    state.push({ id: account.id, label: account.label || account.id, priority: Number.isFinite(account.priority) ? account.priority : Infinity, remaining, resetAt, period });
+    const weight = planWeight(provider, account.plan, windowKey);
+    state.push({ id: account.id, label: account.label || account.id, plan: account.plan ?? null, planLabel: planLabel(provider, account.plan), assumed: planAssumed(provider, account.plan),
+      priority: Number.isFinite(account.priority) ? account.priority : Infinity, weight, units: weight * remaining / 100, resetAt, period });
   }
   state.sort((a, b) => a.priority - b.priority || String(a.id).localeCompare(String(b.id)));
+  const members = state.map(item => ({ id: item.id, label: item.label, plan: item.plan, plan_label: item.planLabel, weight: item.weight, assumed: item.assumed }));
   const stats = Object.hasOwn(options, 'rate') ? { rate: options.rate, coveredS: null, partial: false } : drainStats(samples, now, options.lookbackS), measured = stats.rate;
   const rate = Number.isFinite(measured) && measured >= 0 ? measured : null, drain = rate ?? 0;
-  const pool = () => state.reduce((sum, item) => sum + item.remaining, 0);
+  const pool = () => state.reduce((sum, item) => sum + item.units, 0);
+  const capacity = state.reduce((sum, item) => sum + item.weight, 0);
   const current = pool(), end = now + Math.max(0, horizonS);
   const firstReset = Math.min(...state.map(item => item.resetAt ?? Infinity));
   const points = [{ t: now, value: current }], resets = [];
   let t = now;
   for (let guard = 0; t < end && guard < 10000; guard++) {
-    const active = drain > 0 ? state.find(item => item.remaining > 0) : undefined;
-    const depletion = active ? t + active.remaining / drain * HOUR_S : Infinity;
+    const active = drain > 0 ? state.find(item => item.units > 1e-9) : undefined;
+    const depletion = active ? t + active.units / drain * HOUR_S : Infinity;
     const next = Math.min(end, depletion, ...state.map(item => item.resetAt ?? Infinity));
-    if (active) active.remaining = next === depletion ? 0 : Math.max(0, active.remaining - drain * (next - t) / HOUR_S);
+    if (active) active.units = next === depletion ? 0 : Math.max(0, active.units - drain * (next - t) / HOUR_S);
     t = next;
     points.push({ t, value: pool() });
     if (t >= end) break;
+    const before = pool();
     let stepped = false;
     for (const item of state) if (item.resetAt !== null && item.resetAt <= t) {
-      resets.push({ t, account: item.id, label: item.label, gain: 100 - item.remaining });
-      item.remaining = 100; item.resetAt = item.period ? item.resetAt + item.period : null; stepped = true;
+      resets.push({ t, account: item.id, label: item.label, plan_label: item.planLabel, weight: item.weight, gain: item.weight - item.units, lost: item.units, before });
+      item.units = item.weight; item.resetAt = item.period ? item.resetAt + item.period : null; stepped = true;
     }
     if (stepped) points.push({ t, value: pool() });
   }
   const nextReset = resets.length ? { t: resets[0].t, gain: resets.filter(item => item.t === resets[0].t).reduce((sum, item) => sum + item.gain, 0) }
     : Number.isFinite(firstReset) ? { t: firstReset, gain: null } : null;
-  return { rate, unknown: rate === null, coveredS: stats.coveredS, partial: rate !== null && stats.partial, capacity: state.length * 100, current, points, resets, nextReset,
-    accounts: state.map(item => ({ id: item.id, remaining: item.remaining })), unknownAccounts };
+  return { rate, unknown: rate === null, coveredS: stats.coveredS, partial: rate !== null && stats.partial, capacity, current, points, resets, nextReset, members,
+    accounts: state.map(item => ({ id: item.id, remaining: item.units / item.weight * 100, units: item.units })), unknownAccounts };
+}
+// Projected resets that discard quota, one mark per reset time (accounts resetting together are summed). Losses under minShare of the pool's capacity are left out: a sliver of a percent is noise, not room for extra work.
+export function wasteMarks(projection, minShare = 0.01) {
+  const byTime = new Map();
+  for (const item of projection?.resets || []) {
+    if (!(item.lost > 1e-9)) continue;
+    if (!byTime.has(item.t)) byTime.set(item.t, { t: item.t, before: item.before, lost: 0, accounts: [] });
+    const mark = byTime.get(item.t);
+    mark.lost += item.lost; mark.accounts.push({ id: item.account, label: item.label, plan_label: item.plan_label, lost: item.lost });
+  }
+  const floor = (projection?.capacity || 0) * minShare;
+  return [...byTime.values()].filter(mark => mark.lost >= floor).sort((a, b) => a.t - b.t);
+}
+// The Limits decision in one value: will the pool run short (cut optional work) or throw quota away at resets (room for background work) within the next week? Judged on the weekly window (a week ahead of a five-hour window says little, and the 5h merge is postponed), falling back to the saved window choice when a provider has no weekly one; uses the saved lookback and the pooled plan-unit projection.
+export const VERDICT_DAYS = 7;
+export const WASTE_SHARE = 0.05;
+export function limitsVerdict(provider, prefs, now) {
+  const result = { status: 'unknown', window: null, remaining: null, capacity: null, remaining_pct: null, lost: 0, lost_pct: 0, empty_at: null, next_reset_at: null, last_loss_at: null };
+  if (!provider || provider.auth === 'logged_out') return result;
+  const windows = windowCatalog(provider);
+  const selected = windows.find(item => item.key === 'weekly') || windows.find(item => item.key === prefs?.window) || windows[0];
+  if (!selected) return result;
+  const lookback = LOOKBACK_STOPS.includes(prefs?.lookback) ? prefs.lookback : USAGE_DEFAULTS.lookback;
+  const projection = projectPool(provider.accounts, provider.history, selected.key, now, VERDICT_DAYS * DAY_S, { lookbackS: lookback * HOUR_S, provider: provider.provider });
+  Object.assign(result, { window: selected.key, next_reset_at: projection.nextReset?.t ?? null });
+  if (!projection.capacity) return result;
+  Object.assign(result, { remaining: projection.current, capacity: projection.capacity, remaining_pct: projection.current / projection.capacity * 100 });
+  // Without a measured drain, or when every reading is past the cache freshness limit, a verdict would be a guess.
+  const read = (provider.accounts || []).filter(account => Number.isFinite(account.fetched_at));
+  if (projection.rate === null || read.length && read.every(account => account.stale)) return result;
+  const short = emptySpans(projection.points).find(span => (span.end ?? Infinity) - span.start > 60);
+  if (short) return { ...result, status: 'short', empty_at: short.start, next_reset_at: short.end };
+  const losses = projection.resets.filter(item => item.lost > 1e-9);
+  const lost = losses.reduce((sum, item) => sum + item.lost, 0);
+  Object.assign(result, { lost, lost_pct: lost / projection.capacity * 100, last_loss_at: losses.length ? losses.at(-1).t : null });
+  return { ...result, status: lost >= WASTE_SHARE * projection.capacity ? 'waste' : 'ok' };
+}
+// One sentence for the verdict, shared by the Limits page and the sidebar footer tooltip.
+export function verdictText(verdict, now) {
+  if (verdict?.status === 'short') {
+    const at = verdict.empty_at - now < 60 ? 'Out of quota now' : `Runs out ${resetTime(verdict.empty_at, now)}`;
+    const gap = verdict.next_reset_at === null ? `with no reset in the next ${VERDICT_DAYS} days` : `${formatDurationShort(verdict.next_reset_at - verdict.empty_at)} before the next reset`;
+    return `${at}, ${gap} — cut optional work`;
+  }
+  if (verdict?.status === 'waste') return `${unitsText(verdict.lost)} plan units will expire unused by ${formatAt(verdict.last_loss_at, { weekday: 'short' })} — room for background work`;
+  if (verdict?.status === 'ok') return `On track for the next ${VERDICT_DAYS} days: nothing runs out and little expires unused`;
+  return `Not enough recent readings to judge the next ${VERDICT_DAYS} days`;
 }
 export function windowCatalog(provider) {
   const found = new Map();
@@ -2294,6 +2459,19 @@ async function readUsage(ctx, scope, path, validate) {
   if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load usage.');
   return validate(value);
 }
+// The Limits page and the sidebar footer build the limits query the same way, so with equal preferences they share one cache entry and one five-minute poll instead of fetching the same history twice.
+const limitsQueryOptions = (ctx, scope, hours) => ({ queryKey: [...usageScopeKey(scope), 'limits', hours], staleTime: 60_000, refetchInterval: 300_000, retry: false,
+  queryFn: () => readUsage(ctx, scope, `/usage/limits?hours=${hours}`, validUsageLimits) });
+// Usage preferences live in plugin storage; this query mirrors them in memory so the footer follows a lookback or provider chosen on an open Limits page (storage itself has no change events).
+const USAGE_PREFERENCES_QUERY = ['hermes-t3sidebar-preferences', 'usage'];
+function useUsagePreferences(ctx) {
+  return useQuery({ queryKey: USAGE_PREFERENCES_QUERY, queryFn: () => readUsagePreferences(ctx.storage), initialData: () => readUsagePreferences(ctx.storage), staleTime: Infinity }).data;
+}
+// Two pages can be open at once, so a change is merged into what is stored now rather than into one page's copy, which would overwrite the other page's later choices.
+function updateUsagePreferences(ctx, client, patch) {
+  writeUsagePreferences(ctx.storage, { ...readUsagePreferences(ctx.storage), ...patch });
+  client.setQueryData(USAGE_PREFERENCES_QUERY, previous => validUsagePreferences({ ...previous, ...patch }));
+}
 // One component for both route pages; `view` picks the content and the only endpoint that page fetches.
 export function UsagePage({ ctx, view = 'usage' }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
@@ -2312,13 +2490,14 @@ function Segmented({ label, options, value, onChange, showLabel = true, sizing }
   return h('div', { className: 'su-control', role: 'group', 'aria-label': label }, showLabel ? h('span', { className: 'su-control-label', 'aria-hidden': true }, label) : null, control);
 }
 function ScopedUsagePage({ ctx, scope, view }) {
-  const [prefs, setPrefs] = useState(() => readUsagePreferences(ctx.storage));
-  // Both pages share one stored object and can be open in two tabs, so each change is merged into what is stored now rather
-  // than into this page's copy, which would overwrite the other page's later choices.
+  const client = useQueryClient(), shared = useUsagePreferences(ctx);
+  // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made elsewhere, such as a provider picked from the sidebar footer.
+  const [prefs, setPrefs] = useState(shared);
+  useEffect(() => { setPrefs(shared); }, [shared]);
   const update = useCallback(patch => {
-    writeUsagePreferences(ctx.storage, { ...readUsagePreferences(ctx.storage), ...patch });
     setPrefs(previous => validUsagePreferences({ ...previous, ...patch }));
-  }, [ctx]);
+    updateUsagePreferences(ctx, client, patch);
+  }, [ctx, client]);
   const tz = useMemo(() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (_) { return 'UTC'; } }, []);
   const key = usageScopeKey(scope);
   const history = useQuery({ queryKey: [...key, 'history', prefs.days, tz], enabled: view === 'usage', staleTime: 60_000, refetchInterval: 300_000, retry: false,
@@ -2326,10 +2505,8 @@ function ScopedUsagePage({ ctx, scope, view }) {
     placeholderData: previous => previous,
     queryFn: () => readUsage(ctx, scope, `/usage/history?days=${prefs.days}&tz=${encodeURIComponent(tz)}`, validUsageHistory) });
   const limitsHours = limitsHistoryHours(prefs.lookback, prefs.horizon);
-  const limits = useQuery({ queryKey: [...key, 'limits', limitsHours], enabled: view === 'limits', staleTime: 60_000, refetchInterval: 300_000, retry: false,
-    // A longer lookback or horizon refetches more history; the shorter one stays drawn meanwhile.
-    placeholderData: previous => previous,
-    queryFn: () => readUsage(ctx, scope, `/usage/limits?hours=${limitsHours}`, validUsageLimits) });
+  // A longer lookback or horizon refetches more history; the shorter one stays drawn meanwhile.
+  const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHours), enabled: view === 'limits', placeholderData: previous => previous });
   const active = view === 'limits' ? limits : history;
   const toolbar = h(Fragment, null,
     h('span', { className: 'su-spacer' }),
@@ -2423,8 +2600,8 @@ function UsageChart({ chart, model, mode, hover, setHover, axis }) {
     axis ? h('div', { className: 'su-xaxis', 'aria-hidden': true }, model.labelIndexes.map((index, position) => h('span', { key: index, 'data-edge': index === 0 ? 'start' : index === count - 1 ? 'end' : undefined,
       style: { left: `${bucketX(index, count) / VIEW_W * 100}%` } }, model.labels[position]))) : null);
 }
-const percentText = value => Number.isFinite(value) ? `${Math.round(value)}%` : '—';
-const rateText = rate => rate === null ? 'no drain data' : `~${rate < 10 ? rate.toFixed(1) : Math.round(rate)}% per hour`;
+const rateNumber = rate => rate < 10 ? rate.toFixed(1) : String(Math.round(rate));
+const rateText = rate => rate === null ? 'no drain data' : `~${rateNumber(rate)} units per hour`;
 function resetTime(seconds, now) {
   return formatAt(seconds, seconds - now < 6 * DAY_S ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
@@ -2453,19 +2630,23 @@ function ProviderLimits({ provider, prefs, update, now }) {
   const windows = useMemo(() => windowCatalog(provider), [provider]);
   const selected = windows.find(item => item.key === prefs.window) || windows.find(item => item.key === 'weekly') || windows[0];
   const color = providerHueColor(provider.provider);
+  // The verdict always looks a week ahead whatever horizon the chart shows, so it reads the same as the sidebar footer.
+  const verdict = useMemo(() => limitsVerdict(provider, prefs, now), [provider, prefs, now]);
+  const assumed = provider.accounts.filter(account => planAssumed(provider.provider, account.plan));
   // Hermes knows the provider but has no usable credential, so there is nothing to sample or project.
   if (provider.auth === 'logged_out') return h('div', { className: 'su-provider-limits', 'data-auth': 'logged_out', style: { '--su-color': color } },
     h('div', { className: 'su-state su-logged-out', role: 'status' }, h('div', null, 'Logged out in Hermes — sign in to track limits'), provider.auth_reason ? h('div', { className: 'su-muted' }, provider.auth_reason) : null),
-    provider.accounts.length ? h('div', { className: 'su-accounts' }, provider.accounts.map(account => h(LimitAccount, { key: account.id, account, selected: selected?.key, now }))) : null);
+    provider.accounts.length ? h('div', { className: 'su-accounts' }, provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: selected?.key, now }))) : null);
   return h('div', { className: 'su-provider-limits', style: { '--su-color': color } },
     windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windows.map(item => ({ id: item.key, label: item.label })), value: selected.key, onChange: value => update({ window: value }) }) : null,
-    selected ? h(PooledLimitChart, { provider, windowKey: selected.key, now, horizonDays: prefs.horizon, setHorizon: horizon => update({ horizon }), lookback: prefs.lookback, setLookback: lookback => update({ lookback }) })
+    selected ? h(PooledLimitChart, { provider, windowKey: selected.key, now, verdict, horizonDays: prefs.horizon, setHorizon: horizon => update({ horizon }), lookback: prefs.lookback, setLookback: lookback => update({ lookback }) })
       : h(UsageState, null, 'No limit windows reported for this provider.'),
-    h('div', { className: 'su-accounts' }, provider.accounts.length ? provider.accounts.map(account => h(LimitAccount, { key: account.id, account, selected: selected?.key, now }))
-      : h(UsageState, null, 'No accounts in this provider pool.')));
+    h('div', { className: 'su-accounts' }, provider.accounts.length ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: selected?.key, now }))
+      : h(UsageState, null, 'No accounts in this provider pool.')),
+    // Capacities outside the plan table are a guess; say so once under the rows as well as on each affected row.
+    assumed.length ? h('p', { className: 'su-footnote su-assumption' }, `* Capacity unknown for ${assumed.map(account => `${account.label || account.id} (${planLabel(provider.provider, account.plan) || 'no plan reported'})`).join(', ')}: counted as ${BASE_PLAN_UNITS} plan units, one $20 plan.`) : null);
 }
-// Longest lookback on the left: moving left reaches further into the past. The native value is the visual position (0 = 30d), so
-// arrow keys follow the visual direction (Right = shorter); the preference itself stores hours, never the position.
+// Longest lookback on the left: moving left reaches further into the past. The native value is the visual position (0 = 30d), so arrow keys follow the visual direction (Right = shorter); the preference itself stores hours, never the position.
 export const lookbackPosition = hours => { const index = LOOKBACK_STOPS.indexOf(hours); return LOOKBACK_STOPS.length - 1 - (index < 0 ? LOOKBACK_STOPS.indexOf(USAGE_DEFAULTS.lookback) : index); };
 export const lookbackAtPosition = position => LOOKBACK_STOPS[LOOKBACK_STOPS.length - 1 - clamp(Math.round(Number(position)) || 0, 0, LOOKBACK_STOPS.length - 1)];
 function LookbackSlider({ hours, onChange }) {
@@ -2473,8 +2654,7 @@ function LookbackSlider({ hours, onChange }) {
   return h('div', { className: 'su-lookback' },
     h('span', { className: 'su-lookback-label', 'aria-hidden': true }, 'Projections based on'),
     h('input', { type: 'range', className: 'su-range', min: 0, max: last, step: 1, value: position, 'aria-label': 'Projections based on', 'aria-valuetext': lookbackLabel(hours),
-      // The track is filled from the thumb to the right end (the averaged period reaching back from now); Chromium has no themeable
-      // progress pseudo-element, so the gradient stop is computed from the thumb position.
+      // The track is filled from the thumb to the right end (the averaged period reaching back from now); Chromium has no themeable progress pseudo-element, so the gradient stop is computed from the thumb position.
       style: { '--su-share': position / last },
       onChange: event => onChange(lookbackAtPosition(event.target.value)) }),
     // A fixed-width value keeps the row from shifting while the thumb is dragged.
@@ -2490,17 +2670,14 @@ function HorizonToggle({ days, onChange }) {
   icon(extended ? 'ArrowBarLeft' : 'ArrowBarRight', extended ? '⇤' : '⇥'));
   return typeof sdk.Tip === 'function' ? h(sdk.Tip, { label: tip, side: 'top' }, button) : button;
 }
-// One dimension line under the plot, with arrowheads and end ticks drawn at fixed pixel size. A capped end (`startCap`/`endCap`
-// false) has neither: the line simply runs out at the plot edge.
+// One dimension line under the plot, with arrowheads and end ticks drawn at fixed pixel size. A capped end (`startCap`/`endCap` false) has neither: the line simply runs out at the plot edge.
 function MeasureSpan({ fromPct, toPct, startCap = true, endCap = true }) {
   return h('div', { className: 'su-measure-span', 'aria-hidden': true, 'data-start-cap': startCap, style: { left: `${fromPct}%`, width: `${toPct - fromPct}%` } },
     h('span', { className: 'su-measure-line' }),
     startCap ? h(Fragment, null, h('span', { className: 'su-measure-tick', 'data-end': 'start' }), h('svg', { className: 'su-arrow', 'data-end': 'start', viewBox: '0 0 6 8' }, h('path', { d: 'M6,0.5 L0,4 L6,7.5 Z' }))) : null,
     endCap ? h(Fragment, null, h('span', { className: 'su-measure-tick', 'data-end': 'end' }), h('svg', { className: 'su-arrow', 'data-end': 'end', viewBox: '0 0 6 8' }, h('path', { d: 'M0,0.5 L6,4 L0,7.5 Z' }))) : null);
 }
-// Text labels are centered on their span but clamped to their side of Now (with a gap), so the averaging label left of Now and
-// the time-to-empty label right of it can never overlap or leave the plot. Clamping needs the rendered text width, so it runs as a
-// layout effect; before that (and in DOM-less tests) the label is simply centered.
+// Text labels are centered on their span but clamped to their side of Now (with a gap), so the averaging label left of Now and the time-to-empty label right of it can never overlap or leave the plot. Clamping needs the rendered text width, so it runs as a layout effect; before that (and in DOM-less tests) the label is simply centered.
 const MEASURE_GAP_PX = 12;
 // A span shorter than its two arrowheads draws them outside, pointing in (the usual dimensioning convention for tight spans).
 const TIGHT_SPAN_PX = 16;
@@ -2537,16 +2714,75 @@ function MeasureRow({ nowPct, average, empty }) {
     empty ? h('div', { className: 'su-measure', 'data-kind': 'empty', role: 'note', 'aria-label': empty.text },
       h(MeasureSpan, { fromPct: empty.fromPct, toPct: empty.toPct }), label(empty, 'right', nowPct, 100)) : null);
 }
-const rateShort = rate => rate === null ? 'no drain data' : `~${rate < 10 ? rate.toFixed(1) : Math.round(rate)}%/h`;
-function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon, lookback, setLookback }) {
-  const horizonS = horizonDays * DAY_S, lookbackS = lookback * HOUR_S;
-  const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey), [provider, windowKey]);
+const rateShort = rate => rate === null ? 'no drain data' : `~${rateNumber(rate)} units/h`;
+// Verdict glyphs, shared by the Limits page and the sidebar footer: a warning triangle for a pool that runs out (a battery glyph was unreadable at footer size), a bin for quota that expires unused.
+const VERDICT_ICONS = { short: ['AlertTriangle', '!'], waste: ['Trash2', '⌫'] };
+const verdictIcon = status => Object.hasOwn(VERDICT_ICONS, status) ? h('span', { className: 'su-verdict-icon', 'aria-hidden': true, 'data-verdict-icon': status }, icon(...VERDICT_ICONS[status])) : null;
+function VerdictLine({ verdict, now, windowKey }) {
+  // The verdict always judges the weekly pool; over another window's chart it says so.
+  const prefix = verdict.window && verdict.window !== windowKey ? 'Weekly: ' : '';
+  return h('p', { className: 'su-verdict', 'data-status': verdict.status, 'data-window': verdict.window ?? undefined, role: 'status' }, verdictIcon(verdict.status), h('span', null, prefix + verdictText(verdict, now)));
+}
+// Vertical dimension lines at projected resets that discard quota, in the same visual language as the horizontal measurements: thin line, arrowheads and end ticks at both ends. Each spans from the pool's level just before the reset down by the units that expire. Labels go right of their line, or left when that collides or leaves the plot; a label that fits nowhere is hidden while its line and tooltip stay.
+const WASTE_LABEL_GAP_PX = 4;
+function placeWasteLabels(layer) {
+  const bounds = layer.getBoundingClientRect();
+  if (!(bounds.width > 0)) return;
+  const placed = [];
+  for (const mark of layer.querySelectorAll('.su-waste')) {
+    mark.dataset.tight = String(mark.getBoundingClientRect().height < TIGHT_SPAN_PX);
+    const label = mark.querySelector('.su-waste-text');
+    label.dataset.hidden = 'false';
+    let fit = null;
+    for (const side of ['right', 'left']) {
+      label.dataset.side = side;
+      const box = label.getBoundingClientRect();
+      const inside = box.left >= bounds.left - 0.5 && box.right <= bounds.right + 0.5;
+      const clear = placed.every(other => box.right + WASTE_LABEL_GAP_PX <= other.left || box.left >= other.right + WASTE_LABEL_GAP_PX || box.bottom <= other.top || box.top >= other.bottom);
+      if (inside && clear) { fit = box; break; }
+    }
+    if (fit) placed.push(fit); else { label.dataset.side = 'right'; label.dataset.hidden = 'true'; }
+  }
+}
+function WasteMarks({ marks, xPct, cap, now }) {
+  const layer = useRef(null);
+  const signature = marks.map(mark => `${mark.t}:${mark.before}:${mark.lost}`).join() + `|${cap}`;
+  useLayoutEffect(() => {
+    const node = layer.current;
+    if (!node) return undefined;
+    placeWasteLabels(node);
+    if (typeof ResizeObserver !== 'function') return undefined;
+    const observer = new ResizeObserver(() => placeWasteLabels(node));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [signature]);
+  if (!marks.length) return null;
+  return h('div', { className: 'su-waste-layer', ref: layer }, marks.map(mark => {
+    const when = resetTime(mark.t, now);
+    const title = mark.accounts.map(item => `${item.label}${item.plan_label ? ` · ${item.plan_label}` : ''} · ${unitsText(item.lost)} plan units unused at reset ${when}`).join('\n');
+    return h('div', { key: mark.t, className: 'su-waste', role: 'img', 'aria-label': title, title, 'data-t': Math.round(mark.t), 'data-before': mark.before, 'data-lost': mark.lost,
+      style: { left: `${xPct(mark.t)}%`, top: `${(1 - mark.before / cap) * 100}%`, height: `${mark.lost / cap * 100}%` } },
+      h('span', { className: 'su-waste-line' }),
+      h('span', { className: 'su-waste-tick', 'data-end': 'top' }), h('span', { className: 'su-waste-tick', 'data-end': 'bottom' }),
+      h('svg', { className: 'su-waste-arrow', 'data-end': 'top', viewBox: '0 0 8 6', 'aria-hidden': true }, h('path', { d: 'M0.5,6 L4,0 L7.5,6 Z' })),
+      h('svg', { className: 'su-waste-arrow', 'data-end': 'bottom', viewBox: '0 0 8 6', 'aria-hidden': true }, h('path', { d: 'M0.5,0 L4,6 L7.5,0 Z' })),
+      h('span', { className: 'su-waste-text', 'data-side': 'right', 'aria-hidden': true }, `${unitsText(mark.lost)} lost`));
+  }));
+}
+// "Business: 20, Pro 100: 100": what each account adds to the pool's capacity, an asterisk marking a guessed one.
+const poolComposition = members => members.map(item => `${item.plan_label || 'Unknown plan'}: ${unitsText(item.weight)}${item.assumed ? '*' : ''}`).join(', ');
+function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, setHorizon, lookback, setLookback }) {
+  const horizonS = horizonDays * DAY_S, lookbackS = lookback * HOUR_S, providerId = provider.provider;
+  const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey, providerId), [provider, windowKey, providerId]);
   const past = useMemo(() => pooledHistory(samples), [samples]);
-  const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS, { lookbackS }), [provider, windowKey, now, horizonS, lookbackS]);
+  const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS, { lookbackS, provider: providerId }), [provider, windowKey, now, horizonS, lookbackS, providerId]);
+  const waste = useMemo(() => wasteMarks(projection), [projection]);
   const [hover, setHover] = useState(null);
-  const cap = Math.max(100, projection.capacity, ...past.map(point => point.value));
+  // The axis tops out at the pool's capacity in plan units (or above it if an older reading held more, e.g. before a plan change).
+  const cap = Math.max(projection.capacity || BASE_PLAN_UNITS, ...past.map(point => point.value));
+  const ticks = unitTicks(cap);
   const start = now - limitsPastSeconds(horizonS), end = now + horizonS;
-  const axis = useMemo(() => { const ticks = timeAxisTicks(start, end); return { ...ticks, labels: axisLabels(ticks.times, undefined, ticks.resolution), midnights: localMidnights(start, end) }; }, [start, end]);
+  const axis = useMemo(() => { const times = timeAxisTicks(start, end); return { ...times, labels: axisLabels(times.times, undefined, times.resolution), midnights: localMidnights(start, end) }; }, [start, end]);
   const x = t => (t - start) / (end - start) * VIEW_W, y = value => VIEW_H - value / cap * VIEW_H;
   const pastAt = t => { let value = null; for (const point of past) { if (point.t > t) break; value = point.value; } return value; };
   const projectedAt = t => {
@@ -2573,8 +2809,7 @@ function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon, l
   const emptyPct = emptyAt === null ? null : x(emptyAt) / VIEW_W * 100;
   const emptyText = emptyAt === null ? null : emptyAt - now < 60 ? 'Empty now' : `Empty in ${formatDurationShort(emptyAt - now)} · ${resetTime(emptyAt, now)}`;
   const emptyMeasured = emptyPct !== null && emptyPct - nowPct > 0.05;
-  // The averaged period always spans the requested lookback, even when the history covers less (the coverage note says so). When
-  // it reaches back past the plot it is cut at the plot edge without a left arrowhead, since its true start is not on the chart.
+  // The averaged period always spans the requested lookback, even when the history covers less (the coverage note says so). When it reaches back past the plot it is cut at the plot edge without a left arrowhead, since its true start is not on the chart.
   const averageClipped = now - lookbackS < start, averagePct = averageClipped ? 0 : x(now - lookbackS) / VIEW_W * 100;
   const averageText = `Average over ${lookbackLabel(lookback)} · ${rateShort(projection.rate)}`;
   const average = nowPct - averagePct > 0.05 ? { fromPct: averagePct, toPct: nowPct, clipped: averageClipped, text: averageText,
@@ -2582,17 +2817,21 @@ function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon, l
   const hoverT = hover === null ? null : start + hover * (end - start);
   const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
   const move = event => { const box = event.currentTarget.getBoundingClientRect(); if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1)); };
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map(share => share * cap);
-  return h('section', { className: 'su-chart su-pooled', 'data-window': windowKey, 'data-horizon': horizonDays, 'aria-label': 'Pooled remaining quota' },
+  const composition = projection.members.length ? poolComposition(projection.members) : '';
+  return h('section', { className: 'su-chart su-pooled', 'data-window': windowKey, 'data-horizon': horizonDays, 'data-capacity': projection.capacity, 'aria-label': 'Pooled remaining quota' },
     h('div', { className: 'su-headline' },
       // Without any account reading the pool is unknown, not empty.
-      h('span', { className: 'su-pool' }, projection.capacity ? percentText(projection.current) : '—'), h('span', { className: 'su-capacity' }, projection.capacity ? `/ ${projection.capacity}% remaining` : 'no account readings yet'),
+      h('span', { className: 'su-pool' }, projection.capacity ? unitsText(projection.current) : '—'),
+      h('span', { className: 'su-capacity', title: PLAN_UNITS_NOTE }, projection.capacity ? `/ ${unitsText(projection.capacity)} plan units` : 'no account readings yet'),
+      composition ? h('span', { className: 'su-composition', title: PLAN_UNITS_NOTE }, `(${composition})`) : null,
       h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate)),
       // Kept out of the slider row: text appearing there while dragging would shift the slider under the pointer.
       projection.partial ? h('span', { className: 'su-coverage' }, `based on ${coverageText(projection.coveredS)} of data`) : null),
+    verdict ? h(VerdictLine, { verdict, now, windowKey }) : null,
     h('div', { className: 'su-limits-grid' },
-      h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, `${Math.round(tick)}%`))),
-      h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end),
+      h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, h('span', { className: 'su-yunit', title: PLAN_UNITS_NOTE }, 'plan units'),
+        ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, unitsText(tick)))),
+      h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota in plan units over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end), 'data-cap': cap,
         onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null),
         onKeyDown: event => { const step = { ArrowLeft: -0.02, ArrowRight: 0.02 }[event.key]; if (step) { event.preventDefault(); setHover(clamp((hover ?? nowPct / 100) + step, 0, 1)); } if (event.key === 'Escape') setHover(null); } },
         h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
@@ -2603,11 +2842,12 @@ function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon, l
           h('path', { className: 'su-area su-projected', d: projectedArea }),
           h('path', { className: 'su-line su-projected', d: projectedLine })),
         h('div', { className: 'su-now', style: { left: `${nowPct}%` } }, h('span', null, 'Now')),
+        h(WasteMarks, { marks: waste.filter(mark => mark.t > now && mark.t < end), xPct: t => x(t) / VIEW_W * 100, cap, now }),
         emptyPct === null ? null : h('span', { className: 'su-empty-dot', title: emptyText, style: { left: `${emptyPct}%` } }),
         hoverValue === null ? null : h(Fragment, null,
           h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
           h('div', { className: 'su-tip su-tip-inline', style: hover > 0.6 ? { right: `calc(${100 - hover * 100}% + 10px)` } : { left: `calc(${hover * 100}% + 10px)` } },
-            `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${percentText(hoverValue)} left${hoverT > now ? ' (projected)' : ''}`))),
+            `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${unitsText(hoverValue)} units left${hoverT > now ? ' (projected)' : ''}`))),
       h('div', { className: 'su-horizon-cell' }, h(HorizonToggle, { days: horizonDays, onChange: setHorizon })),
       h('div', { className: 'su-xaxis' }, axis.times.map((t, index) => {
         const share = x(t) / VIEW_W * 100;
@@ -2617,18 +2857,21 @@ function PooledLimitChart({ provider, windowKey, now, horizonDays, setHorizon, l
     h('div', { className: 'su-chart-foot' },
       h(LookbackSlider, { hours: lookback, onChange: setLookback }),
       h('div', { className: 'su-chart-notes' },
-        h('span', null, projection.nextReset ? projection.nextReset.gain === null ? `Next reset · ${resetTime(projection.nextReset.t, now)}` : `Next reset +${Math.round(projection.nextReset.gain)}% · ${resetTime(projection.nextReset.t, now)}` : 'No reset time reported'),
+        h('span', null, projection.nextReset ? projection.nextReset.gain === null ? `Next reset · ${resetTime(projection.nextReset.t, now)}` : `Next reset +${unitsText(projection.nextReset.gain)} units · ${resetTime(projection.nextReset.t, now)}` : 'No reset time reported'),
         emptyText && !emptyMeasured ? h('span', { className: 'su-empty-note' }, emptyText) : null,
         emptyAt === null && projection.rate > 0 ? h('span', { className: 'su-empty-note' }, `Not empty within ${horizonDays}d`) : null,
         projection.unknownAccounts.length ? h('span', null, `${projection.unknownAccounts.length} account${projection.unknownAccounts.length === 1 ? '' : 's'} without a reading left out of the pool`) : null)));
 }
 function Badge({ tone, title, children }) { return h('span', { className: 'su-badge', 'data-tone': tone, title }, children); }
-function LimitAccount({ account, selected, now }) {
+function LimitAccount({ provider, account, selected, now }) {
   const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
+  // The plan label and the capacity this account adds to the pool in the selected window; T3 Code's names, not the raw enum.
+  const label = planLabel(provider, account.plan), units = planWeight(provider, account.plan, selected || 'weekly'), assumed = planAssumed(provider, account.plan);
   return h('div', { className: 'su-account', 'data-account': account.id },
     h('div', { className: 'su-account-head' },
       h('strong', null, account.label || account.id),
-      account.plan ? h(Badge, null, account.plan) : null,
+      h(Badge, { title: PLAN_UNITS_NOTE }, `${label || 'Unknown plan'} · ${unitsText(units)} units`),
+      assumed ? h('span', { className: 'su-muted su-assumed' }, `capacity unknown, counted as ${BASE_PLAN_UNITS}*`) : null,
       Number.isFinite(account.priority) ? h('span', { className: 'su-muted' }, `priority ${account.priority}`) : null,
       Number.isFinite(account.banked_resets) ? h(Badge, null, `${account.banked_resets} banked reset${account.banked_resets === 1 ? '' : 's'}`) : null,
       account.stale ? h(Badge, { tone: 'warn', title: 'The latest reading is older than the cache freshness limit.' }, 'Stale') : null,
@@ -2657,7 +2900,7 @@ function SamplerInfo({ sampler, now }) {
   if (!sampler) return h('p', { className: 'su-footnote' }, 'The limits sampler has not reported yet.');
   const parts = [Number.isFinite(sampler.interval_s) ? `Sampled every ${formatDurationShort(sampler.interval_s)}` : 'Sampler running',
     Number.isFinite(sampler.last_run_at) ? `last sample ${formatAt(sampler.last_run_at, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} (${formatDurationShort(now - sampler.last_run_at)} ago)` : 'no sample yet'];
-  return h('p', { className: 'su-footnote' }, `${parts.join(' · ')}. Projections assume the pooled drain averaged over the selected period continues and accounts are used in pool priority order.`,
+  return h('p', { className: 'su-footnote' }, `${parts.join(' · ')}. Projections assume the pooled drain averaged over the selected period continues and accounts are used in pool priority order. ${PLAN_UNITS_NOTE}`,
     sampler.last_error ? h('span', { className: 'su-error', role: 'alert' }, ` Last sampler error: ${sampler.last_error}`) : null);
 }
 // The page renders in the workspace pane, outside the sidebar stylesheet, so it carries its own theme-variable styles.
@@ -2755,6 +2998,25 @@ const USAGE_CSS = `
 .su-bar{position:relative;height:16px}.su-bar-track,.su-bar-fill{position:absolute;left:0;top:5px;height:6px;border-radius:3px}
 .su-bar-track{right:0;background:color-mix(in srgb,var(--ui-text-primary) 12%,transparent)}.su-bar-fill{background:var(--su-color)}
 .su-pace{position:absolute;top:1px;width:2px;height:14px;margin-left:-1px;border-radius:1px;background:var(--ui-text-primary)}
+/* Plan-unit headline, verdict and the waste measurements. --su-waste matches the sidebar's --sf-waste. */
+.su{--su-waste:color-mix(in oklab,var(--ui-orange,#db704b) 55%,var(--ui-yellow,#c08532))}
+.su-composition{font-size:11px;color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}
+.su-verdict{display:flex;align-items:center;gap:6px;margin:-6px 0 0;font-size:12px;color:var(--ui-text-tertiary)}
+.su-verdict[data-status=short]{color:var(--ui-red,#cf2d56)}.su-verdict[data-status=waste]{color:var(--su-waste)}
+.su-verdict-icon{display:inline-flex;flex-shrink:0}.su-verdict .su-verdict-icon svg{width:15px;height:15px}
+.su-limits-grid{margin-top:22px}
+.su-assumed{font-style:italic}
+.su-waste-layer{position:absolute;inset:0;pointer-events:none}
+.su-waste{position:absolute;width:0;color:var(--su-waste);pointer-events:auto}
+/* A transparent strip wider than the 1px line gives the tooltip a usable hover target. */
+.su-waste::before{content:'';position:absolute;top:0;bottom:0;left:-5px;width:10px}
+.su-waste-line{position:absolute;top:0;bottom:0;left:-0.5px;border-left:1px solid currentColor}
+.su-waste-tick{position:absolute;left:-5px;width:10px;height:0;border-top:1px solid currentColor}.su-waste-tick[data-end=top]{top:0}.su-waste-tick[data-end=bottom]{bottom:0;margin-bottom:-1px}
+.su-waste-arrow{position:absolute;left:-4px;width:8px;height:6px;fill:currentColor;overflow:visible}.su-waste-arrow[data-end=top]{top:0}.su-waste-arrow[data-end=bottom]{bottom:0}
+.su-waste[data-tight=true] .su-waste-arrow{transform:scaleY(-1)}.su-waste[data-tight=true] .su-waste-arrow[data-end=top]{top:-6px}.su-waste[data-tight=true] .su-waste-arrow[data-end=bottom]{bottom:-6px}
+.su-waste[data-tight=true] .su-waste-line{top:-10px;bottom:-10px}
+.su-waste-text{position:absolute;top:50%;transform:translateY(-50%);padding:0 3px;border-radius:3px;background:color-mix(in srgb,var(--ui-bg-elevated,var(--ui-bg-quaternary)) 80%,transparent);font-size:11px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.su-waste-text[data-side=right]{left:6px}.su-waste-text[data-side=left]{right:6px}.su-waste-text[data-hidden=true]{visibility:hidden}
 @media(max-width:640px){.su{padding:12px}.su-window{grid-template-columns:minmax(60px,7rem) minmax(40px,1fr) 4rem;}.su-window-reset{display:none}}
 `;
 export default {

@@ -30,24 +30,26 @@ afterEach(async () => {
   mock.reset();
 });
 
-// Pure projection math ------------------------------------------------------------------------------------------------
-const account = (id, priority, remaining, resetsAt, period = 604800, fetched = 1000) => ({ id, label: id, priority, fetched_at: fetched,
+// Pure projection math ------------------------------------------------------------------------------------------------ Pro 100 accounts weigh 100 plan units, so in these projection tests one percent of an account is exactly one unit of the pool.
+const account = (id, priority, remaining, resetsAt, period = 604800, fetched = 1000, plan = 'prolite') => ({ id, label: id, priority, plan, fetched_at: fetched,
   windows: [{ key: 'weekly', label: 'Weekly', window_seconds: period, remaining_percent: remaining, resets_at: resetsAt }] });
+const codex = { provider: 'openai-codex' };
+const remainingOf = result => result.accounts.map(item => ({ id: item.id, remaining: item.remaining }));
 const round = points => points.map(point => [Math.round(point.t), Math.round(point.value * 1000) / 1000]);
 
 test('projection drains the lowest priority number first, then the next account', () => {
   const now = 1000;
-  const result = usage.projectPool([account('b', 2, 80, now + 10 * D), account('a', 1, 50, now + 10 * D)], [], 'weekly', now, 10 * H, { rate: 10 });
+  const result = usage.projectPool([account('b', 2, 80, now + 10 * D), account('a', 1, 50, now + 10 * D)], [], 'weekly', now, 10 * H, { rate: 10, ...codex });
   assert.equal(result.current, 130); assert.equal(result.capacity, 200);
   assert.deepEqual(round(result.points), [[now, 130], [now + 5 * H, 80], [now + 10 * H, 30]]);
-  assert.deepEqual(result.accounts, [{ id: 'a', remaining: 0 }, { id: 'b', remaining: 30 }]);
+  assert.deepEqual(remainingOf(result), [{ id: 'a', remaining: 0 }, { id: 'b', remaining: 30 }]);
   assert.equal(result.resets.length, 0);
   assert.deepEqual(result.nextReset, { t: now + 10 * D, gain: null });
 });
 
 test('projection steps each account back to 100% at every reset and rolls its window forward', () => {
   const now = 1000;
-  const result = usage.projectPool([account('a', 1, 20, now + H, 5 * H), account('b', 2, 60, now + 3 * H, 5 * H)], [], 'weekly', now, 8 * H, { rate: 10 });
+  const result = usage.projectPool([account('a', 1, 20, now + H, 5 * H), account('b', 2, 60, now + 3 * H, 5 * H)], [], 'weekly', now, 8 * H, { rate: 10, ...codex });
   assert.deepEqual(round(result.points), [[now, 80], [now + H, 70], [now + H, 160], [now + 3 * H, 140], [now + 3 * H, 180], [now + 6 * H, 150], [now + 6 * H, 200], [now + 8 * H, 180]]);
   assert.deepEqual(result.resets.map(item => [item.t - now, item.account, Math.round(item.gain)]), [[H, 'a', 90], [3 * H, 'b', 40], [6 * H, 'a', 50]]);
   assert.deepEqual(result.nextReset, { t: now + H, gain: 90 });
@@ -55,19 +57,19 @@ test('projection steps each account back to 100% at every reset and rolls its wi
 
 test('a reset that passed after the last reading counts the account full and schedules the next window', () => {
   const now = 10_000;
-  const result = usage.projectPool([account('a', 1, 30, now - 600, D, now - 900)], [], 'weekly', now, 2 * D, { rate: 0 });
+  const result = usage.projectPool([account('a', 1, 30, now - 600, D, now - 900)], [], 'weekly', now, 2 * D, { rate: 0, ...codex });
   assert.equal(result.current, 100);
   assert.deepEqual(result.resets.map(item => item.t - now), [D - 600, 2 * D - 600], 'resets continue one window after the missed one');
-  const noPeriod = usage.projectPool([{ id: 'a', priority: 1, fetched_at: now - 900, windows: [{ key: 'weekly', remaining_percent: 30, resets_at: now - 600 }] }], [], 'weekly', now, 2 * D, { rate: 0 });
+  const noPeriod = usage.projectPool([{ id: 'a', priority: 1, plan: 'prolite', fetched_at: now - 900, windows: [{ key: 'weekly', remaining_percent: 30, resets_at: now - 600 }] }], [], 'weekly', now, 2 * D, { rate: 0, ...codex });
   assert.equal(noPeriod.current, 100); assert.equal(noPeriod.nextReset, null);
-  const already = usage.projectPool([account('a', 1, 30, now - 600, D, now - 300)], [], 'weekly', now, H, { rate: 0 });
+  const already = usage.projectPool([account('a', 1, 30, now - 600, D, now - 300)], [], 'weekly', now, H, { rate: 0, ...codex });
   assert.equal(already.current, 30, 'a reading taken after the reset already reflects it');
 });
 
 test('without drain data the projection is flat apart from resets, and unknown readings stay out of the pool', () => {
   const now = 1000;
   const accounts = [account('a', 1, 40, now + 2 * H, 5 * H), { id: 'u', priority: 2, fetched_at: null, windows: [{ key: 'weekly', remaining_percent: null, resets_at: null }] }];
-  const result = usage.projectPool(accounts, [{ t: now - 60, account: 'a', window: 'weekly', remaining_percent: 40, resets_at: now + 2 * H }], 'weekly', now, 4 * H);
+  const result = usage.projectPool(accounts, [{ t: now - 60, account: 'a', window: 'weekly', remaining_percent: 40, resets_at: now + 2 * H }], 'weekly', now, 4 * H, codex);
   assert.equal(result.rate, null); assert.equal(result.unknown, true);
   assert.deepEqual(round(result.points), [[now, 40], [now + 2 * H, 40], [now + 2 * H, 100], [now + 4 * H, 100]]);
   assert.deepEqual(result.unknownAccounts, ['u']); assert.equal(result.capacity, 100);
@@ -75,7 +77,7 @@ test('without drain data the projection is flat apart from resets, and unknown r
 
 test('drain rate pools consumption over the lookback and ignores reset jumps', () => {
   const now = 100 * H;
-  const samples = usage.limitSamples([], [
+  const samples = usage.limitSamples([{ id: 'a', plan: 'prolite' }, { id: 'b', plan: 'prolite' }], [
     { t: now - 8 * H, account: 'a', window: 'weekly', remaining_percent: 99, resets_at: now + D },
     { t: now - 3 * H, account: 'a', window: 'weekly', remaining_percent: 80, resets_at: now + D },
     { t: now - 2 * H, account: 'a', window: 'weekly', remaining_percent: 70, resets_at: now + D },
@@ -84,7 +86,7 @@ test('drain rate pools consumption over the lookback and ignores reset jumps', (
     { t: now - 2 * H, account: 'b', window: 'weekly', remaining_percent: 50, resets_at: now + 3 * D },
     { t: now - H, account: 'b', window: 'weekly', remaining_percent: 49, resets_at: now + 4 * D },
     { t: now - H, account: 'b', window: 'five_hour', remaining_percent: 0, resets_at: null }
-  ], 'weekly');
+  ], 'weekly', 'openai-codex');
   // a: 80→70 (10) and 100→90 (10); the rise is a reset. b: 50→49 straddles a new reset time, so it counts as none.
   assert.equal(Math.round(usage.drainRate(samples, now, 6 * H) * 1000) / 1000, Math.round(20 / 3 * 1000) / 1000);
   // Twelve hours reach back to the 99% reading: 99→80 adds 19 points over the 8 hours the readings cover.
@@ -130,11 +132,11 @@ test('the projection rate follows the lookback and reports partial coverage', ()
   // a drains 1 point per hour for the last 3 hours, but 4 per hour before that.
   const history = [-10, -3, -2, -1, 0].map(hour => ({ t: now + hour * H, account: 'a', window: 'weekly', remaining_percent: hour === -10 ? 98 : 70 - (hour + 3), resets_at: now + 3 * D }));
   const accounts = [account('a', 1, 67, now + 3 * D, 604800, now)];
-  const short = usage.projectPool(accounts, history, 'weekly', now, D, { lookbackS: 2 * H });
+  const short = usage.projectPool(accounts, history, 'weekly', now, D, { lookbackS: 2 * H, ...codex });
   assert.deepEqual([short.rate, short.partial], [1, false]);
-  const wide = usage.projectPool(accounts, history, 'weekly', now, D, { lookbackS: 30 * D });
+  const wide = usage.projectPool(accounts, history, 'weekly', now, D, { lookbackS: 30 * D, ...codex });
   assert.deepEqual([wide.rate, wide.coveredS, wide.partial], [31 / 10, 10 * H, true]);
-  const none = usage.projectPool(accounts, history.slice(-1), 'weekly', now, D, { lookbackS: 12 * H });
+  const none = usage.projectPool(accounts, history.slice(-1), 'weekly', now, D, { lookbackS: 12 * H, ...codex });
   assert.deepEqual([none.rate, none.partial, round(none.points)], [null, false, [[now, 67], [now + D, 67]]], 'without 15 minutes of data the projection stays flat');
 });
 
@@ -142,13 +144,133 @@ test('the first zero crossing is interpolated and ignores a later refill', () =>
   assert.equal(usage.firstEmpty([{ t: 0, value: 50 }, { t: 10, value: 0 }]), 10);
   assert.equal(usage.firstEmpty([{ t: 0, value: 50 }, { t: 10, value: -50 }]), 5);
   const now = 1000;
-  const projection = usage.projectPool([account('a', 1, 20, now + 5 * H, D), account('b', 2, 10, now + 20 * H, D)], [], 'weekly', now, 2 * D, { rate: 10 });
+  const projection = usage.projectPool([account('a', 1, 20, now + 5 * H, D), account('b', 2, 10, now + 20 * H, D)], [], 'weekly', now, 2 * D, { rate: 10, ...codex });
   const empty = usage.firstEmpty(projection.points);
   assert.equal(empty, now + 3 * H, 'both accounts are drained after 30 points at 10 per hour');
   assert.ok(projection.points.some(point => point.t > empty && point.value === 100), 'the pool refills at a later reset');
-  assert.equal(usage.firstEmpty(usage.projectPool([account('a', 1, 20, now + H, D)], [], 'weekly', now, D, { rate: 2 }).points), null, 'a reset before depletion means it never empties');
+  assert.equal(usage.firstEmpty(usage.projectPool([account('a', 1, 20, now + H, D)], [], 'weekly', now, D, { rate: 2, ...codex }).points), null, 'a reset before depletion means it never empties');
   assert.equal(usage.firstEmpty([{ t: 7, value: 0 }]), 7, 'an already empty pool is empty now');
   assert.equal(usage.firstEmpty([]), null);
+});
+
+// Plan units -----------------------------------------------------------------------------------------------------------
+test('plan units follow Virgile\'s table: Codex is linear in price in every window, Anthropic differs per window', () => {
+  const codexRows = [['plus', 20], ['team', 20], ['business', 20], ['self_serve_business_usage_based', 20], ['self_serve_business_prolite', 100], ['prolite', 100], ['pro', 200], ['promax', 500]];
+  for (const [plan, units] of codexRows) for (const key of ['weekly', 'five_hour', 'weekly:gpt-5', 'w7200']) {
+    assert.equal(usage.planWeight('openai-codex', plan, key), units, `Codex ${plan} in ${key}`);
+    assert.equal(usage.planAssumed('openai-codex', plan), false, `Codex ${plan} is known`);
+  }
+  // Older samples hold Hermes's title-cased plan; case and separators fold back to the enum.
+  assert.deepEqual(['Team', 'Prolite', 'Self Serve Business Usage Based', ' PROMAX ', 'Self Serve Business Prolite'].map(plan => usage.planWeight('openai-codex', plan)), [20, 100, 20, 500, 100]);
+  const anthropicRows = [['pro', 20, 20], ['max_5x', 100, 100], ['max_20x', 200, 400], ['team_standard', 20, 20], ['team_premium', 100, 100]];
+  for (const [plan, weekly, fiveHour] of anthropicRows) {
+    assert.deepEqual([usage.planWeight('anthropic', plan, 'weekly'), usage.planWeight('anthropic', plan, 'five_hour'), usage.planAssumed('anthropic', plan)], [weekly, fiveHour, false], `Anthropic ${plan}`);
+  }
+  assert.deepEqual([usage.planWeight('anthropic', 'max_20x', 'weekly'), usage.planWeight('anthropic', 'max_20x', 'five_hour')], [200, 400], 'Max 20x is 2x Max 5x weekly but 4x in five hours');
+  assert.deepEqual([usage.planWeight('anthropic', 'max_20x', 'weekly:opus'), usage.planWeight('anthropic', 'max_20x', 'five_hour:opus'), usage.planWeight('anthropic', 'max_20x', 'w7200'), usage.planWeight('anthropic', 'max_20x', undefined)], [200, 400, 200, 200], 'unknown windows use the weekly weight');
+  // Anthropic strings vary by source; the seat tiers match tolerantly.
+  const tolerant = { 'Claude Pro': 20, 'default_claude_max_5x': 100, 'Max 5x': 100, 'default_claude_max_20x': 200, 'MAX 20X': 200, 'Team Standard': 20, 'standard seat': 20, 'Team Premium': 100, premium: 100, 'Enterprise Premium Seat': 100 };
+  for (const [plan, units] of Object.entries(tolerant)) assert.equal(usage.planWeight('anthropic', plan), units, `Anthropic "${plan}"`);
+  assert.deepEqual([usage.planLabel('anthropic', 'default_claude_max_20x'), usage.planLabel('anthropic', 'team_standard'), usage.planLabel('anthropic', 'premium')], ['Max 20x', 'Standard seat', 'Premium seat']);
+  // Unknown capacity counts as one base plan and is flagged; "premium" alone never matches a Codex row, and a bare "max" stays unknown.
+  for (const [provider, plan] of [['openai-codex', 'premium'], ['openai-codex', 'enterprise'], ['openai-codex', null], ['anthropic', 'max'], ['anthropic', 'team'], ['nous', 'pro']]) {
+    assert.deepEqual([usage.planWeight(provider, plan), usage.planAssumed(provider, plan)], [20, true], `${provider} ${plan} is assumed`);
+  }
+  assert.equal(usage.BASE_PLAN_UNITS, 20);
+});
+
+test('plan labels use T3 Code\'s names', () => {
+  const labels = { free: 'Free', go: 'Go', plus: 'Plus', pro: 'Pro 200', prolite: 'Pro 100', promax: 'Pro 500', self_serve_business_prolite: 'Business Premium', team: 'Business', business: 'Business', self_serve_business_usage_based: 'Business',
+    ent26: 'Enterprise', enterprise: 'Enterprise', enterprise_cbp_automation: 'Enterprise', enterprise_cbp_usage_based: 'Enterprise', edu: 'Edu', edu_plus: 'Edu', edu_pro: 'Edu' };
+  for (const [plan, label] of Object.entries(labels)) assert.equal(usage.planLabel('openai-codex', plan), label, plan);
+  assert.deepEqual([usage.planLabel('openai-codex', 'Prolite'), usage.planLabel('openai-codex', 'mystery_plan'), usage.planLabel('openai-codex', null), usage.planLabel('anthropic', 'max')], ['Pro 100', 'mystery_plan', null, 'max']);
+});
+
+test('units format and vertical ticks run to the pool capacity', () => {
+  assert.deepEqual([74.4, 9.96, 3.25, 0, NaN].map(usage.unitsText), ['74', '10', '3.3', '0', '—']);
+  assert.deepEqual(usage.unitTicks(120), [0, 25, 50, 75, 100, 120]);
+  assert.deepEqual(usage.unitTicks(20), [0, 5, 10, 15, 20]);
+  assert.deepEqual(usage.unitTicks(200), [0, 50, 100, 150, 200]);
+  assert.deepEqual(usage.unitTicks(520), [0, 200, 400, 520]);
+});
+
+test('the pool weighs accounts by plan units: a raw point on Pro 100 moves it five times one on Business', () => {
+  const now = 100 * H;
+  const accounts = [{ id: 'biz', plan: 'team', priority: 0, windows: [] }, { id: 'pro', plan: 'prolite', priority: 1, windows: [] }];
+  const at = (t, biz, pro) => [{ t, account: 'biz', window: 'weekly', remaining_percent: biz, resets_at: now + D }, { t, account: 'pro', window: 'weekly', remaining_percent: pro, resets_at: now + 2 * D }];
+  const pooled = history => usage.pooledHistory(usage.limitSamples(accounts, history, 'weekly', 'openai-codex')).map(point => Math.round(point.value * 1000) / 1000);
+  // 60% of 20 units plus 60% of 100 units.
+  assert.deepEqual(pooled(at(now - H, 60, 60)), [72]);
+  const businessDrop = pooled([...at(now - H, 60, 60), ...at(now, 50, 60)]), proDrop = pooled([...at(now - H, 60, 60), ...at(now, 60, 50)]);
+  assert.deepEqual([businessDrop.at(-1), proDrop.at(-1)], [70, 62], 'ten raw points cost 2 units on Business and 10 on Pro 100');
+  assert.equal((72 - proDrop.at(-1)) / (72 - businessDrop.at(-1)), 5);
+  const samples = usage.limitSamples(accounts, [...at(now - H, 60, 60), ...at(now, 50, 50)], 'weekly', 'openai-codex');
+  assert.equal(usage.drainRate(samples, now, 2 * H), 12, 'the drain rate is in plan units per hour');
+  const withWindows = accounts.map((account, index) => ({ ...account, label: account.id, fetched_at: now, windows: [{ key: 'weekly', window_seconds: 7 * D, remaining_percent: 50, resets_at: now + (index + 1) * D }] }));
+  const projection = usage.projectPool(withWindows, [], 'weekly', now, 3 * D, { rate: 0, provider: 'openai-codex' });
+  assert.deepEqual([projection.capacity, projection.current], [120, 60]);
+  assert.deepEqual(projection.members.map(item => [item.id, item.plan_label, item.weight, item.assumed]), [['biz', 'Business', 20, false], ['pro', 'Pro 100', 100, false]]);
+  // Each reset restores the account's own weight: Business gains 10 units, Pro 100 gains 50; what was left expires as `lost`.
+  assert.deepEqual(projection.resets.map(item => [item.account, item.t - now, item.gain, item.lost, item.before]), [['biz', D, 10, 10, 60], ['pro', 2 * D, 50, 50, 70]]);
+  assert.deepEqual(usage.projectPool(withWindows, [], 'five_hour', now, D, { rate: 0, provider: 'openai-codex' }).capacity, 0, 'no readings in that window, no capacity');
+});
+
+// A two-account pool for verdict cases: the priority-0 Business seat is empty and resets in 4 days, while the Pro 100 account (one percent = one unit) has `left` percent, resets in 1 day and has dropped `perHour` points every hour for the last 12 hours.
+function verdictProvider(now, { provider = 'openai-codex', label = 'OpenAI Codex', plans = ['team', 'prolite'], left = 60, perHour = 0.5, stale = false, auth = 'ok' } = {}) {
+  const history = [];
+  for (let hour = 12; hour >= 0; hour--) history.push(
+    { t: now - hour * H, account: 'second', window: 'weekly', remaining_percent: left + hour * perHour, resets_at: now + D },
+    { t: now - hour * H, account: 'first', window: 'weekly', remaining_percent: 0, resets_at: now + 4 * D });
+  const win = (remaining, resets) => [{ key: 'weekly', label: 'Weekly', window_seconds: 7 * D, remaining_percent: remaining, resets_at: resets }];
+  return { provider, label, auth, history, accounts: [
+    { id: 'first', label: 'chatgptvitibot', priority: 0, plan: plans[0], fetched_at: now, stale, windows: win(0, now + 4 * D) },
+    { id: 'second', label: 'chatgpt1', priority: 1, plan: plans[1], fetched_at: now, stale, windows: win(left, now + D) }] };
+}
+
+test('the verdict says waste when resets discard at least 5% of capacity and the pool never runs dry', () => {
+  const now = 1_000_000, prefs = usage.USAGE_DEFAULTS;
+  const verdict = usage.limitsVerdict(verdictProvider(now), prefs, now);
+  // 0.5 units an hour for a day leaves 48 of Pro 100's 60 units to expire at its reset; afterwards 120 units outlast the week.
+  assert.deepEqual([verdict.status, verdict.window, verdict.remaining, verdict.capacity, verdict.remaining_pct, verdict.empty_at, verdict.last_loss_at - now], ['waste', 'weekly', 60, 120, 50, null, D]);
+  assert.equal(Math.round(verdict.lost * 1000) / 1000, 48); assert.equal(Math.round(verdict.lost_pct * 10) / 10, 40);
+  assert.match(usage.verdictText(verdict, now), /^48 plan units will expire unused by [A-Z][a-z]{2} — room for background work$/);
+  const marks = usage.wasteMarks(usage.projectPool(verdictProvider(now).accounts, verdictProvider(now).history, 'weekly', now, 7 * D, { lookbackS: 12 * H, provider: 'openai-codex' }));
+  assert.deepEqual(marks.map(mark => [mark.t - now, Math.round(mark.before), Math.round(mark.lost), mark.accounts.map(item => `${item.label} ${item.plan_label}`).join()]), [[D, 48, 48, 'chatgpt1 Pro 100']]);
+  // A loss under 5% of capacity is noise: 13% of Pro 100 at 0.5 units an hour leaves 1 unit at the reset.
+  const ok = usage.limitsVerdict(verdictProvider(now, { left: 13 }), prefs, now);
+  assert.deepEqual([ok.status, Math.round(ok.lost)], ['ok', 1]);
+  assert.match(usage.verdictText(ok, now), /^On track for the next 7 days/);
+});
+
+test('the verdict says short when the projection hits zero before a reset, using the saved lookback', () => {
+  const now = 1_000_000;
+  // Two units an hour: 12 units still expire at Pro 100's reset after a day, then its fresh 100 run out 50 hours later, 22 hours before the Business seat resets.
+  const verdict = usage.limitsVerdict(verdictProvider(now, { perHour: 2 }), usage.USAGE_DEFAULTS, now);
+  assert.deepEqual([verdict.status, Math.round(verdict.empty_at - now), verdict.next_reset_at - now], ['short', 74 * H, 4 * D]);
+  assert.match(usage.verdictText(verdict, now), /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset — cut optional work$/);
+  // The verdict reads the user's lookback: one hour of the same steady drain gives the same rate, so the same empty time.
+  assert.equal(Math.round(usage.limitsVerdict(verdictProvider(now, { perHour: 2 }), { ...usage.USAGE_DEFAULTS, lookback: 1 }, now).empty_at - now), 74 * H);
+  const steep = verdictProvider(now, { perHour: 2 });
+  steep.history = steep.history.map(item => item.account === 'second' && item.t === now - H ? { ...item, remaining_percent: 70 } : item);
+  assert.ok(usage.limitsVerdict(steep, { ...usage.USAGE_DEFAULTS, lookback: 1 }, now).empty_at < usage.limitsVerdict(steep, usage.USAGE_DEFAULTS, now).empty_at, 'a steeper last hour moves the 1h-lookback verdict earlier');
+  const now0 = usage.limitsVerdict(verdictProvider(now, { left: 0, perHour: 2 }), usage.USAGE_DEFAULTS, now);
+  assert.match(usage.verdictText(now0, now), /^Out of quota now, 1d 0h before the next reset/);
+});
+
+test('the verdict is unknown without drain data, with stale readings or for a logged-out provider', () => {
+  const now = 1_000_000, prefs = usage.USAGE_DEFAULTS;
+  const flat = verdictProvider(now); flat.history = [];
+  assert.deepEqual([usage.limitsVerdict(flat, prefs, now).status, usage.limitsVerdict(flat, prefs, now).remaining], ['unknown', 60], 'no drain data still reports what is left');
+  assert.equal(usage.limitsVerdict(verdictProvider(now, { stale: true }), prefs, now).status, 'unknown');
+  assert.equal(usage.limitsVerdict(verdictProvider(now, { auth: 'logged_out' }), prefs, now).status, 'unknown');
+  assert.equal(usage.limitsVerdict(null, prefs, now).status, 'unknown');
+  assert.match(usage.verdictText({ status: 'unknown' }, now), /^Not enough recent readings/);
+});
+
+test('empty spans start at the zero crossing and end at the refill', () => {
+  assert.deepEqual(usage.emptySpans([{ t: 0, value: 10 }, { t: 10, value: 0 }, { t: 20, value: 0 }, { t: 20, value: 50 }, { t: 30, value: 40 }]), [{ start: 10, end: 20 }]);
+  assert.deepEqual(usage.emptySpans([{ t: 0, value: 10 }, { t: 10, value: 0 }, { t: 10, value: 100 }]), [{ start: 10, end: 10 }], 'touching zero at a reset is a zero-length span');
+  assert.deepEqual(usage.emptySpans([{ t: 0, value: 0 }, { t: 5, value: 0 }]), [{ start: 0, end: null }], 'no refill within the horizon');
 });
 
 test('axis labels show the month only when it changes and the date only at the first hour label and midnight', () => {
@@ -330,16 +452,21 @@ test('the Limits page pools accounts, projects resets and lists per-account wind
   assert.deepEqual([$('.su').dataset.view, button('Usage') === undefined, $('.su-chart[data-metric]') === null], ['limits', true, true]);
   assert.deepEqual($$('.su-provider').map(node => [node.firstChild.textContent, node.lastChild.textContent, node.getAttribute('aria-pressed')]), [['OpenAI Codex', '2', 'true'], ['Anthropic', 'logged out', 'false']]);
   assert.equal($('.su-pooled').dataset.window, 'weekly', 'weekly is the default window');
-  assert.equal($('.su-capacity').textContent, '/ 200% remaining');
-  assert.match($('.su-rate').textContent, /^~\d+(\.\d)?% per hour$/);
+  // Business (20 units) plus Pro 100 (100 units): the pool counts capacity in plan units, not percent.
+  assert.deepEqual([$('.su-capacity').textContent, $('.su-composition').textContent, $('.su-pooled').dataset.capacity], ['/ 120 plan units', '(Business: 20, Pro 100: 100)', '120']);
+  assert.match($('.su-pool').textContent, /^\d+(\.\d)?$/);
+  assert.match($('.su-rate').textContent, /^~\d+(\.\d)? units per hour$/);
+  assert.deepEqual($$('.su-pooled .su-yaxis span').map(node => node.textContent), ['plan units', '0', '25', '50', '75', '100', '120'], 'the vertical axis runs to the pool capacity in plan units');
   assert.deepEqual([$('.su-lookback-label').textContent, $('.su-lookback-value').textContent], ['Projections based on', '12h']);
   assert.equal($('.su-legend'), null, 'the Remaining/Projected legend is gone');
-  assert.match($('.su-chart-notes').textContent, /^Next reset \+\d+% · /);
+  assert.match($('.su-chart-notes').textContent, /^Next reset \+\d+(\.\d)? units · /);
   assert.ok($('.su-pooled .su-line.su-past')); assert.ok($('.su-pooled .su-line.su-projected')); assert.ok($('.su-now'));
   assert.ok($$('.su-pooled .su-day-grid').length >= 9, 'a week of history plus a week ahead crosses at least nine midnights');
   assert.equal($$('.su-account').length, 2);
   const first = $('.su-account[data-account="acct-team"]');
-  assert.match(first.querySelector('.su-account-head').textContent, /chatgptvitibotteam.*priority 0.*0 banked resets/);
+  assert.match(first.querySelector('.su-account-head').textContent, /^chatgptvitibotBusiness · 20 unitspriority 0.*0 banked resets/);
+  assert.equal($('.su-account[data-account="acct-prolite"] .su-badge').textContent, 'Pro 100 · 100 units');
+  assert.equal($('.su-assumed'), null, 'both plans are in the capacity table');
   assert.equal(first.querySelectorAll('.su-window').length, 2);
   assert.equal(first.querySelectorAll('.su-pace').length, 2, 'every window with a length and reset time has a pace tick');
   assert.match(first.querySelector('.su-window[data-window="weekly"] .su-window-reset').textContent, /^resets in 4d \d+h$/);
@@ -347,6 +474,9 @@ test('the Limits page pools accounts, projects resets and lists per-account wind
   assert.equal(button('3d'), undefined, 'the 1d/3d/7d horizon control is gone');
   await click(button('5-hour'));
   assert.equal($('.su-pooled').dataset.window, 'five_hour');
+  // Business and Pro 100 weigh the same in every Codex window, and the verdict keeps judging the weekly pool.
+  assert.equal($('.su-capacity').textContent, '/ 120 plan units');
+  assert.deepEqual([$('.su-verdict').dataset.window, $('.su-verdict').textContent.startsWith('Weekly: ')], ['weekly', true]);
   await click($$('.su-provider')[1]);
   assert.equal($('.su-pooled'), null, 'a logged-out provider has no chart');
   assert.equal($('[data-auth="logged_out"] .su-logged-out').textContent, 'Logged out in Hermes — sign in to track limits' + 'No usable Anthropic credential in the Hermes pool');
@@ -354,27 +484,104 @@ test('the Limits page pools accounts, projects resets and lists per-account wind
   assert.equal(mock.ctx.storage.get('usage-preferences').provider, 'anthropic');
 });
 
+test('the Limits page shows the verdict and a waste measurement at each reset that discards quota', async () => {
+  const now = Date.now() / 1000;
+  mock.control.usageLimits = { generated_at: now, sampler: null, providers: [verdictProvider(now)] };
+  plugin.register(mock.ctx); await render(limitsPage());
+  assert.deepEqual([$('.su-pool').textContent, $('.su-capacity').textContent], ['60', '/ 120 plan units']);
+  assert.equal($('.su-capacity').getAttribute('title'), '20 plan units = one $20 plan\'s allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.');
+  const verdict = $('.su-verdict');
+  assert.equal(verdict.dataset.status, 'waste');
+  assert.match(verdict.textContent, /^48 plan units will expire unused by [A-Z][a-z]{2} — room for background work$/);
+  assert.equal(verdict.querySelector('[data-verdict-icon]')?.dataset.verdictIcon, 'waste');
+  const marks = $$('.su-pooled .su-waste');
+  assert.equal(marks.length, 1);
+  const mark = marks[0], near = (a, b, tolerance = 0.01) => Math.abs(a - b) < tolerance;
+  // 7-day chart: 50.4 hours of past, so the reset one day ahead sits (50.4 + 24) / 218.4 of the way along; the pool holds 48 of its 120 units just before the reset, all of which expire.
+  assert.ok(near(parseFloat(mark.style.left), 74.4 / 218.4 * 100), `x ${mark.style.left}`);
+  assert.ok(near(parseFloat(mark.style.top), 60) && near(parseFloat(mark.style.height), 40), `span ${mark.style.top} + ${mark.style.height}`);
+  assert.deepEqual([mark.querySelector('.su-waste-text').textContent, mark.querySelectorAll('.su-waste-arrow').length, mark.querySelectorAll('.su-waste-tick').length], ['48 lost', 2, 2]);
+  assert.match(mark.getAttribute('title'), /^chatgpt1 · Pro 100 · 48 plan units unused at reset [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
+  assert.equal($('.su-measure[data-kind="empty"]'), null, 'this pool never runs dry');
+});
+
+test('a pool that runs dry before its next reset gets the short verdict alongside its waste and time-to-empty measurements', async () => {
+  const now = Date.now() / 1000;
+  mock.control.usageLimits = { generated_at: now, sampler: null, providers: [verdictProvider(now, { perHour: 2 })] };
+  plugin.register(mock.ctx); await render(limitsPage());
+  assert.equal($('.su-verdict').dataset.status, 'short');
+  assert.match($('.su-verdict').textContent, /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset — cut optional work$/);
+  assert.equal($('.su-verdict [data-verdict-icon]').dataset.verdictIcon, 'short');
+  assert.deepEqual($$('.su-pooled .su-waste .su-waste-text').map(node => node.textContent), ['12 lost']);
+  // About 74 hours ahead; the page reads its own clock a moment after the fixture's.
+  assert.match($('.su-measure[data-kind="empty"]').textContent, /^Empty in 3d [12]h · /);
+});
+
+// Sidebar footer status ------------------------------------------------------------------------------------------------
+const footerItems = () => $$('.sf-footer .sf-limits .sf-limit').map(node => ({ provider: node.dataset.provider, status: node.dataset.status, value: node.querySelector('.sf-limit-value').textContent,
+  icon: node.querySelector('[data-verdict-icon]')?.dataset.verdictIcon ?? null, mark: node.querySelector('svg[data-provider-mark]')?.dataset.providerMark ?? null, title: node.getAttribute('title') }));
+
+test('the sidebar footer shows each provider\'s pooled units with a verdict glyph only when the week runs short or wastes quota', async () => {
+  const now = Date.now() / 1000;
+  mock.control.usageLimits = { generated_at: now, sampler: null, providers: [
+    verdictProvider(now, { perHour: 2 }),
+    verdictProvider(now, { provider: 'anthropic', label: 'Anthropic', plans: ['pro', 'max_5x'] }),
+    verdictProvider(now, { provider: 'nous', label: 'Nous', plans: [null, null], left: 13 }),
+    { provider: 'xai', label: 'xAI', auth: 'logged_out', accounts: [], history: [] }] };
+  plugin.register(mock.ctx); await render(mock.control.contributions[0]);
+  assert.equal(restPaths().filter(path => path.startsWith('/usage/limits?')).length, 1, 'one limits request, keyed like the Limits page');
+  assert.equal(restPaths().find(path => path.startsWith('/usage/limits?')), '/usage/limits?hours=168');
+  const items = footerItems();
+  assert.deepEqual(items.map(item => [item.provider, item.status, item.value, item.icon, item.mark]), [
+    ['openai-codex', 'short', '60', 'short', 'openai-codex'], ['anthropic', 'waste', '60', 'waste', 'anthropic'], ['nous', 'ok', '2.6', null, 'nous']], 'the logged-out provider is left out');
+  assert.match(items[0].title, /^OpenAI Codex: 60 \/ 120 plan units\. Runs out .* — cut optional work\.$/);
+  assert.match(items[1].title, /^Anthropic: 60 \/ 120 plan units\. 48 plan units will expire unused by [A-Z][a-z]{2} — room for background work\.$/);
+  assert.equal($$('.sf-footer .sf-utility').length, 2, 'the Usage and Limits buttons stay first');
+  await click($('.sf-limit[data-provider="anthropic"]'));
+  assert.deepEqual(mock.calls.filter(call => call[0] === 'navigate').map(call => call[1]), ['/t3sidebar-limits']);
+  assert.equal(mock.ctx.storage.get('usage-preferences').provider, 'anthropic', 'the Limits page opens on the clicked provider');
+});
+
+test('the footer shares the Limits page cache, follows its preferences and renders nothing without the companion or data', async () => {
+  plugin.register(mock.ctx);
+  mock.control.usageError = 'fixture limits unavailable';
+  await render(mock.control.contributions[0]);
+  assert.equal($('.sf-limits'), null, 'a failed read shows no error in the footer');
+  assert.equal($('.sf-footer').children.length, 2);
+  await act(async () => root.unmount()); root = null; mock.queryClient.clear(); mock.calls.length = 0;
+  mock.control.usageError = null; mock.control.backendMissing = true;
+  await render(mock.control.contributions[0]);
+  assert.equal(restPaths().some(path => path.startsWith('/usage/')), false, 'without the companion the footer does not ask for limits');
+  assert.equal($('.sf-limits'), null);
+  await act(async () => root.unmount()); root = null; mock.queryClient.clear(); mock.calls.length = 0;
+  mock.control.backendMissing = false;
+  mock.ctx.storage.set('usage-preferences', { lookback: 360 });
+  await render(mock.control.contributions[0]);
+  assert.deepEqual(restPaths().filter(path => path.startsWith('/usage/')), ['/usage/limits?hours=360'], 'the saved lookback sizes the request like the Limits page');
+  assert.equal($$('.sf-limit').length, 1, 'the synthetic Codex pool shows; logged-out Anthropic does not');
+});
+
 test('the lookback slider moves between stops, changes the drain rate and widens the history request', async () => {
   const now = Date.now() / 1000;
   // Four points per hour for the last two hours, one per hour for the eight hours before.
   const history = [[-10 * H + 30, 90], [-2 * H + 30, 82], [-H + 30, 78], [-30, 74]].map(([offset, value]) => ({ t: now + offset, account: 'a', window: 'weekly', remaining_percent: value, resets_at: now + 5 * D }));
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [{ provider: 'openai-codex', label: 'OpenAI Codex', history,
-    accounts: [{ id: 'a', label: 'a', priority: 0, fetched_at: now - 60, windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: 74, resets_at: now + 5 * D }] }] }] };
+    accounts: [{ id: 'a', label: 'a', priority: 0, plan: 'prolite', fetched_at: now - 60, windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: 74, resets_at: now + 5 * D }] }] }] };
   mock.ctx.storage.set('usage-preferences', { lookback: 2 });
   plugin.register(mock.ctx); await render(limitsPage());
   const slider = $('.su-lookback input[type=range]');
   // Reversed: position 0 is 30d on the left, 9 is 1h on the right, so 2h sits at position 8.
   assert.deepEqual([slider.min, slider.max, slider.step, slider.value, slider.getAttribute('aria-valuetext'), slider.style.getPropertyValue('--su-share')], ['0', '9', '1', '8', '2h', String(8 / 9)]);
-  assert.equal($('.su-rate').textContent, '~4.0% per hour');
+  assert.equal($('.su-rate').textContent, '~4.0 units per hour', 'a Pro 100 account: one percent is one plan unit');
   assert.equal($('.su-coverage'), null, 'two hours of data cover a two-hour lookback');
   assert.match($('.su-measure[data-kind="empty"]').textContent, /^Empty in 18h \d+m · /, '74 points at about 4 per hour');
-  assert.equal($('.su-measure[data-kind="average"]').textContent, 'Average over 2h · ~4.0%/h');
+  assert.equal($('.su-measure[data-kind="average"]').textContent, 'Average over 2h · ~4.0 units/h');
   await slide(slider, 6);
   assert.equal($('.su-lookback input[type=range]').getAttribute('aria-valuetext'), '12h');
-  assert.deepEqual([$('.su-lookback-value').textContent, $('.su-rate').textContent, $('.su-coverage').textContent], ['12h', '~1.6% per hour', 'based on 10h of data']);
+  assert.deepEqual([$('.su-lookback-value').textContent, $('.su-rate').textContent, $('.su-coverage').textContent], ['12h', '~1.6 units per hour', 'based on 10h of data']);
   // The requested twelve hours are drawn even though only ten are covered; the label's title says so.
   const averaged = $('.su-measure[data-kind="average"]');
-  assert.deepEqual([averaged.textContent, averaged.getAttribute('aria-label')], ['Average over 12h · ~1.6%/h', 'Average over 12h · ~1.6%/h (only 10h of data in that period)']);
+  assert.deepEqual([averaged.textContent, averaged.getAttribute('aria-label')], ['Average over 12h · ~1.6 units/h', 'Average over 12h · ~1.6 units/h (only 10h of data in that period)']);
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 12);
   assert.equal(restPaths().at(-1), '/usage/limits?hours=168');
   await slide($('.su-lookback input[type=range]'), 1);
@@ -423,7 +630,7 @@ test('the averaging period is measured left of Now and cut at the plot edge with
   await slide($('.su-lookback input[type=range]'), 1);
   geometry = shape();
   assert.deepEqual([geometry.cap, geometry.startArrows, geometry.endArrows, geometry.left, near(geometry.right, nowPct())], ['false', 0, 1, 0, true], '15d reaches past the plot: cut at the edge, no left arrowhead or tick');
-  assert.match($('.su-measure[data-kind="average"]').textContent, /^Average over 15d · (~\d+(\.\d)?%\/h|no drain data)$/);
+  assert.match($('.su-measure[data-kind="average"]').textContent, /^Average over 15d · (~\d+(\.\d)? units\/h|no drain data)$/);
   await click($('.su-horizon'));
   assert.equal(shape().cap, 'false', 'nine days of past still start after 15 days back');
   await slide($('.su-lookback input[type=range]'), 6);
@@ -439,7 +646,11 @@ test('stale, failing and unread accounts keep the normal view', async () => {
     { id: 'acct-b2', label: 'claude-team', priority: 2, fetched_at: null, stale: false, error: 'HTTP 401 from usage endpoint', windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: null, resets_at: null }] }] }] };
   plugin.register(mock.ctx); await render(limitsPage());
   assert.equal($('.su-provider .su-count').textContent, '2');
-  assert.equal($('.su-capacity').textContent, '/ 100% remaining', 'the account without a reading is left out of the pool');
+  assert.equal($('.su-capacity').textContent, '/ 20 plan units', 'the account without a reading is left out of the pool');
+  // "max" alone does not say 5x or 20x: counted as one base plan, flagged on the row and in a footnote.
+  assert.deepEqual([$('.su-account[data-account="acct-b1"] .su-badge').textContent, $('.su-account[data-account="acct-b1"] .su-assumed').textContent], ['max · 20 units', 'capacity unknown, counted as 20*']);
+  assert.match($('.su-assumption').textContent, /^\* Capacity unknown for claude-max \(max\), claude-team \(no plan reported\): counted as 20 plan units, one \$20 plan\.$/);
+  assert.equal($('.su-verdict').dataset.status, 'unknown', 'a stale pool without drain data gets no verdict');
   assert.match($('.su-chart-notes').textContent, /1 account without a reading left out of the pool/);
   assert.equal($('.su-rate').textContent, 'no drain data');
   assert.equal($('.su-measure[data-kind="empty"]'), null, 'a flat projection never empties');

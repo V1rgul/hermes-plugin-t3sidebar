@@ -149,7 +149,7 @@ export const ctx = {
       if (control.usageError) throw new Error(control.usageError);
       const params = new URLSearchParams(path.split('?')[1] || '');
       if (path.startsWith('/usage/history?')) return clone(control.usageHistory ?? syntheticUsageHistory(Number(params.get('days')), params.get('tz')));
-      if (path.startsWith('/usage/limits?')) return clone(control.usageLimits ?? syntheticUsageLimits(Math.min(840, Number(params.get('hours')) || 168)));
+      if (path.startsWith('/usage/limits?')) return clone(control.usageLimits ?? syntheticUsageLimits(Math.min(840, Number(params.get('hours')) || 168), control.limitsScenario));
     }
     if (path === '/environment') return { profile: control.homeProfile || host.state.profile.get(), home: control.home || '/home/fixture' };
     if (path === '/state') {
@@ -343,9 +343,10 @@ export function syntheticUsageHistory(days = 7, tz = 'UTC') {
   return { generated_at: Date.now() / 1000, days, tz, resolution: hourly ? 'hour' : 'day', buckets, by_provider, by_model,
     totals: { tokens: total('tokens'), cost_usd: total('cost_usd'), user_messages: total('user_messages') }, pricing_missing: ['copilot/gpt-5.5'], approximate: true };
 }
-// Two Codex accounts drained in pool priority order by an office-hours workload: ten days of 15-minute samples with weekly resets as
-// visible step-ups, and a weekday drain that empties the pool before either account's next weekly reset. The weekday/hour profile
-// follows the local clock, so nights and weekends line up with the charts' midnight gridlines.
+// Two Codex accounts on different plans (a 20-unit Business seat drained first, then a 100-unit Pro 100), drained in pool priority order by an office-hours workload: ten days of 15-minute samples with weekly resets as visible step-ups. Consumption is in plan units, the weekday/hour profile follows the local clock (nights and weekends line up with the charts' midnight gridlines), and the last 12 hours run hotter than the days before, as in a burst of work. Scenarios (control.limitsScenario):
+// - 'mixed' (default): the burst would leave Pro 100 with unused quota at tomorrow's reset (a waste arrow) yet still empty the pool   days before the Business seat resets (the time-to-empty arrow); the verdict is short.
+// - 'light': the same accounts with a gentle workload; resets throw quota away and the verdict is waste.
+// - 'steady': consumption that roughly matches the capacity; the verdict is ok.
 const LIMIT_WEEK = 604800, LIMIT_FIVE_HOURS = 18000;
 const resetAfter = (anchor, period, t) => anchor - (Math.ceil((anchor - t) / period) - 1) * period;
 function limitLoad(t) {
@@ -353,34 +354,43 @@ function limitLoad(t) {
   if (day === 0 || day === 6) return hour >= 10 && hour < 18 ? 0.4 : 0;
   return hour >= 9 && hour < 12 ? 4 : hour >= 12 && hour < 14 ? 1.5 : hour >= 14 && hour < 19 ? 4.5 : hour >= 19 && hour < 23 ? 1 : 0;
 }
-export function syntheticUsageLimits(hours = 168) {
+const LIMIT_SCENARIOS = {
+  mixed: { base: 0.28, burst: 1.0, team: 0.3, prolite: 0.6, proliteReset: 1.0, teamReset: 4.2 },
+  light: { base: 0.28, burst: 0.37, team: 0.3, prolite: 0.6, proliteReset: 1.0, teamReset: 4.2 },
+  steady: { base: 0.3, burst: 0.56, team: 0.3, prolite: 0.6, proliteReset: 4.6, teamReset: 2.2 }
+};
+export function syntheticUsageLimits(hours = 168, scenario = 'mixed') {
+  const shape = LIMIT_SCENARIOS[scenario] || LIMIT_SCENARIOS.mixed;
   const now = Date.now() / 1000, step = 900, fetched = now - 140, from = Math.floor(now / step) * step - 10 * 86400;
   const accounts = [
-    { id: 'acct-team', label: 'chatgptvitibot', priority: 0, plan: 'team', banked_resets: 0, weekly: now + 4.2 * 86400, five: now + 1.3 * 3600, remaining: 40 },
-    { id: 'acct-prolite', label: 'chatgpt1', priority: 1, plan: 'prolite', banked_resets: 1, weekly: now + 5.6 * 86400, five: now + 3.1 * 3600, remaining: 85 }
-  ].map(account => ({ ...account, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: resetAfter(account.five, LIMIT_FIVE_HOURS, from), fiveUsed: 0 }));
+    { id: 'acct-team', label: 'chatgptvitibot', priority: 0, plan: 'team', units: 20, banked_resets: 0, weekly: now + shape.teamReset * 86400, five: now + 1.3 * 3600, left: shape.team },
+    { id: 'acct-prolite', label: 'chatgpt1', priority: 1, plan: 'prolite', units: 100, banked_resets: 1, weekly: now + shape.proliteReset * 86400, five: now + 3.1 * 3600, left: shape.prolite }
+  ].map(account => ({ ...account, remaining: account.units * account.left, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: resetAfter(account.five, LIMIT_FIVE_HOURS, from), fiveUsed: 0 }));
   const history = [];
   const round = value => Math.round(value * 10) / 10;
-  const fiveLeft = account => Math.max(0, 100 - account.fiveUsed * 3.5);
+  const percent = account => round(account.remaining / account.units * 100);
+  // A five-hour window holds about a third of the account's weekly capacity.
+  const fiveLeft = account => round(Math.max(0, 100 - account.fiveUsed / (account.units * 0.3) * 100));
   for (let t = from, index = 0; t < fetched; index++) {
     const next = Math.min(t + step, fetched);
     // Deterministic ±40% jitter so the drain is not a ruler-straight line.
-    let need = limitLoad(t) * (0.6 + (index * 37 % 17) / 20) * (next - t) / 3600;
+    const scale = t >= now - 12 * 3600 ? shape.burst : shape.base;
+    let need = limitLoad(t) * scale * (0.6 + (index * 37 % 17) / 20) * (next - t) / 3600;
     for (const account of accounts) { const take = Math.min(account.remaining, need); account.remaining -= take; account.fiveUsed += take; need -= take; if (need <= 0) break; }
     for (const account of accounts) {
-      if (account.weekReset <= next) { account.remaining = 100; account.weekReset += LIMIT_WEEK; }
+      if (account.weekReset <= next) { account.remaining = account.units; account.weekReset += LIMIT_WEEK; }
       if (account.fiveReset <= next) { account.fiveUsed = 0; account.fiveReset += LIMIT_FIVE_HOURS; }
     }
     t = next;
     if (t >= now - hours * 3600) for (const account of accounts) history.push(
-      { t, account: account.id, window: 'five_hour', remaining_percent: round(fiveLeft(account)), resets_at: account.fiveReset },
-      { t, account: account.id, window: 'weekly', remaining_percent: round(account.remaining), resets_at: account.weekReset });
+      { t, account: account.id, window: 'five_hour', remaining_percent: fiveLeft(account), resets_at: account.fiveReset },
+      { t, account: account.id, window: 'weekly', remaining_percent: percent(account), resets_at: account.weekReset });
   }
   return { generated_at: now, sampler: { interval_s: 300, started_at: now - 10 * 86400, last_run_at: fetched, last_error: null }, providers: [
     { provider: 'openai-codex', label: 'OpenAI Codex', history, accounts: accounts.map(account => ({ id: account.id, label: account.label, priority: account.priority, plan: account.plan, banked_resets: account.banked_resets,
       fetched_at: fetched, stale: false, error: null, windows: [
-        { key: 'five_hour', label: '5-hour', window_seconds: LIMIT_FIVE_HOURS, scope: 'account', model: null, used_percent: round(100 - fiveLeft(account)), remaining_percent: round(fiveLeft(account)), resets_at: account.fiveReset },
-        { key: 'weekly', label: 'Weekly', window_seconds: LIMIT_WEEK, scope: 'account', model: null, used_percent: round(100 - account.remaining), remaining_percent: round(account.remaining), resets_at: account.weekReset }
+        { key: 'five_hour', label: '5-hour', window_seconds: LIMIT_FIVE_HOURS, scope: 'account', model: null, used_percent: round(100 - fiveLeft(account)), remaining_percent: fiveLeft(account), resets_at: account.fiveReset },
+        { key: 'weekly', label: 'Weekly', window_seconds: LIMIT_WEEK, scope: 'account', model: null, used_percent: round(100 - percent(account)), remaining_percent: percent(account), resets_at: account.weekReset }
       ] })) },
     // Hermes knows the provider but holds no usable credential for it.
     { provider: 'anthropic', label: 'Anthropic', auth: 'logged_out', auth_reason: 'No usable Anthropic credential in the Hermes pool', accounts: [], history: [] }
@@ -388,9 +398,7 @@ export function syntheticUsageLimits(hours = 168) {
 }
 export function Button({ variant, size, children, ...props }) { return h('button', props, children); }
 export const ROUTES_AREA = 'routes';
-// Public Tip wraps one trigger. The adapter keeps the label as a native title (scalar assertions read it) and, like Desktop's
-// Radix tip, shows a bubble beside the trigger while it is hovered or keyboard-focused, so browser captures can show a tooltip.
-// A pointer press closes it, as Radix does.
+// Public Tip wraps one trigger. The adapter keeps the label as a native title (scalar assertions read it) and, like Desktop's Radix tip, shows a bubble beside the trigger while it is hovered or keyboard-focused, so browser captures can show a tooltip. A pointer press closes it, as Radix does.
 export function Tip({ label, side = 'top', children }) {
   const [anchor, setAnchor] = useState(null);
   if (!label) return children;
@@ -404,8 +412,7 @@ export function Tip({ label, side = 'top', children }) {
     : side === 'right' ? { left: anchor?.right + 5, top: anchor?.top + anchor?.height / 2 } : { left: anchor?.left + anchor?.width / 2, top: anchor?.top - 5 };
   return h(React.Fragment, null, trigger, anchor ? createPortal(h(TipBubble, { side, position }, label), document.body) : null);
 }
-// Like Radix's collision handling (Desktop passes collisionPadding 12), the bubble shifts back inside the viewport while its arrow
-// keeps pointing at the trigger.
+// Like Radix's collision handling (Desktop passes collisionPadding 12), the bubble shifts back inside the viewport while its arrow keeps pointing at the trigger.
 function TipBubble({ side, position, children }) {
   const node = useRef(null);
   useLayoutEffect(() => {
@@ -510,6 +517,6 @@ export const icons = Object.fromEntries(Object.entries({
   MessageSquare: 'M4 4h16v12H9l-5 4V4', Undo2: 'M3 10l5-5M3 10l5 5M3 10h11a6 6 0 0 1 0 12',
   Check: 'M5 12l5 5L20 7', Ellipsis: 'M5 12h1M11 12h1M17 12h1', X: 'M6 6l12 12M6 18L18 6', RefreshCw: 'M20 4v6h-6M20 10a8 8 0 1 0 0 7',
   Copy: 'M9 9h12v12H9ZM5 15H3V3h12v2', FolderOpen: 'M3 5h6l2 3h10v12H3Z', CornerDownLeft: 'M9 10l-5 5 5 5M4 15h12a4 4 0 0 0 4-4V4',
-  Pencil: 'M16 3l5 5-13 13H3v-5ZM14 5l5 5', BarChart3: 'M3 21h18M6 17V9M11 17V5M16 17v-6M21 17v-3', Trash2: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7'
+  Pencil: 'M16 3l5 5-13 13H3v-5ZM14 5l5 5', BarChart3: 'M3 21h18M6 17V9M11 17V5M16 17v-6M21 17v-3', Trash2: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7', AlertTriangle: 'M12 3 2 20h20ZM12 9v5M12 17v.01'
 }).map(([name, path]) => [name, props => h('svg', { 'data-icon': name, width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: path }))]));
 reset();

@@ -14,6 +14,9 @@ plugin.register(mock.ctx);
 // The running fixture's native in-flight turn began just over two minutes ago.
 mock.control.live.find(item => item.id === 'runtime-worker').turn_started_at = Date.now() / 1000 - 125;
 window.hermesT3SidebarHarness = mock;
+// ?limits=light|steady picks a synthetic limits scenario (default mixed: a waste arrow and a shortfall in the same week).
+const limitsScenario = new URLSearchParams(location.search).get('limits');
+if (limitsScenario) mock.control.limitsScenario = limitsScenario;
 // Route contributions open in the workspace like Desktop's route tiles; ?route=/path opens one directly.
 const route = mock.atom(new URLSearchParams(location.search).get('route') || '/');
 const navigate = mock.host.navigate;
