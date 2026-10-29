@@ -174,7 +174,7 @@ class NormalizeTests(unittest.TestCase):
 		self.assertEqual([(w["key"], w["window_seconds"]) for w in out["windows"]], [("five_hour", 18000), ("weekly", 604800)])
 		self.assertEqual(out["windows"][0]["resets_at"], NOW + 60)
 		self.assertEqual((out["fetched_at"], out["plan"]), (NOW, "Pro"))
-		self.assertEqual(set(out), {"fetched_at", "plan", "banked_resets", "windows"})
+		self.assertEqual(set(out), {"fetched_at", "plan", "banked_resets", "banked_applicable", "windows"})
 		# The raw plan enum wins over Hermes's title-cased display value, because the page maps the enum to plan labels and capacity weights.
 		raw_plan = limits.normalize_snapshot("openai-codex", self.snap([W(label="Weekly", used_percent=5.0, reset_at=None, scope="account")], raw={"plan_type": "prolite"}, plan="Prolite"))
 		self.assertEqual(raw_plan["plan"], "prolite")
@@ -233,6 +233,10 @@ class FakeEntry:
 
 class CollectorTests(unittest.TestCase):
 	passed = None
+
+	def setUp(self):
+		# The hourly credit throttle is process-wide; each test starts with no recorded read.
+		limits._CREDITS_READ.clear()
 
 	def symbols(self, cache, refreshed, pool):
 		def refresh(requests):
@@ -310,6 +314,37 @@ class CollectorTests(unittest.TestCase):
 			self.assertNotIn(b"tok-", path.read_bytes())
 			self.assertNotIn(b"example", path.read_bytes())
 
+	def test_reads_codex_credit_lists_hourly_with_each_accounts_token(self):
+		pool = {"openai-codex": [
+			{"id": "7c202b", "label": "a", "priority": 0, "access_token": "tok-a"},
+			{"id": "7ad3ca", "label": "b", "priority": 1, "access_token": "tok-b"},
+			{"id": "dup001", "label": "dup", "priority": 2, "access_token": "tok-a"},
+			{"id": "dead01", "priority": 3, "access_token": "tok-d", "last_status": "dead"},
+		]}
+		calls = []
+
+		def fetch(base_url, token):
+			calls.append(token)
+			if token == "tok-b":
+				raise RuntimeError("401 from tok-b")
+			return [{"status": "available", "granted_at": 1.0e9, "expires_at": 2.0e9}]
+		now = [1_800_000_000.0]
+		with patch.object(limits, "_native_symbols", return_value=self.symbols({}, [], pool)):
+			(reading,) = limits.collect_native(join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
+			# Duplicates of an account and dead credentials are never asked; a failed read leaves no list.
+			self.assertEqual(calls, ["tok-a", "tok-b"])
+			by_id = {a["id"]: a for a in reading["accounts"]}
+			self.assertEqual(by_id["7c202b"]["credits"], [{"status": "available", "granted_at": 1.0e9, "expires_at": 2.0e9}])
+			self.assertNotIn("credits", by_id["7ad3ca"])
+			self.assertNotIn("tok-", repr(reading))
+			# Within the hour nothing is read again, failures included; after it, both are.
+			now[0] += limits.CREDITS_INTERVAL_S - 1
+			limits.collect_native(join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
+			self.assertEqual(len(calls), 2)
+			now[0] += 1
+			limits.collect_native(join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
+			self.assertEqual(calls[2:], ["tok-a", "tok-b"])
+
 	def test_missing_native_symbol_reports_unavailable(self):
 		symbols = self.symbols({}, [], {"openai-codex": [{"id": "7ad3ca", "access_token": "x"}]})
 		symbols["_identity_id_for"] = None
@@ -338,6 +373,8 @@ class CollectorTests(unittest.TestCase):
 			("hermes_cli.auth", "read_credential_pool"),
 			("hermes_cli.inventory", "_pool_entry_route_base_url"),
 			("hermes_cli.inventory", "_pool_entry_host"),
+			("agent.account_usage", "_codex_backend_urls"),
+			("agent.account_usage", "_codex_headers"),
 		})
 		imported = {
 			(node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
@@ -437,3 +474,63 @@ class SamplerTests(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class CreditTests(unittest.TestCase):
+	def test_normalizes_codex_credit_list_to_status_and_times(self):
+		body = {"available_count": 2, "total_earned_count": 9, "credits": [
+			{"reset_type": "codex_rate_limits", "status": "available", "granted_at": "2026-09-29T18:58:39.740398Z", "expires_at": "2026-10-29T18:58:39.740398Z", "id": "secret-id"},
+			{"status": "redeemed", "expires_at": "not a date"},
+			{"status": "Bad Status!", "expires_at": "2026-10-29T18:58:39Z"},
+			{"status": "available", "expires_at": "2026-11-06T23:48:46"},
+			"junk",
+		]}
+		credits = limits.normalize_credits(body)
+		self.assertEqual(credits[0], {"status": "available", "granted_at": dt_epoch("2026-09-29T18:58:39.740398+00:00"), "expires_at": dt_epoch("2026-10-29T18:58:39.740398+00:00")})
+		# Unparseable or zone-less times become None rather than being guessed in local time.
+		self.assertEqual([(c["status"], c["expires_at"]) for c in credits[1:]], [("redeemed", None), ("available", None)])
+		self.assertNotIn("secret", repr(credits))
+		self.assertIsNone(limits.normalize_credits({"available_count": 2}))
+		self.assertIsNone(limits.normalize_credits(None))
+
+	def test_payload_lists_available_unexpired_credits_and_keeps_the_last_list(self):
+		now = 1_800_000_000.0
+		raw = {"rate_limit_reset_credits": {"available_count": 3, "applicable_available_count": 0}}
+		snapshot = limits.normalize_snapshot("openai-codex", SimpleNamespace(fetched_at=dt(now - 10), plan="Pro", raw=raw,
+			windows=(SimpleNamespace(label="Weekly", used_percent=5.0, reset_at=None, scope="account"),)))
+		self.assertEqual(snapshot["banked_applicable"], 0)
+		credits = [
+			{"status": "available", "granted_at": now - 9 * 86400, "expires_at": now + 9 * 86400},
+			{"status": "available", "granted_at": now - 30 * 86400, "expires_at": now + 5 * 3600},
+			{"status": "available", "granted_at": now - 40 * 86400, "expires_at": now - 60},
+			{"status": "redeemed", "granted_at": now - 2 * 86400, "expires_at": now + 86400},
+		]
+		with tempfile.TemporaryDirectory() as temp:
+			store = limits.LimitsStore(Path(temp) / "limits.sqlite3")
+			store.record([{"provider": "openai-codex", "error": None, "accounts": [{"id": "7ad3ca", "label": "b", "priority": 1, "snapshot": snapshot, "credits": credits}]}], checked_at=now)
+			block = limits.limits_payload(store, hours=24, now=now)["providers"][0]["accounts"][0]["banked_credits"]
+			self.assertEqual(block["applicable_count"], 0)
+			self.assertEqual(block["fetched_at"], now)
+			# Expired and redeemed credits are dropped; the rest is ordered by expiry.
+			self.assertEqual([c["expires_at"] for c in block["credits"]], [now + 5 * 3600, now + 9 * 86400])
+			# A later sample without a fresh list keeps the stored one and updates the applicable count.
+			later = dict(snapshot, fetched_at=now + 300, banked_applicable=2)
+			store.record([{"provider": "openai-codex", "error": None, "accounts": [{"id": "7ad3ca", "label": "b", "priority": 1, "snapshot": later}]}], checked_at=now + 300)
+			block = limits.limits_payload(store, hours=24, now=now + 6 * 3600)["providers"][0]["accounts"][0]["banked_credits"]
+			self.assertEqual((block["applicable_count"], block["fetched_at"], [c["expires_at"] for c in block["credits"]]), (2, now, [now + 9 * 86400]))
+
+	def test_account_without_a_credit_read_has_none(self):
+		with tempfile.TemporaryDirectory() as temp:
+			path = Path(temp) / "limits.sqlite3"
+			store = limits.LimitsStore(path)
+			store.record(codex(account("7ad3ca", NOW - 10, [window("weekly", 40.0, NOW + 3600)])), checked_at=NOW)
+			self.assertIsNone(limits.limits_payload(store, hours=24, now=NOW)["providers"][0]["accounts"][0]["banked_credits"])
+			# A store written before the credit table existed still reads.
+			with closing(sqlite3.connect(path)) as connection:
+				connection.execute("DROP TABLE limit_credits")
+				connection.commit()
+			self.assertEqual(store.read_credits(), {})
+
+
+def dt_epoch(text):
+	return datetime.fromisoformat(text).timestamp()

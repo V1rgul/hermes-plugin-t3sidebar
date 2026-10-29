@@ -6,12 +6,14 @@ Read-only toward credentials, by construction:
 - Pool rows come from ``read_credential_pool`` (a plain auth.json read), never ``load_pool`` (which can seed, heal and persist the store) or ``pool.select()``.
 - Fetches go through ``refresh_account_usage_entries_async``, which calls ``fetch_account_usage(read_only=True)`` with each entry's own token: the Codex read-only fetcher reports a 401 instead of refreshing or rotating, and the Anthropic fetcher with an explicit token never resolves or refreshes one. The provider-wide ``refresh_account_usage_async`` is deliberately not used because its Codex path resolves runtime credentials with ``refresh_if_expiring`` and force-refreshes on 401.
 - Only providers in ``VETTED_PROVIDERS`` are refreshed: plugin usage hooks are arbitrary code and OpenRouter issues two GETs.
+- Codex banked reset credits are listed with one extra GET per account at most every ``CREDITS_INTERVAL_S``, on Hermes's own read-only list endpoint (the one the Codex CLI reads); the usage payload only carries their count, not their expiries. A 401 or any failure keeps the previous list and never refreshes the token.
 
-Nothing secret is stored or logged: tokens, identities and base URLs stay in local variables of one collection; the store keeps pool entry id + label, plan, window numbers, banked reset count and a closed set of error classes.
+Nothing secret is stored or logged: tokens, identities and base URLs stay in local variables of one collection; the store keeps pool entry id + label, plan, window numbers, banked reset count, banked credit status/grant/expiry times and a closed set of error classes.
 """
 
 from contextlib import closing, contextmanager
 import contextvars
+import json
 import logging
 import math
 import os
@@ -33,6 +35,10 @@ RETENTION_S = 35 * 86400.0
 MAX_HOURS = 840
 # Hermes's per-slot refresh throttle (account_usage_cache.REFRESH_AFTER_S); used only when the symbol is missing.
 FALLBACK_REFRESH_AFTER_S = 120.0
+# Banked credits change rarely (granted weekly at most, expiring after a month), so their list is read far less often than the windows.
+CREDITS_INTERVAL_S = 3600.0
+CREDITS_TIMEOUT_S = 10.0
+MAX_CREDITS = 50
 
 # Built-in fetchers verified to issue at most one GET with the entry's own token and to never refresh, rotate or persist credentials when called through the per-entry read-only path.
 VETTED_PROVIDERS = ("openai-codex", "anthropic")
@@ -141,6 +147,61 @@ def _banked_resets(provider, raw):
 		return None
 
 
+def _banked_applicable(provider, raw):
+	"""How many banked credits Codex would let the account redeem right now (0 while its limits are not reached)."""
+	if provider != "openai-codex" or not isinstance(raw, dict):
+		return None
+	block = raw.get("rate_limit_reset_credits")
+	value = block.get("applicable_available_count") if isinstance(block, dict) else None
+	# Zero is meaningful here (credits exist but cannot be redeemed yet), so this is not _positive_int.
+	return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1000 else None
+
+
+def _iso_epoch(value):
+	"""Epoch seconds from Codex's ISO-8601 times, or from an already-normalized epoch."""
+	if isinstance(value, (int, float)) and not isinstance(value, bool):
+		return _finite(value)
+	if not isinstance(value, str) or len(value) > 64:
+		return None
+	try:
+		from datetime import datetime
+		parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+	except ValueError:
+		return None
+	return _finite(parsed.timestamp()) if parsed.tzinfo is not None else None
+
+
+def normalize_credits(payload):
+	"""Secret-free credit list from Codex's ``rate-limit-reset-credits`` body: status, grant and expiry only, or None when the body is not a credit list."""
+	if not isinstance(payload, dict) or not isinstance(payload.get("credits"), list):
+		return None
+	credits = []
+	for credit in payload["credits"][:MAX_CREDITS]:
+		if not isinstance(credit, dict):
+			continue
+		status = credit.get("status")
+		if not isinstance(status, str) or not re.fullmatch(r"[a-z_]{1,32}", status):
+			continue
+		credits.append({"status": status, "granted_at": _iso_epoch(credit.get("granted_at")), "expires_at": _iso_epoch(credit.get("expires_at"))})
+	return credits
+
+
+def _fetch_codex_credits(symbols, base_url, token):
+	"""One read-only GET of the account's credit list with its own token; None on any failure (a 401 is not retried or refreshed)."""
+	urls, headers = symbols.get("_codex_backend_urls"), symbols.get("_codex_headers")
+	if urls is None or headers is None:
+		return None
+	import httpx
+	try:
+		with httpx.Client(timeout=CREDITS_TIMEOUT_S, follow_redirects=False) as client:
+			response = client.get(urls(base_url or "")[1], headers=headers(token, None))
+		if response.status_code != 200:
+			return None
+		return normalize_credits(response.json())
+	except Exception:
+		return None
+
+
 def _timestamp(value):
 	try:
 		return _finite(value.timestamp()) if value is not None else None
@@ -176,7 +237,7 @@ def normalize_snapshot(provider, snapshot):
 			"used_percent": _finite(getattr(window, "used_percent", None)),
 			"resets_at": _timestamp(getattr(window, "reset_at", None)),
 		})
-	return {"fetched_at": fetched_at, "plan": plan, "banked_resets": _banked_resets(provider, raw), "windows": result_windows}
+	return {"fetched_at": fetched_at, "plan": plan, "banked_resets": _banked_resets(provider, raw), "banked_applicable": _banked_applicable(provider, raw), "windows": result_windows}
 
 
 # ─── Native adapters: every private Hermes symbol is imported here and degrades to None. ───
@@ -200,6 +261,8 @@ def _native_symbols():
 	take("hermes_cli.auth", "read_credential_pool")
 	take("hermes_cli.inventory", "_pool_entry_route_base_url")
 	take("hermes_cli.inventory", "_pool_entry_host")
+	take("agent.account_usage", "_codex_backend_urls")
+	take("agent.account_usage", "_codex_headers")
 	return symbols
 
 
@@ -212,7 +275,12 @@ def _route(symbols, provider, entry):
 	return base, str(base or "").strip().rstrip("/").lower()
 
 
-def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time):
+# Last credit-list read per (home, provider, account), process-wide like Hermes's own refresh throttle.
+_CREDITS_LOCK = threading.Lock()
+_CREDITS_READ = {}
+
+
+def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None):
 	"""Trigger Hermes's read-only per-credential refresh for vetted pooled providers, then read each account's cached snapshot.
 
 	Must run inside the target home's context: Hermes keys both auth.json and its usage cache on the active home.
@@ -227,7 +295,12 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time):
 	required = ("cached_account_usage", "refresh_account_usage_entries_async", "_identity_id_for", "PooledCredential")
 	refresh_after = _finite(symbols["REFRESH_AFTER_S"]) or FALLBACK_REFRESH_AFTER_S
 	started = float(clock())
-	providers, slots, requests = [], [], []
+	providers, slots, requests, credit_requests = [], [], [], []
+	# The sampler runs inside its home's override, so this keys the throttle per profile like Hermes's own usage cache.
+	try:
+		home = _home_key(_default_home())
+	except Exception:
+		home = ""
 	for provider in sorted(slug for slug in pool if slug in VETTED_PROVIDERS):
 		rows = [row for row in (pool.get(provider) or []) if isinstance(row, dict) and row.get("id")]
 		if not rows:
@@ -279,13 +352,32 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time):
 			reading["accounts"].append(account)
 			slots.append((account, provider, identity_id))
 			requests.append({"provider": provider, "identity_id": identity_id, "base_url": base_url, "api_key": token})
+			if provider == "openai-codex":
+				with _CREDITS_LOCK:
+					due = started - _CREDITS_READ.get((home, provider, account_id), float("-inf")) >= CREDITS_INTERVAL_S
+				if due:
+					credit_requests.append((account, base_url, token))
 	threads = []
 	if requests:
 		try:
 			threads = list(symbols["refresh_account_usage_entries_async"](requests) or [])
 		finally:
-			# Drop the only references this module holds to the tokens.
+			# Drop this list's references to the tokens (the credit list requests are dropped below).
 			requests.clear()
+	# Credit lists are read sequentially while Hermes's refresh threads run; a failure only skips this hour's update.
+	fetch_credits = credits_fetcher or (lambda base_url, token: _fetch_codex_credits(symbols, base_url, token))
+	try:
+		for account, base_url, token in credit_requests:
+			with _CREDITS_LOCK:
+				_CREDITS_READ[(home, "openai-codex", account["id"])] = started
+			try:
+				credits = fetch_credits(base_url, token)
+			except Exception:
+				credits = None
+			if credits is not None:
+				account["credits"] = credits
+	finally:
+		credit_requests.clear()
 	deadline = time.monotonic() + max(0.0, float(join_timeout))
 	for thread in threads:
 		thread.join(max(0.0, deadline - time.monotonic()))
@@ -345,6 +437,16 @@ class LimitsStore:
 				provider TEXT PRIMARY KEY,
 				checked_at REAL NOT NULL,
 				error TEXT
+			)
+		""")
+		connection.execute("""
+			CREATE TABLE IF NOT EXISTS limit_credits (
+				provider TEXT NOT NULL,
+				account_id TEXT NOT NULL,
+				credits_fetched_at REAL,
+				credits_json TEXT,
+				applicable_count INTEGER,
+				PRIMARY KEY (provider, account_id)
 			)
 		""")
 		connection.execute("""
@@ -414,6 +516,20 @@ class LimitsStore:
 		inserted = 0
 		snapshot = account.get("snapshot")
 		fetched_at = _finite(snapshot.get("fetched_at")) if isinstance(snapshot, dict) else None
+		applicable = snapshot.get("banked_applicable") if isinstance(snapshot, dict) and fetched_at else None
+		if isinstance(applicable, int) and not isinstance(applicable, bool):
+			connection.execute(
+				"INSERT INTO limit_credits (provider, account_id, applicable_count) VALUES (?, ?, ?) "
+				"ON CONFLICT(provider, account_id) DO UPDATE SET applicable_count = excluded.applicable_count",
+				(provider, account_id, applicable))
+		credits = account.get("credits")
+		if isinstance(credits, list):
+			# Re-normalized on write so a direct caller cannot store anything beyond status and times.
+			clean = normalize_credits({"credits": credits}) or []
+			connection.execute(
+				"INSERT INTO limit_credits (provider, account_id, credits_fetched_at, credits_json) VALUES (?, ?, ?, ?) "
+				"ON CONFLICT(provider, account_id) DO UPDATE SET credits_fetched_at = excluded.credits_fetched_at, credits_json = excluded.credits_json",
+				(provider, account_id, checked_at, json.dumps(clean, separators=(",", ":"))))
 		windows = [w for w in (snapshot or {}).get("windows") or () if isinstance(w, dict) and w.get("key")] if fetched_at else []
 		if windows:
 			(last,) = connection.execute(
@@ -477,6 +593,16 @@ class LimitsStore:
 			statuses = {provider: error for provider, error in connection.execute("SELECT provider, error FROM limit_provider_status")}
 		return rows, statuses
 
+	def read_credits(self):
+		"""{(provider, account_id): (credits_fetched_at, credits_json, applicable_count)}; empty for a store created before the table existed."""
+		with self._reader() as connection:
+			if connection is None:
+				return {}
+			if connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'limit_credits'").fetchone() is None:
+				return {}
+			return {(provider, account_id): (fetched, text, applicable) for provider, account_id, fetched, text, applicable in connection.execute(
+				"SELECT provider, account_id, credits_fetched_at, credits_json, applicable_count FROM limit_credits")}
+
 
 def _status_error(value):
 	if value is None:
@@ -501,6 +627,20 @@ def _sampler_block(status):
 	}
 
 
+def _credits_block(row, now):
+	"""Available, unexpired banked credits by expiry, or None when the list was never read."""
+	if row is None or row[0] is None or row[1] is None:
+		return None
+	fetched_at, text, applicable = row
+	try:
+		credits = json.loads(text)
+	except ValueError:
+		return None
+	available = [c for c in credits if isinstance(c, dict) and c.get("status") == "available" and (c.get("expires_at") is None or c["expires_at"] > now)]
+	available.sort(key=lambda c: (c["expires_at"] is None, c["expires_at"] or 0.0))
+	return {"fetched_at": fetched_at, "applicable_count": applicable, "credits": [{"status": "available", "expires_at": c.get("expires_at"), "granted_at": c.get("granted_at")} for c in available]}
+
+
 def limits_payload(store, *, hours, now, sampler_status=None):
 	"""``GET /usage/limits`` body: latest windows per account from its newest sample plus ascending history within ``hours``."""
 	if type(hours) is not int or not 1 <= hours <= MAX_HOURS:
@@ -509,6 +649,7 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 	if now is None:
 		raise ValueError("now must be a finite epoch timestamp")
 	rows, statuses = store.read_rows()
+	credit_rows = store.read_credits()
 	since = now - hours * 3600.0
 	providers = {}
 
@@ -549,6 +690,7 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 			age = None if fetched_at is None else now - fetched_at
 			accounts.append({
 				"id": account_id, "label": label, "priority": priority, "plan": plan, "banked_resets": banked,
+				"banked_credits": _credits_block(credit_rows.get((slug, account_id)), now),
 				"fetched_at": fetched_at, "stale": age is None or age < 0 or age > STALE_AFTER_S, "error": error,
 				"windows": account["windows"],
 			})
