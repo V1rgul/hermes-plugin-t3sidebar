@@ -353,6 +353,8 @@ export function verifyAction(state, id, payload) {
 // A read overlapping a plugin write is discarded so it cannot publish pre-write data. That is not a failure:
 // the query retries after the writer exits instead of entering an error state.
 class SupersededRead extends Error {}
+// The single writer rejects overlapping writes; background work treats this as a transient state to retry, not a failure to report.
+class WriterBusy extends Error {}
 const retrySuperseded = (failures, error) => error instanceof SupersededRead && failures < 6;
 const retrySupersededDelay = failures => Math.min(250 * 2 ** failures, 4000);
 // A single metadata writer per plugin instance. Every await is fenced by activation epoch.
@@ -533,7 +535,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     },
     async mutate(scope, id, payload) {
       check(scope);
-      if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
+      if (writing) throw new WriterBusy('Another hermes-t3sidebar change is still saving.');
       writing = true; generation++;
       const key = [...scopeKey(scope), 'metadata'];
       const native = payload.action === 'archive' || payload.action === 'unarchive';
@@ -585,7 +587,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       check(scope);
       const title = input.trim();
       if (!title) throw new Error('Enter a non-empty session title.');
-      if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
+      if (writing) throw new WriterBusy('Another hermes-t3sidebar change is still saving.');
       writing = true; generation++;
       try {
         const route = await routeFor(scope);
@@ -651,7 +653,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     },
     async delete(scope, row) {
       check(scope);
-      if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
+      if (writing) throw new WriterBusy('Another hermes-t3sidebar change is still saving.');
       if (row.status !== 'idle') throw new Error('Delete requires confirmed idle status; no agent will be stopped automatically.');
       if (row._liveOnly) throw new Error('This unsaved session has no stored history to delete. Use the native session controls to close it.');
       const id = durableId(row), requestKey = JSON.stringify([...scopeKey(scope), id]);
@@ -703,7 +705,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       check(scope);
       if (row.status !== 'idle' || row._liveOnly) throw new Error('Moving requires a stored session with confirmed idle status.');
       if (!project?.path || project.isNoProject) throw new Error('Choose a project folder.');
-      if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
+      if (writing) throw new WriterBusy('Another hermes-t3sidebar change is still saving.');
       writing = true; generation++;
       try {
         // Native workspace.move updates one stored segment, not the whole lineage.
@@ -754,7 +756,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         if (typeof patch.name !== 'string' || !patch.name.trim()) throw new Error('Enter a non-empty project name.');
         expected.name = patch.name.trim();
       }
-      if (writing) throw new Error('Another hermes-t3sidebar change is still saving.');
+      if (writing) throw new WriterBusy('Another hermes-t3sidebar change is still saving.');
       const interrupted = client.getQueryCache().findAll({ queryKey: scopeKey(scope), type: 'active', fetchStatus: 'fetching' }).map(query => query.queryKey);
       writing = true; generation++;
       let dispatched = false, confirmed = false, adopted = false;
@@ -1732,7 +1734,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   useEffect(() => {
     try { ctx.storage.set(preferenceKey, collapsed); } catch (_) { /* Folding still works when persistence is unavailable. */ }
   }, [ctx, preferenceKey, collapsed]);
-  const search = useRef(null), rowRefs = useRef(new Map()), navigators = useRef(new Map()), focused = useRef(null), latest = useRef(null), readMarkers = useRef(new Set());
+  const search = useRef(null), rowRefs = useRef(new Map()), navigators = useRef(new Map()), focused = useRef(null), latest = useRef(null), readMarkers = useRef(new Set()), markerNotice = useRef(null);
   const key = scopeKey(scope);
   const mutation = useMutation({ mutationFn: async ({ id, payload }) => controller.mutate(scope, id, payload) });
   const opts = { refetchInterval: 5000, staleTime: 2000, retry: retrySuperseded, retryDelay: retrySupersededDelay };
@@ -1809,6 +1811,13 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const selectedProject = projectCatalog.data?.projects.find(choice => choice.path === project) || projectChoices.get(project) || { name: project || 'No project' };
   const selectProject = useCallback(cwd => { controller.check(scope); setProject(cwd); setFilterOpen(false); }, [controller, scope]);
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
+  // A background acknowledgment notice describes one thread's marker; it is stale once a later acknowledgment succeeds or another thread is shown, and must not hide an unrelated action error.
+  const clearMarkerNotice = useCallback(() => {
+    const message = markerNotice.current;
+    markerNotice.current = null;
+    if (message) setActionError(current => current === message ? '' : current);
+  }, []);
+  useEffect(clearMarkerNotice, [activeId, clearMarkerNotice]);
   useEffect(() => {
     if (!metadata.data || metadata.isError || mutation.isPending || !activeId || activeOwner?.connectionId !== (scope.connectionId ?? 'local') || activeOwner?.profile !== scope.profile) return;
     const row = rows.find(item => aliases(item).includes(activeId));
@@ -1825,10 +1834,14 @@ function ScopedSidebar({ ctx, controller, scope }) {
         const key = JSON.stringify([durableId(row), marker.label, marker.token]);
         if (readMarkers.current.has(key)) continue;
         readMarkers.current.add(key);
-        try { await marker.ack(); }
+        try { await marker.ack(); clearMarkerNotice(); }
         catch (error) {
           readMarkers.current.delete(key);
-          if (sameScope(scope, captureScope())) setActionError(`Thread opened, but its ${marker.label} marker could not be acknowledged: ${error.message}`);
+          // Another write finishing republishes metadata, which reruns this effect and retries silently.
+          if (error instanceof WriterBusy) return;
+          if (!sameScope(scope, captureScope())) return;
+          const message = `Thread opened, but its ${marker.label} marker could not be acknowledged: ${error.message}`;
+          markerNotice.current = message; setActionError(message);
         }
       }
     })();

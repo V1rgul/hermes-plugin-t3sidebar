@@ -1290,6 +1290,43 @@ test('Done acknowledgments require confirmed readback and a matching focused own
   assert.deepEqual(mock.control.metadata.completions, {});
 });
 
+test('a Done acknowledgment that meets another save retries silently instead of reporting it', async () => {
+  mock.control.rows.find(item => item.id === 'readme').unread = false;
+  mock.control.metadata.completions = { readme: { done_token: 'read-me', done_at: Date.now() / 1000 } };
+  await mount();
+  const original = mock.ctx.rest; let release;
+  mock.ctx.rest = (path, options) => options?.body?.action === 'settle' ? new Promise(resolve => { release = () => resolve(original(path, options)); }) : original(path, options);
+  try {
+    const saving = controller.mutate(flow.captureScope(), 'design', { action: 'settle' }); await tick();
+    await act(async () => mock.host.state.focusedStoredSessionId.set('readme')); await tick();
+    assert.equal($('.sf-note[role=alert]'), null, 'a busy writer is not an error');
+    assert.equal(mock.control.metadata.completions.readme?.done_token, 'read-me');
+    await act(async () => { release(); await saving; }); await tick(); await tick();
+    assert.deepEqual(mock.control.metadata.completions, {}, 'the acknowledgment retries once the other save finishes');
+    assert.equal($('.sf-note[role=alert]'), null);
+  } finally { mock.ctx.rest = original; }
+});
+
+test('a failed marker acknowledgment notice clears once a later acknowledgment succeeds', async () => {
+  mock.control.rows.find(item => item.id === 'readme').unread = false;
+  mock.control.metadata.completions = { readme: { done_token: 'read-me', done_at: Date.now() / 1000 } };
+  await mount();
+  const original = mock.ctx.rest, notices = []; let failed = false;
+  mock.ctx.rest = (path, options) => {
+    if (options?.body?.action === 'ack_done' && !failed) { failed = true; return Promise.reject(new Error('fixture write failed')); }
+    return original(path, options);
+  };
+  const observer = new window.MutationObserver(() => { const note = $('.sf-note[role=alert]'); if (note) notices.push(note.textContent); });
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  try {
+    // The failed write refreshes metadata, which retries the acknowledgment; that success must retire the notice.
+    await act(async () => mock.host.state.focusedStoredSessionId.set('readme')); await tick(); await tick();
+    assert.ok(notices.some(text => /Done marker could not be acknowledged: fixture write failed/.test(text)));
+    assert.deepEqual(mock.control.metadata.completions, {});
+    assert.equal($('.sf-note[role=alert]'), null);
+  } finally { observer.disconnect(); mock.ctx.rest = original; }
+});
+
 test('backend completion metadata validates without synthesizing flags on older companions', () => {
   assert.equal(flow.validState({ version: 1, sessions: {} }).completions, undefined);
   assert.throws(() => flow.verifyAction({ version: 1, sessions: {} }, 'id', { action: 'ack_done', done_token: 'exact-token' }), /did not confirm/);
