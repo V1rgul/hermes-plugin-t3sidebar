@@ -287,7 +287,7 @@ class CollectorTests(unittest.TestCase):
 			windows=(SimpleNamespace(label="Session", used_percent=1.0, reset_at=None, scope="account"),))}
 		refreshed = []
 		with patch.object(limits, "_native_symbols", return_value=self.symbols(cache, refreshed, pool)):
-			readings = limits.collect_native(join_timeout=5)
+			readings = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5)
 		# An emptied pool key is reported as logged out; a provider outside the vetted set is never sampled.
 		self.assertEqual([(r["provider"], r["error"], r["accounts"]) for r in readings[:1]], [("anthropic", "logged_out", [])])
 		reading = readings[1]
@@ -330,7 +330,7 @@ class CollectorTests(unittest.TestCase):
 			return [{"status": "available", "granted_at": 1.0e9, "expires_at": 2.0e9}]
 		now = [1_800_000_000.0]
 		with patch.object(limits, "_native_symbols", return_value=self.symbols({}, [], pool)):
-			(reading,) = limits.collect_native(join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
+			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
 			# Duplicates of an account and dead credentials are never asked; a failed read leaves no list.
 			self.assertEqual(calls, ["tok-a", "tok-b"])
 			by_id = {a["id"]: a for a in reading["accounts"]}
@@ -339,22 +339,22 @@ class CollectorTests(unittest.TestCase):
 			self.assertNotIn("tok-", repr(reading))
 			# Within the hour nothing is read again, failures included; after it, both are.
 			now[0] += limits.CREDITS_INTERVAL_S - 1
-			limits.collect_native(join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
+			limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
 			self.assertEqual(len(calls), 2)
 			now[0] += 1
-			limits.collect_native(join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
+			limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
 			self.assertEqual(calls[2:], ["tok-a", "tok-b"])
 
 	def test_missing_native_symbol_reports_unavailable(self):
 		symbols = self.symbols({}, [], {"openai-codex": [{"id": "7ad3ca", "access_token": "x"}]})
 		symbols["_identity_id_for"] = None
 		with patch.object(limits, "_native_symbols", return_value=symbols):
-			(reading,) = limits.collect_native(join_timeout=1)
+			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=1)
 		self.assertEqual((reading["error"], reading["accounts"]), ("unavailable", []))
 		symbols["read_credential_pool"] = None
 		with patch.object(limits, "_native_symbols", return_value=symbols):
 			with self.assertRaises(RuntimeError):
-				limits.collect_native(join_timeout=1)
+				limits.collect_native(claude_login=NO_CLAUDE, join_timeout=1)
 
 	def test_default_collector_only_uses_vetted_native_functions(self):
 		tree = ast.parse((ROOT / "usage_limits.py").read_text(encoding="utf-8"))
@@ -375,6 +375,7 @@ class CollectorTests(unittest.TestCase):
 			("hermes_cli.inventory", "_pool_entry_host"),
 			("agent.account_usage", "_codex_backend_urls"),
 			("agent.account_usage", "_codex_headers"),
+			("agent.account_usage", "_fetch_anthropic_account_usage"),
 		})
 		imported = {
 			(node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
@@ -530,6 +531,62 @@ class CreditTests(unittest.TestCase):
 				connection.execute("DROP TABLE limit_credits")
 				connection.commit()
 			self.assertEqual(store.read_credits(), {})
+
+
+NO_CLAUDE = lambda clock: None
+
+
+class ClaudeCodeFallbackTests(unittest.TestCase):
+	def collect(self, pool, login, fetcher):
+		symbols = CollectorTests.symbols(CollectorTests(), {}, [], pool)
+		with patch.object(limits, "_native_symbols", return_value=symbols):
+			return limits.collect_native(join_timeout=1, claude_login=login, claude_fetcher=fetcher)
+
+	def test_empty_hermes_pool_reads_claude_codes_login_with_one_explicit_token_fetch(self):
+		calls = []
+
+		def fetch(**kwargs):
+			calls.append(kwargs)
+			return SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
+				SimpleNamespace(label="Current session", used_percent=36.0, reset_at=dt(NOW + 1200), scope="account"),
+				SimpleNamespace(label="Current week", used_percent=4.0, reset_at=dt(NOW + 6 * 86400), scope="account")))
+		login = {"token": "sk-ant-oat-secret", "plan": "default_claude_max_5x", "expired": False}
+		readings = self.collect({"anthropic": []}, lambda clock: login, fetch)
+		(reading,) = readings
+		self.assertEqual((reading["provider"], reading["error"]), ("anthropic", None))
+		(account,) = reading["accounts"]
+		self.assertEqual((account["id"], account["label"], account["error"], account["snapshot"]["plan"]), ("claude-code", "Claude Code", None, "default_claude_max_5x"))
+		self.assertEqual([w["key"] for w in account["snapshot"]["windows"]], ["five_hour", "weekly"])
+		self.assertEqual(calls, [{"api_key": "sk-ant-oat-secret"}])
+		# The token never leaves the collection, and the local copy is dropped.
+		self.assertNotIn("secret", repr(readings))
+		self.assertEqual(login, {})
+
+	def test_expired_or_failing_login_is_an_account_error_and_no_login_stays_logged_out(self):
+		expired = self.collect({"anthropic": []}, lambda clock: {"token": "t", "plan": None, "expired": True}, lambda **kw: self.fail("an expired token is never sent"))
+		self.assertEqual(expired[0]["accounts"][0]["error"], "token_expired")
+		failing = self.collect({}, lambda clock: {"token": "t", "plan": None, "expired": False}, lambda **kw: (_ for _ in ()).throw(RuntimeError("401")))
+		self.assertEqual((failing[0]["provider"], failing[0]["accounts"][0]["error"]), ("anthropic", "refresh_failed"))
+		self.assertEqual(self.collect({"anthropic": []}, NO_CLAUDE, None)[0]["error"], "logged_out")
+		self.assertEqual(self.collect({}, NO_CLAUDE, None), [])
+
+	def test_hermes_pool_wins_over_claude_code(self):
+		pool = {"anthropic": [{"id": "a00001", "label": "pool", "priority": 0, "access_token": "tok-a"}]}
+		readings = self.collect(pool, lambda clock: self.fail("Claude Code is not read when Hermes has a pool"), None)
+		self.assertEqual([a["id"] for a in readings[0]["accounts"]], ["a00001"])
+
+	def test_login_reader_is_read_only_and_honours_claude_config_dir(self):
+		with tempfile.TemporaryDirectory() as temp:
+			path = Path(temp) / ".credentials.json"
+			body = '{"claudeAiOauth": {"accessToken": "tok", "refreshToken": "r", "expiresAt": 2000000, "subscriptionType": "team", "rateLimitTier": "default_claude_max_5x"}}'
+			path.write_text(body, encoding="utf-8")
+			with patch.dict(limits.os.environ, {"CLAUDE_CONFIG_DIR": temp}):
+				self.assertEqual(limits._claude_code_login(clock=lambda: 1000.0), {"token": "tok", "plan": "default_claude_max_5x", "expired": False})
+				self.assertTrue(limits._claude_code_login(clock=lambda: 3000.0)["expired"])
+				path.write_text("{broken", encoding="utf-8")
+				self.assertIsNone(limits._claude_code_login())
+			path.write_text(body, encoding="utf-8")
+			self.assertEqual(path.read_text(encoding="utf-8"), body)
 
 
 def dt_epoch(text):

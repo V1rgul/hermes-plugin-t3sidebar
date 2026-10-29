@@ -6,6 +6,7 @@ Read-only toward credentials, by construction:
 - Pool rows come from ``read_credential_pool`` (a plain auth.json read), never ``load_pool`` (which can seed, heal and persist the store) or ``pool.select()``.
 - Fetches go through ``refresh_account_usage_entries_async``, which calls ``fetch_account_usage(read_only=True)`` with each entry's own token: the Codex read-only fetcher reports a 401 instead of refreshing or rotating, and the Anthropic fetcher with an explicit token never resolves or refreshes one. The provider-wide ``refresh_account_usage_async`` is deliberately not used because its Codex path resolves runtime credentials with ``refresh_if_expiring`` and force-refreshes on 401.
 - Only providers in ``VETTED_PROVIDERS`` are refreshed: plugin usage hooks are arbitrary code and OpenRouter issues two GETs.
+- Anthropic falls back to Claude Code's own login when Hermes's anthropic pool is empty: Virgile's Claude sessions run through the Claude Code CLI (claude-subscription-directsdk), so that login is the account actually consumed. Its access token is only read, sent once per sample to Hermes's OAuth usage fetcher (a single GET, no refresh), and never stored; an expired token is skipped until Claude Code refreshes it.
 - Codex banked reset credits are listed with one extra GET per account at most every ``CREDITS_INTERVAL_S``, on Hermes's own read-only list endpoint (the one the Codex CLI reads); the usage payload only carries their count, not their expiries. A 401 or any failure keeps the previous list and never refreshes the token.
 
 Nothing secret is stored or logged: tokens, identities and base URLs stay in local variables of one collection; the store keeps pool entry id + label, plan, window numbers, banked reset count, banked credit status/grant/expiry times and a closed set of error classes.
@@ -47,8 +48,9 @@ PROVIDER_LABELS = {"openai-codex": "OpenAI Codex", "anthropic": "Anthropic"}
 # Closed vocabulary so an error string can never carry a message, URL or token.
 ERROR_CLASSES = frozenset({
 	"unavailable", "pool_unreadable", "credential_dead", "no_credential", "no_data",
-	"refresh_failed", "timeout", "internal_error", "logged_out",
+	"refresh_failed", "timeout", "internal_error", "logged_out", "token_expired",
 })
+CLAUDE_CODE_ACCOUNT_ID = "claude-code"
 
 _SECONDS_KEYS = {18000: "five_hour", 604800: "weekly"}
 _LABEL_KEYS = {
@@ -263,7 +265,54 @@ def _native_symbols():
 	take("hermes_cli.inventory", "_pool_entry_host")
 	take("agent.account_usage", "_codex_backend_urls")
 	take("agent.account_usage", "_codex_headers")
+	take("agent.account_usage", "_fetch_anthropic_account_usage")
 	return symbols
+
+
+def _claude_code_login(clock=time.time):
+	"""Claude Code's OAuth login on this host as {token, plan, expired}, or None. Read-only: honours CLAUDE_CONFIG_DIR like the CLI, never writes or refreshes."""
+	config = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+	path = (Path(config).expanduser() if config else Path.home() / ".claude") / ".credentials.json"
+	try:
+		entry = json.loads(path.read_text(encoding="utf-8")).get("claudeAiOauth")
+	except (OSError, ValueError, AttributeError):
+		return None
+	if not isinstance(entry, dict) or not isinstance(entry.get("accessToken"), str) or not entry["accessToken"].strip():
+		return None
+	# rateLimitTier (default_claude_max_5x) names the allowance; subscriptionType (team, max) alone does not.
+	plan = next((value for value in (entry.get("rateLimitTier"), entry.get("subscriptionType")) if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_ -]{1,64}", value)), None)
+	expires_ms = entry.get("expiresAt")
+	expired = isinstance(expires_ms, (int, float)) and not isinstance(expires_ms, bool) and expires_ms / 1000.0 <= float(clock())
+	return {"token": entry["accessToken"].strip(), "plan": plan, "expired": expired}
+
+
+def _collect_claude_code(symbols, clock, login_reader, fetcher):
+	"""One Anthropic reading from Claude Code's login, or None when there is no such login."""
+	login = login_reader(clock)
+	if login is None:
+		return None
+	account = {"id": CLAUDE_CODE_ACCOUNT_ID, "label": "Claude Code", "priority": 0, "error": None, "snapshot": None}
+	reading = {"provider": "anthropic", "error": None, "accounts": [account]}
+	try:
+		if login["expired"]:
+			account["error"] = "token_expired"
+			return reading
+		fetch = fetcher or symbols.get("_fetch_anthropic_account_usage")
+		if fetch is None:
+			reading["error"], reading["accounts"] = "unavailable", []
+			return reading
+		try:
+			snapshot = normalize_snapshot("anthropic", fetch(api_key=login["token"]))
+		except Exception:
+			snapshot = None
+		if snapshot is None or not snapshot["windows"]:
+			account["error"] = "refresh_failed"
+		else:
+			snapshot["plan"] = login["plan"] or snapshot["plan"]
+			account["snapshot"] = snapshot
+		return reading
+	finally:
+		login.clear()
 
 
 def _route(symbols, provider, entry):
@@ -280,7 +329,7 @@ _CREDITS_LOCK = threading.Lock()
 _CREDITS_READ = {}
 
 
-def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None):
+def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None, claude_login=_claude_code_login, claude_fetcher=None):
 	"""Trigger Hermes's read-only per-credential refresh for vetted pooled providers, then read each account's cached snapshot.
 
 	Must run inside the target home's context: Hermes keys both auth.json and its usage cache on the active home.
@@ -396,6 +445,12 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 			# No successful fetch since the last try that the throttle allowed, so that try failed (or is still running).
 			account["error"] = "timeout" if unfinished else "refresh_failed"
 	slots.clear()
+	# Hermes's own anthropic pool wins; only an empty or missing one falls back to Claude Code's login.
+	current = next((reading for reading in providers if reading["provider"] == "anthropic"), None)
+	if current is None or current["error"] == "logged_out":
+		fallback = _collect_claude_code(symbols, clock, claude_login, claude_fetcher)
+		if fallback is not None:
+			providers = sorted([reading for reading in providers if reading is not current] + [fallback], key=lambda reading: reading["provider"])
 	return providers
 
 
