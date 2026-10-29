@@ -382,9 +382,10 @@ test('stacked layers accumulate while independent layers start from zero', () =>
 });
 
 test('usage charts plot per-day rates with a unit while totals stay actual amounts', () => {
-  const hourly = usage.buildUsageCharts({ ...history, resolution: 'hour', tz: 'UTC', buckets: [0, H, 2 * H] }, 'provider', 'stacked');
+  const hourly = usage.buildUsageCharts({ ...history, resolution: '60m', bucket_minutes: 60, tz: 'UTC', buckets: [0, H, 2 * H], window_end: 3 * H }, 'provider', 'stacked');
   const daily = usage.buildUsageCharts({ ...history, buckets: [0, D, 2 * D] }, 'provider', 'stacked');
-  assert.deepEqual([hourly.factor, daily.factor, usage.perDayFactor('hour'), usage.perDayFactor('day')], [24, 1, 24, 1]);
+  const legacy = usage.buildUsageCharts({ ...history, resolution: 'hour', tz: 'UTC', buckets: [0, H, 2 * H] }, 'provider', 'stacked');
+  assert.deepEqual([hourly.factors, daily.factors, legacy.factors], [[24, 24, 24], [1, 1, 1], [24, 24, 24]], 'backends without bucket_minutes still scale hour buckets');
   assert.deepEqual(hourly.charts[0].layers.map(layer => layer.upper), [[120, 24, 0], [144, 72, 72]], 'hourly buckets are scaled to a day');
   assert.deepEqual(daily.charts[0].layers.map(layer => layer.upper), [[5, 1, 0], [6, 3, 3]], 'daily buckets already are per day');
   assert.deepEqual(hourly.charts[0].scale.ticks, [0, 50, 100, 150]);
@@ -392,6 +393,20 @@ test('usage charts plot per-day rates with a unit while totals stay actual amoun
   assert.deepEqual(hourly.charts.map(chart => chart.metric.unit), ['tokens/day', '$/day', 'messages/day']);
   assert.deepEqual([hourly.dayLines, hourly.labelIndexes, hourly.labels], [[0], [0], ['Jan 1']], 'the hourly midnight gets a day line and a date label');
   assert.deepEqual([daily.dayLines, daily.labels], [[0, 1, 2], ['Jan 1', '2', '3']]);
+});
+
+test('sub-day buckets over several days scale by their own length and are labelled by day', () => {
+  // Paris, 24-26 October 2026 in 6-hour steps: the 00:00 bucket of the 25th lasts 7 hours (the clocks go back at 03:00).
+  const at = text => Date.parse(text) / 1000;
+  const buckets = ['2026-10-24T00:00:00+02:00', '2026-10-24T06:00:00+02:00', '2026-10-24T12:00:00+02:00', '2026-10-24T18:00:00+02:00', '2026-10-25T00:00:00+02:00', '2026-10-25T06:00:00+01:00', '2026-10-25T12:00:00+01:00', '2026-10-25T18:00:00+01:00', '2026-10-26T00:00:00+01:00'].map(at);
+  const steps = { ...history, resolution: '360m', bucket_minutes: 360, tz: 'Europe/Paris', buckets, window_end: at('2026-10-26T06:00:00+01:00'),
+    by_provider: [{ key: 'p', label: 'p', tokens: [6, 6, 6, 6, 7, 6, 6, 6, 3], cost_usd: [], user_messages: [] }], by_model: [] };
+  const model = usage.buildUsageCharts(steps, 'provider', 'stacked');
+  assert.deepEqual(model.factors, [4, 4, 4, 4, 24 / 7, 4, 4, 4, 4]);
+  assert.deepEqual(model.charts[0].layers[0].upper, [24, 24, 24, 24, 24, 24, 24, 24, 12], 'the 7-hour bucket reads at the same rate as its neighbours');
+  assert.equal(model.charts[0].total, 52);
+  assert.deepEqual([model.dayLines, model.labelIndexes, model.labels], [[0, 4, 8], [0, 4, 8], ['Oct 24', '25', '26']], 'day lines and labels sit on the local midnights only');
+  assert.deepEqual(usage.perDayFactors([0, 3 * H], undefined, 180), [8, 8], 'a missing window end falls back to the nominal length');
 });
 
 test('model labels name the provider only when two series share a model', () => {
@@ -489,11 +504,11 @@ test('the Usage page draws three charts from /usage/history only and toggles spl
   assert.deepEqual(mock.ctx.storage.get('usage-preferences'), { ...usage.USAGE_DEFAULTS, mode: 'independent' });
   await click(button('24h'));
   assert.equal(restPaths().at(-1), `/usage/history?days=1&tz=${encodeURIComponent(tz)}`);
-  assert.equal($$('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')[0].getAttribute('d').split('L').length, 24, 'the day view has 24 hourly buckets');
+  assert.equal($$('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')[0].getAttribute('d').split('L').length, 480, 'the day view has 480 three-minute buckets');
   assert.deepEqual($$('.su-yunit').map(node => node.textContent), ['tokens/day', '$/day', 'messages/day']);
   await key($('.su-chart[data-metric="user_messages"] .su-plot'), 'End');
-  const hourValue = Number($('.su-chart[data-metric="user_messages"] .su-tip-total b .su-tip-raw').textContent.match(/ · ([\d,]+) this hour/)[1].replace(/,/g, ''));
-  assert.equal($('.su-chart[data-metric="user_messages"] .su-tip-total b').textContent, `${(hourValue * 24).toLocaleString('en')}/day · ${hourValue.toLocaleString('en')} this hour`);
+  const rawValue = Number($('.su-chart[data-metric="user_messages"] .su-tip-total b .su-tip-raw').textContent.match(/ · ([\d,]+) in 3 min/)[1].replace(/,/g, ''));
+  assert.equal($('.su-chart[data-metric="user_messages"] .su-tip-total b').textContent, `${(rawValue * 480).toLocaleString('en')}/day · ${rawValue.toLocaleString('en')} in 3 min`);
 });
 
 test('hovering a bucket synchronizes the crosshair and tooltip across all three charts', async () => {

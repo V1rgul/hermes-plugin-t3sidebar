@@ -66,13 +66,16 @@ class UsageRouteTests(unittest.TestCase):
 		self.assertEqual(response.status_code, 200, response.text)
 		body = response.json()
 		self.assertEqual(body["profile"], "default")
-		self.assertEqual((body["days"], body["tz"], body["resolution"], len(body["buckets"])), (7, "Europe/Paris", "day", 7))
+		self.assertEqual((body["days"], body["tz"], body["resolution"], body["bucket_minutes"]), (7, "Europe/Paris", "20m", 20))
+		# Six whole days in 20-minute steps plus today's steps up to the one in progress (stretched by an hour on a fall-back night).
+		self.assertTrue(6 * 72 < len(body["buckets"]) <= 7 * 72, len(body["buckets"]))
+		self.assertIn(body["window_end"] - body["buckets"][-1], (1200, 4800))
 		self.assertEqual((body["by_provider"], body["by_model"]), ([], []))
 		self.assertEqual(response.headers["cache-control"], "no-store")
 
 	def test_history_hourly_window(self):
 		body = self.client().get(f"{PREFIX}/usage/history?days=1&tz=UTC").json()
-		self.assertEqual((body["resolution"], len(body["buckets"])), ("hour", 24))
+		self.assertEqual((body["resolution"], len(body["buckets"])), ("3m", 480))
 
 	def test_history_rejects_bad_arguments_and_foreign_profiles(self):
 		client = self.client()

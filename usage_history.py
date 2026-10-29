@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 VALID_DAYS = frozenset({1, 7, 30, 90})
+# Nominal bucket length in minutes per period, chosen for roughly 500 points each (480, 504, 480, 540); every length divides a day, so buckets start at local midnight.
+BUCKET_MINUTES = {1: 3, 7: 20, 30: 90, 90: 240}
 # Usage rows record first/last call times with some lag relative to the persisted assistant message, so call matching and window overlap tolerate this much clock skew.
 MATCH_SLACK_S = 120.0
 SESSION_BATCH = 500
@@ -112,16 +114,25 @@ def _zone(tz):
 def _buckets(days, zone, now):
 	"""Bucket starts as UTC epochs plus the end of the last bucket."""
 	local_now = datetime.fromtimestamp(now, zone)
+	step = BUCKET_MINUTES[days]
 	if days == 1:
-		# Hour starts are a fixed 3600 s apart in absolute time, so a DST change yields 24 real hours that the client labels in local time; flooring keeps the zone's own minute offset (e.g. :30 zones).
-		current = local_now.replace(minute=0, second=0, microsecond=0).timestamp()
-		return [current - 3600.0 * (23 - index) for index in range(24)], current + 3600.0
+		# The last 24 real hours in fixed steps, so a DST change still yields 24 hours that the client labels in local time; flooring the local minute keeps the zone's own offset (e.g. :30 zones) on whole steps.
+		current = local_now.replace(minute=local_now.minute // step * step, second=0, microsecond=0).timestamp()
+		count = 24 * 60 // step
+		return [current - 60.0 * step * (count - 1 - index) for index in range(count)], current + 60.0 * step
+	# Longer periods cover whole local days (today included) cut into wall-clock steps that start at local midnight, so day boundaries stay bucket boundaries and a DST day only stretches or shrinks one bucket. The window ends with the bucket in progress rather than with empty future buckets.
 	today = local_now.date()
 	starts = []
 	for index in range(days + 1):
 		day = today - timedelta(days=days - 1 - index)
-		starts.append(datetime(day.year, day.month, day.day, tzinfo=zone).timestamp())
-	return starts[:-1], starts[-1]
+		# Tomorrow only contributes its midnight, which ends today's last step.
+		for minute in range(0, 24 * 60 if index < days else 1, step):
+			start = datetime(day.year, day.month, day.day, minute // 60, minute % 60, tzinfo=zone).timestamp()
+			# A wall-clock time skipped by a DST gap resolves an hour later, onto or past a later step; never emit a non-increasing start.
+			if not starts or start > starts[-1]:
+				starts.append(start)
+	current = bisect.bisect_right(starts, now) - 1
+	return starts[:current + 1], starts[current + 1]
 
 
 def _connect(db_path):
@@ -390,7 +401,7 @@ def _compute(conn, days, tz, now, buckets, window_end, price, db_key):
 		for _, bucket, row in user_owner.values():
 			series_for(row).user_messages[bucket] += 1
 
-	return _render(days, tz, now, buckets, series, missing)
+	return _render(days, tz, now, buckets, window_end, series, missing)
 
 
 def _message_query(conn):
@@ -528,7 +539,7 @@ def _round_preserving_sum(values):
 	return [int(value) for value in floors]
 
 
-def _render(days, tz, now, buckets, series, missing):
+def _render(days, tz, now, buckets, window_end, series, missing):
 	width = len(buckets)
 	by_model = []
 	providers = {}
@@ -564,8 +575,11 @@ def _render(days, tz, now, buckets, series, missing):
 		"generated_at": now,
 		"days": days,
 		"tz": tz,
-		"resolution": "hour" if days == 1 else "day",
+		"resolution": f"{BUCKET_MINUTES[days]}m",
+		# Nominal bucket length; a bucket's real length is the gap to the next start (or to window_end), which DST changes by an hour.
+		"bucket_minutes": BUCKET_MINUTES[days],
 		"buckets": [int(round(value)) for value in buckets],
+		"window_end": int(round(window_end)),
 		"by_provider": by_provider,
 		"by_model": by_model,
 		"totals": {
