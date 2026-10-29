@@ -1912,20 +1912,30 @@ try {
         await usage.screenshot({ path: join(usageDir, 'v6-limits-stacked-tip.png'), clip: { x: section.x - 12, y: top, width: section.width + 24, height: bottom - top } });
       }
       await usage.mouse.move(5, 5);
-      // Banked-credit flags: the two Codex credits expiring ten minutes apart in about five hours share one flag above the plot, its pole on the first expiry.
+      // Banked-credit flags: the two Codex credits expiring ten minutes apart in about five hours get one flag each, poles on their own expiry; the second is lifted onto the next row instead of overlapping the first.
       const flag = await usage.evaluate(selector => {
-        const chart = document.querySelector(selector), r = el => el.getBoundingClientRect(), plotNode = chart.querySelector('.su-pooled .su-plot'), plot = r(plotNode), node = chart.querySelector('.su-flag');
-        if (!node) return null;
-        const start = Number(plotNode.dataset.start), end = Number(plotNode.dataset.end), box = r(node), svg = r(node.querySelector('svg'));
-        return { count: chart.querySelectorAll('.su-flag').length, credits: node.dataset.count, badge: node.querySelector('.su-flag-count')?.textContent, pole: Math.abs(svg.left + svg.width * 5 / 24 - (plot.left + (Number(node.dataset.t) - start) / (end - start) * plot.width)),
-          above: box.bottom <= plot.top + 0.5 && box.top >= plot.top - 22, other: document.querySelectorAll('.su-provider-limits[data-provider="anthropic"] .su-flag').length };
+        const chart = document.querySelector(selector), r = el => el.getBoundingClientRect(), plotNode = chart.querySelector('.su-pooled .su-plot'), plot = r(plotNode), nodes = [...chart.querySelectorAll('.su-flag')];
+        const start = Number(plotNode.dataset.start), end = Number(plotNode.dataset.end);
+        const flags = nodes.map(node => { const box = r(node), svg = r(node.querySelector('svg'));
+          return { account: node.dataset.account, row: node.dataset.row, box: { left: box.left, right: box.right, top: box.top, bottom: box.bottom }, pole: Math.abs(svg.left + svg.width * 5 / 24 - (plot.left + (Number(node.dataset.t) - start) / (end - start) * plot.width)) }; });
+        const overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+        return { flags, apart: flags.every((a, i) => flags.every((b, j) => i === j || !overlap(a.box, b.box))), above: flags.every(item => item.box.bottom <= plot.top + 0.5),
+          counts: chart.querySelectorAll('.su-flag-count').length, other: document.querySelectorAll('.su-provider-limits[data-provider="anthropic"] .su-flag').length };
       }, CODEX);
-      await usage.locator(`${CODEX} .su-flag`).first().hover();
-      await usage.waitForSelector('.mock-tip');
-      const flagTip = await usage.evaluate(() => [...document.querySelectorAll('.mock-tip span > span')].map(node => node.textContent));
-      console.log(`USAGE LIMITS FLAG: ${JSON.stringify({ flag, flagTip })}`);
-      check('Banked credits expiring together share one flag above the Codex plot, pole on the expiry time within 1px, with a count and one tooltip line per credit', flag?.count === 1 && flag.credits === '2' && flag.badge === '2' && flag.pole <= 1 && flag.above && flag.other === 0
-        && flagTip.length === 2 && /^chatgptvitibot · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTip[0]) && /^chatgpt1 · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTip[1]));
+      const flagTips = [];
+      for (const index of [0, 1]) {
+        await usage.locator(`${CODEX} .su-flag`).nth(index).hover();
+        await usage.waitForSelector('.mock-tip');
+        flagTips.push(await usage.evaluate(() => [...document.querySelectorAll('.mock-tip span > span')].map(node => node.textContent)));
+        await usage.mouse.move(5, 5);
+      }
+      console.log(`USAGE LIMITS FLAG: ${JSON.stringify({ flag, flagTips })}`);
+      check('Each banked credit gets its own flag above the Codex plot, pole on its expiry within 1px, the close second one lifted onto the next row without overlap, no count badge, one tooltip line each', flag.flags.length === 2 && flag.flags.every(item => item.pole <= 1)
+        && flag.flags.map(item => item.row).join() === '0,1' && flag.apart && flag.above && flag.counts === 0 && flag.other === 0
+        && flagTips.every(lines => lines.length === 1) && /^chatgptvitibot · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTips[0][0]) && /^chatgpt1 · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTips[1][0]));
+      // Projected reset steps are dashed like the projection line; only realized (past) step-ups are solid.
+      const segments = await usage.evaluate(selector => [...document.querySelectorAll(`${selector} .su-reset-mark`)].map(node => { const style = getComputedStyle(node.querySelector('.su-reset-seg')); return { kind: node.dataset.kind, dashed: style.backgroundImage.includes('repeating-linear-gradient'), solid: style.borderLeftStyle === 'solid' }; }), CODEX);
+      check('Projected reset segments are dashed, never a solid line', segments.some(item => item.kind === 'projected') && segments.filter(item => item.kind === 'projected').every(item => item.dashed && !item.solid));
       await usage.mouse.move(5, 5);
     }
     // Pixels along the slider's middle row: the track left of the thumb stays unfilled and the part to its right carries the fill color (the thumb's own color), since the filled part is the averaged period reaching back from now.
@@ -2038,9 +2048,9 @@ try {
       check('Limits 30-day 12h averaging span is too short for inner arrowheads, so they point in from outside', geometry.average.tight && geometry.average.right - geometry.average.left < 16 && other.average.tight);
       await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-30d.png') });
       // The 30-day chart shows the banked credits expiring in nine days as their own flags, and last week's stacked resets as quieter past markers.
-      const thirty = await usage.evaluate(selector => { const chart = document.querySelector(selector); return { flags: [...chart.querySelectorAll('.su-flag')].map(node => node.dataset.count).join(), past: [...chart.querySelectorAll('.su-reset[data-kind=past]')].map(node => node.querySelectorAll('.su-reset-mark').length).join(), pastLabels: chart.querySelectorAll('.su-reset[data-kind=past] .su-reset-text').length }; }, CODEX);
+      const thirty = await usage.evaluate(selector => { const chart = document.querySelector(selector); return { flags: [...chart.querySelectorAll('.su-flag')].map(node => node.querySelector('.su-flag-count')?.textContent ?? '1').join(), past: [...chart.querySelectorAll('.su-reset[data-kind=past]')].map(node => node.querySelectorAll('.su-reset-mark').length).join(), pastLabels: chart.querySelectorAll('.su-reset[data-kind=past] .su-reset-text').length }; }, CODEX);
       console.log(`USAGE HORIZON 30D MARKS: ${JSON.stringify(thirty)}`);
-      check('The 30-day Codex chart flags all three banked expiry times and marks last week\'s stacked resets quietly, without labels', thirty.flags === '2,1,1' && thirty.past.split(',').includes('2') && thirty.pastLabels === 0);
+      check('The 30-day Codex chart flags each banked expiry time (×2 only where two credits expire at the same instant) and marks last week\'s stacked resets quietly, without labels', thirty.flags === '1,1,×2' && thirty.past.split(',').includes('2') && thirty.pastLabels === 0);
       await usage.locator('.su-horizon button', { hasText: '7d' }).click();
       await usage.waitForFunction(() => [...document.querySelectorAll('.su-pooled')].every(chart => chart.dataset.horizon === '7'));
       await usage.mouse.move(5, 5);
@@ -2068,7 +2078,7 @@ try {
       // The page clock runs on from the fixed start while the test works, so the countdowns may have lost a minute.
       check('Each Codex account lists its banked resets under its bars, soonest first: the one expiring within a day in orange, chatgpt1\'s marked not usable now in muted text', banked['acct-team'].length === 2 && banked['acct-prolite'].length === 2
         && [teamSoon, teamLater, proSoon, proLater].every(line => line.below) && /^Banked reset · expires \w{3} \d{1,2}:\d{2} (AM|PM) \(in (4h 5\dm|5h 0m)\)$/.test(teamSoon.text) && /\(in (8d 23h|9d 0h)\)$/.test(teamLater.text)
-        && /\(in 5h \d+m\) · not usable now$/.test(proSoon.text) && /\(in 9d 1[12]h\) · not usable now$/.test(proLater.text) && teamSoon.soon === 'true' && teamLater.soon === 'false'
+        && /\(in 5h \d+m\) · not usable now$/.test(proSoon.text) && /\(in (9d 0h|8d 23h)\) · not usable now$/.test(proLater.text) && teamSoon.soon === 'true' && teamLater.soon === 'false'
         && teamSoon.color[0] > teamSoon.color[2] + 60 && teamLater.color.join() !== teamSoon.color.join() && proSoon.muted && proSoon.muted.join() !== proSoon.color.join() && teamSoon.muted === null);
       await usage.reload();
       await usage.waitForSelector('.sf-footer .sf-limit');

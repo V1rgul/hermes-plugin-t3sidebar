@@ -2472,7 +2472,13 @@ export function bankedFlags(accounts, from, to) {
   for (const account of accounts || []) for (const credit of account?.banked_credits?.credits || []) {
     if (Number.isFinite(credit.expires_at) && credit.expires_at > from && credit.expires_at < to) items.push({ t: credit.expires_at, account: account.id, label: account.label || account.id });
   }
-  return resetGroups(items).map(group => ({ t: group.t, credits: group.items }));
+  // One flag per expiry time, placed exactly: only credits expiring in the same minute share a flag (with a ×N count); merely close ones keep their own flags, lifted onto separate rows at layout time (placeFlagRows).
+  const flags = new Map();
+  for (const item of items.sort((a, b) => a.t - b.t || String(a.label).localeCompare(String(b.label)))) {
+    const minute = Math.floor(item.t / 60);
+    if (flags.has(minute)) flags.get(minute).credits.push(item); else flags.set(minute, { t: item.t, credits: [item] });
+  }
+  return [...flags.values()];
 }
 // The Limits decision in one value: will the pool run short or throw quota away at resets within the next week? Judged on the weekly window (a week ahead of a five-hour window says little, and the 5h merge is postponed), falling back to the saved window choice when a provider has no weekly one; uses the saved lookback and the pooled unit projection.
 export const VERDICT_DAYS = 7;
@@ -2836,9 +2842,24 @@ export const bankedFlagLines = (flag, now) => flag.credits.map(credit => `${cred
 // Labels next to chart marks go right of their mark, or left when that collides or leaves the plot; one that fits nowhere is hidden while its mark and tooltip stay. Dots and flags are obstacles too, so no label covers another account's marker.
 const MARK_LABEL_GAP_PX = 4;
 const boxesOverlap = (box, other, gap) => !(box.right + gap <= other.left || box.left >= other.right + gap || box.bottom <= other.top || box.top >= other.bottom);
+// Flags whose icons would overlap go on rows above each other, each keeping its pole on its own expiry; rows depend on pixel width, so this runs with the label placement on every resize.
+const FLAG_ROW_GAP_PX = 2;
+function placeFlagRows(layer) {
+  const rows = [];
+  for (const flag of [...layer.querySelectorAll('.su-flag')].sort((a, b) => Number(a.dataset.t) - Number(b.dataset.t))) {
+    flag.style.setProperty('--su-flag-row', '0');
+    const box = flag.getBoundingClientRect();
+    let row = rows.findIndex(right => right + FLAG_ROW_GAP_PX <= box.left);
+    if (row < 0) { row = rows.length; rows.push(0); }
+    rows[row] = box.right;
+    flag.style.setProperty('--su-flag-row', String(row));
+    flag.dataset.row = String(row);
+  }
+}
 function placeMarkLabels(layer) {
   const bounds = layer.getBoundingClientRect();
   if (!(bounds.width > 0)) return;
+  placeFlagRows(layer);
   for (const mark of layer.querySelectorAll('.su-waste')) mark.dataset.tight = String(mark.getBoundingClientRect().height < TIGHT_SPAN_PX);
   const obstacles = [...layer.querySelectorAll('.su-reset-dot, .su-flag')].map(node => node.getBoundingClientRect()), placed = [];
   // Waste labels are placed first: what expires matters more than what a reset restores, so it keeps the better spot.
@@ -2861,16 +2882,16 @@ function ResetMark({ item, kind, yPct, lines }) {
     h('span', { className: 'su-reset-seg' }), withTip(lines, dot),
     kind === 'projected' ? h('span', { className: 'su-reset-text', 'data-side': 'right', 'aria-hidden': true }, `+${unitsText(item.gain)}`) : null);
 }
-// Banked reset credits expiring together share one flag above the plot, with their count beside it.
+// Banked reset credits expiring at one time: a flag above the plot with its pole on the expiry, and ×N when several expire together.
 function BankedFlag({ flag, xPct, now }) {
   const lines = bankedFlagLines(flag, now), count = flag.credits.length;
-  return withTip(lines, h('span', { className: 'su-flag', role: 'img', 'aria-label': lines.join('. '), title: typeof sdk.Tip === 'function' ? undefined : lines.join('\n'), 'data-t': Math.round(flag.t), 'data-count': count, style: { left: `${xPct(flag.t)}%` } },
-    icon('Flag', '⚑'), count > 1 ? h('span', { className: 'su-flag-count', 'aria-hidden': true }, count) : null));
+  return withTip(lines, h('span', { className: 'su-flag', role: 'img', 'aria-label': lines.join('. '), title: typeof sdk.Tip === 'function' ? undefined : lines.join('\n'), 'data-t': Math.round(flag.t), 'data-account': flag.credits.map(item => item.account).join(), 'data-count': count, style: { left: `${xPct(flag.t)}%` } },
+    icon('Flag', '⚑'), count > 1 ? h('span', { className: 'su-flag-count', 'aria-hidden': true }, `×${count}`) : null));
 }
 // Everything drawn at a time x over the plot, as HTML so dots, arrowheads and labels keep their pixel size over the stretched SVG: waste measurements (vertical dimension lines from the level before a reset down by the units that expire, in the Now line's neutral colour), reset markers and banked-credit flags.
 function ChartMarks({ waste, resets, past, flags, xPct, cap, now }) {
   const layer = useRef(null);
-  const signature = JSON.stringify([waste.map(mark => [mark.t, mark.before, mark.lost]), [...past, ...resets].map(group => [group.t, group.accounts.map(item => [item.id, item.base, item.gain])]), flags.map(flag => [flag.t, flag.credits.length]), cap]);
+  const signature = JSON.stringify([waste.map(mark => [mark.t, mark.before, mark.lost]), [...past, ...resets].map(group => [group.t, group.accounts.map(item => [item.id, item.base, item.gain])]), flags.map(flag => [flag.t, flag.credits.map(item => item.account).join()]), cap]);
   useLayoutEffect(() => {
     const node = layer.current;
     if (!node) return undefined;
@@ -2898,7 +2919,7 @@ function ChartMarks({ waste, resets, past, flags, xPct, cap, now }) {
         h('svg', { className: 'su-waste-arrow', 'data-end': 'bottom', viewBox: '0 0 8 6', 'aria-hidden': true }, h('path', { d: 'M0.5,0 L4,6 L7.5,0 Z' })),
         h('span', { className: 'su-waste-text', 'data-side': 'right', 'aria-hidden': true }, `${unitsText(mark.lost)} lost`));
     }),
-    flags.map(flag => h(BankedFlag, { key: flag.t, flag, xPct, now })));
+    flags.map(flag => h(BankedFlag, { key: Math.floor(flag.t / 60), flag, xPct, now })));
 }
 // "Business: 20, Pro 100: 100": what each account adds to the pool's capacity, an asterisk marking a guessed one.
 const poolComposition = members => members.map(item => `${item.plan_label || 'Unknown plan'}: ${unitsText(item.weight)}${item.assumed ? '*' : ''}`).join(', ');
@@ -3185,9 +3206,11 @@ const USAGE_CSS = `
 .su-reset-text{top:0;color:var(--su-color)}.su-reset-text[data-side=right]{left:7px}.su-reset-text[data-side=left]{right:7px}
 /* Past step-ups are quieter: a hollow dot and a faint segment, no label. */
 .su-reset-mark[data-kind=past] .su-reset-seg{opacity:.45}
+/* A projected step is not realized yet, so it is dashed like the projection line (5 on, 4 off at the same 1.5px weight); only past step-ups stay solid. */
+.su-reset-mark[data-kind=projected] .su-reset-seg{left:-0.75px;width:1.5px;border-left:0;background:repeating-linear-gradient(to bottom,var(--su-color) 0 5px,transparent 5px 9px)}
 .su-reset-mark[data-kind=past] .su-reset-dot{width:6px;height:6px;margin:-3px 0 0 -3px;border:1.5px solid var(--su-color);background:var(--ui-bg-elevated,var(--ui-bg-quaternary))}
 /* Banked-credit flags sit above the plot, the pole on the expiry time (the Tabler flag's pole is at x = 5 of 24). */
-.su-flag{position:absolute;bottom:100%;display:inline-flex;align-items:flex-start;gap:1px;margin:0 0 3px calc(-14px * 5 / 24);color:var(--ui-text-secondary);font-size:10px;line-height:12px;font-variant-numeric:tabular-nums;pointer-events:auto}
+.su-flag{position:absolute;bottom:calc(100% + var(--su-flag-row, 0) * 16px);display:inline-flex;align-items:flex-start;gap:1px;margin:0 0 3px calc(-14px * 5 / 24);color:var(--ui-text-secondary);font-size:10px;line-height:12px;font-variant-numeric:tabular-nums;pointer-events:auto}
 .su-flag svg{width:14px;height:14px;flex-shrink:0}
 /* Banked reset credits listed under an account's bars. */
 .su-banked{display:flex;flex-direction:column;gap:2px;margin:8px 0 0;padding:0;list-style:none;font-size:11px;color:var(--ui-text-secondary)}

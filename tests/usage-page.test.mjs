@@ -324,9 +324,12 @@ test('banked reset credits are validated defensively and flagged by expiry', () 
   assert.deepEqual(parsed.providers[0].accounts.map(account => account.banked_credits?.credits.length ?? null), [1, null]);
   const now = 1000, accounts = [{ id: 'a', label: 'chatgpt1', banked_credits: { credits: [{ expires_at: now + 5 * H }, { expires_at: now + 9 * D }] } }, { id: 'b', label: 'chatgptvitibot', banked_credits: { credits: [{ expires_at: now + 5 * H + 600 }, { expires_at: null }] } }];
   const flags = usage.bankedFlags(accounts, now, now + 7 * D);
-  assert.deepEqual(flags.map(flag => [flag.t - now, flag.credits.map(item => item.label).join()]), [[5 * H, 'chatgpt1,chatgptvitibot']], 'expiries ten minutes apart share one flag; ones outside the range or without a time get none');
+  assert.deepEqual(flags.map(flag => [flag.t - now, flag.credits.map(item => item.label).join()]), [[5 * H, 'chatgpt1'], [5 * H + 600, 'chatgptvitibot']], 'one flag per expiry, even ten minutes apart; ones outside the range or without a time get none');
+  const minute = 60 * 1000;
+  const same = usage.bankedFlags([{ id: 'a', label: 'a', banked_credits: { credits: [{ expires_at: minute + 10 }] } }, { id: 'b', label: 'b', banked_credits: { credits: [{ expires_at: minute + 40 }, { expires_at: minute + 70 }] } }], 0, minute + D);
+  assert.deepEqual(same.map(flag => flag.credits.length), [2, 1], 'credits expiring in the same minute share one flag; the next minute gets its own');
   const lines = usage.bankedFlagLines(flags[0], now);
-  assert.equal(lines.length, 2);
+  assert.equal(lines.length, 1);
   assert.match(lines[0], /^chatgpt1 · banked reset expires [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
 });
 
@@ -630,12 +633,13 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
     assert.deepEqual([Math.abs(marks[1].base - marks[0].top) < 1e-9, Math.abs(marks[1].top - 120) < 1e-9], [true, true], 'the Pro 100 segment starts where the Business one ends and refills the pool');
     assert.deepEqual(marks.map(item => item.label), marks.map(item => `+${usage.unitsText(item.gain)}`));
     assert.deepEqual([Number(stacked.dataset.t), codexSection.querySelector('.su-waste').dataset.t], [Math.round(fixed / 1000 + D), stacked.dataset.t], 'the waste arrow sits at the same x');
-    // Two credits expiring ten minutes apart, five hours from now, share one flag with a count; the nine-day ones are beyond the 7-day chart.
-    const flags = () => [...codexSection.querySelectorAll('.su-flag')].map(node => [node.dataset.count, node.querySelector('.su-flag-count')?.textContent ?? null, node.getAttribute('aria-label').replace(/expires \w{3} \d{1,2}:\d{2} (AM|PM)/g, 'expires <time>')]);
-    assert.deepEqual(flags(), [['2', '2', 'chatgptvitibot · banked reset expires <time>. chatgpt1 · banked reset expires <time>']]);
+    // Two credits expiring ten minutes apart, five hours from now, get one flag each; the nine-day ones are beyond the 7-day chart.
+    const flags = () => [...codexSection.querySelectorAll('.su-flag')].map(node => [node.dataset.account, node.getAttribute('aria-label').replace(/expires \w{3} \d{1,2}:\d{2} (AM|PM)/g, 'expires <time>')]);
+    assert.deepEqual(flags(), [['acct-team', 'chatgptvitibot · banked reset expires <time>'], ['acct-prolite', 'chatgpt1 · banked reset expires <time>']]);
+    assert.equal(codexSection.querySelectorAll('.su-flag-count').length, 0, 'different expiries are never counted together');
     assert.equal($$('.su-provider-limits[data-provider="anthropic"] .su-flag').length, 0, 'never-read credits draw no flag');
     await click(button('30d'));
-    assert.deepEqual(flags().map(flag => flag[0]), ['2', '1', '1']);
+    assert.deepEqual([flags().length, [...codexSection.querySelectorAll('.su-flag-count')].map(node => node.textContent).join()], [3, '×2'], 'the 30-day chart adds one ×2 flag for the two credits expiring at the same instant');
     // The weekly resets six days ago are within the 30-day chart's nine days of past: a quieter stacked marker without labels.
     const past = [...codexSection.querySelectorAll('.su-reset[data-kind=past]')].find(node => node.querySelectorAll('.su-reset-mark').length === 2);
     assert.deepEqual([past !== undefined, past?.querySelectorAll('.su-reset-text').length], [true, 0]);
@@ -647,7 +651,7 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
     assert.match(team[0], /^true\|Banked reset · expires [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM) \(in 5h 0m\)$/, 'within a day: orange');
     assert.match(team[1], /^false\|Banked reset · expires [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} (AM|PM) \(in 9d 0h\)$/);
     assert.match(prolite[0], /^true\|Banked reset · expires .* \(in 5h 10m\) · not usable now$/, 'applicable 0: the credits exist but cannot be used now');
-    assert.match(prolite[1], /^false\|Banked reset · expires .* \(in 9d 12h\) · not usable now$/);
+    assert.match(prolite[1], /^false\|Banked reset · expires .* \(in 9d 0h\) · not usable now$/);
     assert.equal($$('.su-account[data-account="acct-team"] .su-banked-unusable').length, 0);
   } finally { Date.now = realNow; }
 });

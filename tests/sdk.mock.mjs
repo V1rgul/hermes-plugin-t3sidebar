@@ -389,7 +389,7 @@ function simulateLimitPool(accounts, { from, fetched, since, scaleAt, seed = 0 }
     ] });
   return { history, accounts: accounts.map(snapshot) };
 }
-// The backend's banked_credits block: available credits expiring the given hours from now, granted a week before, and how many could be redeemed now.
+// Both accounts' nine-day credits expire at the same instant, so the 30-day chart shows one ×2 flag beside single flags. The backend's banked_credits block: available credits expiring the given hours from now, granted a week before, and how many could be redeemed now.
 const bankedCredits = (now, hours, applicable) => ({ fetched_at: now - 900, applicable_count: applicable, credits: hours.map(hour => ({ status: 'available', expires_at: now + hour * 3600, granted_at: now + hour * 3600 - 30 * 86400 })) });
 export function syntheticUsageLimits(hours = 168, scenario = 'mixed') {
   const shape = LIMIT_SCENARIOS[scenario] || LIMIT_SCENARIOS.mixed;
@@ -397,7 +397,7 @@ export function syntheticUsageLimits(hours = 168, scenario = 'mixed') {
   const prepare = list => list.map(account => ({ ...account, remaining: account.units * account.left, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: resetAfter(account.five, LIMIT_FIVE_HOURS, from), fiveUsed: 0 }));
   const codex = simulateLimitPool(prepare([
     { id: 'acct-team', label: 'chatgptvitibot', priority: 0, plan: 'team', units: 20, banked_resets: 2, banked_credits: bankedCredits(now, [5, 9 * 24], 2), weekly: now + shape.teamReset * 86400, five: now + 1.3 * 3600, left: shape.team },
-    { id: 'acct-prolite', label: 'chatgpt1', priority: 1, plan: 'prolite', units: 100, banked_resets: 2, banked_credits: bankedCredits(now, [5 + 10 / 60, 9.5 * 24], 0), weekly: now + shape.proliteReset * 86400, five: now + 3.1 * 3600, left: shape.prolite }
+    { id: 'acct-prolite', label: 'chatgpt1', priority: 1, plan: 'prolite', units: 100, banked_resets: 2, banked_credits: bankedCredits(now, [5 + 10 / 60, 9 * 24], 0), weekly: now + shape.proliteReset * 86400, five: now + 3.1 * 3600, left: shape.prolite }
   ]), { from, fetched, since, scaleAt: t => t >= now - 12 * 3600 ? shape.burst : shape.base });
   // Max 20x as Anthropic's usage endpoint names it (rateLimitTier), which the plugin maps to 200 weekly plan units.
   const claude = simulateLimitPool(prepare([
