@@ -590,7 +590,8 @@ test('the shared lookback and horizon controls change every chart at once', asyn
     assert.equal($('.su-lookback-value').textContent, '15d');
     const after = rates();
     assert.deepEqual(after.map((text, index) => text !== before[index] && /^(~\d+(\.\d)? units per hour|no drain data)$/.test(text)), [true, true], `every provider's rate follows the slider (${before} → ${after})`);
-    assert.deepEqual($$('.su-measure[data-kind="average"]').map(node => node.textContent.split(' · ')[0]), ['Average over 15d', 'Average over 15d']);
+    // The fixtures hold ten days of history, so a 15d lookback averages over those ten days.
+    assert.deepEqual($$('.su-measure[data-kind="average"]').map(node => node.textContent.split(' · ')[0]), ['Average over 10d', 'Average over 10d']);
     const spans = () => $$('.su-pooled .su-plot').map(node => Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100);
     assert.deepEqual(spans(), [9.1, 9.1]);
     await click(button('30d'));
@@ -788,15 +789,15 @@ test('the lookback slider moves between stops, changes the drain rate and widens
   // Reversed: position 0 is 30d on the left, 9 is 1h on the right, so 2h sits at position 8.
   assert.deepEqual([slider.min, slider.max, slider.step, slider.value, slider.getAttribute('aria-valuetext'), slider.style.getPropertyValue('--su-share')], ['0', '9', '1', '8', '2h', String(8 / 9)]);
   assert.equal($('.su-rate').textContent, '~4.0 units per hour', 'a Pro 100 account: one percent is one plan unit');
-  assert.equal($('.su-coverage'), null, 'two hours of data cover a two-hour lookback');
+  assert.equal(document.querySelectorAll('.su-coverage').length, 0, 'the headline never carries a coverage note');
   assert.match($('.su-measure[data-kind="empty"]').textContent, /^Empty in 18h \d+m · /, '74 points at about 4 per hour');
   assert.equal($('.su-measure[data-kind="average"]').textContent, 'Average over 2h · ~4.0 units/h');
   await slide(slider, 6);
   assert.equal($('.su-lookback input[type=range]').getAttribute('aria-valuetext'), '12h');
-  assert.deepEqual([$('.su-lookback-value').textContent, $('.su-rate').textContent, $('.su-coverage').textContent], ['12h', '~1.6 units per hour', 'based on 10h of data']);
-  // The requested twelve hours are drawn even though only ten are covered; the label's title says so.
+  assert.deepEqual([$('.su-lookback-value').textContent, $('.su-rate').textContent, document.querySelectorAll('.su-coverage').length], ['12h', '~1.6 units per hour', 0]);
+  // Only ten of the requested twelve hours are covered: the arrow and its label span those ten hours, and the title names the requested lookback.
   const averaged = $('.su-measure[data-kind="average"]');
-  assert.deepEqual([averaged.textContent, averaged.getAttribute('aria-label')], ['Average over 12h · ~1.6 units/h', 'Average over 12h · ~1.6 units/h (only 10h of data in that period)']);
+  assert.deepEqual([averaged.textContent, averaged.getAttribute('aria-label'), averaged.dataset.seconds], ['Average over 10h · ~1.6 units/h', 'Average over 10h · ~1.6 units/h (all the data in the last 12h)', String(10 * H - 60)]);
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 12);
   assert.equal(restPaths().at(-1), '/usage/limits?hours=168');
   await slide($('.su-lookback input[type=range]'), 1);
@@ -846,7 +847,7 @@ test('the averaging period is measured left of Now and cut at the plot edge with
   await slide($('.su-lookback input[type=range]'), 1);
   geometry = shape();
   assert.deepEqual([geometry.cap, geometry.startArrows, geometry.endArrows, geometry.left, near(geometry.right, nowPct())], ['false', 0, 1, 0, true], '15d reaches past the plot: cut at the edge, no left arrowhead or tick');
-  assert.match($('.su-measure[data-kind="average"]').textContent, /^Average over 15d · (~\d+(\.\d)? units\/h|no drain data)$/);
+  assert.match($('.su-measure[data-kind="average"]').textContent, /^Average over 10d · (~\d+(\.\d)? units\/h|no drain data)$/, 'ten days of history: the span and label cover those, still past the plot edge');
   await click(button('30d'));
   assert.equal(shape().cap, 'false', 'nine days of past still start after 15 days back');
   await slide($('.su-lookback input[type=range]'), 6);

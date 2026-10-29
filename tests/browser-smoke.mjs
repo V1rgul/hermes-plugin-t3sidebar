@@ -1795,8 +1795,8 @@ try {
           ticksAtEnds: Object.entries(ticks).every(([end, tick]) => Math.abs((end === 'start' ? tick.left : tick.right) - (end === 'start' ? box.left : box.right)) <= 1),
           text: text.textContent, label: { left: label.left, right: label.right, top: label.top, bottom: label.bottom }, full: text.scrollWidth <= text.clientWidth + 0.5, aboveLine: label.bottom <= box.top + 1 };
       };
-      const slider = document.querySelector('.su-lookback input[type=range]'), valueText = slider.getAttribute('aria-valuetext');
-      const dot = chart.querySelector('.su-empty-dot'), mark = dot ? r(dot) : null, lookback = Number(valueText.replace(/[hd]$/, '')) * (/d$/.test(valueText) ? 86400 : 3600);
+      // The averaging span is the lookback, or only the covered time when the history holds less; the chart reports which in data-seconds.
+      const dot = chart.querySelector('.su-empty-dot'), mark = dot ? r(dot) : null, lookback = Number(chart.querySelector('.su-measure[data-kind="average"]')?.dataset.seconds);
       const nowT = start + (nowX - plot.left) / plot.width * (end - start);
       // The notes row under a chart exists only when there is a note; without it nothing sits below the measurements.
       const footNode = chart.querySelector('.su-chart-foot'), foot = footNode ? r(footNode) : { top: Infinity }, row = r(chart.querySelector('.su-measures'));
@@ -2002,13 +2002,13 @@ try {
       check('Limits lookback fill still starts at the moved thumb and runs to the right end', fill1d.rightFilled === true && fill1d.leftFilled === false);
       // 15 days reach back past the 2.1 days of past on the chart: every averaging line is cut at the plot edge, without a left arrowhead.
       await usage.locator('.su-lookback input[type=range]').fill('1');
-      await usage.waitForFunction(() => /based on \d+d of data/.test(document.querySelector('.su-coverage')?.textContent || ''));
+      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '15d');
       await settle(usage);
       check('Limits lookback beyond the history requests more and says how much data it used', await usage.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'rest' && call[1] === '/usage/limits?hours=360')));
       const clipped = await measure(), otherClipped = await measureIn(ANTHROPIC);
       console.log(`USAGE LIMITS 15D: ${JSON.stringify({ clipped, otherClipped })}`);
       check('Limits 15d averaging lines are clipped at the plot edge with no left arrowhead or tick, on both charts', [clipped, otherClipped].every(geometry => geometry.lookbackX < geometry.plotLeft && averageOk(geometry) && geometry.average.arrows === 'end'
-        && /^Average over 15d · ~\d+(\.\d)? units\/h$/.test(geometry.average.text) && labelsOk(geometry)));
+        && /^Average over \d+d · ~\d+(\.\d)? units\/h$/.test(geometry.average.text) && labelsOk(geometry)));
       // fill() leaves the slider focused; its focus ring is not part of the resting design.
       await usage.locator('.su-lookback input[type=range]').blur();
       await usage.locator('.su-lookback input[type=range]').fill('6');

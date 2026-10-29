@@ -2850,7 +2850,7 @@ function MeasureRow({ nowPct, average, empty }) {
     // The title restores the full text when a narrow plot ellipsizes it.
     title: item.title || item.text, style: { left: `${(item.fromPct + item.toPct) / 2}%` } }, item.text);
   return h('div', { className: 'su-measures', ref: row },
-    average ? h('div', { className: 'su-measure', 'data-kind': 'average', role: 'note', 'aria-label': average.title || average.text },
+    average ? h('div', { className: 'su-measure', 'data-kind': 'average', 'data-seconds': Math.round(average.seconds), role: 'note', 'aria-label': average.title || average.text },
       h(MeasureSpan, { fromPct: average.fromPct, toPct: average.toPct, startCap: !average.clipped }), label(average, 'left', 0, nowPct)) : null,
     empty ? h('div', { className: 'su-measure', 'data-kind': 'empty', role: 'note', 'aria-label': empty.text },
       h(MeasureSpan, { fromPct: empty.fromPct, toPct: empty.toPct }), label(empty, 'right', nowPct, 100)) : null);
@@ -2997,11 +2997,12 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
   const emptyPct = emptyAt === null ? null : x(emptyAt) / VIEW_W * 100;
   const emptyText = emptyAt === null ? null : emptyAt - now < 60 ? 'Empty now' : `Empty in ${formatDurationShort(emptyAt - now)} · ${resetTime(emptyAt, now)}`;
   const emptyMeasured = emptyPct !== null && emptyPct - nowPct > 0.05;
-  // The averaged period always spans the requested lookback, even when the history covers less (the coverage note says so). When it reaches back past the plot it is cut at the plot edge without a left arrowhead, since its true start is not on the chart.
-  const averageClipped = now - lookbackS < start, averagePct = averageClipped ? 0 : x(now - lookbackS) / VIEW_W * 100;
-  const averageText = `Average over ${lookbackLabel(lookback)} · ${rateShort(projection.rate)}`;
-  const average = nowPct - averagePct > 0.05 ? { fromPct: averagePct, toPct: nowPct, clipped: averageClipped, text: averageText,
-    title: projection.partial ? `${averageText} (only ${coverageText(projection.coveredS)} of data in that period)` : averageText } : null;
+  // The averaged period spans the time the rate is actually based on: the requested lookback, or only the covered time when the history holds less (Virgile: the arrow must not claim 7d for a rate measured over 16 minutes). When it reaches back past the plot it is cut at the plot edge without a left arrowhead, since its true start is not on the chart.
+  const averageS = projection.partial ? projection.coveredS : lookbackS;
+  const averageClipped = now - averageS < start, averagePct = averageClipped ? 0 : x(now - averageS) / VIEW_W * 100;
+  const averageText = `Average over ${projection.partial ? coverageText(averageS) : lookbackLabel(lookback)} · ${rateShort(projection.rate)}`;
+  const average = nowPct - averagePct > 0.05 ? { fromPct: averagePct, toPct: nowPct, clipped: averageClipped, text: averageText, seconds: averageS,
+    title: projection.partial ? `${averageText} (all the data in the last ${lookbackLabel(lookback)})` : averageText } : null;
   const hoverT = hover === null ? null : start + hover * (end - start);
   const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
   // Over a mark its own tooltip speaks, so the crosshair and its inline tooltip step aside.
@@ -3023,9 +3024,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
       h('span', { className: 'su-pool' }, projection.capacity ? unitsText(projection.current) : '—'),
       h('span', { className: 'su-capacity', title: PLAN_UNITS_NOTE }, projection.capacity ? `/ ${unitsText(projection.capacity)} units` : 'no account readings yet'),
       composition ? h('span', { className: 'su-composition', title: PLAN_UNITS_NOTE }, `(${composition})`) : null,
-      h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate)),
-      // Kept out of the slider row: text appearing there while dragging would shift the slider under the pointer.
-      projection.partial ? h('span', { className: 'su-coverage' }, `based on ${coverageText(projection.coveredS)} of data`) : null),
+      h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate))),
     verdict ? h(VerdictLine, { verdict, now, windowKey }) : null,
     h('div', { className: 'su-limits-grid' },
       h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, h('span', { className: 'su-yunit', title: PLAN_UNITS_NOTE }, 'units'),
@@ -3169,7 +3168,7 @@ const USAGE_CSS = `
 @media(prefers-reduced-motion:reduce){.su-disclosure-chevron{transition:none}}
 .su-footnotes{display:flex;flex-direction:column;gap:4px}
 .su-headline{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}.su-pool{font-size:24px;font-weight:600;color:var(--su-color);font-variant-numeric:tabular-nums}
-.su-capacity{font-size:13px;color:var(--ui-text-secondary)}.su-rate{margin-left:10px;font-size:12px;color:var(--ui-text-tertiary)}.su-coverage{font-size:11px;color:var(--ui-text-quaternary,var(--ui-text-tertiary))}
+.su-capacity{font-size:13px;color:var(--ui-text-secondary)}.su-rate{margin-left:10px;font-size:12px;color:var(--ui-text-tertiary)}
 .su-lookback{display:inline-flex;align-items:center;gap:8px;font-size:11px;color:var(--ui-text-secondary)}
 .su-lookback-label{white-space:nowrap}.su-lookback-value{min-width:2.6em;color:var(--ui-text-primary);font-variant-numeric:tabular-nums;white-space:nowrap}
 .su-range{-webkit-appearance:none;appearance:none;width:132px;height:16px;margin:0;padding:0;background:transparent;cursor:pointer}
