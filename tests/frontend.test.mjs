@@ -1762,9 +1762,26 @@ test('pin, snooze and restore are reversed through ordinary actions without any 
   assert.equal(row('readme').closest('section'), shelf('Archived')); noUndo();
 });
 
-test('unfiltered empty Ready keeps catch-up while a no-match project filter suppresses it', async () => {
+test('empty categories omit placeholders on first load and after their last card leaves', async () => {
+  mock.control.rows = []; mock.control.live = [];
+  await mount();
+  const assertEmptyCategories = () => {
+    for (const name of ['Pinned', 'Ready', 'Working', 'Snoozed', 'Archived']) {
+      assert.equal(shelf(name).querySelectorAll('.sf-row, .sf-empty').length, 0, name);
+    }
+    for (const name of ['Working', 'Snoozed', 'Archived']) assert.ok(button(`${name} (0)`));
+    assert.doesNotMatch(document.body.textContent, /All caught up|No sessions|No matching sessions/);
+  };
+  assertEmptyCategories();
+  mock.control.rows = [{ id: 'ready', title: 'Existing conversation', message_count: 2 }];
+  await refresh(); assert.ok(row('ready'));
+  mock.control.rows = []; await refresh();
+  assertEmptyCategories();
+});
+
+test('empty Ready has no catch-up message while a no-match project filter retains feedback', async () => {
   mock.control.rows = mock.control.rows.filter(r => r.id === 'archived'); mock.control.live = [];
-  await mount(); assert.match(shelf('Ready').textContent, /All caught up/);
+  await mount(); assert.doesNotMatch(shelf('Ready').textContent, /All caught up|No sessions/);
   await click(button('Filter sessions'));
   // A known project disappears from the loaded data after it has been selected.
   await click(button('Filter by Synthetic Sidebar'));
@@ -1885,4 +1902,32 @@ test('remembered subagent counts are per runtime, forgotten when it leaves and r
   assert.equal(flow.rememberSubagents(second, memory, 'scope-a'), second, 'a runtime that left the snapshot is forgotten');
   flow.rememberSubagents(first, memory, 'scope-a');
   assert.equal(flow.rememberSubagents(second, memory, 'scope-b'), second, 'another scope starts empty');
+});
+
+test('compaction draws the pinched ring in detailed mode only, keeps +N and the time, and shows even without a subagent count', async () => {
+  const rows = [{ id: 'root', last_active: 10 }];
+  const card = runtime => flow.buildSections(rows, { sessions: {} }, [{ id: 'runtime', session_key: 'root', status: 'working', ...runtime }], { now: 100 }).working[0];
+  assert.equal(card({ compacting: true, running_subagents: 2 }).workingCompacting, true);
+  assert.equal(flow.workingDetail(card({ compacting: true, running_subagents: 2 })), 'Compacting context · 2 subagents running');
+  assert.equal(flow.workingDetail(card({ compacting: true, running_subagents: null })), 'Compacting context');
+  for (const compacting of [false, null, undefined]) assert.equal(card({ compacting, running_subagents: 0 }).workingCompacting, false, String(compacting));
+  // Idle rows never carry a compaction, whatever the runtime says.
+  assert.equal(flow.buildSections(rows, { sessions: {} }, [{ session_key: 'root', status: 'idle', compacting: true }], { now: 100 }).active[0].workingCompacting, false);
+
+  const worker = mock.control.live.find(item => item.id === 'runtime-worker');
+  worker.running_subagents = 2; worker.compacting = true;
+  await mount();
+  const badge = () => {
+    const status = row('root').querySelector('.sf-status');
+    return { compacting: status.dataset.compacting ?? null, paths: [...status.querySelectorAll('svg path')].map(path => path.getAttribute('d')).length, count: status.querySelector('.sf-subagents')?.textContent ?? null,
+      label: status.querySelector('.sf-sr').textContent, title: row('root').querySelector('.sf-open').title.split('\n').at(-1) };
+  };
+  // Default mode stays T3 Code's single dashed icon.
+  assert.deepEqual(badge(), { compacting: null, paths: 8, count: null, label: 'Working', title: 'working' });
+  mock.storageData.set('working-details', 'true'); await remount();
+  assert.deepEqual(badge(), { compacting: 'true', paths: 6, count: '+2', label: 'Working: Compacting context · 2 subagents running', title: 'Compacting context · 2 subagents running' });
+  worker.running_subagents = null; mock.queryClient.clear(); await remount();
+  assert.deepEqual(badge(), { compacting: 'true', paths: 6, count: null, label: 'Working: Compacting context', title: 'Compacting context' });
+  worker.compacting = false; worker.running_subagents = 0; await refresh();
+  assert.deepEqual(badge(), { compacting: null, paths: 1, count: null, label: 'Working: Agent working', title: 'Agent working' });
 });

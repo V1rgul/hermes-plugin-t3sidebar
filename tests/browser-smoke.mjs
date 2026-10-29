@@ -103,6 +103,7 @@ try {
   await page.getByRole('searchbox').fill('Runtime classification');
   await page.locator('[data-session-id="root"]').waitFor();
   check('search temporarily reveals persisted folded category without catch-up text', await page.locator('[data-section="working"]').getAttribute('data-closed') === 'false' && !await page.getByText('All caught up', { exact: true }).count());
+  check('empty categories have no placeholder text while headings remain visible', !await page.locator('.sf-section .sf-empty').count() && await page.getByRole('button', { name: 'Snoozed (0)', exact: true }).isVisible() && await page.getByRole('button', { name: 'Archived (0)', exact: true }).isVisible());
   await page.locator('.sf-search input').evaluate(el => el.blur());
   await page.mouse.move(1100, 850);
   check('search clear cross stays visible without hover or focus', await page.getByRole('button', { name: 'Clear search', exact: true }).isVisible() && await page.getByRole('button', { name: 'Clear search', exact: true }).evaluate(el => getComputedStyle(el).opacity === '1'));
@@ -810,6 +811,26 @@ try {
       && time.left - count.right >= 3 && Math.abs(centre(count) - centre(time)) <= 1
       && getComputedStyle(el.querySelector('.sf-subagents')).fontWeight === '400' && getComputedStyle(el.querySelector('.sf-working-duration')).fontWeight === '600';
   }));
+  // The same card compacting: the pinched ring replaces the dashed one, +2 and the time stay put.
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.live.find(row => row.session_key === 'design').compacting = true;
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  await page.waitForFunction(() => document.querySelector('[data-session-id="design"] .sf-status')?.dataset.compacting === 'true');
+  check('a compacting card draws the pinched ring, centred, with +2 touching it and its own hover detail', await design.locator('.sf-status').evaluate(el => {
+    const ring = el.querySelector('svg[data-status-icon=working]').getBoundingClientRect(), count = el.querySelector('.sf-subagents').getBoundingClientRect(), tokens = el.closest('.sf-card-meta').querySelector('.sf-token').getBoundingClientRect();
+    const centre = rect => rect.top + rect.height / 2;
+    return el.querySelectorAll('svg path').length === 6 && ring.width === 13 && Math.abs(centre(ring) - centre(tokens)) <= 1 && Math.abs(count.left - ring.right) <= 0.5
+      && el.querySelector('.sf-sr').textContent === 'Working: Compacting context · 2 subagents running' && el.closest('.sf-open').title.endsWith('\nCompacting context · 2 subagents running');
+  }));
+  await design.screenshot({ path: join(screenshotDir, 'compacting-card.png') });
+  await page.evaluate(async () => {
+    const fixture = window.hermesT3SidebarHarness;
+    fixture.control.live.find(row => row.session_key === 'design').compacting = false;
+    await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+  });
+  await page.waitForFunction(() => document.querySelector('[data-session-id="design"] .sf-status')?.dataset.compacting === undefined);
   await page.evaluate(async () => {
     const fixture = window.hermesT3SidebarHarness;
     fixture.control.live.find(row => row.session_key === 'design').running_subagents = 0;

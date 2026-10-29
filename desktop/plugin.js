@@ -134,8 +134,10 @@ export function rememberSubagents(live, memory, scope) {
 }
 // Hover title for a Working card. Null when the subagent count is unknown: the badge then shows only the elapsed time.
 export function workingDetail(row) {
-  if (row.working !== true || !Number.isInteger(row.workingSubagents)) return null;
+  if (row.working !== true) return null;
   const subagents = row.workingSubagents > 0 ? `${row.workingSubagents} subagent${row.workingSubagents > 1 ? 's' : ''} running` : null;
+  if (row.workingCompacting) return ['Compacting context', subagents].filter(Boolean).join(' · ');
+  if (!Number.isInteger(row.workingSubagents)) return null;
   if (row.workingMain) return ['Agent working', subagents].filter(Boolean).join(' · ');
   return subagents || 'Waiting on a background command';
 }
@@ -271,7 +273,8 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     const working = observed === 'working';
     result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, runStartedAt: workingSince(observed, matches, metadata.runs?.[durableId(row)]), section, status, woke, newSession,
       runtimeId: runtimes.length === 1 ? runtimes[0].id : null, activity,
-      working, workingMain: working && matches.some(ownTurn), workingSubagents: working ? displayedSubagents(matches) : null });
+      working, workingMain: working && matches.some(ownTurn), workingSubagents: working ? displayedSubagents(matches) : null,
+      workingCompacting: working && matches.some(i => i.compacting === true) });
   }
   for (const section of SECTIONS) result[section].sort((a, b) => {
     if (section === 'active' && (a.status === 'waiting') !== (b.status === 'waiting')) return a.status === 'waiting' ? -1 : 1;
@@ -979,6 +982,8 @@ function projectMark(project) {
 const STATUS_ICONS = {
   // Lucide circle: the conversation's own turn is running. The dashed circle means only subagents or a background command are.
   agent: ['M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0'],
+  // Compacting, drawn for this plugin: the same ring opened on the diagonal, with Lucide minimize-2's arrows pushing in through the gaps.
+  compacting: ['M21.397 8.58A10 10 0 0 1 8.58 21.397', 'M2.603 15.42A10 10 0 0 1 15.42 2.603', 'm14 10 7-7', 'M18 10h-4V6', 'm3 21 7-7', 'M6 14h4v4'],
   working: ['M10.1 2.182a10 10 0 0 1 3.8 0', 'M13.9 21.818a10 10 0 0 1-3.8 0', 'M17.609 3.721a10 10 0 0 1 2.69 2.7', 'M2.182 13.9a10 10 0 0 1 0-3.8', 'M20.279 17.609a10 10 0 0 1-2.7 2.69', 'M21.818 10.1a10 10 0 0 1 0 3.8', 'M3.721 6.391a10 10 0 0 1 2.7-2.69', 'M6.391 20.279a10 10 0 0 1-2.69-2.7'],
   input: ['M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719', 'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3', 'M12 17h.01'],
   done: ['M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0', 'm16 9-5.5 5.5L8 12'],
@@ -1325,10 +1330,11 @@ function statusBadge(badge, row, hidden, details = false) {
       row.runStartedAt ? h(WorkingDuration, { startedAt: row.runStartedAt, hidden }) : null);
   }
   if (badge === 'working') {
-    // Without a known subagent count the solid/dashed distinction could mislead, so only the elapsed time remains.
-    const known = Number.isInteger(row.workingSubagents), subagents = known && row.workingSubagents > 0 ? row.workingSubagents : 0;
-    return h('span', { className: 'sf-status', 'data-status': badge, 'data-agent': known ? String(row.workingMain === true) : undefined },
-      known ? statusIcon('working', row.workingMain ? 'agent' : 'working') : null,
+    // Without a known subagent count the solid/dashed distinction could mislead, so only the elapsed time remains. A compaction
+    // is known on its own, so its pinched ring shows either way.
+    const compacting = row.workingCompacting === true, known = Number.isInteger(row.workingSubagents), subagents = known && row.workingSubagents > 0 ? row.workingSubagents : 0;
+    return h('span', { className: 'sf-status', 'data-status': badge, 'data-compacting': compacting || undefined, 'data-agent': known && !compacting ? String(row.workingMain === true) : undefined },
+      compacting ? statusIcon('working', 'compacting') : known ? statusIcon('working', row.workingMain ? 'agent' : 'working') : null,
       subagents ? h('span', { className: 'sf-subagents', 'aria-hidden': true }, `+${subagents}`) : null,
       // The ring, count and elapsed time replace the visible Working word; screen readers still hear it with the details.
       h('span', { className: 'sf-sr' }, ['Working', workingDetail(row)].filter(Boolean).join(': ')),
@@ -1826,7 +1832,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
       h('div', { className: 'sf-section-body', 'aria-label': `${section === 'active' ? 'Ready' : LABELS[section]} sessions`, 'aria-hidden': closed || undefined, inert: closed || undefined, tabIndex: -1 },
         section === 'archived' && archives.isError ? h('div', { className: 'sf-empty', role: 'alert' }, `Archives unavailable: ${archives.error.message}`) : null,
         section === 'archived' && archives.isError && !archives.data ? null : items,
-        entries.length || section === 'archived' && archives.isError || section === 'pinned' || section === 'working' || section === 'active' && filtering ? null : h('div', { className: 'sf-empty' }, section === 'active' ? 'All caught up' : section === 'archived' && archives.isLoading ? 'Loading archives…' : 'No sessions'),
+        section === 'archived' && !entries.length && !archives.isError && archives.isLoading ? h('div', { className: 'sf-empty' }, 'Loading archives…') : null,
         section === 'archived' && !archives.isError && archives.data?.has_more ? h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: archives.isFetching, onClick: () => setArchiveLimit(previous => previous + 1) }, 'Browse older archives') : null));
 
   };

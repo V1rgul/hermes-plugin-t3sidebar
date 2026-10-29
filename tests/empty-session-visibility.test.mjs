@@ -38,7 +38,7 @@ test('both persisted and runtime-only empty sessions are absent without a prompt
 	assert.equal(!!row('live-empty'), false);
 	assert.ok(row('history')); assert.ok(row('unknown'));
 	assert.ok(mock.calls.some(call => call[0] === 'getDraft' && call[1] === 'live-empty'), 'hidden rows still inspect their own draft');
-	assert.equal(document.querySelector('[data-section="active"] .sf-empty'), null);
+	assert.equal(Boolean(document.querySelector('[data-section="active"] .sf-empty')), false);
 });
 
 test('draft-bearing empty session displays exact runtime project, glyph, color and provider, then disappears on clear', async () => {

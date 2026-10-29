@@ -394,6 +394,19 @@ def runtime_awaits_processes(session):
 		return None
 
 
+# The automatic compaction heartbeat stamps the agent's activity with these descriptions under the agent.compression provenance while it runs. Stopping writes "completed" or "failed" under the same provenance, and the next ordinary activity replaces it, so neither counts.
+_COMPACTION_RUNNING = frozenset({"context compression started", "context compression in progress"})
+
+
+def runtime_compacting(session, agent):
+	"""Manual /compress (session flag) or an automatic compaction whose heartbeat is still running on the live agent. Call under the registry lock."""
+	if session.get("_manual_compress_active"):
+		return True
+	provenance = getattr(agent, "_last_activity_provenance", None)
+	return (getattr(provenance, "value", provenance) == "agent.compression"
+		and getattr(agent, "_last_activity_desc", None) in _COMPACTION_RUNNING)
+
+
 def runtime_turn_started_at(session):
 	"""Native in-flight turn start (Desktop's own elapsed-timer source), never a retained failed turn.
 
@@ -490,7 +503,7 @@ def standalone_runtime(request, profile, actor):
 	from hermes_cli.web_server_sessions import _open_session_db_for_profile
 	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
 
-	facts, parents, turn_starts, compressing, awaiting = {}, {}, {}, {}, {}
+	facts, parents, turn_starts, compressing, compacting, awaiting = {}, {}, {}, {}, {}, {}
 
 	def profile_home(name):
 		resolved = server._profile_home(name)
@@ -512,6 +525,7 @@ def standalone_runtime(request, profile, actor):
 			captured = runtime_session_facts(session)
 			turn_starts[(sid, key)] = runtime_turn_started_at(session)
 			compressing[(sid, key)] = bool(session.get("_manual_compress_active"))
+			compacting[(sid, key)] = runtime_compacting(session, parent)
 		# The native mapper can read titles from SQLite. It must run outside
 		# the global registry lock, just like catalog/default-route/lineage IO.
 		item = server._session_live_item(sid, session, current)
@@ -567,6 +581,7 @@ def standalone_runtime(request, profile, actor):
 			item["turn_started_at"] = turn_starts.get(identity) or runtime_compression_started_at(
 				home, row["id"], parents[identity][0], compressing.get(identity, False))
 			item["awaiting_processes"] = awaiting.get(identity)
+			item["compacting"] = compacting.get(identity, False)
 			item["running_subagents"] = standalone_subagent_count(server, row,
 				parents[identity], db, home)
 			# All catalog/default-route/lineage IO ran outside the registry lock.
@@ -649,6 +664,8 @@ async def native_runtime(request, profile):
 		row["running_subagents"] = None
 		# Authority rows expose no process ownership; unknown never means idle.
 		row["awaiting_processes"] = None
+		# Nor any agent activity: compaction is unknown.
+		row["compacting"] = None
 		# Authority rows carry no turn start; Desktop falls back to the hook-recorded open turn.
 		row["turn_started_at"] = None
 		try:
