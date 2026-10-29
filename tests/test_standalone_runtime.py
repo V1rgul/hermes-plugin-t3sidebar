@@ -182,6 +182,33 @@ class StandaloneRuntime(unittest.TestCase):
 		self.client.get("/runtime?profile=exact-profile")
 		self.assertNotIn((str(self.current), "runtime-a"), backend._compression_seen)
 
+	def test_compacting_reports_manual_compress_and_a_running_automatic_compaction_heartbeat(self):
+		from agent.conversation_compression import _CompressionActivityHeartbeat
+		from agent.session_activity import ActivityProvenance
+
+		session, agent = self.registry["runtime-a"], self.registry["runtime-a"]["agent"]
+		self.assertIs(self.runtime_row()["compacting"], False)
+		session["_manual_compress_active"] = True
+		self.assertIs(self.runtime_row()["compacting"], True)
+		session.pop("_manual_compress_active")
+		# Drive the native heartbeat against a recording agent: started and in-progress stamps count, its stop stamp does not.
+		agent._touch_activity = lambda desc, provenance=None, force_persist=False: (
+			setattr(agent, "_last_activity_desc", desc), setattr(agent, "_last_activity_provenance", provenance or ActivityProvenance.UNKNOWN))
+		heartbeat = _CompressionActivityHeartbeat(agent, interval_seconds=3600).start()
+		try:
+			self.assertIs(self.runtime_row()["compacting"], True)
+			heartbeat._touch("context compression in progress")
+			self.assertIs(self.runtime_row()["compacting"], True)
+		finally:
+			heartbeat.stop()
+		self.assertEqual(agent._last_activity_provenance, ActivityProvenance.AGENT_COMPRESSION)
+		self.assertIs(self.runtime_row()["compacting"], False)
+		agent._touch_activity("context compression in progress", provenance=ActivityProvenance.AGENT_COMPRESSION_TIMEOUT)
+		self.assertIs(self.runtime_row()["compacting"], False, "a terminal timeout stamp is not a running compaction")
+		agent._touch_activity("calling the model")
+		self.assertIs(self.runtime_row()["compacting"], False)
+		self.assertNotIn("compression", self.client.get("/runtime?profile=exact-profile").text)
+
 	def test_awaited_background_processes_use_the_native_notification_predicate(self):
 		# Real registry predicate with a synthetic tracked process; only notifying processes keep a session busy.
 		running = {}

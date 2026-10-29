@@ -30,6 +30,8 @@ The runtime snapshot includes a read-only `running_subagents` count. A positive 
 
 With the Detailed Working indicator setting on, the Working badge displays the count as `+N` (summed across the card's runtimes, a repeated runtime counted once). Display, unlike classification, keeps the last known value: a failed poll keeps the whole last snapshot, and a runtime whose count reads as unknown on a successful poll keeps showing its previous count. That memory is per source/profile/epoch and forgets runtimes that leave the snapshot. A card with no known count shows only its elapsed time.
 
+The runtime snapshot also carries `compacting`: true for a manual `/compress` (the native session flag) or while an automatic compaction's activity heartbeat is running on the live agent (provenance `agent.compression` with the native "started"/"in progress" stamps; its "completed"/"failed" stop stamp and any later activity clear it). Authority rows report null. Only the detailed Working indicator uses it, and only for cards already Working; it never affects classification.
+
 ## Confirmed deletion
 
 The right-click Delete session action opens the public SDK's `ConfirmDialog`, the same component used by native session deletion. Cancel performs no write. Confirmation reads an exact, profile-qualified native mutation snapshot through the read-only companion, then issues routed `session.mutate` with operation `delete`, explicit empty payload, a retained request ID and the snapshot's revision/generation. The plugin validates the receipt and reads back every returned deleted ID as explicitly absent before confirming success. A lost reply retries the original request rather than generating fresh fences. Source/profile/epoch changes fence every await.
