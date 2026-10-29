@@ -40,6 +40,13 @@ function readPinnedGap(ctx) {
 function usePinnedGap(ctx) {
   return useQuery({ queryKey: PINNED_GAP_KEY, queryFn: () => readPinnedGap(ctx), initialData: () => readPinnedGap(ctx), staleTime: Infinity }).data;
 }
+const SHOW_TOKENS_KEY = ['hermes-t3sidebar-preferences', 'show-tokens'];
+function readShowTokens(ctx) {
+  try { return ctx.storage.get('show-tokens', true) !== false; } catch (_) { return true; }
+}
+function useShowTokens(ctx) {
+  return useQuery({ queryKey: SHOW_TOKENS_KEY, queryFn: () => readShowTokens(ctx), initialData: () => readShowTokens(ctx), staleTime: Infinity }).data;
+}
 const activationEpoch = sdk.atom(gatewayActivationEpoch());
 export const durableId = row => row._lineage_root_id || row.id;
 export const aliases = row => [...new Set([row.id, row.resolved_id, durableId(row), ...(row._lineage_ids || [])].filter(Boolean))];
@@ -1052,8 +1059,8 @@ function MenuAction({ name, codicon, className = '', destructive = false, childr
 }
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
 function Settings({ ctx }) {
-  const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedGap = usePinnedGap(ctx);
-  const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [gapError, setGapError] = useState('');
+  const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedGap = usePinnedGap(ctx), showTokens = useShowTokens(ctx);
+  const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [gapError, setGapError] = useState(''), [tokensError, setTokensError] = useState('');
   const save = value => {
     if (!validSnoozeTime(value)) { setError('Choose a valid time.'); return; }
     try {
@@ -1076,6 +1083,13 @@ function Settings({ ctx }) {
       client.setQueryData(PINNED_GAP_KEY, on); setGapError('');
     } catch (err) { setGapError(err.message); }
   };
+  const saveTokens = on => {
+    try {
+      ctx.storage.set('show-tokens', on);
+      if (ctx.storage.get('show-tokens') !== on) throw new Error('The token count setting was not saved.');
+      client.setQueryData(SHOW_TOKENS_KEY, on); setTokensError('');
+    } catch (err) { setTokensError(err.message); }
+  };
   // The host already supplies the page title and gutters; behavior notes live in docs/behavior.md.
   return h('div', null, h('style', null, SETTINGS_CSS), h(sdk.ListRow ?? SettingsRow, {
     title: 'Snooze preset time',
@@ -1092,6 +1106,11 @@ function Settings({ ctx }) {
     description: "Adds a small gap below pinned session, so they're visually separated",
     checked: pinnedGap, onChange: saveGap,
     below: gapError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, gapError) : null
+  }), h(sdk.ToggleRow ?? SettingsToggleRow, {
+    label: 'Show token counts',
+    description: 'Show total input and output tokens on session cards.',
+    checked: showTokens, onChange: saveTokens,
+    below: tokensError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, tokensError) : null
   }));
 }
 // The settings page renders without the sidebar's stylesheet. Masking the native picker button keeps its click-to-open picker while drawing the same alarm as the hover Snooze control instead of a plain clock.
@@ -1344,7 +1363,7 @@ function statusBadge(badge, row, hidden, details = false) {
     statusIcon(badge),
     { done: 'Done', woke: 'Woke', input: 'Input' }[badge]);
 }
-function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain, presetTime, snoozeDetail, workingDetails }) {
+function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain, presetTime, snoozeDetail, workingDetails, showTokens }) {
   const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
   useEffect(() => { retain?.(row.key, menuOpen || snoozeOpen); return () => retain?.(row.key, false); }, [retain, row.key, menuOpen, snoozeOpen]);
   const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
@@ -1372,7 +1391,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
           row.project?.name || !row.newSession ? h('span', { className: 'sf-project-name' }, row.project?.name || 'Project unavailable') : null),
         row.status === 'unknown' ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': 'Status unknown' }, '?') : null,
         provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, title: row.provider }, provider) : null,
-        h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${tokens}` }, tokens),
+        showTokens ? h('span', { className: 'sf-token', title: 'Total input and output tokens', 'aria-label': `Total tokens: ${tokens}` }, tokens) : null,
         // A running snoozed card stays in Snoozed but still shows its Working status, between tokens and the countdown.
         snoozed && isWorking(row) ? h('span', { className: 'sf-time sf-snooze-working' }, statusBadge('working', row, hidden, workingDetails)) : null,
         h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row, hidden, workingDetails) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
@@ -1665,7 +1684,7 @@ function ProjectChoice({ choice, selected, scope, controller, filterProject, clo
       onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject, close }) : null));
 }
 function ScopedSidebar({ ctx, controller, scope }) {
-  const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedGap = usePinnedGap(ctx);
+  const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedGap = usePinnedGap(ctx), showTokens = useShowTokens(ctx);
   const client = useQueryClient(), activeId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner);
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false), [deleteTarget, setDeleteTarget] = useState(null);
   const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [actionError, setActionError] = useState('');
@@ -1817,7 +1836,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const disabled = latest.current.disabled;
   const renderRow = (row, retain) => h(MemoSessionRow, { key: row.key, row, retain, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
     draftPresent: row.newSession && emptyDrafts.has(draftIdentity(row)),
-    presetTime, workingDetails, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
+    presetTime, workingDetails, showTokens, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
   const renderSection = section => {
     const entries = sections[section], closed = isClosed(section);
@@ -1839,7 +1858,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // Toolbar/popover/error state is not a list input: retain its element tree,
   // not only the cards, so these interactions never walk thousands of rows.
   const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, settled, activeId, activeOwner,
-    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, workingDetails, emptyDrafts,
+    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, workingDetails, showTokens, emptyDrafts,
     archives.isError, archives.error, !archives.data, archives.isLoading, archives.isFetching, archives.data?.has_more]);
   // CSS flex owns every shelf height (see the stylesheet). A pure JavaScript allocator was also built and profiled: pixel heights
   // computed from card counts, exact Ready-first priority even in short panes, and Working/Snoozed capped at 40%. Once fold

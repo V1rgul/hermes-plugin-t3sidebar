@@ -136,8 +136,71 @@ test('unavailable storage reads leave settings and default presets usable', asyn
 	mock.ctx.storage = { ...storage, get() { throw new Error('fixture storage unavailable'); } };
 	plugin.register(mock.ctx); await render();
 	assert.equal($('[aria-label="Snooze preset time"]').value, '09:00');
+	assert.equal($('[role=switch][aria-label="Show token counts"]').getAttribute('aria-checked'), 'true');
+	assert.ok($('[data-session-id="design"] .sf-token'));
 	await click($('[data-session-id="design"] [aria-label="Snooze session"]'));
 	assert.ok(button('Tomorrow at 9:00')); assert.ok(button('Next Monday at 9:00'));
+});
+
+test('Show token counts defaults on, updates all shelves immediately and persists across remounts and sources', async () => {
+	plugin.register(mock.ctx); await render();
+	const toggle = () => $('[role=switch][aria-label="Show token counts"]');
+	const cards = () => [...document.querySelectorAll('.sf-row')];
+	const metadata = () => cards().map(row => ({ id: row.dataset.sessionId, provider: row.querySelector('.sf-provider')?.getAttribute('aria-label'), time: row.querySelector('.sf-time')?.textContent, title: row.querySelector('.sf-row-title').textContent }));
+	assert.equal(toggle().getAttribute('aria-checked'), 'true');
+	for (const section of ['pinned', 'active', 'working', 'snoozed', 'archived']) assert.ok($(`[data-section="${section}"] .sf-token`), section);
+	assert.ok(cards().every(row => row.querySelector('.sf-token')));
+	const before = metadata();
+	await click(toggle());
+	assert.equal(storage.get('show-tokens'), false);
+	assert.equal(toggle().getAttribute('aria-checked'), 'false');
+	assert.equal(document.querySelectorAll('.sf-token, [aria-label^="Total tokens:"]').length, 0);
+	assert.deepEqual(metadata(), before, 'provider, status/time, title and row order remain unchanged');
+	await act(async () => root.unmount()); root = null;
+	mock.queryClient.clear(); await render();
+	assert.equal(toggle().getAttribute('aria-checked'), 'false');
+	assert.equal(document.querySelectorAll('.sf-token').length, 0);
+	await act(async () => mock.switchScope('source-b', 'other')); await tick(); await tick();
+	assert.equal(document.querySelectorAll('.sf-token').length, 0);
+	await click(toggle());
+	assert.equal(storage.get('show-tokens'), true);
+	assert.equal(toggle().getAttribute('aria-checked'), 'true');
+	assert.ok(cards().every(row => row.querySelector('.sf-token')));
+});
+
+for (const saved of ['false', 0, null, {}]) test(`invalid stored token visibility ${JSON.stringify(saved)} keeps counters on`, async () => {
+	storage.set('show-tokens', saved); plugin.register(mock.ctx); await render();
+	assert.equal($('[role=switch][aria-label="Show token counts"]').getAttribute('aria-checked'), 'true');
+	assert.ok($('[data-session-id="design"] .sf-token'));
+});
+
+test('Show token counts removes unavailable-value placeholders as well as zero and known counts', async () => {
+	const design = mock.control.rows.find(row => row.id === 'design');
+	delete design.total_tokens; delete design.input_tokens; delete design.output_tokens;
+	Object.assign(mock.control.rows.find(row => row.id === 'pinned'), { total_tokens: 0 });
+	plugin.register(mock.ctx); await render();
+	assert.equal($('[data-session-id="design"] .sf-token').textContent, '—');
+	assert.equal($('[data-session-id="pinned"] .sf-token').textContent, '0');
+	await click($('[role=switch][aria-label="Show token counts"]'));
+	assert.equal(document.querySelectorAll('.sf-token').length, 0);
+});
+
+test('Show token counts rejects failed and unverified saves without changing cards, then recovers', async () => {
+	plugin.register(mock.ctx); await render();
+	const toggle = () => $('[role=switch][aria-label="Show token counts"]');
+	mock.ctx.storage = { ...storage, set() { throw new Error('fixture storage unavailable'); } };
+	await click(toggle());
+	assert.match($('[role=alert]').textContent, /storage unavailable/);
+	assert.equal(toggle().getAttribute('aria-checked'), 'true');
+	assert.ok($('[data-session-id="design"] .sf-token'));
+	mock.ctx.storage = { ...storage, set() {} };
+	await click(toggle());
+	assert.match($('[role=alert]').textContent, /not saved/);
+	assert.equal(toggle().getAttribute('aria-checked'), 'true');
+	assert.ok($('[data-session-id="design"] .sf-token'));
+	mock.ctx.storage = storage;
+	await click(toggle());
+	assert.equal(document.querySelectorAll('[role=alert], .sf-token').length, 0);
 });
 
 test('the Detailed Working indicator setting defaults off, persists, switches every card without a reload and rejects failed saves', async () => {

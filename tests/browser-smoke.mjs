@@ -60,6 +60,41 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator('[data-session-id="approval"]').waitFor();
   await page.waitForFunction(() => document.querySelector('[data-session-id="root"]')?.dataset.working === 'true');
+  {
+    const visibility = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+    visibility.on('pageerror', error => errors.push(error.message));
+    await visibility.emulateMedia({ reducedMotion: 'reduce' });
+    await visibility.goto(`http://127.0.0.1:${server.address().port}`);
+    await visibility.locator('[data-session-id="root"][data-working=true]').waitFor();
+    await visibility.getByRole('button', { name: 'Plugin settings', exact: true }).click();
+    const toggle = visibility.getByRole('switch', { name: 'Show token counts', exact: true });
+    const metadata = () => visibility.locator('.sf-row').evaluateAll(rows => rows.map(row => ({
+      id: row.dataset.sessionId, provider: row.querySelector('.sf-provider')?.getAttribute('aria-label'),
+      time: row.querySelector('.sf-time')?.textContent, height: row.getBoundingClientRect().height,
+      title: row.querySelector('.sf-row-title')?.textContent
+    })));
+    check('Show token counts defaults on for every session card', await toggle.getAttribute('aria-checked') === 'true' && await visibility.locator('.sf-token').count() === await visibility.locator('.sf-row').count());
+    const before = await metadata();
+    await toggle.click();
+    await visibility.waitForFunction(() => !document.querySelector('.sf-token'));
+    check('disabling token counts removes their accessible labels and keeps card metadata and heights unchanged', !await visibility.locator('[aria-label^="Total tokens:"]').count() && JSON.stringify(await metadata()) === JSON.stringify(before));
+    await visibility.reload();
+    await visibility.locator('[data-session-id="root"][data-working=true]').waitFor();
+    await visibility.getByRole('button', { name: 'Plugin settings', exact: true }).click();
+    check('hidden token counts persist through a full browser reload', await toggle.getAttribute('aria-checked') === 'false' && !await visibility.locator('.sf-token').count());
+    await visibility.getByRole('button', { name: 'Switch mock source', exact: true }).click();
+    await visibility.locator('[data-session-id="root"][data-working=true]').waitFor();
+    check('token visibility stays a Desktop preference across sources', !await visibility.locator('.sf-token').count());
+    await toggle.click();
+    await visibility.waitForFunction(() => document.querySelectorAll('.sf-token').length === document.querySelectorAll('.sf-row').length);
+    check('enabling token counts restores every counter without reloading', await toggle.getAttribute('aria-checked') === 'true' && await visibility.locator('.sf-token').count() > 0);
+    await visibility.locator('.harness-sidebar').evaluate(el => { el.style.width = '240px'; });
+    check('token counts fit narrow cards without horizontal overflow', await visibility.locator('.sf-card-meta').evaluateAll(nodes => nodes.every(el => el.scrollWidth <= el.clientWidth + 1)));
+    await toggle.click();
+    await visibility.waitForFunction(() => !document.querySelector('.sf-token'));
+    check('hidden token counts leave no horizontal overflow on narrow cards', await visibility.locator('.sf-card-meta').evaluateAll(nodes => nodes.every(el => el.scrollWidth <= el.clientWidth + 1)));
+    await visibility.close();
+  }
   check('a single Snoozed card reserves no blank space below it', await page.locator('[data-section="snoozed"]').evaluate(el => {
     const body = el.querySelector('.sf-section-body'), cards = body.querySelectorAll('.sf-row');
     return cards.length === 1 && Math.abs(body.getBoundingClientRect().bottom - cards[0].getBoundingClientRect().bottom) <= 1 && body.scrollHeight <= body.clientHeight;
