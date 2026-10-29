@@ -233,12 +233,13 @@ test('the verdict says waste when resets discard at least 5% of capacity and the
   // 0.5 units an hour for a day leaves 48 of Pro 100's 60 units to expire at its reset; afterwards 120 units outlast the week.
   assert.deepEqual([verdict.status, verdict.window, verdict.remaining, verdict.capacity, verdict.remaining_pct, verdict.empty_at, verdict.last_loss_at - now], ['waste', 'weekly', 60, 120, 50, null, D]);
   assert.equal(Math.round(verdict.lost * 1000) / 1000, 48); assert.equal(Math.round(verdict.lost_pct * 10) / 10, 40);
-  assert.match(usage.verdictText(verdict, now), /^48 plan units will expire unused by [A-Z][a-z]{2}$/, 'the fact only, no advice');
+  assert.match(usage.verdictText(verdict, now), /^48 units will expire unused by [A-Z][a-z]{2}$/, 'the fact only, no advice');
+  assert.deepEqual([verdict.severity, verdict.missing], ['medium', 0], '48 of 120 units lost is over a third of the capacity');
   const marks = usage.wasteMarks(usage.projectPool(verdictProvider(now).accounts, verdictProvider(now).history, 'weekly', now, 7 * D, { lookbackS: 12 * H, provider: 'openai-codex' }));
   assert.deepEqual(marks.map(mark => [mark.t - now, Math.round(mark.before), Math.round(mark.lost), mark.accounts.map(item => `${item.label} ${item.plan_label}`).join()]), [[D, 48, 48, 'chatgpt1 Pro 100']]);
   // A loss under 5% of capacity is noise: 13% of Pro 100 at 0.5 units an hour leaves 1 unit at the reset.
   const ok = usage.limitsVerdict(verdictProvider(now, { left: 13 }), prefs, now);
-  assert.deepEqual([ok.status, Math.round(ok.lost)], ['ok', 1]);
+  assert.deepEqual([ok.status, Math.round(ok.lost), ok.severity], ['ok', 1, null]);
   assert.match(usage.verdictText(ok, now), /^On track for the next 7 days/);
 });
 
@@ -247,14 +248,16 @@ test('the verdict says short when the projection hits zero before a reset, using
   // Two units an hour: 12 units still expire at Pro 100's reset after a day, then its fresh 100 run out 50 hours later, 22 hours before the Business seat resets.
   const verdict = usage.limitsVerdict(verdictProvider(now, { perHour: 2 }), usage.USAGE_DEFAULTS, now);
   assert.deepEqual([verdict.status, Math.round(verdict.empty_at - now), verdict.next_reset_at - now], ['short', 74 * H, 4 * D]);
-  assert.match(usage.verdictText(verdict, now), /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset$/, 'the fact only, no advice');
+  assert.match(usage.verdictText(verdict, now), /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset · missing ~168 units$/, 'the facts only, no advice');
+  // Missing units are the drain over every empty stretch in the week: 22 hours until the Business seat refills, then 62 hours from when its 20 units run out to the end of the week, at 2 units an hour.
+  assert.deepEqual([Math.round(verdict.missing * 1000) / 1000, verdict.severity, Math.round(verdict.lost)], [168, 'high', 12]);
   // The verdict reads the user's lookback: one hour of the same steady drain gives the same rate, so the same empty time.
   assert.equal(Math.round(usage.limitsVerdict(verdictProvider(now, { perHour: 2 }), { ...usage.USAGE_DEFAULTS, lookback: 1 }, now).empty_at - now), 74 * H);
   const steep = verdictProvider(now, { perHour: 2 });
   steep.history = steep.history.map(item => item.account === 'second' && item.t === now - H ? { ...item, remaining_percent: 70 } : item);
   assert.ok(usage.limitsVerdict(steep, { ...usage.USAGE_DEFAULTS, lookback: 1 }, now).empty_at < usage.limitsVerdict(steep, usage.USAGE_DEFAULTS, now).empty_at, 'a steeper last hour moves the 1h-lookback verdict earlier');
   const now0 = usage.limitsVerdict(verdictProvider(now, { left: 0, perHour: 2 }), usage.USAGE_DEFAULTS, now);
-  assert.equal(usage.verdictText(now0, now), 'Out of quota now, 1d 0h before the next reset');
+  assert.match(usage.verdictText(now0, now), /^Out of quota now, 1d 0h before the next reset · missing ~\d+ units$/);
 });
 
 test('the verdict is unknown without drain data, with stale readings or for a logged-out provider', () => {
@@ -265,6 +268,66 @@ test('the verdict is unknown without drain data, with stale readings or for a lo
   assert.equal(usage.limitsVerdict(verdictProvider(now, { auth: 'logged_out' }), prefs, now).status, 'unknown');
   assert.equal(usage.limitsVerdict(null, prefs, now).status, 'unknown');
   assert.match(usage.verdictText({ status: 'unknown' }, now), /^Not enough recent readings/);
+});
+
+test('verdict severity compares missing or lost units with the pool capacity at exactly one and two thirds', () => {
+  assert.deepEqual([[39.99, 120], [40, 120], [79.99, 120], [80, 120], [120, 120], [0, 120]].map(([amount, capacity]) => usage.verdictSeverity(amount, capacity)), ['low', 'medium', 'medium', 'high', 'high', 'low']);
+  assert.deepEqual([usage.verdictSeverity(10, 0), usage.verdictSeverity(NaN, 120)], [null, null]);
+  // Pro 100 holding 52 units at half a unit an hour has exactly 40 of the pool's 120 left at its reset: one third. 92 units leave exactly 80: two thirds.
+  const now = 1_000_000;
+  const third = usage.limitsVerdict(verdictProvider(now, { left: 52 }), usage.USAGE_DEFAULTS, now), twoThirds = usage.limitsVerdict(verdictProvider(now, { left: 92 }), usage.USAGE_DEFAULTS, now), below = usage.limitsVerdict(verdictProvider(now, { left: 51 }), usage.USAGE_DEFAULTS, now);
+  assert.deepEqual([third.status, third.lost, third.severity], ['waste', 40, 'medium']);
+  assert.deepEqual([twoThirds.status, twoThirds.lost, twoThirds.severity], ['waste', 80, 'high']);
+  assert.deepEqual([below.status, below.lost, below.severity], ['waste', 39, 'low']);
+});
+
+test('accounts resetting together stack their markers in pool priority order on one vertical line', () => {
+  const now = 1000;
+  // Business (20 units, priority 0) is empty and Pro 100 (priority 1) holds 30 units; both reset in a day, and a second Pro 100 resets ten minutes later.
+  const accounts = [account('biz', 0, 0, now + D, 7 * D, now, 'team'), account('pro', 1, 30, now + D, 7 * D, now), account('late', 2, 50, now + D + 600, 7 * D, now)];
+  const projection = usage.projectPool(accounts, [], 'weekly', now, 3 * D, { rate: 0, ...codex });
+  const markers = usage.resetMarkers(projection, now, now + 3 * D);
+  assert.equal(markers.length, 1, 'ten minutes apart is within the 15-minute tolerance: one vertical line');
+  assert.deepEqual(markers[0].accounts.map(item => [item.id, item.t - now, item.base, item.top, item.gain]), [['biz', D, 80, 100, 20], ['pro', D, 100, 170, 70], ['late', D + 600, 170, 220, 50]],
+    'each segment starts where the previous account left the pool and rises by what this account restores');
+  assert.equal(markers[0].t, now + D);
+  const waste = usage.wasteMarks(projection);
+  assert.deepEqual(waste.map(mark => [mark.t - now, mark.before, mark.lost, mark.accounts.map(item => item.id).join()]), [[D, 80, 80, 'pro,late']], 'the waste arrow of the group sits at the same x below the step');
+  const apart = usage.projectPool([accounts[1], { ...accounts[2], windows: [{ ...accounts[2].windows[0], resets_at: now + D + 16 * 60 }] }], [], 'weekly', now, 3 * D, { rate: 0, ...codex });
+  assert.equal(usage.resetMarkers(apart, now, now + 3 * D).length, 2, 'sixteen minutes apart are two lines');
+  assert.deepEqual(usage.resetMarkers(projection, now, now + D - 1), [], 'resets beyond the visible range get no marker');
+  assert.deepEqual(usage.resetMarkLines(markers[0].accounts[1], now).slice(0, 1).concat(usage.resetMarkLines(markers[0].accounts[1], now).slice(2)), ['pro · Pro 100', '+70 units restored', '30 units lost at this reset']);
+  assert.match(usage.resetMarkLines(markers[0].accounts[1], now)[1], /^Resets [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
+  assert.equal(usage.resetMarkLines(markers[0].accounts[0], now).length, 3, 'an empty account loses nothing, so its tooltip has no loss line');
+});
+
+test('past step-ups stack below the pooled level after the step', () => {
+  const at = (t, account, remaining, resetsAt) => ({ t, account, window: 'weekly', remaining_percent: remaining, resets_at: resetsAt });
+  const accounts = [{ id: 'biz', label: 'biz', priority: 0, plan: 'team' }, { id: 'pro', label: 'pro', priority: 1, plan: 'prolite' }];
+  const samples = usage.limitSamples(accounts, [at(0, 'biz', 10, 100), at(0, 'pro', 40, 100), at(200, 'biz', 100, 100 + 7 * D), at(200, 'pro', 100, 100 + 7 * D), at(400, 'pro', 90, 100 + 7 * D)], 'weekly', 'openai-codex');
+  const markers = usage.pastResetMarkers(accounts, samples, -1, 1000, 'openai-codex');
+  assert.deepEqual(markers.map(group => [group.t, group.accounts.map(item => [item.id, item.base, item.top, item.gain, item.reset_at, item.plan_label])]), [[200, [['biz', 42, 60, 18, 100, 'Business'], ['pro', 60, 120, 60, 100, 'Pro 100']]]]);
+  assert.deepEqual(usage.pastResetMarkers(accounts, samples, 200, 1000), [], 'a step at the range start is outside it');
+});
+
+test('banked reset credits are validated defensively and flagged by expiry', () => {
+  assert.equal(usage.validBankedCredits(null), null);
+  assert.equal(usage.validBankedCredits([]), null);
+  const credits = usage.validBankedCredits({ fetched_at: 5, applicable_count: 2, credits: [
+    { status: 'available', expires_at: 300, granted_at: 1 }, { status: 'available', expires_at: null, granted_at: null }, { status: 'available', expires_at: 100 },
+    { status: 'used', expires_at: 50 }, { status: 'available', expires_at: '200' }, { status: 'available', expires_at: Infinity }, { status: 'available', expires_at: 80, granted_at: 'x' }, null, 'credit'] });
+  assert.deepEqual(credits.credits.map(item => [item.expires_at, item.granted_at]), [[100, null], [300, 1], [null, null]], 'malformed, used and unparseable entries are dropped; the rest are sorted with no expiry last');
+  assert.deepEqual([credits.fetched_at, credits.applicable_count], [5, 2]);
+  assert.deepEqual([-1, 1.5, '2', null].map(count => usage.validBankedCredits({ applicable_count: count, credits: 'none' })).map(item => [item.applicable_count, item.credits.length]), [[null, 0], [null, 0], [null, 0], [null, 0]]);
+  assert.equal(usage.validBankedCredits({ applicable_count: 0, credits: [] }).applicable_count, 0, 'zero is a real answer: the credits exist but cannot be used now');
+  const parsed = usage.validUsageLimits({ providers: [{ provider: 'openai-codex', accounts: [{ id: 'a', banked_credits: { credits: [{ status: 'available', expires_at: 10 }] } }, { id: 'b', banked_credits: 'broken' }] }] });
+  assert.deepEqual(parsed.providers[0].accounts.map(account => account.banked_credits?.credits.length ?? null), [1, null]);
+  const now = 1000, accounts = [{ id: 'a', label: 'chatgpt1', banked_credits: { credits: [{ expires_at: now + 5 * H }, { expires_at: now + 9 * D }] } }, { id: 'b', label: 'chatgptvitibot', banked_credits: { credits: [{ expires_at: now + 5 * H + 600 }, { expires_at: null }] } }];
+  const flags = usage.bankedFlags(accounts, now, now + 7 * D);
+  assert.deepEqual(flags.map(flag => [flag.t - now, flag.credits.map(item => item.label).join()]), [[5 * H, 'chatgpt1,chatgptvitibot']], 'expiries ten minutes apart share one flag; ones outside the range or without a time get none');
+  const lines = usage.bankedFlagLines(flags[0], now);
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^chatgpt1 · banked reset expires [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
 });
 
 test('empty spans start at the zero crossing and end at the refill', () => {
@@ -475,21 +538,22 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.deepEqual($$('.su-provider-limits').map(node => node.querySelectorAll('.su-pooled').length), [1, 1]);
   assert.deepEqual($$('.su-pooled').map(node => [node.dataset.window, node.getAttribute('aria-label')]), [['weekly', 'OpenAI Codex pooled remaining quota'], ['weekly', 'Anthropic pooled remaining quota']], 'weekly is the default window');
   // Business (20 units) plus Pro 100 (100 units), and one Max 20x (200 weekly units): pools count capacity in plan units, not percent.
-  assert.deepEqual($$('.su-capacity').map(node => node.textContent), ['/ 120 plan units', '/ 200 plan units']);
+  assert.deepEqual($$('.su-capacity').map(node => node.textContent), ['/ 120 units', '/ 200 units']);
   assert.deepEqual($$('.su-composition').map(node => node.textContent), ['(Business: 20, Pro 100: 100)', '(Max 20x: 200)']);
   assert.equal($$('.su-pool').every(node => /^\d+(\.\d)?$/.test(node.textContent)), true);
   assert.equal($$('.su-rate').every(node => /^~\d+(\.\d)? units per hour$/.test(node.textContent)), true);
-  assert.deepEqual($$('.su-pooled').map(chart => [...chart.querySelectorAll('.su-yaxis span')].map(node => node.textContent).join()), ['plan units,0,25,50,75,100,120', 'plan units,0,50,100,150,200']);
+  assert.deepEqual($$('.su-pooled').map(chart => [...chart.querySelectorAll('.su-yaxis span')].map(node => node.textContent).join()), ['units,0,25,50,75,100,120', 'units,0,50,100,150,200']);
   assert.deepEqual($$('.su-verdict').map(node => node.closest('.su-provider-limits').dataset.provider), ['openai-codex', 'anthropic']);
   assert.equal($$('.su-pooled .su-line.su-past').length + $$('.su-pooled .su-line.su-projected').length + $$('.su-now').length, 6);
   assert.ok($$('.su-pooled')[1].querySelectorAll('.su-day-grid').length >= 9, 'a week of history plus a week ahead crosses at least nine midnights');
   assert.equal($('.su-legend'), null, 'the Remaining/Projected legend is gone');
-  assert.equal($$('.su-chart-notes').every(node => /^Next reset \+\d+(\.\d)? units · /.test(node.textContent)), true);
+  // Reset times are markers in the charts now, never a Next reset line; no wording anywhere still says plan units.
+  assert.deepEqual([/Next reset/.test(document.body.textContent), /plan units/i.test(document.body.textContent), $$('[title]').some(node => /plan units/i.test(node.title))], [false, false, false]);
   // One controls bar at the top: lookback, window, horizon and refresh, none of them repeated per chart.
   const bar = $('.su-limits-controls');
   assert.equal(bar.parentElement.className, 'su', 'the controls head the page');
   assert.equal(bar.compareDocumentPosition($('.su-provider-limits')) & 4, 4, 'the controls come before the first section');
-  assert.deepEqual([$$('.su-lookback').length, $$('.su-horizon').length, $$('.su [role=group][aria-label=Window]').length], [1, 1, 1]);
+  assert.deepEqual([$$('.su-lookback').length, $$('.su-horizon').length, $$('.su [role=group][aria-label=Window]').length, $$('.su [role=group][aria-label=Horizon]').length], [1, 1, 1, 1]);
   assert.deepEqual([bar.querySelector('.su-lookback') !== null, bar.querySelector('.su-horizon') !== null, bar.querySelector('[aria-label=Window]') !== null, bar.querySelector('[aria-label=Refresh]') !== null], [true, true, true, true]);
   assert.deepEqual([$('.su-lookback-label').textContent, $('.su-lookback-value').textContent], ['Projections based on', '12h']);
   assert.deepEqual([...bar.querySelectorAll('[aria-label=Window] button')].map(node => node.textContent), ['5-hour', 'Weekly']);
@@ -497,13 +561,13 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.equal($$('.su-account').length, 0, 'accounts are folded by default');
   assert.deepEqual($$('.su-disclosure').map(node => [node.textContent, node.getAttribute('aria-expanded')]), [['Accounts (2)', 'false'], ['Accounts (1)', 'false']]);
   assert.equal($$('.su-footnote').length, 1);
-  assert.match($('.su-footnote').textContent, /^Sampled every 5m · last sample .*averaged over the selected period.*20 plan units = one \$20 plan's allowance/);
+  assert.match($('.su-footnote').textContent, /^Sampled every 5m · last sample .*averaged over the selected period.*20 units = one \$20 plan's allowance/);
   assert.equal($('.su-overview').lastElementChild.className, 'su-footnotes', 'the footnotes close the page');
   assert.equal(button('3d'), undefined, 'the 1d/3d/7d horizon control is gone');
   await click(button('5-hour'));
   assert.deepEqual($$('.su-pooled').map(node => node.dataset.window), ['five_hour', 'five_hour'], 'the window choice applies to every chart');
   // Codex plans weigh the same in every window; Max 20x is 400 units in five hours. The verdicts keep judging the weekly pools.
-  assert.deepEqual($$('.su-capacity').map(node => node.textContent), ['/ 120 plan units', '/ 400 plan units']);
+  assert.deepEqual($$('.su-capacity').map(node => node.textContent), ['/ 120 units', '/ 400 units']);
   assert.deepEqual($$('.su-verdict').map(node => [node.dataset.window, node.textContent.startsWith('Weekly: ')]), [['weekly', true], ['weekly', true]]);
   assert.equal(mock.ctx.storage.get('usage-preferences').window, 'five_hour');
   assert.equal(adviceFree(), true, 'no verdict, label or title gives advice');
@@ -520,9 +584,9 @@ test('the shared lookback and horizon controls change every chart at once', asyn
   assert.deepEqual($$('.su-measure[data-kind="average"]').map(node => node.textContent.split(' · ')[0]), ['Average over 15d', 'Average over 15d']);
   const spans = () => $$('.su-pooled .su-plot').map(node => Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100);
   assert.deepEqual(spans(), [9.1, 9.1]);
-  await click($('.su-horizon'));
-  assert.deepEqual([spans(), $$('.su-pooled').map(node => node.dataset.horizon)], [[39, 39], ['30', '30']], 'one toggle extends every chart');
-  await click($('.su-horizon'));
+  await click(button('30d'));
+  assert.deepEqual([spans(), $$('.su-pooled').map(node => node.dataset.horizon)], [[39, 39], ['30', '30']], 'one horizon choice extends every chart');
+  await click(button('7d'));
   assert.deepEqual(spans(), [9.1, 9.1]);
 });
 
@@ -536,12 +600,13 @@ test('account details are folded by default and each provider remembers its own 
   assert.deepEqual([section('openai-codex').querySelectorAll('.su-account').length, section('anthropic').querySelectorAll('.su-account').length], [2, 0]);
   assert.deepEqual(mock.ctx.storage.get('usage-preferences').accounts, { 'openai-codex': true });
   const first = $('.su-account[data-account="acct-team"]');
-  assert.match(first.querySelector('.su-account-head').textContent, /^chatgptvitibotBusiness · 20 unitspriority 0.*0 banked resets/);
+  assert.match(first.querySelector('.su-account-head').textContent, /^chatgptvitibotBusiness · 20 unitspriority 0.*2 banked resets/);
   assert.equal($('.su-account[data-account="acct-prolite"] .su-badge').textContent, 'Pro 100 · 100 units');
   assert.equal($('.su-assumed'), null, 'every plan is in the capacity table');
   assert.equal(first.querySelectorAll('.su-window').length, 2);
   assert.equal(first.querySelectorAll('.su-pace').length, 2, 'every window with a length and reset time has a pace tick');
-  assert.match(first.querySelector('.su-window[data-window="weekly"] .su-window-reset').textContent, /^resets in 4d \d+h$/);
+  // In the mixed fixture both Codex accounts reset together tomorrow.
+  assert.match(first.querySelector('.su-window[data-window="weekly"] .su-window-reset').textContent, /^resets in (23h \d+m|1d 0h)$/);
   await act(async () => root.unmount()); root = null; mock.queryClient.clear();
   await render(limitsPage());
   assert.deepEqual([toggle('openai-codex').getAttribute('aria-expanded'), toggle('anthropic').getAttribute('aria-expanded'), $$('.su-account').length], ['true', 'false', 2], 'the fold survives a remount');
@@ -550,6 +615,41 @@ test('account details are folded by default and each provider remembers its own 
   await click(toggle('openai-codex'));
   assert.deepEqual(mock.ctx.storage.get('usage-preferences').accounts, { 'openai-codex': false, anthropic: true });
   assert.deepEqual($$('.su-account').map(node => node.dataset.account), ['acct-claude']);
+});
+
+test('the mixed fixture stacks both Codex resets on one line, flags banked credits and lists them under each account', async () => {
+  const realNow = Date.now, fixed = Date.parse('2026-10-28T15:00:00+01:00');
+  Date.now = () => fixed;
+  try {
+    plugin.register(mock.ctx); await render(limitsPage());
+    const codexSection = $('.su-provider-limits[data-provider="openai-codex"]');
+    const stacked = [...codexSection.querySelectorAll('.su-reset[data-kind=projected]')].find(node => node.querySelectorAll('.su-reset-mark').length === 2);
+    assert.equal(stacked !== undefined, true, 'both Codex accounts reset at the same time');
+    const marks = [...stacked.querySelectorAll('.su-reset-mark')].map(node => ({ id: node.dataset.account, base: Number(node.dataset.base), top: Number(node.dataset.top), gain: Number(node.dataset.gain), label: node.querySelector('.su-reset-text').textContent }));
+    assert.deepEqual(marks.map(item => item.id), ['acct-team', 'acct-prolite'], 'stacked in pool priority order');
+    assert.deepEqual([Math.abs(marks[1].base - marks[0].top) < 1e-9, Math.abs(marks[1].top - 120) < 1e-9], [true, true], 'the Pro 100 segment starts where the Business one ends and refills the pool');
+    assert.deepEqual(marks.map(item => item.label), marks.map(item => `+${usage.unitsText(item.gain)}`));
+    assert.deepEqual([Number(stacked.dataset.t), codexSection.querySelector('.su-waste').dataset.t], [Math.round(fixed / 1000 + D), stacked.dataset.t], 'the waste arrow sits at the same x');
+    // Two credits expiring ten minutes apart, five hours from now, share one flag with a count; the nine-day ones are beyond the 7-day chart.
+    const flags = () => [...codexSection.querySelectorAll('.su-flag')].map(node => [node.dataset.count, node.querySelector('.su-flag-count')?.textContent ?? null, node.getAttribute('aria-label').replace(/expires \w{3} \d{1,2}:\d{2} (AM|PM)/g, 'expires <time>')]);
+    assert.deepEqual(flags(), [['2', '2', 'chatgptvitibot · banked reset expires <time>. chatgpt1 · banked reset expires <time>']]);
+    assert.equal($$('.su-provider-limits[data-provider="anthropic"] .su-flag').length, 0, 'never-read credits draw no flag');
+    await click(button('30d'));
+    assert.deepEqual(flags().map(flag => flag[0]), ['2', '1', '1']);
+    // The weekly resets six days ago are within the 30-day chart's nine days of past: a quieter stacked marker without labels.
+    const past = [...codexSection.querySelectorAll('.su-reset[data-kind=past]')].find(node => node.querySelectorAll('.su-reset-mark').length === 2);
+    assert.deepEqual([past !== undefined, past?.querySelectorAll('.su-reset-text').length], [true, 0]);
+    await click(button('7d'));
+    await click(codexSection.querySelector('.su-disclosure'));
+    const lines = id => [...$(`.su-account[data-account="${id}"]`).querySelectorAll('.su-banked-credit')].map(node => `${node.dataset.soon}|${node.textContent}`);
+    const team = lines('acct-team'), prolite = lines('acct-prolite');
+    assert.equal(team.length, 2); assert.equal(prolite.length, 2);
+    assert.match(team[0], /^true\|Banked reset · expires [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM) \(in 5h 0m\)$/, 'within a day: orange');
+    assert.match(team[1], /^false\|Banked reset · expires [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} (AM|PM) \(in 9d 0h\)$/);
+    assert.match(prolite[0], /^true\|Banked reset · expires .* \(in 5h 10m\) · not usable now$/, 'applicable 0: the credits exist but cannot be used now');
+    assert.match(prolite[1], /^false\|Banked reset · expires .* \(in 9d 12h\) · not usable now$/);
+    assert.equal($$('.su-account[data-account="acct-team"] .su-banked-unusable').length, 0);
+  } finally { Date.now = realNow; }
 });
 
 test('a logged-out provider is a compact muted row after every chart', async () => {
@@ -571,12 +671,13 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
   const now = Date.now() / 1000;
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [verdictProvider(now)] };
   plugin.register(mock.ctx); await render(limitsPage());
-  assert.deepEqual([$('.su-pool').textContent, $('.su-capacity').textContent], ['60', '/ 120 plan units']);
-  assert.equal($('.su-capacity').getAttribute('title'), '20 plan units = one $20 plan\'s allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.');
+  assert.deepEqual([$('.su-pool').textContent, $('.su-capacity').textContent], ['60', '/ 120 units']);
+  assert.equal($('.su-capacity').getAttribute('title'), '20 units = one $20 plan\'s allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.');
   const verdict = $('.su-verdict');
   assert.equal(verdict.dataset.status, 'waste');
-  assert.match(verdict.textContent, /^48 plan units will expire unused by [A-Z][a-z]{2}$/);
-  assert.equal(verdict.querySelector('[data-verdict-icon]')?.dataset.verdictIcon, 'waste');
+  assert.match(verdict.textContent, /^48 units will expire unused by [A-Z][a-z]{2}$/);
+  // 48 of 120 units is over a third of the capacity: an orange clock-x, the verdict text itself neutral.
+  assert.deepEqual([verdict.dataset.severity, verdict.querySelector('[data-verdict-icon]')?.dataset.verdictIcon, verdict.querySelector('[data-verdict-icon]')?.dataset.severity, verdict.querySelector('svg')?.getAttribute('data-icon')], ['medium', 'waste', 'medium', 'ClockX']);
   const marks = $$('.su-pooled .su-waste');
   assert.equal(marks.length, 1);
   const mark = marks[0], near = (a, b, tolerance = 0.01) => Math.abs(a - b) < tolerance;
@@ -584,7 +685,13 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
   assert.ok(near(parseFloat(mark.style.left), 74.4 / 218.4 * 100), `x ${mark.style.left}`);
   assert.ok(near(parseFloat(mark.style.top), 60) && near(parseFloat(mark.style.height), 40), `span ${mark.style.top} + ${mark.style.height}`);
   assert.deepEqual([mark.querySelector('.su-waste-text').textContent, mark.querySelectorAll('.su-waste-arrow').length, mark.querySelectorAll('.su-waste-tick').length], ['48 lost', 2, 2]);
-  assert.match(mark.getAttribute('title'), /^chatgpt1 · Pro 100 · 48 plan units unused at reset [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
+  assert.match(mark.getAttribute('title'), /^chatgpt1 · Pro 100 · 48 units unused at reset [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
+  // Each reset is a marker on its step: Pro 100 rises from the 48 units left by the 52 it restores; three days of half a unit an hour later the Business seat rises from 64 by its 20.
+  const resets = $$('.su-pooled .su-reset[data-kind=projected] .su-reset-mark').map(node => [node.dataset.account, Math.round(Number(node.dataset.base)), Math.round(Number(node.dataset.top)), node.querySelector('.su-reset-text')?.textContent]);
+  assert.deepEqual(resets, [['second', 48, 100, '+52'], ['first', 64, 84, '+20']]);
+  const dot = $('.su-reset-mark[data-account=second] .su-reset-dot');
+  assert.deepEqual([dot.getAttribute('role'), dot.getAttribute('aria-label').replace(/Resets \w{3} \d{1,2}:\d{2} (AM|PM)/, 'Resets <time>')], ['img', 'chatgpt1 · Pro 100. Resets <time>. +52 units restored. 48 units lost at this reset']);
+  assert.equal($('.su-reset-mark[data-account=first] .su-reset-dot').getAttribute('aria-label').endsWith('+20 units restored'), true, 'an empty account loses nothing at its reset');
   assert.equal($('.su-measure[data-kind="empty"]'), null, 'this pool never runs dry');
 });
 
@@ -593,8 +700,8 @@ test('a pool that runs dry before its next reset gets the short verdict alongsid
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [verdictProvider(now, { perHour: 2 })] };
   plugin.register(mock.ctx); await render(limitsPage());
   assert.equal($('.su-verdict').dataset.status, 'short');
-  assert.match($('.su-verdict').textContent, /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset$/);
-  assert.equal($('.su-verdict [data-verdict-icon]').dataset.verdictIcon, 'short');
+  assert.match($('.su-verdict').textContent, /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset · missing ~168 units$/);
+  assert.deepEqual([$('.su-verdict [data-verdict-icon]').dataset.verdictIcon, $('.su-verdict [data-verdict-icon]').dataset.severity, $('.su-verdict svg')?.getAttribute('data-icon')], ['short', 'high', 'ArrowBarToDownTouching']);
   assert.deepEqual($$('.su-pooled .su-waste .su-waste-text').map(node => node.textContent), ['12 lost']);
   // About 74 hours ahead; the page reads its own clock a moment after the fixture's.
   assert.match($('.su-measure[data-kind="empty"]').textContent, /^Empty in 3d [12]h · /);
@@ -616,14 +723,17 @@ test('the single Limits button shows each provider\'s pooled units with a verdic
   assert.equal(restPaths().find(path => path.startsWith('/usage/limits?')), '/usage/limits?hours=168');
   assert.deepEqual(footerItems().map(item => [item.provider, item.status, item.value, item.icon, item.mark]), [
     ['openai-codex', 'short', '60', 'short', 'openai-codex'], ['anthropic', 'waste', '60', 'waste', 'anthropic'], ['nous', 'ok', '2.6', null, 'nous']], 'the logged-out provider is left out');
+  // Codex misses 168 of 120 units (red), Anthropic loses 48 of 120 (orange); an ok pool has no glyph and no severity.
+  assert.deepEqual($$('.sf-footer .sf-limit').map(node => [node.dataset.severity ?? null, node.querySelector('[data-verdict-icon]')?.dataset.severity ?? null, node.querySelector('[data-verdict-icon] svg')?.getAttribute('data-icon') ?? null]),
+    [['high', 'high', 'ArrowBarToDownTouching'], ['medium', 'medium', 'ClockX'], [null, null, null]]);
   const limits = $('.sf-footer .sf-limits');
   assert.deepEqual([$$('.sf-footer button').length, limits.querySelectorAll('button').length, limits.dataset.empty, limits.getAttribute('title')], [2, 0, 'false', null], 'one button holds every item; its tooltip is the SDK Tip, not a title');
   // The accessible name repeats the tooltip: one factual line per provider, no advice.
   const name = limits.getAttribute('aria-label');
-  assert.match(name, /^Limits\. OpenAI Codex: 60 \/ 120 plan units · Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset\. Anthropic: 60 \/ 120 plan units · 48 plan units will expire unused by [A-Z][a-z]{2}\. Nous: 2\.6 \/ 40 plan units · On track for the next 7 days: nothing runs out and little expires unused\.$/);
+  assert.match(name, /^Limits\. OpenAI Codex: 60 \/ 120 units · Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset · missing ~168 units\. Anthropic: 60 \/ 120 units · 48 units will expire unused by [A-Z][a-z]{2}\. Nous: 2\.6 \/ 40 units · On track for the next 7 days: nothing runs out and little expires unused\.$/);
   assert.equal(ADVICE.test(name), false);
   const codex = mock.control.usageLimits.providers[1];
-  assert.equal(usage.limitsFooterLine(codex, usage.limitsVerdict(codex, usage.USAGE_DEFAULTS, now), now).startsWith('OpenAI Codex: 60 / 120 plan units · Runs out '), true);
+  assert.equal(usage.limitsFooterLine(codex, usage.limitsVerdict(codex, usage.USAGE_DEFAULTS, now), now).startsWith('OpenAI Codex: 60 / 120 units · Runs out '), true);
   await click(limits);
   assert.deepEqual(mock.calls.filter(call => call[0] === 'navigate').map(call => call[1]), ['/t3sidebar-limits']);
   assert.equal(mock.ctx.storage.get('usage-preferences', null), null, 'clicking only opens the page');
@@ -687,23 +797,24 @@ test('the lookback slider moves between stops, changes the drain rate and widens
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 720, 'the leftmost stop is the longest lookback');
 });
 
-test('one toggle at the end of the time axis switches the projection between 7 and 30 days', async () => {
+test('a 7d | 30d segmented control in the controls bar switches the projection horizon', async () => {
   // A horizon saved by the retired 1d/3d/7d control opens at the 7-day default.
   mock.ctx.storage.set('usage-preferences', { horizon: 3 });
   plugin.register(mock.ctx); await render(limitsPage());
-  const toggle = () => $('.su-horizon');
-  const state = () => [toggle().getAttribute('aria-pressed'), toggle().getAttribute('aria-label'), toggle().getAttribute('title'), toggle().querySelector('svg')?.getAttribute('data-icon'), $('.su-pooled').dataset.horizon];
+  const group = () => $('.su-horizon');
+  const state = () => [...group().querySelectorAll('button')].map(node => `${node.textContent}:${node.getAttribute('aria-pressed')}`).join() + `|${$('.su-pooled').dataset.horizon}`;
   const days = () => { const node = $('.su-pooled .su-plot'); return Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100; };
-  assert.deepEqual(state(), ['false', 'Project 30 days ahead', 'Extend the projection to 30 days', 'ArrowBarRight', '7']);
-  assert.equal(toggle().closest('.su-limits-controls') !== null, true, 'the toggle sits in the shared controls bar');
+  assert.deepEqual([group().getAttribute('role'), group().getAttribute('aria-label'), group().closest('.su-limits-controls') !== null, group().querySelector('.su-control-label')?.textContent], ['group', 'Horizon', true, 'Horizon'], 'a labelled group in the shared controls bar');
+  assert.equal(state(), '7d:true,30d:false|7');
+  assert.equal(group().querySelectorAll('svg').length, 0, 'text choices, no arrow icon');
   assert.equal(days(), 9.1, 'seven days ahead plus 30% of that before Now');
-  await click(toggle());
-  assert.deepEqual(state(), ['true', 'Project 30 days ahead', 'Shrink the projection back to 7 days', 'ArrowBarLeft', '30']);
+  await click(button('30d'));
+  assert.equal(state(), '7d:false,30d:true|30');
   assert.equal(days(), 39);
   assert.equal(mock.ctx.storage.get('usage-preferences').horizon, 30);
   assert.equal(restPaths().at(-1), '/usage/limits?hours=216', 'nine days of past need more than a week of history');
-  await click(toggle());
-  assert.deepEqual([toggle().getAttribute('aria-pressed'), mock.ctx.storage.get('usage-preferences').horizon], ['false', 7]);
+  await click(button('7d'));
+  assert.deepEqual([state(), mock.ctx.storage.get('usage-preferences').horizon], ['7d:true,30d:false|7', 7]);
 });
 
 test('the averaging period is measured left of Now and cut at the plot edge without a left arrowhead', async () => {
@@ -725,7 +836,7 @@ test('the averaging period is measured left of Now and cut at the plot edge with
   geometry = shape();
   assert.deepEqual([geometry.cap, geometry.startArrows, geometry.endArrows, geometry.left, near(geometry.right, nowPct())], ['false', 0, 1, 0, true], '15d reaches past the plot: cut at the edge, no left arrowhead or tick');
   assert.match($('.su-measure[data-kind="average"]').textContent, /^Average over 15d · (~\d+(\.\d)? units\/h|no drain data)$/);
-  await click($('.su-horizon'));
+  await click(button('30d'));
   assert.equal(shape().cap, 'false', 'nine days of past still start after 15 days back');
   await slide($('.su-lookback input[type=range]'), 6);
   geometry = shape();
@@ -740,10 +851,10 @@ test('stale, failing and unread accounts keep the normal view', async () => {
   plugin.register(mock.ctx); await render(limitsPage());
   assert.equal($('.su-disclosure').textContent, 'Accounts (2)');
   await click($('.su-disclosure'));
-  assert.equal($('.su-capacity').textContent, '/ 20 plan units', 'the account without a reading is left out of the pool');
+  assert.equal($('.su-capacity').textContent, '/ 20 units', 'the account without a reading is left out of the pool');
   // "max" alone does not say 5x or 20x: counted as one base plan, flagged on the row and in a footnote.
   assert.deepEqual([$('.su-account[data-account="acct-b1"] .su-badge').textContent, $('.su-account[data-account="acct-b1"] .su-assumed').textContent], ['max · 20 units', 'capacity unknown, counted as 20*']);
-  assert.match($('.su-assumption').textContent, /^\* Capacity unknown for claude-max \(max\), claude-team \(no plan reported\): counted as 20 plan units, one \$20 plan\.$/);
+  assert.match($('.su-assumption').textContent, /^\* Capacity unknown for claude-max \(max\), claude-team \(no plan reported\): counted as 20 units, one \$20 plan\.$/);
   assert.equal($('.su-verdict').dataset.status, 'unknown', 'a stale pool without drain data gets no verdict');
   assert.match($('.su-chart-notes').textContent, /1 account without a reading left out of the pool/);
   assert.equal($('.su-rate').textContent, 'no drain data');

@@ -1544,7 +1544,7 @@ try {
         && footerTip.count === 1 && footerTip.text === 'Token usage' && footerTip.above && footerTip.centered && footerTip.inside);
       await usage.mouse.move(5, 5);
     }
-    // The Limits button holds one item per provider with limits: the synthetic Codex pool (Business 20 + Pro 100 100 plan units) runs short this week (red warning triangle) and Anthropic's Max 20x (200 units) throws quota away at its reset (amber bin).
+    // The Limits button holds one item per provider with limits: the synthetic Codex pool (Business 20 + Pro 100 100 units) runs short this week, missing more than two thirds of its capacity (red arrow to the floor), and Anthropic's Max 20x (200 units) throws under a third of its capacity away at its reset (muted clock-x).
     await usage.waitForSelector('.sf-footer .sf-limit');
     const footerStatus = () => usage.evaluate(() => {
       const r = el => el.getBoundingClientRect(), footer = document.querySelector('.sf-footer'), button = footer.querySelector('.sf-limits'), usageButton = footer.querySelector('.sf-utility');
@@ -1554,20 +1554,22 @@ try {
         label: button.getAttribute('aria-label'),
         items: items.map(item => { const value = item.querySelector('.sf-limit-value'), glyph = item.querySelector('[data-verdict-icon]');
           return { provider: item.dataset.provider, status: item.dataset.status, value: value.textContent, tabular: getComputedStyle(value).fontVariantNumeric.includes('tabular-nums'), mark: !!item.querySelector('svg[data-provider-mark]'),
-            icon: glyph?.dataset.verdictIcon ?? null, iconName: glyph?.querySelector('svg')?.getAttribute('data-icon') ?? null, iconColor: glyph ? rgb(glyph) : null, inside: r(item).right <= r(button).right + 0.5 && r(item).bottom <= r(button).bottom + 0.5 }; }) };
+            icon: glyph?.dataset.verdictIcon ?? null, severity: item.dataset.severity ?? null, iconName: glyph?.querySelector('svg')?.getAttribute('data-icon') ?? null, iconColor: glyph ? rgb(glyph) : null, valueColor: rgb(value), inside: r(item).right <= r(button).right + 0.5 && r(item).bottom <= r(button).bottom + 0.5 }; }) };
     });
     const ADVICE = /cut optional|background work|room for|optional work/i;
-    const codexLine = /^OpenAI Codex: \d+(\.\d)? \/ 120 plan units · Runs out \w{3} \d{1,2}:\d{2} (AM|PM), (\d+d \d+h|\d+h \d+m) before the next reset$/;
-    const anthropicLine = /^Anthropic: \d+(\.\d)? \/ 200 plan units · \d+(\.\d)? plan units will expire unused by \w{3}$/;
+    const codexLine = /^OpenAI Codex: \d+(\.\d)? \/ 120 units · Runs out \w{3} \d{1,2}:\d{2} (AM|PM), ((\d+d \d+h|\d+h \d+m) before the next reset|still empty at the end of the 7 days) · missing ~\d+ units$/;
+    const anthropicLine = /^Anthropic: \d+(\.\d)? \/ 200 units · \d+(\.\d)? units will expire unused by \w{3}$/;
+    // A neutral colour has its channels close together; theme orange and red do not.
+    const neutral = color => Math.max(...color) - Math.min(...color) < 24;
     {
       const status = await footerStatus();
       console.log(`USAGE FOOTER STATUS: ${JSON.stringify(status)}`);
       const [codex, anthropic] = status.items;
       check('Limits button follows Usage in the same 36px row as one 28px control, one item per provider with limits, without overflow', status.footerHeight === 36 && status.afterUsage && status.oneRow && status.buttonHeight === 28 && status.insideFooter
         && status.focusables === 0 && status.items.length === 2 && codex.provider === 'openai-codex' && anthropic.provider === 'anthropic' && status.items.every(item => item.mark && item.inside) && status.overflow <= 0);
-      check('Limits items show pooled plan units in tabular numerals: a red warning triangle for the short Codex pool, an amber bin for wasting Anthropic', status.items.every(item => /^\d+(\.\d)?$/.test(item.value) && item.tabular)
-        && codex.status === 'short' && codex.iconName === 'AlertTriangle' && codex.iconColor[0] > codex.iconColor[1] + 40
-        && anthropic.status === 'waste' && anthropic.iconName === 'Trash2' && anthropic.iconColor[0] > anthropic.iconColor[2] + 60);
+      check('Limits items show pooled units in tabular numerals: a red arrow to the floor for Codex missing over two thirds of its capacity, a muted clock-x for Anthropic losing under a third', status.items.every(item => /^\d+(\.\d)?$/.test(item.value) && item.tabular)
+        && codex.status === 'short' && codex.severity === 'high' && codex.iconName === 'ArrowBarToDownTouching' && codex.iconColor[0] > codex.iconColor[1] + 40
+        && anthropic.status === 'waste' && anthropic.severity === 'low' && anthropic.iconName === 'ClockX' && neutral(anthropic.iconColor) && anthropic.iconColor.join() === anthropic.valueColor.join());
       const idle = await limitsButton.evaluate(el => getComputedStyle(el).backgroundColor);
       await limitsButton.hover();
       await usage.waitForSelector('.mock-tip');
@@ -1590,7 +1592,7 @@ try {
       await closeUp.locator('.sf-footer .sf-limits').hover();
       await closeUp.waitForSelector('.mock-tip');
       const pane = await closeUp.locator('.harness-sidebar').boundingBox(), tip = await closeUp.locator('.mock-tip').boundingBox();
-      await closeUp.screenshot({ path: join(usageDir, 'v5-footer.png'), clip: { x: pane.x, y: tip.y - 12, width: Math.max(pane.width, tip.x + tip.width + 12 - pane.x), height: pane.y + pane.height - tip.y + 12 } });
+      await closeUp.screenshot({ path: join(usageDir, 'v6-footer.png'), clip: { x: pane.x, y: tip.y - 12, width: Math.max(pane.width, tip.x + tip.width + 12 - pane.x), height: pane.y + pane.height - tip.y + 12 } });
       // The same footer in a 260px pane: both providers stay on the one row without overflowing it.
       await closeUp.mouse.move(600, 300);
       const footerAt = async width => {
@@ -1621,7 +1623,7 @@ try {
       await closeUp.waitForFunction(() => document.querySelectorAll('.sf-footer .sf-limit').length === 2);
       await footerAt(260);
       const narrowPane = await closeUp.locator('.harness-sidebar').boundingBox();
-      await closeUp.screenshot({ path: join(usageDir, 'v5-footer-260.png'), clip: { x: narrowPane.x, y: narrowPane.y + narrowPane.height - 60, width: narrowPane.width + 1, height: 60 } });
+      await closeUp.screenshot({ path: join(usageDir, 'v6-footer-260.png'), clip: { x: narrowPane.x, y: narrowPane.y + narrowPane.height - 60, width: narrowPane.width + 1, height: 60 } });
       await closeUp.close();
     }
     {
@@ -1742,7 +1744,7 @@ try {
       // The footer status already holds the same limits query (same key), so the page may reuse it without a new request.
       check('Limits button opens /t3sidebar-limits, which shows only limits and fetches only /usage/limits', state.navigated && state.title === 'Limits' && state.view === 'limits' && state.usageCharts === 0
         && state.paths.every(path => path === '/usage/limits'));
-      check('Limits charts have no Remaining/Projected legend and no 1d/3d/7d horizon control', state.legend === 0 && !state.segmented.some(label => /^\d+d$/.test(label)));
+      check('Limits charts have no Remaining/Projected legend and the only day choices are the 7d | 30d horizon', state.legend === 0 && state.segmented.filter(label => /^\d+d$/.test(label)).join() === '7d,30d');
     }
     {
       // Overview: the shared controls bar first, then one section per provider with data, each with its logo heading, chart and folded accounts.
@@ -1762,7 +1764,7 @@ try {
       console.log(`USAGE LIMITS OVERVIEW: ${JSON.stringify(overview)}`);
       check('Limits page is one overview without provider tabs: a Codex then an Anthropic section, each with its logo heading and one chart', overview.tabs === 0 && overview.sections.join() === 'openai-codex,anthropic'
         && overview.headings.join() === 'OpenAI Codex,Anthropic' && overview.marks.every(Boolean) && overview.charts.join() === '1,1');
-      check('One shared controls bar heads the page: Projections based on [slider] value, Window, horizon toggle, Refresh, in one row and only once', overview.barFirst && overview.parts.every(Boolean) && overview.ordered && overview.oneRow
+      check('One shared controls bar heads the page: Projections based on [slider] value, Window, 7d | 30d horizon, Refresh, in one row and only once', overview.barFirst && overview.parts.every(Boolean) && overview.ordered && overview.oneRow
         && overview.once.join() === '1,1,1,1' && overview.sliderRow && overview.sliderText.join() === 'Projections based on,12h');
       check('Accounts are folded under every chart by default and the footnote appears once at the bottom', overview.accounts === 0 && overview.disclosures.join() === 'Accounts (2)|false,Accounts (1)|false' && overview.footnotes === 1 && overview.footnoteLast);
     }
@@ -1796,7 +1798,8 @@ try {
       const slider = document.querySelector('.su-lookback input[type=range]'), valueText = slider.getAttribute('aria-valuetext');
       const dot = chart.querySelector('.su-empty-dot'), mark = dot ? r(dot) : null, lookback = Number(valueText.replace(/[hd]$/, '')) * (/d$/.test(valueText) ? 86400 : 3600);
       const nowT = start + (nowX - plot.left) / plot.width * (end - start);
-      const foot = r(chart.querySelector('.su-chart-foot')), row = r(chart.querySelector('.su-measures'));
+      // The notes row under a chart exists only when there is a note; without it nothing sits below the measurements.
+      const footNode = chart.querySelector('.su-chart-foot'), foot = footNode ? r(footNode) : { top: Infinity }, row = r(chart.querySelector('.su-measures'));
       return { plotLeft: plot.left, plotRight: plot.right, plotBottom: plot.bottom, nowX, lookbackX: xAt(nowT - lookback), emptyX: mark ? mark.left + mark.width / 2 : null, emptyOnFloor: mark ? Math.abs(mark.top + mark.height / 2 - plot.bottom) <= 1 : null,
         average: part('average'), empty: part('empty'), rowTop: row.top, rowBottom: row.bottom, footTop: foot.top };
     }, section);
@@ -1837,7 +1840,8 @@ try {
     // Waste measurements: vertical dimension lines at projected resets that discard quota, at the reset's x and spanning from the pool's level just before the step-up down by the expiring units. Colors are read back through a canvas: color-mix in oklab computes to an oklab() string, not rgb().
     const wasteGeometry = (page, section) => page.evaluate(selector => {
       const chart = document.querySelector(selector), r = el => el.getBoundingClientRect(), plotNode = chart.querySelector('.su-pooled .su-plot'), plot = r(plotNode);
-      const start = Number(plotNode.dataset.start), end = Number(plotNode.dataset.end), cap = Number(plotNode.dataset.cap), rgb = el => { const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1; const paint = canvas.getContext('2d'); paint.fillStyle = getComputedStyle(el).color; paint.fillRect(0, 0, 1, 1); return [...paint.getImageData(0, 0, 1, 1).data.slice(0, 3)]; };
+      const start = Number(plotNode.dataset.start), end = Number(plotNode.dataset.end), cap = Number(plotNode.dataset.cap), paint = value => { const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1; const context = canvas.getContext('2d'); context.fillStyle = value; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data.slice(0, 3)]; }, rgb = el => paint(getComputedStyle(el).color);
+      const nowColor = paint(getComputedStyle(chart.querySelector('.su-now')).borderLeftColor);
       const marks = [...chart.querySelectorAll('.su-pooled .su-waste')].map(mark => {
         const box = r(mark), line = r(mark.querySelector('.su-waste-line')), t = Number(mark.dataset.t), before = Number(mark.dataset.before), lost = Number(mark.dataset.lost);
         const x = plot.left + (t - start) / (end - start) * plot.width, top = plot.top + (1 - before / cap) * plot.height, bottom = top + lost / cap * plot.height;
@@ -1847,31 +1851,82 @@ try {
           arrowsAtEnds: tight || Math.abs(arrows.top.top - box.top) <= 0.5 && Math.abs(arrows.bottom.bottom - box.bottom) <= 0.5, ticks: Object.keys(ticks).sort().join(),
           ticksAtEnds: Math.abs(ticks.top.top - box.top) <= 1 && Math.abs(ticks.bottom.top - box.bottom) <= 1, text: label.textContent, hidden: label.dataset.hidden === 'true',
           label: { left: labelBox.left, right: labelBox.right, top: labelBox.top, bottom: labelBox.bottom }, labelInside: labelBox.left >= plot.left - 0.5 && labelBox.right <= plot.right + 0.5,
-          color: rgb(mark), title: mark.getAttribute('title') };
+          color: rgb(mark), labelColor: rgb(label), nowColor, title: mark.getAttribute('title') };
       });
       const shown = marks.filter(mark => !mark.hidden);
       const apart = shown.every((a, i) => shown.every((b, j) => i >= j || a.label.right <= b.label.left || b.label.right <= a.label.left || a.label.bottom <= b.label.top || b.label.bottom <= a.label.top));
       const verdict = chart.querySelector('.su-verdict');
-      return { marks, apart, verdict: verdict ? { status: verdict.dataset.status, text: verdict.textContent, icon: verdict.querySelector('svg')?.getAttribute('data-icon') ?? null, color: rgb(verdict) } : null };
+      const glyph = verdict?.querySelector('.su-verdict-icon');
+      return { marks, apart, verdict: verdict ? { status: verdict.dataset.status, severity: verdict.dataset.severity ?? null, text: verdict.textContent, icon: verdict.querySelector('svg')?.getAttribute('data-icon') ?? null, color: rgb(verdict), iconColor: glyph ? rgb(glyph) : null } : null };
     }, section);
     const wasteOk = (mark, account) => mark.x <= 1 && mark.top <= 1 && mark.bottom <= 1 && mark.arrowsAtEnds && mark.ticks === 'bottom,top' && mark.ticksAtEnds && mark.labelInside
-      && /^\d+(\.\d)? lost$/.test(mark.text) && mark.color[0] > mark.color[2] + 60 && new RegExp(`^${account} · \\d+(\\.\\d)? plan units unused at reset \\w{3} \\d{1,2}:\\d{2} (AM|PM)$`).test(mark.title);
+      && /^\d+(\.\d)? lost$/.test(mark.text) && mark.color.join() === mark.nowColor.join() && mark.labelColor.join() === mark.nowColor.join() && new RegExp(`^${account} · \\d+(\\.\\d)? units unused at reset \\w{3} \\d{1,2}:\\d{2} (AM|PM)$`).test(mark.title);
     {
       const waste = await wasteGeometry(usage, CODEX), claude = await wasteGeometry(usage, ANTHROPIC);
       console.log(`USAGE LIMITS WASTE (mixed): ${JSON.stringify({ waste, claude })}`);
-      check('Limits draws a waste measurement at the Pro 100 reset: x within 1px, span = the expiring units within 1px, amber, with arrowheads, ticks and a label',
+      check('Limits draws a waste measurement at the Pro 100 reset: x within 1px, span = the expiring units within 1px, in the Now line colour, with arrowheads, ticks and a label',
         waste.marks.length === 1 && waste.marks.every(mark => wasteOk(mark, 'chatgpt1 · Pro 100')) && waste.marks[0].span > 16 && !waste.marks[0].hidden && waste.apart);
-      check('Limits Codex verdict under its headline: a red short line with only the facts (when it runs out and the gap to the next reset)', waste.verdict?.status === 'short' && waste.verdict.icon === 'AlertTriangle'
-        && /^Runs out \w{3} \d{1,2}:\d{2} (AM|PM), (\d+d \d+h|\d+h \d+m) before the next reset$/.test(waste.verdict.text) && waste.verdict.color[0] > waste.verdict.color[1] + 40);
-      check('Limits Anthropic chart has its own amber waste verdict and a waste measurement at the Max 20x reset', claude.verdict?.status === 'waste' && claude.verdict.icon === 'Trash2'
-        && /^\d+(\.\d)? plan units will expire unused by \w{3}$/.test(claude.verdict.text) && claude.marks.length === 1 && claude.marks.every(mark => wasteOk(mark, 'claude-max · Max 20x')) && claude.apart);
+      check('Limits Codex verdict under its headline: neutral factual text (when it runs out, the gap, the missing units) after a red arrow to the floor', waste.verdict?.status === 'short' && waste.verdict.severity === 'high' && waste.verdict.icon === 'ArrowBarToDownTouching'
+        && /^Runs out \w{3} \d{1,2}:\d{2} (AM|PM), ((\d+d \d+h|\d+h \d+m) before the next reset|still empty at the end of the 7 days) · missing ~\d+ units$/.test(waste.verdict.text) && neutral(waste.verdict.color) && waste.verdict.iconColor[0] > waste.verdict.iconColor[1] + 40);
+      check('Limits Anthropic chart has its own waste verdict (muted clock-x: under a third of the capacity) and a waste measurement at the Max 20x reset', claude.verdict?.status === 'waste' && claude.verdict.severity === 'low' && claude.verdict.icon === 'ClockX' && neutral(claude.verdict.iconColor)
+        && /^\d+(\.\d)? units will expire unused by \w{3}$/.test(claude.verdict.text) && claude.marks.length === 1 && claude.marks.every(mark => wasteOk(mark, 'claude-max · Max 20x')) && claude.apart);
       const headline = await usage.evaluate(() => [...document.querySelectorAll('.su-pooled')].map(chart => ({ pool: chart.querySelector('.su-pool').textContent, capacity: chart.querySelector('.su-capacity').textContent, composition: chart.querySelector('.su-composition').textContent,
         ticks: [...chart.querySelectorAll('.su-yaxis span')].map(el => el.textContent).join() })));
       console.log(`USAGE LIMITS HEADLINE: ${JSON.stringify(headline)}`);
-      check('Limits headlines and axes are in plan units: Business 20 + Pro 100 100 = 120, Max 20x = 200', headline.length === 2 && headline.every(item => /^\d+(\.\d)?$/.test(item.pool))
-        && headline[0].capacity === '/ 120 plan units' && headline[0].composition === '(Business: 20, Pro 100: 100)' && headline[0].ticks === 'plan units,0,25,50,75,100,120'
-        && headline[1].capacity === '/ 200 plan units' && headline[1].composition === '(Max 20x: 200)' && headline[1].ticks === 'plan units,0,50,100,150,200');
+      check('Limits headlines and axes are in units: Business 20 + Pro 100 100 = 120, Max 20x = 200', headline.length === 2 && headline.every(item => /^\d+(\.\d)?$/.test(item.pool))
+        && headline[0].capacity === '/ 120 units' && headline[0].composition === '(Business: 20, Pro 100: 100)' && headline[0].ticks === 'units,0,25,50,75,100,120'
+        && headline[1].capacity === '/ 200 units' && headline[1].composition === '(Max 20x: 200)' && headline[1].ticks === 'units,0,50,100,150,200');
+      check('No Next reset line and no plan units wording anywhere on the Limits page', await usage.evaluate(() => !/Next reset|plan units/i.test(document.querySelector('.su').innerText) && [...document.querySelectorAll('[title],[aria-label]')].every(node => !/plan units/i.test(`${node.getAttribute('title') || ''} ${node.getAttribute('aria-label') || ''}`))));
       check('No advice anywhere on the Limits page or in the footer', await usage.evaluate(source => { const advice = new RegExp(source, 'i'); return !advice.test(document.body.innerText) && [...document.querySelectorAll('[aria-label],[title]')].every(node => !advice.test(node.getAttribute('aria-label') || '') && !advice.test(node.getAttribute('title') || '')); }, ADVICE.source));
+    }
+    {
+      // Reset markers: Business and Pro 100 reset together tomorrow, so their markers stack on one vertical line in pool priority order, each dot at the cumulative level its account brings the pool to.
+      const resets = await usage.evaluate(selector => {
+        const chart = document.querySelector(selector), r = el => el.getBoundingClientRect(), plotNode = chart.querySelector('.su-pooled .su-plot'), plot = r(plotNode);
+        const start = Number(plotNode.dataset.start), end = Number(plotNode.dataset.end), cap = Number(plotNode.dataset.cap), box = b => ({ left: b.left, right: b.right, top: b.top, bottom: b.bottom });
+        const groups = [...chart.querySelectorAll('.su-reset[data-kind=projected]')].map(group => ({ t: Number(group.dataset.t), marks: [...group.querySelectorAll('.su-reset-mark')].map(mark => {
+          const dot = r(mark.querySelector('.su-reset-dot')), label = mark.querySelector('.su-reset-text'), top = Number(mark.dataset.top);
+          return { account: mark.dataset.account, top, base: Number(mark.dataset.base), dx: Math.abs((dot.left + dot.right) / 2 - (plot.left + (Number(group.dataset.t) - start) / (end - start) * plot.width)),
+            dy: Math.abs((dot.top + dot.bottom) / 2 - (plot.top + (1 - top / cap) * plot.height)), text: label.textContent, hidden: label.dataset.hidden === 'true', dot: box(dot) };
+        }) }));
+        const waste = chart.querySelector('.su-waste'), overlap = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+        const labels = [...chart.querySelectorAll('.su-reset-text, .su-waste-text')].filter(node => node.dataset.hidden !== 'true').map(r), dots = [...chart.querySelectorAll('.su-reset-dot')].map(r);
+        return { groups, wasteT: waste ? Number(waste.dataset.t) : null, labelsApart: labels.every((a, i) => labels.every((b, j) => i >= j || !overlap(a, b))), labelsClearOfDots: labels.every(a => dots.every(b => !overlap(a, b))) };
+      }, CODEX);
+      console.log(`USAGE LIMITS RESETS: ${JSON.stringify(resets)}`);
+      const stacked = resets.groups.find(group => group.marks.length === 2);
+      check('Both Codex accounts resetting together stack two markers on one vertical line in priority order, each dot within 1px of its cumulative level', !!stacked && stacked.marks.map(mark => mark.account).join() === 'acct-team,acct-prolite'
+        && Math.abs(stacked.marks[1].base - stacked.marks[0].top) < 1e-6 && Math.abs(stacked.marks[1].top - 120) < 1e-6 && stacked.marks.every(mark => mark.dx <= 1 && mark.dy <= 1) && stacked.marks[0].dot.top - stacked.marks[1].dot.bottom > 8);
+      check('Stacked reset labels read +N and stay shown, apart from each other and from every dot; the waste arrow shares the reset x', !!stacked && stacked.marks.every(mark => /^\+\d+(\.\d)?$/.test(mark.text) && !mark.hidden) && resets.labelsApart && resets.labelsClearOfDots && resets.wasteT === stacked.t);
+      // Hovering the upper dot shows its tooltip; the crosshair and its inline tooltip step aside.
+      await usage.locator(`${CODEX} .su-reset-mark[data-account="acct-prolite"] .su-reset-dot`).hover();
+      await usage.waitForSelector('.mock-tip');
+      const tip = await usage.evaluate(selector => ({ count: document.querySelectorAll('.mock-tip').length, lines: [...document.querySelectorAll('.mock-tip span > span')].map(node => node.textContent),
+        cross: document.querySelectorAll(`${selector} .su-cross`).length, inline: document.querySelectorAll(`${selector} .su-tip`).length }), CODEX);
+      console.log(`USAGE LIMITS RESET TIP: ${JSON.stringify(tip)}`);
+      check('Hovering a reset marker shows account and plan, reset time, units restored and units lost, without the crosshair', tip.count === 1 && tip.lines[0] === 'chatgpt1 · Pro 100' && /^Resets \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(tip.lines[1])
+        && /^\+\d+ units restored$/.test(tip.lines[2]) && /^\d+ units lost at this reset$/.test(tip.lines[3]) && tip.lines.length === 4 && tip.cross === 0 && tip.inline === 0);
+      {
+        const section = await usage.locator(CODEX).boundingBox(), bubble = await usage.locator('.mock-tip').boundingBox();
+        const top = Math.max(0, Math.min(section.y, bubble.y) - 12), bottom = Math.max(section.y + section.height, bubble.y + bubble.height) + 12;
+        await usage.screenshot({ path: join(usageDir, 'v6-limits-stacked-tip.png'), clip: { x: section.x - 12, y: top, width: section.width + 24, height: bottom - top } });
+      }
+      await usage.mouse.move(5, 5);
+      // Banked-credit flags: the two Codex credits expiring ten minutes apart in about five hours share one flag above the plot, its pole on the first expiry.
+      const flag = await usage.evaluate(selector => {
+        const chart = document.querySelector(selector), r = el => el.getBoundingClientRect(), plotNode = chart.querySelector('.su-pooled .su-plot'), plot = r(plotNode), node = chart.querySelector('.su-flag');
+        if (!node) return null;
+        const start = Number(plotNode.dataset.start), end = Number(plotNode.dataset.end), box = r(node), svg = r(node.querySelector('svg'));
+        return { count: chart.querySelectorAll('.su-flag').length, credits: node.dataset.count, badge: node.querySelector('.su-flag-count')?.textContent, pole: Math.abs(svg.left + svg.width * 5 / 24 - (plot.left + (Number(node.dataset.t) - start) / (end - start) * plot.width)),
+          above: box.bottom <= plot.top + 0.5 && box.top >= plot.top - 22, other: document.querySelectorAll('.su-provider-limits[data-provider="anthropic"] .su-flag').length };
+      }, CODEX);
+      await usage.locator(`${CODEX} .su-flag`).first().hover();
+      await usage.waitForSelector('.mock-tip');
+      const flagTip = await usage.evaluate(() => [...document.querySelectorAll('.mock-tip span > span')].map(node => node.textContent));
+      console.log(`USAGE LIMITS FLAG: ${JSON.stringify({ flag, flagTip })}`);
+      check('Banked credits expiring together share one flag above the Codex plot, pole on the expiry time within 1px, with a count and one tooltip line per credit', flag?.count === 1 && flag.credits === '2' && flag.badge === '2' && flag.pole <= 1 && flag.above && flag.other === 0
+        && flagTip.length === 2 && /^chatgptvitibot · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTip[0]) && /^chatgpt1 · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTip[1]));
+      await usage.mouse.move(5, 5);
     }
     // Pixels along the slider's middle row: the track left of the thumb stays unfilled and the part to its right carries the fill color (the thumb's own color), since the filled part is the averaged period reaching back from now.
     const sliderFill = async () => {
@@ -1907,7 +1962,7 @@ try {
     check('Limits hover reports a projected value in plan units with its local time, on the hovered chart only', /^\w{3} \d{1,2}:\d{2}.* · \d+(\.\d)? units left \(projected\)$/.test(await usage.locator(`${CODEX} .su-pooled .su-tip`).textContent())
       && await usage.locator(`${ANTHROPIC} .su-pooled .su-tip`).count() === 0);
     await usage.mouse.move(5, 5);
-    await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v5-limits-top.png') });
+    await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-top.png') });
     {
       // The overview scrolled so the second provider's section starts at the top of the page.
       await usage.evaluate(selector => { const page = document.querySelector('.su'), section = document.querySelector(selector); page.scrollTop += section.getBoundingClientRect().top - page.getBoundingClientRect().top - 12; }, ANTHROPIC);
@@ -1917,7 +1972,7 @@ try {
       console.log(`USAGE LIMITS SCROLLED: ${JSON.stringify(scrolled)}`);
       // The page may end before the section reaches the top; then it is scrolled all the way down.
       check('The overview scrolls to the Anthropic section and shows its whole chart', scrolled.scrollTop > 0 && (Math.abs(scrolled.top - 12) <= 1 || scrolled.bottom <= 1) && scrolled.chartShown);
-      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v5-limits-second.png') });
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-second.png') });
       await usage.evaluate(() => { document.querySelector('.su').scrollTop = 0; });
     }
     {
@@ -1951,37 +2006,42 @@ try {
       await usage.locator('.su-lookback input[type=range]').blur();
     }
     {
-      // Horizon toggle: one icon button in the controls bar; 7 days by default, 30 days on every chart when pressed.
-      const horizon = usage.locator('.su-limits-controls .su-horizon');
+      // Horizon: an explicit 7d | 30d segmented control in the controls bar; 7 days by default, 30 days on every chart when chosen.
       const toggleState = () => usage.evaluate(() => {
-        const button = document.querySelector('.su-horizon'), charts = [...document.querySelectorAll('.su-pooled')];
-        return { pressed: button.getAttribute('aria-pressed'), name: button.getAttribute('aria-label'), icon: button.querySelector('svg')?.getAttribute('data-icon'), inBar: !!button.closest('.su-limits-controls'),
+        const group = document.querySelector('.su-horizon'), charts = [...document.querySelectorAll('.su-pooled')];
+        return { role: group.getAttribute('role'), name: group.getAttribute('aria-label'), choices: [...group.querySelectorAll('button')].map(button => `${button.textContent}:${button.getAttribute('aria-pressed')}`).join(), icons: group.querySelectorAll('svg').length, inBar: !!group.closest('.su-limits-controls'),
           days: charts.map(chart => { const plot = chart.querySelector('.su-plot'); return Math.round((Number(plot.dataset.end) - Number(plot.dataset.start)) / 864) / 100; }),
           reachEnd: charts.every(chart => Math.abs(chart.querySelector('.su-line.su-projected').getBoundingClientRect().right - chart.querySelector('.su-plot').getBoundingClientRect().right) <= 2) };
       });
       const initial = await toggleState();
-      await horizon.hover();
-      await usage.waitForSelector('.mock-tip');
-      const tip = await usage.locator('.mock-tip').textContent();
-      console.log(`USAGE HORIZON 7D: ${JSON.stringify({ initial, tip })}`);
-      check('Limits horizon toggle sits in the controls bar, defaults to 7 days on every chart and offers to extend to 30', initial.pressed === 'false' && initial.name === 'Project 30 days ahead' && initial.icon === 'ArrowBarRight'
-        && initial.inBar && initial.days.join() === '9.1,9.1' && tip === 'Extend the projection to 30 days');
-      await horizon.click();
+      console.log(`USAGE HORIZON 7D: ${JSON.stringify(initial)}`);
+      check('Limits horizon is a labelled 7d | 30d segmented control in the controls bar, 7 days pressed by default on every chart', initial.role === 'group' && initial.name === 'Horizon' && initial.choices === '7d:true,30d:false' && initial.icons === 0
+        && initial.inBar && initial.days.join() === '9.1,9.1');
+      // Keyboard: Tab reaches the 30d choice and Space presses it.
+      await usage.locator('.su-horizon button', { hasText: '7d' }).focus();
+      await usage.keyboard.press('Tab');
+      const focused = await usage.evaluate(() => document.activeElement?.textContent);
+      await usage.keyboard.press('Space');
       await usage.waitForFunction(() => [...document.querySelectorAll('.su-pooled')].every(chart => chart.dataset.horizon === '30'));
       await usage.waitForFunction(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'rest' && call[1] === '/usage/limits?hours=216'));
+      await usage.locator('.su-horizon button', { hasText: '30d' }).blur();
       await usage.mouse.move(5, 5);
       await settle(usage);
       const extended = await toggleState(), geometry = await measure(), other = await measureIn(ANTHROPIC), axis = await axisState(`${CODEX} .su-pooled`), otherAxis = await axisState(`${ANTHROPIC} .su-pooled`);
       const plot = await usage.evaluate(selector => { const node = document.querySelector(`${selector} .su-pooled .su-plot`); return [Number(node.dataset.start), Number(node.dataset.end)]; }, CODEX);
       const midnights = await pageMidnights(...plot);
-      console.log(`USAGE HORIZON 30D: ${JSON.stringify({ extended, geometry, other, axis, otherAxis, midnights })}`);
-      check('One horizon toggle extends every chart to 30 days, shows the shrink arrow and persists', extended.pressed === 'true' && extended.icon === 'ArrowBarLeft' && extended.days.join() === '39,39' && extended.reachEnd
+      console.log(`USAGE HORIZON 30D: ${JSON.stringify({ focused, extended, geometry, other, axis, otherAxis, midnights })}`);
+      check('The keyboard picks 30d, which extends every chart to 30 days and persists', focused === '30d' && extended.choices === '7d:false,30d:true' && extended.days.join() === '39,39' && extended.reachEnd
         && await usage.evaluate(() => JSON.parse(localStorage.getItem('hermes.plugin.hermes-t3sidebar.usage-preferences')).horizon) === 30);
       check('Limits 30-day charts keep one gridline per midnight, readable labels and their measurements', axis.dayLines === midnights && otherAxis.dayLines === midnights && midnights >= 38 && monthsOnChange(axis.labels) && !axis.overlap && !otherAxis.overlap
         && averageOk(geometry) && geometry.lookbackX > geometry.plotLeft && labelsOk(geometry) && averageOk(other) && labelsOk(other));
       check('Limits 30-day 12h averaging span is too short for inner arrowheads, so they point in from outside', geometry.average.tight && geometry.average.right - geometry.average.left < 16 && other.average.tight);
-      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v5-limits-30d.png') });
-      await horizon.click();
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-30d.png') });
+      // The 30-day chart shows the banked credits expiring in nine days as their own flags, and last week's stacked resets as quieter past markers.
+      const thirty = await usage.evaluate(selector => { const chart = document.querySelector(selector); return { flags: [...chart.querySelectorAll('.su-flag')].map(node => node.dataset.count).join(), past: [...chart.querySelectorAll('.su-reset[data-kind=past]')].map(node => node.querySelectorAll('.su-reset-mark').length).join(), pastLabels: chart.querySelectorAll('.su-reset[data-kind=past] .su-reset-text').length }; }, CODEX);
+      console.log(`USAGE HORIZON 30D MARKS: ${JSON.stringify(thirty)}`);
+      check('The 30-day Codex chart flags all three banked expiry times and marks last week\'s stacked resets quietly, without labels', thirty.flags === '2,1,1' && thirty.past.split(',').includes('2') && thirty.pastLabels === 0);
+      await usage.locator('.su-horizon button', { hasText: '7d' }).click();
       await usage.waitForFunction(() => [...document.querySelectorAll('.su-pooled')].every(chart => chart.dataset.horizon === '7'));
       await usage.mouse.move(5, 5);
     }
@@ -1998,6 +2058,18 @@ try {
       console.log(`USAGE LIMITS ACCOUNTS: ${JSON.stringify(accounts)}`);
       check('Unfolding Codex accounts shows its two rows with pace ticks inside the bars, leaves Anthropic folded and stores the fold', accounts.codex === 2 && accounts.total === 2 && accounts.paces && accounts.overflowX <= 0
         && JSON.stringify(accounts.stored) === '{"openai-codex":true}');
+      const banked = await usage.evaluate(() => {
+        const rgb = el => { const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1; const paint = canvas.getContext('2d'); paint.fillStyle = getComputedStyle(el).color; paint.fillRect(0, 0, 1, 1); return [...paint.getImageData(0, 0, 1, 1).data.slice(0, 3)]; };
+        return Object.fromEntries(['acct-team', 'acct-prolite'].map(id => { const account = document.querySelector(`.su-account[data-account="${id}"]`), bars = account.querySelector('.su-windows').getBoundingClientRect();
+          return [id, [...account.querySelectorAll('.su-banked-credit')].map(line => ({ text: line.textContent, soon: line.dataset.soon, color: rgb(line), muted: line.querySelector('.su-banked-unusable') ? rgb(line.querySelector('.su-banked-unusable')) : null, below: line.getBoundingClientRect().top >= bars.bottom }))]; }));
+      });
+      console.log(`USAGE LIMITS BANKED: ${JSON.stringify(banked)}`);
+      const [teamSoon, teamLater] = banked['acct-team'], [proSoon, proLater] = banked['acct-prolite'];
+      // The page clock runs on from the fixed start while the test works, so the countdowns may have lost a minute.
+      check('Each Codex account lists its banked resets under its bars, soonest first: the one expiring within a day in orange, chatgpt1\'s marked not usable now in muted text', banked['acct-team'].length === 2 && banked['acct-prolite'].length === 2
+        && [teamSoon, teamLater, proSoon, proLater].every(line => line.below) && /^Banked reset · expires \w{3} \d{1,2}:\d{2} (AM|PM) \(in (4h 5\dm|5h 0m)\)$/.test(teamSoon.text) && /\(in (8d 23h|9d 0h)\)$/.test(teamLater.text)
+        && /\(in 5h \d+m\) · not usable now$/.test(proSoon.text) && /\(in 9d 1[12]h\) · not usable now$/.test(proLater.text) && teamSoon.soon === 'true' && teamLater.soon === 'false'
+        && teamSoon.color[0] > teamSoon.color[2] + 60 && teamLater.color.join() !== teamSoon.color.join() && proSoon.muted && proSoon.muted.join() !== proSoon.color.join() && teamSoon.muted === null);
       await usage.reload();
       await usage.waitForSelector('.sf-footer .sf-limit');
       await usage.locator('.sf-footer .sf-limits').click();
@@ -2006,7 +2078,7 @@ try {
       check('The account fold survives a reload', reloaded === 'true,false');
       await usage.evaluate(selector => { const page = document.querySelector('.su'), toggle = document.querySelector(`${selector} .su-disclosure`); page.scrollTop += toggle.getBoundingClientRect().top - page.getBoundingClientRect().top - 260; }, CODEX);
       await settle(usage);
-      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v5-limits-accounts.png') });
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-accounts.png') });
       await usage.locator(`${CODEX} .su-disclosure`).click();
       await usage.evaluate(() => { document.querySelector('.su').scrollTop = 0; });
     }
@@ -2028,7 +2100,7 @@ try {
       check('Logged-out Anthropic is a compact muted row after the Codex chart, without a chart or accounts, and is left out of the footer', state.sections.join() === 'openai-codex,anthropic'
         && state.text === 'Anthropic · logged out in Hermes — sign in to track limits' + 'No usable Anthropic credential in the Hermes pool' && !state.chart && !state.disclosure && state.mark && state.height < 60 && state.footer === 'openai-codex');
       await loggedOut.evaluate(() => { const page = document.querySelector('.su'); page.scrollTop = page.scrollHeight; });
-      await loggedOut.locator('.harness-page').screenshot({ path: join(usageDir, 'v5-limits-logged-out.png') });
+      await loggedOut.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-logged-out.png') });
       await loggedOut.close();
     }
     {
@@ -2042,8 +2114,8 @@ try {
       await light.evaluate(() => localStorage.setItem('hermes.plugin.hermes-t3sidebar.usage-preferences', JSON.stringify({ provider: 'anthropic' })));
       await light.reload();
       await light.waitForSelector('.sf-footer .sf-limit');
-      const footer = await light.evaluate(() => { const items = [...document.querySelectorAll('.sf-limit')]; return { items: items.map(item => `${item.dataset.provider}:${item.dataset.status}:${item.querySelector('[data-verdict-icon] svg')?.getAttribute('data-icon')}`), label: document.querySelector('.sf-limits').getAttribute('aria-label') }; });
-      check('Footer items show the amber bin for every pool whose quota will expire unused', footer.items.join() === 'openai-codex:waste:Trash2,anthropic:waste:Trash2' && /OpenAI Codex: \d+ \/ 120 plan units · \d+ plan units will expire unused by \w{3}\./.test(footer.label));
+      const footer = await light.evaluate(() => { const items = [...document.querySelectorAll('.sf-limit')]; return { items: items.map(item => `${item.dataset.provider}:${item.dataset.status}:${item.querySelector('[data-verdict-icon] svg')?.getAttribute('data-icon')}:${item.dataset.severity}`), label: document.querySelector('.sf-limits').getAttribute('aria-label') }; });
+      check('Footer items show the clock-x for every pool whose quota will expire unused, coloured by severity (Codex over a third: orange; Anthropic under: muted)', footer.items.join() === 'openai-codex:waste:ClockX:medium,anthropic:waste:ClockX:low' && /OpenAI Codex: \d+ \/ 120 units · \d+ units will expire unused by \w{3}\./.test(footer.label));
       await light.locator('.sf-footer .sf-limits').click();
       // The mark itself is 0px wide (its line and arrows overflow it), so wait for it in the DOM rather than for visibility.
       await light.waitForSelector(`${CODEX} .su-pooled .su-waste`, { state: 'attached' });
@@ -2053,16 +2125,20 @@ try {
       const waste = await wasteGeometry(light, CODEX);
       const empty = await light.locator(`${CODEX} .su-measure[data-kind="empty"]`).count();
       console.log(`USAGE LIMITS WASTE (light): ${JSON.stringify({ waste, empty })}`);
-      check('Limits light week: an amber factual waste verdict and a waste measurement at the reset, no time-to-empty', waste.verdict?.status === 'waste' && waste.verdict.icon === 'Trash2'
-        && /^\d+(\.\d)? plan units will expire unused by \w{3}$/.test(waste.verdict.text) && waste.marks.length >= 1 && waste.marks.every(mark => wasteOk(mark, 'chatgpt1 · Pro 100')) && waste.apart && empty === 0);
+      check('Limits light week: a factual waste verdict after an orange clock-x (over a third of the capacity) and a waste measurement at the reset, no time-to-empty', waste.verdict?.status === 'waste' && waste.verdict.severity === 'medium' && waste.verdict.icon === 'ClockX'
+        && waste.verdict.iconColor[0] > waste.verdict.iconColor[2] + 60 && /^\d+(\.\d)? units will expire unused by \w{3}$/.test(waste.verdict.text) && waste.marks.length >= 1 && waste.marks.every(mark => wasteOk(mark, 'chatgpt1 · Pro 100')) && waste.apart && empty === 0);
       await light.mouse.move(5, 5);
-      await light.locator('.harness-page').screenshot({ path: join(usageDir, 'v5-limits-7d-waste.png') });
+      await light.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-7d-waste.png') });
       await light.close();
     }
     // A narrow workspace keeps both pages usable without horizontal scrolling.
     await usage.setViewportSize({ width: 900, height: 1000 });
     await usage.waitForSelector('.su-pooled .su-measures');
-    // Labels are re-clamped by a ResizeObserver, whose callback runs with the next frame.
+    // Labels are re-clamped by a ResizeObserver; a fixed number of frames raced its delivery, so wait until every label's width budget matches its row's current width.
+    await usage.waitForFunction(() => [...document.querySelectorAll('.su-measures')].every(row => {
+      const width = row.getBoundingClientRect().width, gap = side => side === 'left' || side === 'right' ? 1 : 0;
+      return [...row.querySelectorAll('.su-measure-text')].every(label => Math.abs(parseFloat(label.style.maxWidth) - Math.max(0, (Number(label.dataset.high) - Number(label.dataset.low)) / 100 * width - gap(label.dataset.side) * 12)) < 1);
+    }), null, { timeout: 5000 });
     await settle(usage);
     {
       const geometry = await measure(), other = await measureIn(ANTHROPIC), overflow = await usage.evaluate(() => { const root = document.querySelector('.su'); return root.scrollWidth - root.clientWidth; });

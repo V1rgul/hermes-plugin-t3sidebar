@@ -344,7 +344,8 @@ export function syntheticUsageHistory(days = 7, tz = 'UTC') {
     totals: { tokens: total('tokens'), cost_usd: total('cost_usd'), user_messages: total('user_messages') }, pricing_missing: ['copilot/gpt-5.5'], approximate: true };
 }
 // Two Codex accounts on different plans (a 20-unit Business seat drained first, then a 100-unit Pro 100) and one Anthropic Max 20x account (200 units weekly), each pool drained in priority order by an office-hours workload: ten days of 15-minute samples with weekly resets as visible step-ups. Consumption is in plan units, the weekday/hour profile follows the local clock (nights and weekends line up with the charts' midnight gridlines), and Codex's last 12 hours run hotter than the days before, as in a burst of work. Scenarios (control.limitsScenario):
-// - 'mixed' (default): Codex's burst would leave Pro 100 with unused quota at tomorrow's reset (a waste arrow) yet still empty the pool days before the Business seat resets (the time-to-empty arrow), so its verdict is short; Anthropic's lighter use leaves quota to expire at its reset (waste).
+// - 'mixed' (default): both Codex accounts reset together tomorrow (stacked reset markers on one vertical line); Codex's burst leaves Pro 100 with unused quota at that reset (a waste arrow) yet still empties the pool with no further reset that week (the time-to-empty arrow), so its verdict is short; Anthropic's lighter use leaves quota to expire at its reset (waste).
+// Both Codex accounts hold two banked reset credits, one expiring in about five hours (the two expiries ten minutes apart share one flag) and one in nine to ten days; chatgptvitibot could redeem them now, chatgpt1 could not.
 // - 'light': the same accounts with a gentle Codex workload; resets throw quota away and both verdicts are waste.
 // - 'steady': consumption that roughly matches each pool's capacity; both verdicts are ok.
 // - 'logged-out': 'mixed' with Anthropic logged out in Hermes (no credential left in its pool).
@@ -356,7 +357,7 @@ function limitLoad(t) {
   return hour >= 9 && hour < 12 ? 4 : hour >= 12 && hour < 14 ? 1.5 : hour >= 14 && hour < 19 ? 4.5 : hour >= 19 && hour < 23 ? 1 : 0;
 }
 const LIMIT_SCENARIOS = {
-  mixed: { base: 0.28, burst: 1.0, team: 0.3, prolite: 0.6, proliteReset: 1.0, teamReset: 4.2, claude: 0.35, claudeLoad: 0.8, claudeReset: 2.5, anthropic: true },
+  mixed: { base: 0.28, burst: 1.0, team: 0.3, prolite: 0.6, proliteReset: 1.0, teamReset: 1.0, claude: 0.35, claudeLoad: 0.8, claudeReset: 2.5, anthropic: true },
   light: { base: 0.28, burst: 0.37, team: 0.3, prolite: 0.6, proliteReset: 1.0, teamReset: 4.2, claude: 0.35, claudeLoad: 0.8, claudeReset: 2.5, anthropic: true },
   steady: { base: 0.3, burst: 0.56, team: 0.3, prolite: 0.6, proliteReset: 4.6, teamReset: 2.2, claude: 0.35, claudeLoad: 0.7, claudeReset: 4.5, anthropic: true }
 };
@@ -381,20 +382,22 @@ function simulateLimitPool(accounts, { from, fetched, since, scaleAt, seed = 0 }
       { t, account: account.id, window: 'five_hour', remaining_percent: fiveLeft(account), resets_at: account.fiveReset },
       { t, account: account.id, window: 'weekly', remaining_percent: percent(account), resets_at: account.weekReset });
   }
-  const snapshot = account => ({ id: account.id, label: account.label, priority: account.priority, plan: account.plan, ...(Number.isFinite(account.banked_resets) ? { banked_resets: account.banked_resets } : {}),
+  const snapshot = account => ({ id: account.id, label: account.label, priority: account.priority, plan: account.plan, ...(Number.isFinite(account.banked_resets) ? { banked_resets: account.banked_resets } : {}), banked_credits: account.banked_credits ?? null,
     fetched_at: fetched, stale: false, error: null, windows: [
       { key: 'five_hour', label: '5-hour', window_seconds: LIMIT_FIVE_HOURS, scope: 'account', model: null, used_percent: round(100 - fiveLeft(account)), remaining_percent: fiveLeft(account), resets_at: account.fiveReset },
       { key: 'weekly', label: 'Weekly', window_seconds: LIMIT_WEEK, scope: 'account', model: null, used_percent: round(100 - percent(account)), remaining_percent: percent(account), resets_at: account.weekReset }
     ] });
   return { history, accounts: accounts.map(snapshot) };
 }
+// The backend's banked_credits block: available credits expiring the given hours from now, granted a week before, and how many could be redeemed now.
+const bankedCredits = (now, hours, applicable) => ({ fetched_at: now - 900, applicable_count: applicable, credits: hours.map(hour => ({ status: 'available', expires_at: now + hour * 3600, granted_at: now + hour * 3600 - 30 * 86400 })) });
 export function syntheticUsageLimits(hours = 168, scenario = 'mixed') {
   const shape = LIMIT_SCENARIOS[scenario] || LIMIT_SCENARIOS.mixed;
   const now = Date.now() / 1000, fetched = now - 140, from = Math.floor(now / 900) * 900 - 10 * 86400, since = now - hours * 3600;
   const prepare = list => list.map(account => ({ ...account, remaining: account.units * account.left, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: resetAfter(account.five, LIMIT_FIVE_HOURS, from), fiveUsed: 0 }));
   const codex = simulateLimitPool(prepare([
-    { id: 'acct-team', label: 'chatgptvitibot', priority: 0, plan: 'team', units: 20, banked_resets: 0, weekly: now + shape.teamReset * 86400, five: now + 1.3 * 3600, left: shape.team },
-    { id: 'acct-prolite', label: 'chatgpt1', priority: 1, plan: 'prolite', units: 100, banked_resets: 1, weekly: now + shape.proliteReset * 86400, five: now + 3.1 * 3600, left: shape.prolite }
+    { id: 'acct-team', label: 'chatgptvitibot', priority: 0, plan: 'team', units: 20, banked_resets: 2, banked_credits: bankedCredits(now, [5, 9 * 24], 2), weekly: now + shape.teamReset * 86400, five: now + 1.3 * 3600, left: shape.team },
+    { id: 'acct-prolite', label: 'chatgpt1', priority: 1, plan: 'prolite', units: 100, banked_resets: 2, banked_credits: bankedCredits(now, [5 + 10 / 60, 9.5 * 24], 0), weekly: now + shape.proliteReset * 86400, five: now + 3.1 * 3600, left: shape.prolite }
   ]), { from, fetched, since, scaleAt: t => t >= now - 12 * 3600 ? shape.burst : shape.base });
   // Max 20x as Anthropic's usage endpoint names it (rateLimitTier), which the plugin maps to 200 weekly plan units.
   const claude = simulateLimitPool(prepare([

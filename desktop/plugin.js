@@ -865,9 +865,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
 
 const CSS = `
 /* Desktop's --ui-purple (#9e94d5 in both modes) is 2.7:1 on light backgrounds, and --ui-blue (#0053fd in both modes, Midnight included) about 3.3:1 on dark ones. Mixing in the base text darkens them in light mode and lightens them in dark mode; raising OKLCH chroma restores the saturation the mix removes (blue 62% at ×1.6: saturated yet light enough at 12px). */
-.sf,.sf-menu{--sf-blue:color-mix(in srgb,var(--ui-blue,#0053fd) 66%,var(--ui-base,var(--ui-text-primary)));--sf-blue:oklch(from color-mix(in oklab,var(--ui-blue,#0053fd) 62%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.6) h);--sf-purple:color-mix(in srgb,var(--ui-purple,#9e94d5) 70%,var(--ui-base,var(--ui-text-primary)));--sf-purple:oklch(from color-mix(in oklab,var(--ui-purple,#9e94d5) 65%,var(--ui-base,var(--ui-text-primary))) l calc(c * 2) h);
-  /* Amber for quota that expires unused, from the theme's own orange and yellow (the Limits page declares the same mix). */
-  --sf-waste:color-mix(in oklab,var(--ui-orange,#db704b) 55%,var(--ui-yellow,#c08532))}
+.sf,.sf-menu{--sf-blue:color-mix(in srgb,var(--ui-blue,#0053fd) 66%,var(--ui-base,var(--ui-text-primary)));--sf-blue:oklch(from color-mix(in oklab,var(--ui-blue,#0053fd) 62%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.6) h);--sf-purple:color-mix(in srgb,var(--ui-purple,#9e94d5) 70%,var(--ui-base,var(--ui-text-primary)));--sf-purple:oklch(from color-mix(in oklab,var(--ui-purple,#9e94d5) 65%,var(--ui-base,var(--ui-text-primary))) l calc(c * 2) h)}
 /* Card geometry: --sf-card-content (two text lines), --sf-card-padding and --sf-card-margin (vertical, per side). Defaults are fallbacks rather than declarations, so :root, a theme or any ancestor can set them; the stride used by windowing and shelf minimums derives from them. */
 .sf{--sf-card-stride:calc(var(--sf-card-content,42px) + 2 * var(--sf-card-padding,6px) + 2 * var(--sf-card-margin,1px))}
 .sf{display:flex;flex-direction:column;height:100%;min-height:0;min-width:220px;font:12px/1.4 var(--font-sans,inherit);color:var(--ui-text-primary)}
@@ -940,7 +938,8 @@ const CSS = `
 .sf-limit svg[data-provider-mark]{width:13px;height:13px;flex-shrink:0;opacity:.7}
 .sf-limit-value{font-variant-numeric:tabular-nums;white-space:nowrap}.sf-limit-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sf-limit .su-verdict-icon{display:inline-flex;flex-shrink:0}.sf-limit .su-verdict-icon svg{width:14px;height:14px}
-.sf-limit[data-status=short] .su-verdict-icon{color:var(--ui-red,#cf2d56)}.sf-limit[data-status=waste] .su-verdict-icon{color:var(--sf-waste)}
+/* Verdict glyph colour follows severity (missing or lost units against the pool's capacity), the same rule as the Limits page: muted below a third, orange from a third, red from two thirds. */
+.sf-limit .su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.sf-limit .su-verdict-icon[data-severity=high]{color:var(--ui-red,#cf2d56)}
 @media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
 // Monochrome 24x24 provider marks: LobeHub Icons, @lobehub/icons-static-svg 1.95.1 (MIT, Copyright (c) 2023 LobeHub; notice in
@@ -1015,11 +1014,13 @@ function statusIcon(status, glyph = status) {
   return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
     STATUS_ICONS[glyph].map(d => h('path', { key: d, d })));
 }
-// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge and arrow-bar glyphs.
+// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge, clock-x and flag glyphs, plus one derived arrow.
 const BUNDLED_ICONS = {
   Gauge: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M13.41 10.59l2.59 -2.59', 'M7 12a5 5 0 0 1 5 -5'],
-  ArrowBarRight: ['M20 12l-10 0', 'M20 12l-4 4', 'M20 12l-4 -4', 'M4 4l0 16'],
-  ArrowBarLeft: ['M4 12l10 0', 'M4 12l4 4', 'M4 12l4 -4', 'M20 4l0 16'],
+  ClockX: ['M20.926 13.15a9 9 0 1 0 -7.835 7.784', 'M12 7v5l2 2', 'M22 22l-5 -5', 'M17 22l5 -5'],
+  // Derived from Tabler v3.44.0 arrow-bar-to-down (MIT) with the tip moved down to meet the bar's top edge, because Virgile wants the arrow to touch the floor.
+  ArrowBarToDownTouching: ['M4 20h16', 'M12 4v14', 'M8 14l4 4l4 -4'],
+  Flag: ['M5 5a5 5 0 0 1 7 0a5 5 0 0 0 7 0v9a5 5 0 0 1 -7 0a5 5 0 0 0 -7 0v-9', 'M5 21v-7'],
   ClockHour1: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 7v5', 'M12 12l2 -3'],
   ClockHour3: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 12h3.5', 'M12 7v5'],
   CalendarTime: ['M11.795 21h-6.795a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v4', 'M14 18a4 4 0 1 0 8 0a4 4 0 1 0 -8 0', 'M15 3v4', 'M7 3v4', 'M3 11h16', 'M18 16.496v1.504l1 1'],
@@ -1986,7 +1987,7 @@ function UsageFooter({ ctx, scope, companion = false }) {
   return h('footer', { className: 'sf-footer' }, h(UtilityLink, { link: USAGE_LINK }),
     ctx && scope ? h(LimitsFooterStatus, { ctx, scope, enabled: companion }) : h(LimitsFooterButton, { items: [], now: 0 }));
 }
-// The Limits entry point is one button whatever the data: every provider's mark, pooled plan units and a verdict glyph (only when the week runs short or wastes quota), or the gauge alone while there is nothing to show (loading, failure, no companion, no provider with limits), so the page stays reachable and no placeholder or error ever appears in the row.
+// The Limits entry point is one button whatever the data: every provider's mark, pooled units and a verdict glyph (only when the week runs short or wastes quota, coloured by severity), or the gauge alone while there is nothing to show (loading, failure, no companion, no provider with limits), so the page stays reachable and no placeholder or error ever appears in the row.
 function LimitsFooterStatus({ ctx, scope, enabled }) {
   const prefs = useUsagePreferences(ctx);
   // Same key as the Limits page with the same preferences, so both read one cache entry.
@@ -1997,7 +1998,7 @@ function LimitsFooterStatus({ ctx, scope, enabled }) {
   return h(LimitsFooterButton, { items, now });
 }
 // One tooltip line per provider, also used (joined) as the button's accessible name: facts only, no advice.
-export const limitsFooterLine = (provider, verdict, now) => `${provider.label || provider.provider}: ${unitsText(verdict.remaining)} / ${unitsText(verdict.capacity)} plan units · ${verdictText(verdict, now)}`;
+export const limitsFooterLine = (provider, verdict, now) => `${provider.label || provider.provider}: ${unitsText(verdict.remaining)} / ${unitsText(verdict.capacity)} units · ${verdictText(verdict, now)}`;
 function LimitsFooterButton({ items, now }) {
   const lines = items.map(({ provider, verdict }) => limitsFooterLine(provider, verdict, now));
   const tip = typeof sdk.Tip === 'function';
@@ -2005,10 +2006,10 @@ function LimitsFooterButton({ items, now }) {
   const label = lines.length ? h('span', { style: { display: 'block', textAlign: 'left' } }, lines.map(line => h('span', { key: line, style: { display: 'block' } }, line))) : 'Subscription limits';
   const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-limits', 'data-route': LIMITS_ROUTE, 'data-empty': !lines.length,
     'aria-label': lines.length ? `Limits. ${lines.join('. ')}.` : 'Limits', title: tip ? undefined : lines.length ? lines.join('\n') : 'Subscription limits', onClick: () => openRoute(LIMITS_ROUTE) },
-    lines.length ? h('span', { className: 'sf-limits-items' }, items.map(({ provider, verdict }) => h('span', { key: provider.provider, className: 'sf-limit', 'data-provider': provider.provider, 'data-status': verdict.status },
+    lines.length ? h('span', { className: 'sf-limits-items' }, items.map(({ provider, verdict }) => h('span', { key: provider.provider, className: 'sf-limit', 'data-provider': provider.provider, 'data-status': verdict.status, 'data-severity': verdict.severity ?? undefined },
       providerMark(provider.provider) || h('span', { className: 'sf-limit-name' }, provider.label || provider.provider),
       h('span', { className: 'sf-limit-value' }, unitsText(verdict.remaining)),
-      verdictIcon(verdict.status))))
+      verdictIcon(verdict))))
       : icon('Gauge', '◔'));
   return tip ? h(sdk.Tip, { label, side: 'top' }, button) : button;
 }
@@ -2031,10 +2032,21 @@ export function validUsageLimits(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.providers)) throw new Error('Unsupported usage limits response.');
   const providers = value.providers.filter(item => item && typeof item.provider === 'string').map(item => ({
     // Only an explicit logged_out marks a provider without a usable credential; anything else keeps the normal view.
-    ...item, auth: item.auth === 'logged_out' ? 'logged_out' : 'ok', auth_reason: typeof item.auth_reason === 'string' && item.auth_reason ? item.auth_reason : null, accounts: Array.isArray(item.accounts) ? item.accounts.filter(account => account && typeof account.id === 'string').map(account => ({ ...account, windows: Array.isArray(account.windows) ? account.windows.filter(win => win && typeof win.key === 'string') : [] })) : [],
+    ...item, auth: item.auth === 'logged_out' ? 'logged_out' : 'ok', auth_reason: typeof item.auth_reason === 'string' && item.auth_reason ? item.auth_reason : null, accounts: Array.isArray(item.accounts) ? item.accounts.filter(account => account && typeof account.id === 'string').map(account => ({ ...account, windows: Array.isArray(account.windows) ? account.windows.filter(win => win && typeof win.key === 'string') : [], banked_credits: validBankedCredits(account.banked_credits) })) : [],
     history: Array.isArray(item.history) ? item.history : []
   }));
   return { ...value, providers, sampler: value.sampler && typeof value.sampler === 'object' ? value.sampler : null };
+}
+// Banked reset credits: null when never read, else the well-formed available credits by expiry (no expiry last). Malformed entries are dropped rather than shown, and an applicable count that is not a whole number reads as unknown.
+const optionalTime = value => value == null ? null : Number.isFinite(value) ? value : undefined;
+export function validBankedCredits(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const credits = (Array.isArray(value.credits) ? value.credits : []).flatMap(credit => {
+    if (!credit || typeof credit !== 'object' || credit.status !== 'available') return [];
+    const expires = optionalTime(credit.expires_at), granted = optionalTime(credit.granted_at);
+    return expires === undefined || granted === undefined ? [] : [{ status: 'available', expires_at: expires, granted_at: granted }];
+  }).sort((a, b) => (a.expires_at === null) - (b.expires_at === null) || (a.expires_at ?? 0) - (b.expires_at ?? 0));
+  return { fetched_at: finiteOrNull(value.fetched_at), applicable_count: Number.isInteger(value.applicable_count) && value.applicable_count >= 0 ? value.applicable_count : null, credits };
 }
 // One series per backend entry for the chosen split; series with nothing to draw for this metric are left out of its chart and legend.
 export function usageSeries(history, split, metric) {
@@ -2192,9 +2204,9 @@ export function formatDurationShort(seconds) {
   if (hours > 0) return `${hours}h ${minutes}m`;
   return minutes > 0 ? `${minutes}m` : '<1m';
 }
-// Plan capacity ─ pools are measured in plan units, where 20 is one base $20 plan's allowance (ChatGPT Plus, Claude Pro). Units measure capacity relative to that plan, not price, so accounts on different plans add up to what the pool can actually spend.
+// Plan capacity ─ pools are measured in units, where 20 is one base $20 plan's allowance (ChatGPT Plus, Claude Pro). Units measure capacity relative to that plan, not price, so accounts on different plans add up to what the pool can actually spend.
 export const BASE_PLAN_UNITS = 20;
-export const PLAN_UNITS_NOTE = `${BASE_PLAN_UNITS} plan units = one $20 plan's allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.`;
+export const PLAN_UNITS_NOTE = `${BASE_PLAN_UNITS} units = one $20 plan's allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.`;
 // Source: Virgile's figures. Codex capacity is linear in price and the same in every window; Anthropic is not linear in its marketing multipliers and differs per window: Max 20x gets 2x Max 5x in the weekly window but 4x in the five-hour window, and the Anthropic Team/Enterprise seats are assumed by analogy (Standard seat = Pro, Premium seat = Max 5x), not verified figures. A window missing from a row (and any window other than five_hour) uses the weekly weight.
 const PLAN_UNITS = {
   'openai-codex': {
@@ -2253,7 +2265,7 @@ export function planLabel(provider, plan) {
 const unitsDecimal = Intl.NumberFormat('en', { maximumFractionDigits: 1 });
 // Whole units are precise enough from 10 up; below that one decimal keeps a small pool from reading 0 while it still has quota.
 export const unitsText = value => !Number.isFinite(value) ? '—' : Math.abs(value) >= 10 ? String(Math.round(value)) : unitsDecimal.format(Math.round(value * 10) / 10);
-// Vertical ticks in plan units: round steps below the capacity plus the capacity itself as the top line, dropping a round step that would crowd it (120 gives 0, 25, 50, 75, 100, 120).
+// Vertical ticks in units: round steps below the capacity plus the capacity itself as the top line, dropping a round step that would crowd it (120 gives 0, 25, 50, 75, 100, 120).
 export function unitTicks(capacity) {
   const top = capacity > 0 ? capacity : BASE_PLAN_UNITS;
   const step = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000].find(item => top / item <= 5) ?? Math.ceil(top / 5);
@@ -2294,7 +2306,7 @@ export function pooledHistory(samples) {
   }
   return points;
 }
-// Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in plan units per hour (a drop on a 100-unit plan weighs five times a drop of the same percent on a 20-unit one), or null without at least 15 minutes of paired readings.
+// Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in units per hour (a drop on a 100-unit plan weighs five times a drop of the same percent on a 20-unit one), or null without at least 15 minutes of paired readings.
 export function drainStats(samples, now, lookbackS = 12 * HOUR_S) {
   const from = now - lookbackS, groups = new Map();
   for (const sample of samples) if (sample.t >= from && sample.t <= now) { if (!groups.has(sample.account)) groups.set(sample.account, []); groups.get(sample.account).push(sample); }
@@ -2347,7 +2359,7 @@ export function coverageText(seconds) {
   const hours = seconds / HOUR_S;
   return hours < 1 ? `${Math.max(1, Math.round(seconds / 60))}m` : hours < 48 ? `${Math.round(hours)}h` : `${Math.round(hours / 24)}d`;
 }
-// Projects the pooled remaining quota, in plan units, from now to now + horizonS. Each account holds weight · remaining% / 100 units of its plan's capacity (weight from planWeight for this window). The measured drain is consumed from accounts in pool priority order (lowest number first, the next once one is empty), and each account returns to its full weight at its resets_at, its next reset following one window_seconds later. Whatever an account still holds when it resets expires unused (`lost`). Without drain data the projection stays flat apart from those resets.
+// Projects the pooled remaining quota, in units, from now to now + horizonS. Each account holds weight · remaining% / 100 units of its plan's capacity (weight from planWeight for this window). The measured drain is consumed from accounts in pool priority order (lowest number first, the next once one is empty), and each account returns to its full weight at its resets_at, its next reset following one window_seconds later. Whatever an account still holds when it resets expires unused (`lost`). Without drain data the projection stays flat apart from those resets.
 export function projectPool(accounts, history, windowKey, now, horizonS, options = {}) {
   const provider = options.provider ?? null;
   const samples = limitSamples(accounts, history, windowKey, provider);
@@ -2400,23 +2412,76 @@ export function projectPool(accounts, history, windowKey, now, horizonS, options
   return { rate, unknown: rate === null, coveredS: stats.coveredS, partial: rate !== null && stats.partial, capacity, current, points, resets, nextReset, members,
     accounts: state.map(item => ({ id: item.id, remaining: item.units / item.weight * 100, units: item.units })), unknownAccounts };
 }
-// Projected resets that discard quota, one mark per reset time (accounts resetting together are summed). Losses under minShare of the pool's capacity are left out: a sliver of a percent is noise.
+// Projected resets that discard quota, one mark per group of resets within the tolerance (accounts resetting together are summed, drawn from the level before the group's first reset). Losses under minShare of the pool's capacity are left out: a sliver of a percent is noise.
 export function wasteMarks(projection, minShare = 0.01) {
-  const byTime = new Map();
-  for (const item of projection?.resets || []) {
-    if (!(item.lost > 1e-9)) continue;
-    if (!byTime.has(item.t)) byTime.set(item.t, { t: item.t, before: item.before, lost: 0, accounts: [] });
-    const mark = byTime.get(item.t);
-    mark.lost += item.lost; mark.accounts.push({ id: item.account, label: item.label, plan_label: item.plan_label, lost: item.lost });
-  }
+  const marks = resetGroups((projection?.resets || []).filter(item => item.lost > 1e-9)).map(group => ({ t: group.t, before: group.items[0].before, lost: group.items.reduce((sum, item) => sum + item.lost, 0),
+    accounts: group.items.map(item => ({ id: item.account, label: item.label, plan_label: item.plan_label, lost: item.lost })) }));
   const floor = (projection?.capacity || 0) * minShare;
-  return [...byTime.values()].filter(mark => mark.lost >= floor).sort((a, b) => a.t - b.t);
+  return marks.filter(mark => mark.lost >= floor);
 }
-// The Limits decision in one value: will the pool run short or throw quota away at resets within the next week? Judged on the weekly window (a week ahead of a five-hour window says little, and the 5h merge is postponed), falling back to the saved window choice when a provider has no weekly one; uses the saved lookback and the pooled plan-unit projection.
+// Resets less than this apart share one x on the chart: their markers stack on one vertical line instead of overlapping side by side.
+export const RESET_TOLERANCE_S = 15 * 60;
+// Groups time-stamped items (resets, credit expiries) that fall within the tolerance of a group's first item; the stable sort keeps pool priority order among equal times.
+export function resetGroups(items, tolerance = RESET_TOLERANCE_S) {
+  const groups = [];
+  for (const item of [...(items || [])].sort((a, b) => a.t - b.t)) {
+    const last = groups.at(-1);
+    if (last && item.t - last.t <= tolerance) last.items.push(item); else groups.push({ t: item.t, items: [item] });
+  }
+  return groups;
+}
+// Reset markers inside (from, to): one per account and projected reset. Accounts resetting together share the group's x and stack in pool priority order, each from the level before its own reset (plus what earlier accounts at the same instant restored) up by the units it restores, so every dot sits on the projected step. Restores under minShare of capacity get no marker.
+export function resetMarkers(projection, from, to, minShare = 0.01) {
+  const floor = (projection?.capacity || 0) * minShare;
+  return resetGroups((projection?.resets || []).filter(item => item.t > from && item.t < to)).map(group => {
+    const restored = new Map();
+    const accounts = group.items.map(item => {
+      const base = item.before + (restored.get(item.t) || 0);
+      restored.set(item.t, (restored.get(item.t) || 0) + item.gain);
+      return { id: item.account, label: item.label, plan_label: item.plan_label, t: item.t, base, top: base + item.gain, gain: item.gain, lost: item.lost };
+    }).filter(item => item.gain >= floor && item.gain > 1e-9);
+    return { t: group.t, accounts };
+  }).filter(group => group.accounts.length);
+}
+// Past step-ups inside (from, to]: an account's reading rising, or its reset time moving later, means it reset between two readings, and the pooled past line steps up at the later reading. Accounts stepping up at the same reading stack in pool priority order below the pooled level after the step.
+export function pastResetMarkers(accounts, samples, from, to, provider = null) {
+  const info = new Map((accounts || []).map((account, index) => [account.id, { label: account.label || account.id, plan_label: planLabel(provider, account.plan), priority: Number.isFinite(account.priority) ? account.priority : Infinity, index }]));
+  const previous = new Map(), steps = [];
+  for (const sample of [...(samples || [])].sort((a, b) => a.t - b.t)) {
+    const before = previous.get(sample.account);
+    previous.set(sample.account, sample);
+    if (!before || sample.t <= from || sample.t > to) continue;
+    const restarted = sample.value > before.value || sample.resets_at !== null && before.resets_at !== null && sample.resets_at > before.resets_at + 60;
+    const gain = sampleUnits(sample) - sampleUnits(before);
+    if (restarted && gain > 1e-9) steps.push({ t: sample.t, account: sample.account, gain, reset_at: before.resets_at !== null && before.resets_at <= sample.t ? before.resets_at : sample.t });
+  }
+  const pooled = pooledHistory(samples || []);
+  const levelAt = t => { let value = 0; for (const point of pooled) { if (point.t > t) break; value = point.value; } return value; };
+  const rank = id => info.get(id) ?? { priority: Infinity, index: Infinity };
+  return resetGroups(steps, 0).map(group => {
+    const ordered = [...group.items].sort((a, b) => rank(a.account).priority - rank(b.account).priority || rank(a.account).index - rank(b.account).index);
+    let top = levelAt(group.t) - ordered.reduce((sum, item) => sum + item.gain, 0);
+    return { t: group.t, accounts: ordered.map(item => { const base = top; top += item.gain; return { id: item.account, label: info.get(item.account)?.label ?? item.account, plan_label: info.get(item.account)?.plan_label ?? null, reset_at: item.reset_at, base, top, gain: item.gain }; }) };
+  });
+}
+// Banked reset credits expiring inside (from, to), one flag per group within the tolerance, so credits expiring together read as one flag with a count.
+export function bankedFlags(accounts, from, to) {
+  const items = [];
+  for (const account of accounts || []) for (const credit of account?.banked_credits?.credits || []) {
+    if (Number.isFinite(credit.expires_at) && credit.expires_at > from && credit.expires_at < to) items.push({ t: credit.expires_at, account: account.id, label: account.label || account.id });
+  }
+  return resetGroups(items).map(group => ({ t: group.t, credits: group.items }));
+}
+// The Limits decision in one value: will the pool run short or throw quota away at resets within the next week? Judged on the weekly window (a week ahead of a five-hour window says little, and the 5h merge is postponed), falling back to the saved window choice when a provider has no weekly one; uses the saved lookback and the pooled unit projection.
 export const VERDICT_DAYS = 7;
 export const WASTE_SHARE = 0.05;
+// How bad a short or waste verdict is: the units missing (short) or lost (waste) against the pool's capacity, the sum of every account's weekly weight. From a third it is medium (orange), from two thirds high (red), below that low (muted). Multiplying instead of dividing keeps the exact thresholds exact.
+export function verdictSeverity(amount, capacity) {
+  if (!(capacity > 0) || !Number.isFinite(amount)) return null;
+  return amount * 3 >= capacity * 2 ? 'high' : amount * 3 >= capacity ? 'medium' : 'low';
+}
 export function limitsVerdict(provider, prefs, now) {
-  const result = { status: 'unknown', window: null, remaining: null, capacity: null, remaining_pct: null, lost: 0, lost_pct: 0, empty_at: null, next_reset_at: null, last_loss_at: null };
+  const result = { status: 'unknown', severity: null, window: null, remaining: null, capacity: null, remaining_pct: null, lost: 0, lost_pct: 0, missing: 0, empty_at: null, next_reset_at: null, last_loss_at: null };
   if (!provider || provider.auth === 'logged_out') return result;
   const windows = windowCatalog(provider);
   const selected = windows.find(item => item.key === 'weekly') || windows.find(item => item.key === prefs?.window) || windows[0];
@@ -2429,21 +2494,27 @@ export function limitsVerdict(provider, prefs, now) {
   // Without a measured drain, or when every reading is past the cache freshness limit, a verdict would be a guess.
   const read = (provider.accounts || []).filter(account => Number.isFinite(account.fetched_at));
   if (projection.rate === null || read.length && read.every(account => account.stale)) return result;
-  const short = emptySpans(projection.points).find(span => (span.end ?? Infinity) - span.start > 60);
-  if (short) return { ...result, status: 'short', empty_at: short.start, next_reset_at: short.end };
   const losses = projection.resets.filter(item => item.lost > 1e-9);
   const lost = losses.reduce((sum, item) => sum + item.lost, 0);
   Object.assign(result, { lost, lost_pct: lost / projection.capacity * 100, last_loss_at: losses.length ? losses.at(-1).t : null });
-  return { ...result, status: lost >= WASTE_SHARE * projection.capacity ? 'waste' : 'ok' };
+  const end = now + VERDICT_DAYS * DAY_S, spans = emptySpans(projection.points).filter(span => (span.end ?? Infinity) - span.start > 60);
+  if (spans.length) {
+    // What the projected demand cannot get: the drain rate over every stretch the pool sits empty within the week.
+    const emptyS = spans.reduce((sum, span) => sum + Math.max(0, Math.min(span.end ?? end, end) - span.start), 0), missing = projection.rate * emptyS / HOUR_S;
+    return { ...result, status: 'short', empty_at: spans[0].start, next_reset_at: spans[0].end, missing, severity: verdictSeverity(missing, projection.capacity) };
+  }
+  const waste = lost >= WASTE_SHARE * projection.capacity;
+  return { ...result, status: waste ? 'waste' : 'ok', severity: waste ? verdictSeverity(lost, projection.capacity) : null };
 }
-// One factual sentence for the verdict, shared by the Limits page and the sidebar footer: what happens and when, never what to do about it (Virgile draws the conclusion himself).
+// One factual sentence for the verdict, shared by the Limits page and the sidebar footer: what happens, when and how much, never what to do about it (Virgile draws the conclusion himself).
 export function verdictText(verdict, now) {
   if (verdict?.status === 'short') {
     const at = verdict.empty_at - now < 60 ? 'Out of quota now' : `Runs out ${resetTime(verdict.empty_at, now)}`;
-    const gap = verdict.next_reset_at === null ? `with no reset in the next ${VERDICT_DAYS} days` : `${formatDurationShort(verdict.next_reset_at - verdict.empty_at)} before the next reset`;
-    return `${at}, ${gap}`;
+    // next_reset_at is the first reset after the pool empties; earlier resets can still appear on the chart, so the text must not claim there is none.
+    const gap = verdict.next_reset_at === null ? `still empty at the end of the ${VERDICT_DAYS} days` : `${formatDurationShort(verdict.next_reset_at - verdict.empty_at)} before the next reset`;
+    return `${at}, ${gap} · missing ~${unitsText(verdict.missing)} units`;
   }
-  if (verdict?.status === 'waste') return `${unitsText(verdict.lost)} plan units will expire unused by ${formatAt(verdict.last_loss_at, { weekday: 'short' })}`;
+  if (verdict?.status === 'waste') return `${unitsText(verdict.lost)} units will expire unused by ${formatAt(verdict.last_loss_at, { weekday: 'short' })}`;
   if (verdict?.status === 'ok') return `On track for the next ${VERDICT_DAYS} days: nothing runs out and little expires unused`;
   return `Not enough recent readings to judge the next ${VERDICT_DAYS} days`;
 }
@@ -2503,13 +2574,13 @@ export function UsagePage({ ctx, view = 'usage' }) {
   const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
   return h(ScopedUsagePage, { key: JSON.stringify(usageScopeKey(scope)), ctx, scope, view: view === 'limits' ? 'limits' : 'usage' });
 }
-function Segmented({ label, options, value, onChange, showLabel = true, sizing }) {
+function Segmented({ label, options, value, onChange, showLabel = true, sizing, className = '' }) {
   const items = options.map(option => ({ id: String(option.id), label: option.label }));
   const pick = id => { const option = options.find(item => String(item.id) === id); if (option) onChange(option.id); };
   const control = typeof sdk.SegmentedControl === 'function'
     ? h(sdk.SegmentedControl, { options: items, value: String(value), onChange: pick, sizing })
     : h('div', { className: 'su-seg' }, items.map(item => h('button', { key: item.id, type: 'button', 'aria-pressed': item.id === String(value), onClick: () => pick(item.id) }, item.label)));
-  return h('div', { className: 'su-control', role: 'group', 'aria-label': label }, showLabel ? h('span', { className: 'su-control-label', 'aria-hidden': true }, label) : null, control);
+  return h('div', { className: `su-control ${className}`.trim(), role: 'group', 'aria-label': label }, showLabel ? h('span', { className: 'su-control-label', 'aria-hidden': true }, label) : null, control);
 }
 function ScopedUsagePage({ ctx, scope, view }) {
   const client = useQueryClient(), shared = useUsagePreferences(ctx);
@@ -2641,7 +2712,8 @@ function LimitsView({ query, prefs, update, toolbar }) {
   const controls = h('header', { className: 'su-header su-limits-controls' },
     h(LookbackSlider, { hours: prefs.lookback, onChange: lookback => update({ lookback }) }),
     windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windows.map(item => ({ id: item.key, label: item.label })), value: selected.key, onChange: value => update({ window: value }) }) : null,
-    h(HorizonToggle, { days: prefs.horizon, onChange: horizon => update({ horizon }) }),
+    // An explicit 7d | 30d choice rather than an icon toggle: both horizons stay visible, and the pressed one is the chart's.
+    h(Segmented, { label: 'Horizon', className: 'su-horizon', options: HORIZON_DAYS.map(days => ({ id: days, label: `${days}d` })), value: prefs.horizon, onChange: horizon => update({ horizon }) }),
     toolbar);
   if (!data) return h(Fragment, null, controls, h('div', { className: 'su-body' }, query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…')));
   return h(Fragment, null, controls,
@@ -2678,11 +2750,11 @@ function AccountsDisclosure({ provider, windowKey, now, open, onToggle }) {
     open ? h('div', { className: 'su-accounts', id }, count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now }))
       : h(UsageState, null, 'No accounts in this provider pool.')) : null);
 }
-// Shared notes once under every section: how the samples and projections work, what a plan unit is, and which capacities are guessed.
+// Shared notes once under every section: how the samples and projections work, what a unit is, and which capacities are guessed.
 function LimitsFootnotes({ providers, sampler, now }) {
   const assumed = providers.flatMap(provider => provider.accounts.filter(account => planAssumed(provider.provider, account.plan)).map(account => `${account.label || account.id} (${planLabel(provider.provider, account.plan) || 'no plan reported'})`));
   return h('div', { className: 'su-footnotes' }, h(SamplerInfo, { sampler, now }),
-    assumed.length ? h('p', { className: 'su-footnote su-assumption' }, `* Capacity unknown for ${assumed.join(', ')}: counted as ${BASE_PLAN_UNITS} plan units, one $20 plan.`) : null);
+    assumed.length ? h('p', { className: 'su-footnote su-assumption' }, `* Capacity unknown for ${assumed.join(', ')}: counted as ${BASE_PLAN_UNITS} units, one $20 plan.`) : null);
 }
 // Longest lookback on the left: moving left reaches further into the past. The native value is the visual position (0 = 30d), so arrow keys follow the visual direction (Right = shorter); the preference itself stores hours, never the position.
 export const lookbackPosition = hours => { const index = LOOKBACK_STOPS.indexOf(hours); return LOOKBACK_STOPS.length - 1 - (index < 0 ? LOOKBACK_STOPS.indexOf(USAGE_DEFAULTS.lookback) : index); };
@@ -2697,16 +2769,6 @@ function LookbackSlider({ hours, onChange }) {
       onChange: event => onChange(lookbackAtPosition(event.target.value)) }),
     // A fixed-width value keeps the row from shifting while the thumb is dragged.
     h('output', { className: 'su-lookback-value', 'aria-hidden': true }, lookbackLabel(hours)));
-}
-// Projection horizon toggle in the controls bar, applied to every chart: the arrow pushes the time axes out to 30 days, then pulls them back to 7.
-function HorizonToggle({ days, onChange }) {
-  const extended = days === HORIZON_DAYS[1];
-  const tip = extended ? `Shrink the projection back to ${HORIZON_DAYS[0]} days` : `Extend the projection to ${HORIZON_DAYS[1]} days`;
-  // The accessible name stays constant and aria-pressed carries the state; the tooltip says what a click does next.
-  const button = h('button', { type: 'button', className: 'su-icon su-horizon', 'aria-label': `Project ${HORIZON_DAYS[1]} days ahead`, 'aria-pressed': extended, 'data-horizon': days,
-    title: typeof sdk.Tip === 'function' ? undefined : tip, onClick: () => onChange(extended ? HORIZON_DAYS[0] : HORIZON_DAYS[1]) },
-  icon(extended ? 'ArrowBarLeft' : 'ArrowBarRight', extended ? '⇤' : '⇥'));
-  return typeof sdk.Tip === 'function' ? h(sdk.Tip, { label: tip, side: 'top' }, button) : button;
 }
 // One dimension line under the plot, with arrowheads and end ticks drawn at fixed pixel size. A capped end (`startCap`/`endCap` false) has neither: the line simply runs out at the plot edge.
 function MeasureSpan({ fromPct, toPct, startCap = true, endCap = true }) {
@@ -2753,59 +2815,88 @@ function MeasureRow({ nowPct, average, empty }) {
       h(MeasureSpan, { fromPct: empty.fromPct, toPct: empty.toPct }), label(empty, 'right', nowPct, 100)) : null);
 }
 const rateShort = rate => rate === null ? 'no drain data' : `~${rateNumber(rate)} units/h`;
-// Verdict glyphs, shared by the Limits page and the sidebar footer: a warning triangle for a pool that runs out (a battery glyph was unreadable at footer size), a bin for quota that expires unused.
-const VERDICT_ICONS = { short: ['AlertTriangle', '!'], waste: ['Trash2', '⌫'] };
-const verdictIcon = status => Object.hasOwn(VERDICT_ICONS, status) ? h('span', { className: 'su-verdict-icon', 'aria-hidden': true, 'data-verdict-icon': status }, icon(...VERDICT_ICONS[status])) : null;
+// Verdict glyphs chosen by Virgile, shared by the Limits page and the sidebar footer: an arrow hitting the floor for a pool that runs dry within the week, Tabler clock-x for quota that expires unused.
+const VERDICT_ICONS = { short: ['ArrowBarToDownTouching', '⤓'], waste: ['ClockX', '⌛'] };
+// The glyph carries the severity colour (muted, orange or red); the verdict text stays neutral.
+const verdictIcon = verdict => Object.hasOwn(VERDICT_ICONS, verdict?.status) ? h('span', { className: 'su-verdict-icon', 'aria-hidden': true, 'data-verdict-icon': verdict.status, 'data-severity': verdict.severity ?? undefined }, icon(...VERDICT_ICONS[verdict.status])) : null;
 function VerdictLine({ verdict, now, windowKey }) {
   // The verdict always judges the weekly pool; over another window's chart it says so.
   const prefix = verdict.window && verdict.window !== windowKey ? 'Weekly: ' : '';
-  return h('p', { className: 'su-verdict', 'data-status': verdict.status, 'data-window': verdict.window ?? undefined, role: 'status' }, verdictIcon(verdict.status), h('span', null, prefix + verdictText(verdict, now)));
+  return h('p', { className: 'su-verdict', 'data-status': verdict.status, 'data-severity': verdict.severity ?? undefined, 'data-window': verdict.window ?? undefined, role: 'status' }, verdictIcon(verdict), h('span', null, prefix + verdictText(verdict, now)));
 }
-// Vertical dimension lines at projected resets that discard quota, in the same visual language as the horizontal measurements: thin line, arrowheads and end ticks at both ends. Each spans from the pool's level just before the reset down by the units that expire. Labels go right of their line, or left when that collides or leaves the plot; a label that fits nowhere is hidden while its line and tooltip stay.
-const WASTE_LABEL_GAP_PX = 4;
-function placeWasteLabels(layer) {
+// Tooltips over chart marks list one fact per line; without the SDK tooltip the same lines become a native title.
+const tipLabel = lines => h('span', { style: { display: 'block', textAlign: 'left' } }, lines.map((line, index) => h('span', { key: index, style: { display: 'block' } }, line)));
+const withTip = (lines, node) => typeof sdk.Tip === 'function' ? h(sdk.Tip, { label: tipLabel(lines), side: 'top' }, node) : node;
+const accountName = item => `${item.label}${item.plan_label ? ` · ${item.plan_label}` : ''}`;
+export const resetMarkLines = (item, now) => [accountName(item), `Resets ${resetTime(item.t, now)}`, `+${unitsText(item.gain)} units restored`, ...(item.lost >= 0.05 ? [`${unitsText(item.lost)} units lost at this reset`] : [])];
+const pastResetLines = (item, now) => [accountName(item), `Reset ${resetTime(item.reset_at, now)}`, `+${unitsText(item.gain)} units restored`];
+export const bankedFlagLines = (flag, now) => flag.credits.map(credit => `${credit.label} · banked reset expires ${resetTime(credit.t, now)}`);
+// Labels next to chart marks go right of their mark, or left when that collides or leaves the plot; one that fits nowhere is hidden while its mark and tooltip stay. Dots and flags are obstacles too, so no label covers another account's marker.
+const MARK_LABEL_GAP_PX = 4;
+const boxesOverlap = (box, other, gap) => !(box.right + gap <= other.left || box.left >= other.right + gap || box.bottom <= other.top || box.top >= other.bottom);
+function placeMarkLabels(layer) {
   const bounds = layer.getBoundingClientRect();
   if (!(bounds.width > 0)) return;
-  const placed = [];
-  for (const mark of layer.querySelectorAll('.su-waste')) {
-    mark.dataset.tight = String(mark.getBoundingClientRect().height < TIGHT_SPAN_PX);
-    const label = mark.querySelector('.su-waste-text');
+  for (const mark of layer.querySelectorAll('.su-waste')) mark.dataset.tight = String(mark.getBoundingClientRect().height < TIGHT_SPAN_PX);
+  const obstacles = [...layer.querySelectorAll('.su-reset-dot, .su-flag')].map(node => node.getBoundingClientRect()), placed = [];
+  // Waste labels are placed first: what expires matters more than what a reset restores, so it keeps the better spot.
+  for (const label of [...layer.querySelectorAll('.su-waste-text'), ...layer.querySelectorAll('.su-reset-text')]) {
     label.dataset.hidden = 'false';
     let fit = null;
     for (const side of ['right', 'left']) {
       label.dataset.side = side;
       const box = label.getBoundingClientRect();
       const inside = box.left >= bounds.left - 0.5 && box.right <= bounds.right + 0.5;
-      const clear = placed.every(other => box.right + WASTE_LABEL_GAP_PX <= other.left || box.left >= other.right + WASTE_LABEL_GAP_PX || box.bottom <= other.top || box.top >= other.bottom);
-      if (inside && clear) { fit = box; break; }
+      if (inside && placed.every(other => !boxesOverlap(box, other, MARK_LABEL_GAP_PX)) && obstacles.every(other => !boxesOverlap(box, other, 0))) { fit = box; break; }
     }
     if (fit) placed.push(fit); else { label.dataset.side = 'right'; label.dataset.hidden = 'true'; }
   }
 }
-function WasteMarks({ marks, xPct, cap, now }) {
+// One account's share of a reset step: a segment from the level before its reset up by what it restores, with the marker dot at its top. Past step-ups are quieter: a hollow dot, no label.
+function ResetMark({ item, kind, yPct, lines }) {
+  const dot = h('span', { className: 'su-reset-dot', role: 'img', 'aria-label': lines.join('. '), title: typeof sdk.Tip === 'function' ? undefined : lines.join('\n') });
+  return h('span', { className: 'su-reset-mark', 'data-kind': kind, 'data-account': item.id, 'data-base': item.base, 'data-top': item.top, 'data-gain': item.gain, style: { bottom: `${yPct(item.base)}%`, height: `${yPct(item.top) - yPct(item.base)}%` } },
+    h('span', { className: 'su-reset-seg' }), withTip(lines, dot),
+    kind === 'projected' ? h('span', { className: 'su-reset-text', 'data-side': 'right', 'aria-hidden': true }, `+${unitsText(item.gain)}`) : null);
+}
+// Banked reset credits expiring together share one flag above the plot, with their count beside it.
+function BankedFlag({ flag, xPct, now }) {
+  const lines = bankedFlagLines(flag, now), count = flag.credits.length;
+  return withTip(lines, h('span', { className: 'su-flag', role: 'img', 'aria-label': lines.join('. '), title: typeof sdk.Tip === 'function' ? undefined : lines.join('\n'), 'data-t': Math.round(flag.t), 'data-count': count, style: { left: `${xPct(flag.t)}%` } },
+    icon('Flag', '⚑'), count > 1 ? h('span', { className: 'su-flag-count', 'aria-hidden': true }, count) : null));
+}
+// Everything drawn at a time x over the plot, as HTML so dots, arrowheads and labels keep their pixel size over the stretched SVG: waste measurements (vertical dimension lines from the level before a reset down by the units that expire, in the Now line's neutral colour), reset markers and banked-credit flags.
+function ChartMarks({ waste, resets, past, flags, xPct, cap, now }) {
   const layer = useRef(null);
-  const signature = marks.map(mark => `${mark.t}:${mark.before}:${mark.lost}`).join() + `|${cap}`;
+  const signature = JSON.stringify([waste.map(mark => [mark.t, mark.before, mark.lost]), [...past, ...resets].map(group => [group.t, group.accounts.map(item => [item.id, item.base, item.gain])]), flags.map(flag => [flag.t, flag.credits.length]), cap]);
   useLayoutEffect(() => {
     const node = layer.current;
     if (!node) return undefined;
-    placeWasteLabels(node);
+    placeMarkLabels(node);
     if (typeof ResizeObserver !== 'function') return undefined;
-    const observer = new ResizeObserver(() => placeWasteLabels(node));
+    const observer = new ResizeObserver(() => placeMarkLabels(node));
     observer.observe(node);
     return () => observer.disconnect();
   }, [signature]);
-  if (!marks.length) return null;
-  return h('div', { className: 'su-waste-layer', ref: layer }, marks.map(mark => {
-    const when = resetTime(mark.t, now);
-    const title = mark.accounts.map(item => `${item.label}${item.plan_label ? ` · ${item.plan_label}` : ''} · ${unitsText(item.lost)} plan units unused at reset ${when}`).join('\n');
-    return h('div', { key: mark.t, className: 'su-waste', role: 'img', 'aria-label': title, title, 'data-t': Math.round(mark.t), 'data-before': mark.before, 'data-lost': mark.lost,
-      style: { left: `${xPct(mark.t)}%`, top: `${(1 - mark.before / cap) * 100}%`, height: `${mark.lost / cap * 100}%` } },
-      h('span', { className: 'su-waste-line' }),
-      h('span', { className: 'su-waste-tick', 'data-end': 'top' }), h('span', { className: 'su-waste-tick', 'data-end': 'bottom' }),
-      h('svg', { className: 'su-waste-arrow', 'data-end': 'top', viewBox: '0 0 8 6', 'aria-hidden': true }, h('path', { d: 'M0.5,6 L4,0 L7.5,6 Z' })),
-      h('svg', { className: 'su-waste-arrow', 'data-end': 'bottom', viewBox: '0 0 8 6', 'aria-hidden': true }, h('path', { d: 'M0.5,0 L4,6 L7.5,0 Z' })),
-      h('span', { className: 'su-waste-text', 'data-side': 'right', 'aria-hidden': true }, `${unitsText(mark.lost)} lost`));
-  }));
+  if (!waste.length && !resets.length && !past.length && !flags.length) return null;
+  const yPct = value => clamp(value / cap * 100, 0, 100);
+  const group = (kind, item, lines) => h('div', { key: `${kind}${item.t}`, className: 'su-reset', 'data-kind': kind, 'data-t': Math.round(item.t), style: { left: `${xPct(item.t)}%` } },
+    item.accounts.map(account => h(ResetMark, { key: account.id, item: account, kind, yPct, lines: lines(account, now) })));
+  return h('div', { className: 'su-marks', ref: layer },
+    past.map(item => group('past', item, pastResetLines)),
+    resets.map(item => group('projected', item, resetMarkLines)),
+    waste.map(mark => {
+      const when = resetTime(mark.t, now);
+      const title = mark.accounts.map(item => `${accountName(item)} · ${unitsText(item.lost)} units unused at reset ${when}`).join('\n');
+      return h('div', { key: mark.t, className: 'su-waste', role: 'img', 'aria-label': title, title, 'data-t': Math.round(mark.t), 'data-before': mark.before, 'data-lost': mark.lost,
+        style: { left: `${xPct(mark.t)}%`, top: `${(1 - mark.before / cap) * 100}%`, height: `${mark.lost / cap * 100}%` } },
+        h('span', { className: 'su-waste-line' }),
+        h('span', { className: 'su-waste-tick', 'data-end': 'top' }), h('span', { className: 'su-waste-tick', 'data-end': 'bottom' }),
+        h('svg', { className: 'su-waste-arrow', 'data-end': 'top', viewBox: '0 0 8 6', 'aria-hidden': true }, h('path', { d: 'M0.5,6 L4,0 L7.5,6 Z' })),
+        h('svg', { className: 'su-waste-arrow', 'data-end': 'bottom', viewBox: '0 0 8 6', 'aria-hidden': true }, h('path', { d: 'M0.5,0 L4,6 L7.5,0 Z' })),
+        h('span', { className: 'su-waste-text', 'data-side': 'right', 'aria-hidden': true }, `${unitsText(mark.lost)} lost`));
+    }),
+    flags.map(flag => h(BankedFlag, { key: flag.t, flag, xPct, now })));
 }
 // "Business: 20, Pro 100: 100": what each account adds to the pool's capacity, an asterisk marking a guessed one.
 const poolComposition = members => members.map(item => `${item.plan_label || 'Unknown plan'}: ${unitsText(item.weight)}${item.assumed ? '*' : ''}`).join(', ');
@@ -2814,12 +2905,15 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
   const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey, providerId), [provider, windowKey, providerId]);
   const past = useMemo(() => pooledHistory(samples), [samples]);
   const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS, { lookbackS, provider: providerId }), [provider, windowKey, now, horizonS, lookbackS, providerId]);
-  const waste = useMemo(() => wasteMarks(projection), [projection]);
+  const start = now - limitsPastSeconds(horizonS), end = now + horizonS;
+  const waste = useMemo(() => wasteMarks(projection).filter(mark => mark.t > now && mark.t < end), [projection, now, end]);
+  const resets = useMemo(() => resetMarkers(projection, now, end), [projection, now, end]);
+  const pastResets = useMemo(() => pastResetMarkers(provider.accounts, samples, start, now, providerId), [provider, samples, start, now, providerId]);
+  const flags = useMemo(() => bankedFlags(provider.accounts, now, end), [provider, now, end]);
   const [hover, setHover] = useState(null);
-  // The axis tops out at the pool's capacity in plan units (or above it if an older reading held more, e.g. before a plan change).
+  // The axis tops out at the pool's capacity in units (or above it if an older reading held more, e.g. before a plan change).
   const cap = Math.max(projection.capacity || BASE_PLAN_UNITS, ...past.map(point => point.value));
   const ticks = unitTicks(cap);
-  const start = now - limitsPastSeconds(horizonS), end = now + horizonS;
   const axis = useMemo(() => { const times = timeAxisTicks(start, end); return { ...times, labels: axisLabels(times.times, undefined, times.resolution), midnights: localMidnights(start, end) }; }, [start, end]);
   const x = t => (t - start) / (end - start) * VIEW_W, y = value => VIEW_H - value / cap * VIEW_H;
   const pastAt = t => { let value = null; for (const point of past) { if (point.t > t) break; value = point.value; } return value; };
@@ -2854,22 +2948,33 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
     title: projection.partial ? `${averageText} (only ${coverageText(projection.coveredS)} of data in that period)` : averageText } : null;
   const hoverT = hover === null ? null : start + hover * (end - start);
   const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
-  const move = event => { const box = event.currentTarget.getBoundingClientRect(); if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1)); };
+  // Over a mark its own tooltip speaks, so the crosshair and its inline tooltip step aside.
+  const move = event => {
+    if (event.target?.closest?.('.su-reset-dot, .su-flag, .su-waste')) { setHover(null); return; }
+    const box = event.currentTarget.getBoundingClientRect();
+    if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1));
+  };
   const composition = projection.members.length ? poolComposition(projection.members) : '';
+  // Reset times now show as markers in the chart; the notes keep only what the chart cannot show.
+  const notes = [
+    projection.nextReset ? null : h('span', { key: 'none' }, 'No reset time reported'),
+    emptyText && !emptyMeasured ? h('span', { key: 'empty', className: 'su-empty-note' }, emptyText) : null,
+    emptyAt === null && projection.rate > 0 ? h('span', { key: 'full', className: 'su-empty-note' }, `Not empty within ${horizonDays}d`) : null,
+    projection.unknownAccounts.length ? h('span', { key: 'unknown' }, `${projection.unknownAccounts.length} account${projection.unknownAccounts.length === 1 ? '' : 's'} without a reading left out of the pool`) : null].filter(Boolean);
   return h('div', { className: 'su-chart su-pooled', 'data-window': windowKey, 'data-horizon': horizonDays, 'data-capacity': projection.capacity, role: 'group', 'aria-label': `${provider.label || providerId} pooled remaining quota` },
     h('div', { className: 'su-headline' },
       // Without any account reading the pool is unknown, not empty.
       h('span', { className: 'su-pool' }, projection.capacity ? unitsText(projection.current) : '—'),
-      h('span', { className: 'su-capacity', title: PLAN_UNITS_NOTE }, projection.capacity ? `/ ${unitsText(projection.capacity)} plan units` : 'no account readings yet'),
+      h('span', { className: 'su-capacity', title: PLAN_UNITS_NOTE }, projection.capacity ? `/ ${unitsText(projection.capacity)} units` : 'no account readings yet'),
       composition ? h('span', { className: 'su-composition', title: PLAN_UNITS_NOTE }, `(${composition})`) : null,
       h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate)),
       // Kept out of the slider row: text appearing there while dragging would shift the slider under the pointer.
       projection.partial ? h('span', { className: 'su-coverage' }, `based on ${coverageText(projection.coveredS)} of data`) : null),
     verdict ? h(VerdictLine, { verdict, now, windowKey }) : null,
     h('div', { className: 'su-limits-grid' },
-      h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, h('span', { className: 'su-yunit', title: PLAN_UNITS_NOTE }, 'plan units'),
+      h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, h('span', { className: 'su-yunit', title: PLAN_UNITS_NOTE }, 'units'),
         ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, unitsText(tick)))),
-      h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota in plan units over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end), 'data-cap': cap,
+      h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota in units over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end), 'data-cap': cap,
         onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null),
         onKeyDown: event => { const step = { ArrowLeft: -0.02, ArrowRight: 0.02 }[event.key]; if (step) { event.preventDefault(); setHover(clamp((hover ?? nowPct / 100) + step, 0, 1)); } if (event.key === 'Escape') setHover(null); } },
         h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
@@ -2880,7 +2985,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
           h('path', { className: 'su-area su-projected', d: projectedArea }),
           h('path', { className: 'su-line su-projected', d: projectedLine })),
         h('div', { className: 'su-now', style: { left: `${nowPct}%` } }, h('span', null, 'Now')),
-        h(WasteMarks, { marks: waste.filter(mark => mark.t > now && mark.t < end), xPct: t => x(t) / VIEW_W * 100, cap, now }),
+        h(ChartMarks, { waste, resets, past: pastResets, flags, xPct: t => x(t) / VIEW_W * 100, cap, now }),
         emptyPct === null ? null : h('span', { className: 'su-empty-dot', title: emptyText, style: { left: `${emptyPct}%` } }),
         hoverValue === null ? null : h(Fragment, null,
           h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
@@ -2891,12 +2996,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
         return h('span', { key: t, 'data-edge': share < 3 ? 'start' : share > 97 ? 'end' : undefined, style: { left: `${share}%` } }, axis.labels[index]);
       })),
       h(MeasureRow, { nowPct, average, empty: emptyMeasured ? { fromPct: nowPct, toPct: emptyPct, text: emptyText } : null })),
-    h('div', { className: 'su-chart-foot' },
-      h('div', { className: 'su-chart-notes' },
-        h('span', null, projection.nextReset ? projection.nextReset.gain === null ? `Next reset · ${resetTime(projection.nextReset.t, now)}` : `Next reset +${unitsText(projection.nextReset.gain)} units · ${resetTime(projection.nextReset.t, now)}` : 'No reset time reported'),
-        emptyText && !emptyMeasured ? h('span', { className: 'su-empty-note' }, emptyText) : null,
-        emptyAt === null && projection.rate > 0 ? h('span', { className: 'su-empty-note' }, `Not empty within ${horizonDays}d`) : null,
-        projection.unknownAccounts.length ? h('span', null, `${projection.unknownAccounts.length} account${projection.unknownAccounts.length === 1 ? '' : 's'} without a reading left out of the pool`) : null)));
+    notes.length ? h('div', { className: 'su-chart-foot' }, h('div', { className: 'su-chart-notes' }, notes)) : null);
 }
 function Badge({ tone, title, children }) { return h('span', { className: 'su-badge', 'data-tone': tone, title }, children); }
 function LimitAccount({ provider, account, selected, now }) {
@@ -2916,7 +3016,17 @@ function LimitAccount({ provider, account, selected, now }) {
       h('span', { className: 'su-muted' }, Number.isFinite(account.fetched_at) ? `read ${formatDurationShort(now - account.fetched_at)} ago` : 'never read')),
     account.error ? h('div', { className: 'su-account-error', role: 'alert' }, String(account.error)) : null,
     windows.length ? h('div', { className: 'su-windows' }, windows.map(win => h(LimitWindowRow, { key: win.key, win, now, selected: win.key === selected })))
-      : h('div', { className: 'su-muted' }, 'No limit windows reported.'));
+      : h('div', { className: 'su-muted' }, 'No limit windows reported.'),
+    h(BankedCredits, { banked: account.banked_credits, now }));
+}
+// One line per banked reset credit under the account's bars, soonest expiry first; a credit expiring within a day turns orange, and when Codex says none can be redeemed right now (limits not reached, for example) each line says so.
+function BankedCredits({ banked, now }) {
+  const credits = (banked?.credits || []).filter(credit => credit.expires_at === null || credit.expires_at > now);
+  if (!credits.length) return null;
+  const unusable = banked.applicable_count === 0;
+  return h('ul', { className: 'su-banked', 'aria-label': 'Banked resets' }, credits.map((credit, index) => h('li', { key: `${credit.expires_at}:${index}`, className: 'su-banked-credit', 'data-soon': credit.expires_at !== null && credit.expires_at - now < DAY_S },
+    h('span', null, credit.expires_at === null ? 'Banked reset · no expiry reported' : `Banked reset · expires ${resetTime(credit.expires_at, now)} (in ${formatDurationShort(credit.expires_at - now)})`),
+    unusable ? h('span', { className: 'su-banked-unusable' }, ' · not usable now') : null)));
 }
 function LimitWindowRow({ win, now, selected }) {
   const remaining = Number.isFinite(win.remaining_percent) ? clamp(win.remaining_percent, 0, 100) : null;
@@ -2965,7 +3075,7 @@ const USAGE_CSS = `
 .su-plot-row{display:grid;grid-template-columns:56px minmax(0,1fr);margin-top:6px}
 .su-yaxis,.su-plot{position:relative;height:128px}.su-yaxis-tall,.su-plot-tall{height:200px}
 .su-yaxis span{position:absolute;right:8px;transform:translateY(50%);font-size:10px;line-height:1;color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums;white-space:nowrap}
-.su-plot{min-width:0;touch-action:none;cursor:crosshair}.su-plot svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.su-plot{min-width:0;touch-action:none;cursor:crosshair}.su-plot>svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
 .su-grid{stroke:var(--ui-stroke-secondary);stroke-width:1;vector-effect:non-scaling-stroke}
 .su-line{fill:none;stroke-width:1.5;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .su-past.su-area{fill:var(--su-color);fill-opacity:.22}.su-past.su-line{stroke:var(--su-color)}
@@ -3017,7 +3127,6 @@ const USAGE_CSS = `
 /* Pooled chart grid: y-axis | plot, then the x-axis and the measurement row under the plot column. */
 .su-limits-grid{display:grid;grid-template-columns:56px minmax(0,1fr);grid-template-rows:auto 16px 30px;margin-top:6px}
 .su-limits-grid>.su-yaxis{grid-area:1/1}.su-limits-grid>.su-plot{grid-area:1/2}.su-limits-grid>.su-xaxis{grid-area:2/2;margin:0}
-.su .su-horizon{color:var(--ui-text-secondary)}.su-horizon svg{width:16px;height:16px}
 .su-measures{grid-area:3/2;position:relative;color:var(--ui-text-secondary)}
 .su-measure-span{position:absolute;top:22px;height:0}
 .su-measure-line{position:absolute;left:0;right:0;top:-0.5px;border-top:1px solid currentColor}
@@ -3043,16 +3152,18 @@ const USAGE_CSS = `
 .su-bar{position:relative;height:16px}.su-bar-track,.su-bar-fill{position:absolute;left:0;top:5px;height:6px;border-radius:3px}
 .su-bar-track{right:0;background:color-mix(in srgb,var(--ui-text-primary) 12%,transparent)}.su-bar-fill{background:var(--su-color)}
 .su-pace{position:absolute;top:1px;width:2px;height:14px;margin-left:-1px;border-radius:1px;background:var(--ui-text-primary)}
-/* Plan-unit headline, verdict and the waste measurements. --su-waste matches the sidebar's --sf-waste. */
-.su{--su-waste:color-mix(in oklab,var(--ui-orange,#db704b) 55%,var(--ui-yellow,#c08532))}
+/* Unit headline, verdict and the marks over the plot. */
 .su-composition{font-size:11px;color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}
 .su-verdict{display:flex;align-items:center;gap:6px;margin:-6px 0 0;font-size:12px;color:var(--ui-text-tertiary)}
-.su-verdict[data-status=short]{color:var(--ui-red,#cf2d56)}.su-verdict[data-status=waste]{color:var(--su-waste)}
-.su-verdict-icon{display:inline-flex;flex-shrink:0}.su-verdict .su-verdict-icon svg{width:15px;height:15px}
+/* The text of a short or waste verdict stays neutral; only its glyph carries the severity colour, as in the sidebar footer. */
+.su-verdict[data-status=short],.su-verdict[data-status=waste]{color:var(--ui-text-secondary)}
+.su-verdict-icon{display:inline-flex;flex-shrink:0;color:var(--ui-text-tertiary)}.su-verdict .su-verdict-icon svg{width:15px;height:15px}
+.su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.su-verdict-icon[data-severity=high]{color:var(--ui-red,#cf2d56)}
 .su-limits-grid{margin-top:22px}
 .su-assumed{font-style:italic}
-.su-waste-layer{position:absolute;inset:0;pointer-events:none}
-.su-waste{position:absolute;width:0;color:var(--su-waste);pointer-events:auto}
+.su-marks{position:absolute;inset:0;pointer-events:none}
+/* Same neutral as the Now line: the provider colour already fills the chart, and orange would read as a severity. */
+.su-waste{position:absolute;width:0;color:var(--ui-text-secondary);pointer-events:auto}
 /* A transparent strip wider than the 1px line gives the tooltip a usable hover target. */
 .su-waste::before{content:'';position:absolute;top:0;bottom:0;left:-5px;width:10px}
 .su-waste-line{position:absolute;top:0;bottom:0;left:-0.5px;border-left:1px solid currentColor}
@@ -3060,8 +3171,25 @@ const USAGE_CSS = `
 .su-waste-arrow{position:absolute;left:-4px;width:8px;height:6px;fill:currentColor;overflow:visible}.su-waste-arrow[data-end=top]{top:0}.su-waste-arrow[data-end=bottom]{bottom:0}
 .su-waste[data-tight=true] .su-waste-arrow{transform:scaleY(-1)}.su-waste[data-tight=true] .su-waste-arrow[data-end=top]{top:-6px}.su-waste[data-tight=true] .su-waste-arrow[data-end=bottom]{bottom:-6px}
 .su-waste[data-tight=true] .su-waste-line{top:-10px;bottom:-10px}
-.su-waste-text{position:absolute;top:50%;transform:translateY(-50%);padding:0 3px;border-radius:3px;background:color-mix(in srgb,var(--ui-bg-elevated,var(--ui-bg-quaternary)) 80%,transparent);font-size:11px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}
-.su-waste-text[data-side=right]{left:6px}.su-waste-text[data-side=left]{right:6px}.su-waste-text[data-hidden=true]{visibility:hidden}
+.su-waste-text,.su-reset-text{position:absolute;top:50%;transform:translateY(-50%);padding:0 3px;border-radius:3px;background:color-mix(in srgb,var(--ui-bg-elevated,var(--ui-bg-quaternary)) 80%,transparent);font-size:11px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.su-waste-text[data-side=right]{left:6px}.su-waste-text[data-side=left]{right:6px}.su-waste-text[data-hidden=true],.su-reset-text[data-hidden=true]{visibility:hidden}
+/* Reset markers: each account's share of a step is a solid segment with a dot at its top; accounts resetting together stack on one vertical line. */
+.su-reset{position:absolute;top:0;bottom:0;width:0}
+.su-reset-mark{position:absolute;left:0;width:0}
+.su-reset-seg{position:absolute;top:0;bottom:0;left:-1px;border-left:2px solid var(--su-color)}
+.su-reset-dot{position:absolute;left:0;top:0;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;border-radius:50%;background:var(--su-color);box-shadow:0 0 0 1.5px var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:auto}
+/* A transparent ring around the dot gives the tooltip a usable hover target. */
+.su-reset-dot::before{content:'';position:absolute;inset:-4px;border-radius:50%}
+.su-reset-text{top:0;color:var(--su-color)}.su-reset-text[data-side=right]{left:7px}.su-reset-text[data-side=left]{right:7px}
+/* Past step-ups are quieter: a hollow dot and a faint segment, no label. */
+.su-reset-mark[data-kind=past] .su-reset-seg{opacity:.45}
+.su-reset-mark[data-kind=past] .su-reset-dot{width:6px;height:6px;margin:-3px 0 0 -3px;border:1.5px solid var(--su-color);background:var(--ui-bg-elevated,var(--ui-bg-quaternary))}
+/* Banked-credit flags sit above the plot, the pole on the expiry time (the Tabler flag's pole is at x = 5 of 24). */
+.su-flag{position:absolute;bottom:100%;display:inline-flex;align-items:flex-start;gap:1px;margin:0 0 3px calc(-14px * 5 / 24);color:var(--ui-text-secondary);font-size:10px;line-height:12px;font-variant-numeric:tabular-nums;pointer-events:auto}
+.su-flag svg{width:14px;height:14px;flex-shrink:0}
+/* Banked reset credits listed under an account's bars. */
+.su-banked{display:flex;flex-direction:column;gap:2px;margin:8px 0 0;padding:0;list-style:none;font-size:11px;color:var(--ui-text-secondary)}
+.su-banked-credit[data-soon=true]{color:var(--ui-orange,#db704b)}.su-banked-unusable{color:var(--ui-text-tertiary)}
 @media(max-width:640px){.su{padding:12px}.su-window{grid-template-columns:minmax(60px,7rem) minmax(40px,1fr) 4rem;}.su-window-reset{display:none}}
 `;
 export default {
