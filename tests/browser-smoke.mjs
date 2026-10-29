@@ -1341,6 +1341,64 @@ try {
     await focus.close();
   }
   {
+    const gap = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+    gap.on('pageerror', error => errors.push(error.message));
+    await gap.emulateMedia({ reducedMotion: 'reduce' });
+    await gap.goto(`http://127.0.0.1:${server.address().port}`);
+    await gap.locator('[data-session-id="pinned"]').waitFor();
+    const measure = () => gap.locator('[data-section="pinned"]').evaluate(el => ({
+      height: el.getBoundingClientRect().height,
+      space: el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().bottom,
+      margin: parseFloat(getComputedStyle(el).marginBottom),
+      row: el.querySelector('.sf-row')?.getBoundingClientRect().height ?? 0
+    }));
+    await gap.getByRole('button', { name: 'Plugin settings', exact: true }).click();
+    const toggle = gap.getByRole('switch', { name: 'Pinned session gap', exact: true });
+    check('Pinned session gap defaults off with the original 1px shelf spacing', await toggle.getAttribute('aria-checked') === 'false' && (await measure()).space === 1);
+    await toggle.click();
+    await gap.waitForFunction(() => document.querySelector('.sf-scroll')?.dataset.pinnedGap === 'true');
+    const enabled = await measure();
+    check('Pinned session gap adds exactly a quarter-row outside the unchanged pinned body', enabled.space === 1 + enabled.row / 4 && enabled.margin === enabled.row / 4 && enabled.height === enabled.row);
+    await gap.reload();
+    await gap.locator('[data-session-id="pinned"]').waitFor();
+    check('Pinned session gap persists through a real browser reload', (await measure()).space === enabled.space);
+    await gap.getByRole('button', { name: 'Plugin settings', exact: true }).click();
+    check('Pinned session gap toggle reads its persisted value', await toggle.getAttribute('aria-checked') === 'true');
+    const custom = await gap.addStyleTag({ content: ':root{--sf-card-content:44px;--sf-card-padding:7px;--sf-card-margin:2px}' });
+    const themed = await measure();
+    check('Pinned session gap follows custom card geometry without JavaScript measurements', themed.row === 62 && themed.space === 1 + themed.row / 4);
+    await custom.evaluate(el => el.remove());
+    await gap.getByRole('searchbox', { name: 'Search sessions', exact: true }).fill('Design review');
+    await gap.waitForFunction(() => document.querySelector('[data-section=pinned]')?.dataset.populated === 'false');
+    check('search hiding all pinned cards removes their gap and reserved space', await gap.locator('.sf-scroll').evaluate(el => {
+      const pinned = el.querySelector('[data-section=pinned]'), ready = el.querySelector('[data-section=active]');
+      return pinned.getBoundingClientRect().height === 0 && getComputedStyle(pinned).marginBottom === '-1px' && ready.getBoundingClientRect().top === el.getBoundingClientRect().top;
+    }));
+    await gap.getByRole('searchbox', { name: 'Search sessions', exact: true }).fill('');
+    await gap.locator('[data-session-id="pinned"]').waitFor();
+    check('clearing search restores the enabled pinned gap', (await measure()).space === enabled.space);
+    await toggle.click();
+    await gap.waitForFunction(() => document.querySelector('.sf-scroll')?.dataset.pinnedGap === 'false');
+    check('disabling Pinned session gap immediately restores the original spacing', (await measure()).space === 1);
+    await toggle.click();
+    await gap.waitForFunction(() => document.querySelector('.sf-scroll')?.dataset.pinnedGap === 'true');
+    await gap.evaluate(async () => {
+      const fixture = window.hermesT3SidebarHarness; fixture.loadDenseFixtures();
+      await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+    });
+    await gap.locator('[data-session-id="synthetic-pinned-000"]').waitFor();
+    for (const height of [300, 400, 650]) {
+      await gap.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
+      check(`${height}px with pinned gap: capped pinned scrolling and all secondary headings fit`, await gap.locator('.sf-scroll').evaluate(el => {
+        const pinned = el.querySelector('[data-section=pinned]'), body = pinned.querySelector('.sf-section-body');
+        return el.scrollHeight <= el.clientHeight + 1 && pinned.getBoundingClientRect().height <= el.clientHeight * .18 + 1 && body.scrollHeight > body.clientHeight &&
+          [...el.querySelectorAll('.sf-section-toggle')].every(header => header.getBoundingClientRect().bottom <= el.getBoundingClientRect().bottom + 1);
+      }));
+      check(`${height}px with pinned gap: spacing stays exactly a quarter-row`, (await measure()).space === 15);
+    }
+    await gap.close();
+  }
+  {
     // Card geometry is themeable: a different content/padding/margin must drive heights, gaps, windowing and shelf minimums alike.
     const geometry = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
     geometry.on('pageerror', error => errors.push(error));

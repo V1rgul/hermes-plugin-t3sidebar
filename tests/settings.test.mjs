@@ -87,6 +87,51 @@ test('settings rejects empty input and failed storage writes without publishing 
 	assert.ok(button('Tomorrow at 9:00')); assert.ok(button('Next Monday at 9:00'));
 });
 
+test('Pinned session gap defaults off, updates the mounted sidebar immediately and persists across remounts and sources', async () => {
+	plugin.register(mock.ctx); await render();
+	const toggle = () => $('[role=switch][aria-label="Pinned session gap"]');
+	assert.equal(toggle().getAttribute('aria-checked'), 'false');
+	assert.equal($('.sf-scroll').dataset.pinnedGap, 'false');
+	await click(toggle());
+	assert.equal(storage.get('pinned-gap'), true);
+	assert.equal(toggle().getAttribute('aria-checked'), 'true');
+	assert.equal($('.sf-scroll').dataset.pinnedGap, 'true');
+	await act(async () => root.unmount()); root = null;
+	mock.queryClient.clear(); await render();
+	assert.equal(toggle().getAttribute('aria-checked'), 'true');
+	assert.equal($('.sf-scroll').dataset.pinnedGap, 'true');
+	await act(async () => mock.switchScope('source-b', 'other')); await tick(); await tick();
+	assert.equal($('.sf-scroll').dataset.pinnedGap, 'true');
+	await click(toggle());
+	assert.equal(storage.get('pinned-gap'), false);
+	assert.equal($('.sf-scroll').dataset.pinnedGap, 'false');
+});
+
+for (const saved of ['true', 1, null, {}]) test(`invalid stored pinned gap ${JSON.stringify(saved)} stays off`, async () => {
+	storage.set('pinned-gap', saved); plugin.register(mock.ctx); await render();
+	assert.equal($('[role=switch][aria-label="Pinned session gap"]').getAttribute('aria-checked'), 'false');
+	assert.equal($('.sf-scroll').dataset.pinnedGap, 'false');
+});
+
+test('Pinned session gap rejects failed and unverified saves without changing the mounted sidebar', async () => {
+	plugin.register(mock.ctx); await render();
+	const toggle = () => $('[role=switch][aria-label="Pinned session gap"]');
+	mock.ctx.storage = { ...storage, set() { throw new Error('fixture storage unavailable'); } };
+	await click(toggle());
+	assert.match($('[role=alert]').textContent, /storage unavailable/);
+	assert.equal(toggle().getAttribute('aria-checked'), 'false');
+	assert.equal($('.sf-scroll').dataset.pinnedGap, 'false');
+	mock.ctx.storage = { ...storage, set() {} };
+	await click(toggle());
+	assert.match($('[role=alert]').textContent, /not saved/);
+	assert.equal(toggle().getAttribute('aria-checked'), 'false');
+	assert.equal($('.sf-scroll').dataset.pinnedGap, 'false');
+	mock.ctx.storage = storage;
+	await click(toggle());
+	assert.equal(document.querySelectorAll('[role=alert]').length, 0);
+	assert.equal($('.sf-scroll').dataset.pinnedGap, 'true');
+});
+
 test('unavailable storage reads leave settings and default presets usable', async () => {
 	mock.ctx.storage = { ...storage, get() { throw new Error('fixture storage unavailable'); } };
 	plugin.register(mock.ctx); await render();
