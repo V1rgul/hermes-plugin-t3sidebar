@@ -1675,9 +1675,11 @@ try {
       const axis7 = await axisState('.su-chart[data-metric="user_messages"]');
       const buckets = await usage.evaluate(() => window.hermesT3SidebarHarness.syntheticUsageHistory(7, 'Europe/Paris').buckets);
       const midnights = (await Promise.all(buckets.map(t => pageMidnights(t, t)))).reduce((sum, count) => sum + count, 0);
-      console.log(`USAGE 7D AXIS: ${JSON.stringify({ ...axis7, midnights })}`);
+      const points = await usage.evaluate(() => document.querySelector('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')?.getAttribute('d').split('L').length);
+      console.log(`USAGE 7D AXIS: ${JSON.stringify({ ...axis7, midnights, points, buckets: buckets.length })}`);
       check('Usage charts label the vertical axis per day for all three metrics', axis7.units.join() === 'tokens/day,$/day,messages/day');
-      check('Usage 7d day gridlines match the local midnights and labels name the month only once', axis7.dayLines === midnights && midnights === 7 && monthsOnChange(axis7.labels) && !axis7.overlap);
+      check('Usage 7d draws one point per 20-minute bucket, roughly 500 points', points === buckets.length && points > 6 * 72);
+      check('Usage 7d day gridlines match the local midnights and labels name the month only once', axis7.dayLines === midnights && midnights === 7 && axis7.labels.length === 7 && monthsOnChange(axis7.labels) && !axis7.overlap);
     }
     const tokensPlot = usage.locator('.su-chart[data-metric="tokens"] .su-plot');
     const plotBox = await tokensPlot.boundingBox();
@@ -1697,9 +1699,9 @@ try {
     await usage.mouse.move(plotBox.x + plotBox.width * 0.2, plotBox.y + plotBox.height / 2);
     await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-independent.png') });
     await usage.mouse.move(5, 5);
-    // 24h: hourly buckets plotted per day, with the date only on the first label and at midnight.
+    // 24h: 3-minute buckets plotted per day, with the date only on the first label and at midnight.
     await usage.getByRole('button', { name: '24h', exact: true }).click();
-    await usage.waitForFunction(() => document.querySelector('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')?.getAttribute('d').split('L').length === 24);
+    await usage.waitForFunction(() => document.querySelector('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')?.getAttribute('d').split('L').length === 480);
     {
       const axis = await axisState('.su-chart[data-metric="user_messages"]');
       const buckets = await usage.evaluate(() => window.hermesT3SidebarHarness.syntheticUsageHistory(1, 'Europe/Paris').buckets);
@@ -1711,8 +1713,8 @@ try {
       const box = await usage.locator('.su-chart[data-metric="user_messages"] .su-plot').boundingBox();
       await usage.mouse.move(box.x + box.width * 0.6, box.y + box.height / 2);
       const tip = await usage.locator('.su-chart[data-metric="user_messages"] .su-tip-total b').textContent();
-      const [, perDay, hour] = tip.match(/^([\d,]+)\/day · ([\d,]+) this hour$/) || [];
-      check('Usage 24h tooltip shows the per-day rate with the raw hour value', perDay !== undefined && Number(perDay.replace(/,/g, '')) === 24 * Number(hour.replace(/,/g, '')));
+      const [, perDay, raw] = tip.match(/^([\d,]+)\/day · ([\d,]+) in 3 min$/) || [];
+      check('Usage 24h tooltip shows the per-day rate with the raw 3-minute value', perDay !== undefined && Number(perDay.replace(/,/g, '')) === 480 * Number(raw.replace(/,/g, '')));
       await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-usage-24h.png') });
       await usage.mouse.move(5, 5);
     }

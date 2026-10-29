@@ -2191,15 +2191,29 @@ export function seriesColors(series, split) {
   }
   return colors;
 }
-// Charts plot rates per day so the 24h view (hourly buckets) and the daily periods read in the same unit.
-export const perDayFactor = resolution => resolution === 'hour' ? 24 : 1;
+// Charts plot rates per day so every period reads in the same unit whatever its bucket size. Each sub-day bucket is scaled by its own length (a DST change stretches or shrinks one by an hour); a day bucket already is per day.
+export function perDayFactors(buckets, windowEnd, bucketMinutes) {
+  if (bucketMinutes >= 1440) return buckets.map(() => 1);
+  return buckets.map((start, index) => {
+    const end = index + 1 < buckets.length ? buckets[index + 1] : windowEnd;
+    return DAY_S / (Number.isFinite(end) && end > start ? end - start : bucketMinutes * 60);
+  });
+}
+// Nominal bucket minutes; backends that predate bucket_minutes only sent hour or day buckets.
+const historyBucketMinutes = history => Number.isInteger(history.bucket_minutes) && history.bucket_minutes > 0 ? history.bucket_minutes : history.resolution === 'hour' ? 60 : 1440;
+// "3 min", "1.5 h", "4 h": bucket lengths in tooltips and labels.
+const bucketDuration = seconds => seconds < HOUR_S ? `${Math.round(seconds / 60)} min` : `${Math.round(seconds / HOUR_S * 10) / 10} h`;
 export function buildUsageCharts(history, split, mode) {
-  const resolution = history.resolution === 'hour' ? 'hour' : 'day', factor = perDayFactor(resolution), tz = typeof history.tz === 'string' && history.tz ? history.tz : undefined;
+  const bucketMinutes = historyBucketMinutes(history), tz = typeof history.tz === 'string' && history.tz ? history.tz : undefined;
+  const factors = perDayFactors(history.buckets, history.window_end, bucketMinutes);
+  // Hour labels only fit a window of about a day; longer windows are labelled by local day whatever their bucket size.
+  const span = history.buckets.length ? history.buckets.at(-1) + DAY_S / factors.at(-1) - history.buckets[0] : 0;
+  const axis = bucketMinutes < 1440 && span <= 1.5 * DAY_S ? 'hour' : 'day';
   const all = USAGE_METRICS.map(metric => ({ metric, series: usageSeries(history, split, metric.key) }));
   // One color map across the three charts, so a series keeps its color even where it is absent from one metric.
   const colors = seriesColors(all.flatMap(chart => chart.series), split);
-  return { buckets: history.buckets, resolution, factor, tz, colors, ...usageAxis(history.buckets, resolution, tz), charts: all.map(({ metric, series }) => {
-    const { layers, max } = chartLayers(series.map(item => ({ ...item, values: item.values.map(value => value * factor) })), mode);
+  return { buckets: history.buckets, bucketMinutes, factors, tz, colors, ...usageAxis(history.buckets, axis, tz), charts: all.map(({ metric, series }) => {
+    const { layers, max } = chartLayers(series.map(item => ({ ...item, values: item.values.map((value, index) => value * factors[index]) })), mode);
     // Totals stay the actual amounts for the period; only the plotted rates are scaled.
     return { metric, series, layers, scale: niceScale(max, 4, metric.integer), total: series.reduce((sum, item) => sum + item.total, 0) };
   }) };
@@ -2254,18 +2268,18 @@ export function axisLabels(times, timeZone, resolution) {
     return label;
   });
 }
-// Usage charts: daily buckets start at local midnights (backend contract), so each one is a day line; hourly buckets get a line only where the bucket starts at midnight. Hourly labels sit on every third local hour, which always includes midnight.
+// Usage charts: a day line sits on every bucket that starts at a local midnight (every daily bucket, the first of each day's sub-day buckets). Hourly labels sit on every third local hour, which always includes midnight; day labels sit on day lines.
 export function usageAxis(buckets, resolution, timeZone) {
-  const count = buckets.length;
+  const parts = buckets.map(t => zonedParts(t, timeZone));
+  const dayLines = parts.flatMap((item, index) => item.hour === 0 && item.minute === 0 ? [index] : []);
   if (resolution === 'hour') {
-    const parts = buckets.map(t => zonedParts(t, timeZone));
     const labelIndexes = parts.flatMap((item, index) => item.minute === 0 && item.hour % 3 === 0 ? [index] : []);
-    return { dayLines: parts.flatMap((item, index) => item.hour === 0 && item.minute === 0 ? [index] : []), labelIndexes, labels: axisLabels(labelIndexes.map(index => buckets[index]), timeZone, 'hour') };
+    return { dayLines, labelIndexes, labels: axisLabels(labelIndexes.map(index => buckets[index]), timeZone, 'hour') };
   }
-  // Every labelStep-th bucket plus the last one, dropping a regular label that would crowd the right-aligned last label.
-  const labelStep = Math.max(1, Math.ceil(count / 8));
-  const labelIndexes = buckets.flatMap((_, index) => index !== count - 1 && (index % labelStep || count - 1 - index < labelStep / 2) ? [] : [index]);
-  return { dayLines: buckets.map((_, index) => index), labelIndexes, labels: axisLabels(labelIndexes.map(index => buckets[index]), timeZone, 'day') };
+  // Every labelStep-th day line plus the last one, dropping a regular label that would crowd the last label.
+  const count = dayLines.length, labelStep = Math.max(1, Math.ceil(count / 8));
+  const labelIndexes = dayLines.filter((_, position) => position === count - 1 || !(position % labelStep || count - 1 - position < labelStep / 2));
+  return { dayLines, labelIndexes, labels: axisLabels(labelIndexes.map(index => buckets[index]), timeZone, 'day') };
 }
 // Limits axis: one label per local midnight (thinned to at most maxLabels) for multi-day spans, otherwise every few local hours.
 export function timeAxisTicks(start, end, timeZone, maxLabels = 10) {
@@ -2726,7 +2740,9 @@ const VIEW_W = 1000, VIEW_H = 100;
 // Bucket centers span the full plot width; a single bucket becomes a flat segment across it.
 const bucketX = (index, count) => count > 1 ? index / (count - 1) * VIEW_W : VIEW_W / 2;
 function bucketLabel(model, index) {
-  return formatAt(model.buckets[index], model.resolution === 'hour' ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { weekday: 'short', month: 'short', day: 'numeric' }, model.tz);
+  const start = model.buckets[index];
+  if (model.bucketMinutes >= 1440) return formatAt(start, { weekday: 'short', month: 'short', day: 'numeric' }, model.tz);
+  return `${formatAt(start, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }, model.tz)} – ${formatAt(start + DAY_S / model.factors[index], { hour: 'numeric', minute: '2-digit' }, model.tz)}`;
 }
 function plotKeys(event, count, hover, setHover) {
   const moves = { ArrowLeft: -1, ArrowRight: 1 };
@@ -2734,9 +2750,9 @@ function plotKeys(event, count, hover, setHover) {
   if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); setHover(event.key === 'Home' ? 0 : count - 1); }
   if (event.key === 'Escape') setHover(null);
 }
-// Tooltip values are per day like the plot; hourly buckets also show the raw amount of that hour.
+// Tooltip values are per day like the plot; sub-day buckets also show the raw amount of that bucket.
 function TipValue({ metric, value, factor }) {
-  return h('b', null, `${metric.format(value * factor)}/day`, factor !== 1 ? h('span', { className: 'su-tip-raw' }, ` · ${metric.format(value)} this hour`) : null);
+  return h('b', null, `${metric.format(value * factor)}/day`, factor !== 1 ? h('span', { className: 'su-tip-raw' }, ` · ${metric.format(value)} in ${bucketDuration(DAY_S / factor)}`) : null);
 }
 function UsageChart({ chart, model, mode, hover, setHover, axis }) {
   const { metric, series, layers, scale } = chart, count = model.buckets.length;
@@ -2760,7 +2776,7 @@ function UsageChart({ chart, model, mode, hover, setHover, axis }) {
       : h('span', { className: 'su-muted' }, 'Nothing in this period')),
     h('div', { className: 'su-plot-row su-plot-row-unit' },
       h('div', { className: 'su-yaxis', 'aria-hidden': true }, h('span', { className: 'su-yunit' }, metric.unit), scale.ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / scale.max * 100}%` } }, metric.format(tick)))),
-      h('div', { className: 'su-plot', tabIndex: 0, 'aria-label': `${metric.title} per day, by ${model.resolution}; use arrow keys to inspect buckets`,
+      h('div', { className: 'su-plot', tabIndex: 0, 'aria-label': `${metric.title} per day, by ${model.bucketMinutes >= 1440 ? 'day' : `${bucketDuration(model.bucketMinutes * 60)} bucket`}; use arrow keys to inspect buckets`,
         onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null), onKeyDown: event => plotKeys(event, count, hovered, setHover) },
         h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
           model.dayLines.map(index => h('line', { key: `d${index}`, className: 'su-day-grid', x1: bucketX(index, count), x2: bucketX(index, count), y1: 0, y2: VIEW_H })),
@@ -2778,8 +2794,8 @@ function UsageChart({ chart, model, mode, hover, setHover, axis }) {
           layers.map(layer => h('span', { key: layer.key, className: 'su-dot', style: { left: `${pct}%`, bottom: `${layer.upper[hovered] / scale.max * 100}%`, background: model.colors.get(layer.key) } })),
           h('div', { className: 'su-tip', 'data-side': pct > 60 ? 'left' : 'right', style: pct > 60 ? { right: `calc(${100 - pct}% + 10px)` } : { left: `calc(${pct}% + 10px)` } },
             h('div', { className: 'su-tip-head' }, bucketLabel(model, hovered)),
-            ordered.map(item => h('div', { key: item.key, className: 'su-tip-row' }, h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', null, item.label), h(TipValue, { metric, value: item.values[hovered], factor: model.factor }))),
-            h('div', { className: 'su-tip-row su-tip-total' }, h('span'), h('span', null, 'Total'), h(TipValue, { metric, value: series.reduce((sum, item) => sum + item.values[hovered], 0), factor: model.factor })))))),
+            ordered.map(item => h('div', { key: item.key, className: 'su-tip-row' }, h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', null, item.label), h(TipValue, { metric, value: item.values[hovered], factor: model.factors[hovered] }))),
+            h('div', { className: 'su-tip-row su-tip-total' }, h('span'), h('span', null, 'Total'), h(TipValue, { metric, value: series.reduce((sum, item) => sum + item.values[hovered], 0), factor: model.factors[hovered] })))))),
     axis ? h('div', { className: 'su-xaxis', 'aria-hidden': true }, model.labelIndexes.map((index, position) => h('span', { key: index, 'data-edge': index === 0 ? 'start' : index === count - 1 ? 'end' : undefined,
       style: { left: `${bucketX(index, count) / VIEW_W * 100}%` } }, model.labels[position]))) : null);
 }

@@ -4,7 +4,7 @@ The sidebar footer's **Usage** button opens the `/t3sidebar-usage` page, modeled
 
 ## Usage tab
 
-Three charts on one time axis: tokens, API-equivalent cost and human user messages, over 24 h (hourly) or 7/30/90 days (daily, in the Desktop client's time zone). **Split** draws one series per provider or per model; **Mode** stacks the series or draws them independently from zero.
+Three charts on one time axis: tokens, API-equivalent cost and human user messages, in roughly 500 buckets per period: 24 h in 3-minute buckets, 7/30/90 days in 20-minute, 90-minute and 4-hour buckets from local midnight (in the Desktop client's time zone, ending with the bucket in progress). Every chart plots a rate per day, each bucket scaled by its real length (a DST day stretches or shrinks one bucket by an hour); tooltips also give the bucket's raw amount. **Split** draws one series per provider or per model; **Mode** stacks the series or draws them independently from zero.
 
 - Source: Hermes `session_model_usage` (exact totals per session × model × task), read strictly read-only through `GET /usage/history` (`usage_history.py`). No extra data is stored.
 - Timing: Hermes keeps no per-call token counts, so each total is spread over the session's assistant messages (one per API call). Input-side tokens are weighted by the context size at each call and output-side tokens by the reply's size, both measured in characters. Totals are exact; placement within a bucket is approximate.

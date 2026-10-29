@@ -335,17 +335,20 @@ function fixtureMidnight(seconds, tz) {
 // Synthetic usage fixtures shaped like the frozen /usage/history and /usage/limits contract; deterministic apart from the clock.
 const FIXTURE_MODELS = [['openai-codex', 'gpt-6.1-sol', 1], ['openai-codex', 'gpt-6.1-mini', 0.35], ['anthropic', 'claude-opus-5', 0.6], ['anthropic', 'claude-haiku-5', 0.2], ['copilot', 'gpt-5.5', 0.12]];
 export function syntheticUsageHistory(days = 7, tz = 'UTC') {
-  const hourly = days === 1, count = hourly ? 24 : days;
-  const end = Math.floor(Date.now() / 1000 / 3600) * 3600;
-  // Daily buckets start at local midnights in the requested zone, like the backend's.
-  const buckets = Array.from({ length: count }, (_, index) => hourly ? end - (count - 1 - index) * 3600 : fixtureMidnight(end - (count - 1 - index) * 86400, tz));
-  const wave = (index, phase) => Math.max(0, Math.sin(index * 0.9 + phase) * 0.5 + 0.6 + ((index * 7 + phase * 13) % 5) / 10);
+  const bucketMinutes = { 1: 3, 7: 20, 30: 90, 90: 240 }[days] || 1440, step = bucketMinutes * 60, now = Date.now() / 1000;
+  // 24h is the last 24 hours in fixed steps; longer periods are whole local days in the requested zone cut into steps from local midnight and ending with the step in progress, like the backend's (the steps after a DST change drift an hour here, which the fixture tolerates).
+  const steps = Array.from({ length: days }, (_, index) => fixtureMidnight(now - (days - 1 - index) * 86400, tz)).flatMap(midnight => Array.from({ length: Math.ceil(86400 / step) }, (_, index) => midnight + index * step));
+  const end = Math.floor(now / step) * step;
+  const buckets = days === 1 ? Array.from({ length: 86400 / step }, (_, index) => end - (86400 / step - 1 - index) * step) : steps.filter(t => t <= now);
+  const window_end = buckets.at(-1) + step, share = step / 86400;
+  // Shaped by time rather than bucket index so every period shows the same daily rhythm; the jitter changes every three hours.
+  const wave = (t, phase) => { const hours = (t - buckets[0]) / 3600, slot = Math.floor(hours / 3); return Math.max(0, Math.sin(hours * 0.3 + phase) * 0.5 + 0.6 + ((slot * 7 + phase * 13) % 5) / 10); };
   const by_model = FIXTURE_MODELS.map(([provider, model, weight], seriesIndex) => {
-    const tokens = buckets.map((_, index) => Math.round(wave(index, seriesIndex) * weight * (hourly ? 900_000 : 14_000_000)));
+    const tokens = buckets.map(t => Math.round(wave(t, seriesIndex) * weight * 14_000_000 * share));
     const input = tokens.map(value => Math.round(value * 0.2)), output = tokens.map(value => Math.round(value * 0.05)), cache_read = tokens.map((value, index) => value - input[index] - output[index]);
     return { key: `${provider}/${model}`, label: model, provider, model, tokens, input, output, cache_read, cache_write: tokens.map(() => 0), reasoning: output.map(value => Math.round(value / 3)),
       cost_usd: provider === 'copilot' ? tokens.map(() => 0) : tokens.map(value => Math.round(value * (provider === 'anthropic' ? 2.4 : 1.1)) / 1e6),
-      user_messages: tokens.map(value => Math.round(value / (hourly ? 120_000 : 600_000))) };
+      user_messages: tokens.map(value => Math.round(value / (600_000 * share))) };
   });
   const sum = (list, field) => buckets.map((_, index) => list.reduce((total, item) => total + item[field][index], 0));
   const fields = ['tokens', 'input', 'output', 'cache_read', 'cache_write', 'reasoning', 'cost_usd', 'user_messages'];
@@ -354,7 +357,7 @@ export function syntheticUsageHistory(days = 7, tz = 'UTC') {
     return { key: provider, label: provider, provider, model: null, ...Object.fromEntries(fields.map(field => [field, sum(members, field)])) };
   });
   const total = field => by_model.reduce((all, item) => all + item[field].reduce((a, b) => a + b, 0), 0);
-  return { generated_at: Date.now() / 1000, days, tz, resolution: hourly ? 'hour' : 'day', buckets, by_provider, by_model,
+  return { generated_at: now, days, tz, resolution: `${bucketMinutes}m`, bucket_minutes: bucketMinutes, buckets, window_end, by_provider, by_model,
     totals: { tokens: total('tokens'), cost_usd: total('cost_usd'), user_messages: total('user_messages') }, pricing_missing: ['copilot/gpt-5.5'], approximate: true };
 }
 // Two Codex accounts on different plans (a 20-unit Business seat drained first, then a 100-unit Pro 100) and one Anthropic Max 20x account (200 units weekly), each pool drained in priority order by an office-hours workload: ten days of 15-minute samples with weekly resets as visible step-ups. Consumption is in plan units, the weekday/hour profile follows the local clock (nights and weekends line up with the charts' midnight gridlines), and Codex's last 12 hours run hotter than the days before, as in a burst of work. Scenarios (control.limitsScenario):
