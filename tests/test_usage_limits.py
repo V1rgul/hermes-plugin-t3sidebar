@@ -175,6 +175,9 @@ class NormalizeTests(unittest.TestCase):
 		self.assertEqual(out["windows"][0]["resets_at"], NOW + 60)
 		self.assertEqual((out["fetched_at"], out["plan"]), (NOW, "Pro"))
 		self.assertEqual(set(out), {"fetched_at", "plan", "banked_resets", "windows"})
+		# The raw plan enum wins over Hermes's title-cased display value, because the page maps the enum to plan labels and capacity weights.
+		raw_plan = limits.normalize_snapshot("openai-codex", self.snap([W(label="Weekly", used_percent=5.0, reset_at=None, scope="account")], raw={"plan_type": "prolite"}, plan="Prolite"))
+		self.assertEqual(raw_plan["plan"], "prolite")
 		self.assertNotIn("example.com", repr(out))
 		self.assertNotIn("codex:acct", repr(out))
 		# Weekly-only payload in primary_window (Hermes labels it Weekly by duration).

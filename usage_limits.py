@@ -158,7 +158,8 @@ def normalize_snapshot(provider, snapshot):
 	windows = tuple(getattr(snapshot, "windows", None) or ())
 	raw = getattr(snapshot, "raw", None)
 	seconds = _codex_window_seconds(raw, windows) if provider == "openai-codex" else [None] * len(windows)
-	plan = getattr(snapshot, "plan", None)
+	# Hermes title-cases Codex's plan_type ("Prolite"), which loses the enum the frontend maps to plan labels and pool capacity weights; prefer the raw value when the payload carries it.
+	plan = raw.get("plan_type") if provider == "openai-codex" and isinstance(raw, dict) and isinstance(raw.get("plan_type"), str) else getattr(snapshot, "plan", None)
 	plan = plan.strip()[:64] if isinstance(plan, str) and plan.strip() and "@" not in plan else None
 	result_windows = []
 	used_keys = set()
