@@ -284,6 +284,9 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
       : meta.pinned ? 'pinned'
       : observed === 'working' ? 'working' : 'active';
     const newSession = isEmptySession(row, runtimeKnown ? matches : []);
+    // Native stores an empty Desktop session's row only once text was typed into it (see controller.persistDraft), so a stored
+    // empty Desktop row keeps its card (and tint) until its first message or deletion, even with the composer cleared.
+    const drafted = newSession && !row._liveOnly && String(row.source || '').toLowerCase() === 'desktop';
     if (!matchesFilters({ ...row, newSession }, tokens, project)) continue;
     // Runtime last_active is also a resume/reattach clock, not conversation progress.
     const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
@@ -292,7 +295,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     // a solid ring when the conversation's own turn runs, dashed when only subagents or a background command keep it busy,
     // and the running subagent count. Primitive fields keep card memoization exact.
     const working = observed === 'working';
-    result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, runStartedAt: workingSince(observed, matches, metadata.runs?.[durableId(row)]), section, status, woke, newSession,
+    result[section].push({ ...row, key: durableId(row), meta, completion: metadata.completions?.[durableId(row)] || null, runStartedAt: workingSince(observed, matches, metadata.runs?.[durableId(row)]), section, status, woke, newSession, drafted,
       runtimeId: runtimes.length === 1 ? runtimes[0].id : null, activity,
       working, workingMain: working && matches.some(ownTurn), workingSubagents: working ? displayedSubagents(matches) : null,
       workingCompacting: working && matches.some(i => i.compacting === true) });
@@ -620,6 +623,27 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           client.removeQueries({ queryKey: [...scopeKey(scope), 'page'] });
           refresh(scope, { queryKey: scopeKey(scope) });
         }
+      }
+    },
+    // Desktop's dead-session prune erases the composer text of any session without a stored row, and native writes that row
+    // only on the first prompt, so typed but unsent text vanished after navigating away. Persist the row as soon as text
+    // appears; the stored empty row then keeps its card until it is sent to or deleted. No plugin metadata is written, so
+    // this takes no writer lock and is fenced by scope alone.
+    async persistDraft(scope, row) {
+      check(scope);
+      const id = durableId(row);
+      if (!row._liveOnly || !row.runtimeId) throw new Error('Only an unsaved session with one live runtime needs persisting.');
+      try {
+        const route = await routeFor(scope);
+        const result = await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}/draft`, { method: 'POST', body: { runtime_id: row.runtimeId } }));
+        // The companion has already read the stored row back; a receipt for another session or profile is not confirmation.
+        if (result?.ok !== true || result.profile !== (route?.targetProfile || scope.profile) || result.session_id !== id || !Number.isInteger(result.message_count) || result.message_count < 0) {
+          throw new Error('The server did not confirm this draft session.');
+        }
+        return result;
+      } finally {
+        // The stored row replaces the runtime-only card on the next listing.
+        if (!disposed && sameScope(scope, env.capture())) refresh(scope, { queryKey: scopeKey(scope) });
       }
     },
     // The backend's command catalog lists commands actually registered by loaded plugins, not merely installed files.
@@ -1403,7 +1427,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   useEffect(() => { retain?.(row.key, menuOpen || snoozeOpen); return () => retain?.(row.key, false); }, [retain, row.key, menuOpen, snoozeOpen]);
   const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
   const draft = useSessionDraft({ row, active, hidden: hidden || row.newSession, controller, scope });
-  const hasDraft = row.newSession ? draftPresent : draft.data === true && !draft.isError;
+  const hasDraft = row.newSession ? draftPresent || row.drafted : draft.data === true && !draft.isError;
   const attention = row.status === 'waiting', snoozed = row.section === 'snoozed', badge = snoozed ? null : cardStatus(row, active);
   const tokens = compactTokens(row), provider = providerMark(row.provider);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
@@ -1788,7 +1812,32 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // Populate text only for rows actually searched; replacing the classified snapshot also replaces its search index.
   const searchIndex = useMemo(() => new WeakMap(), [classified]);
   const sections = useMemo(() => Object.fromEntries(SECTIONS.map(section => [section,
-    classified[section].filter(row => (!row.newSession || emptyDrafts.has(draftIdentity(row)) || ['waiting', 'working'].includes(row.status)) && matchesFilters(row, tokens, project, searchIndex))])), [classified, emptyDrafts, tokens, project, searchIndex]);
+    classified[section].filter(row => (!row.newSession || row.drafted || emptyDrafts.has(draftIdentity(row)) || ['waiting', 'working'].includes(row.status)) && matchesFilters(row, tokens, project, searchIndex))])), [classified, emptyDrafts, tokens, project, searchIndex]);
+  // Persist each newly drafted unsaved session (see controller.persistDraft). One attempt at a time per session; failures back off
+  // so an unsupported backend is not hammered.
+  const draftPersists = useRef(new Map()), [draftRetry, setDraftRetry] = useState(0);
+  useEffect(() => {
+    const now = Date.now();
+    let wake = Infinity;
+    for (const row of emptyCandidates) {
+      const id = draftIdentity(row);
+      if (!row._liveOnly || !row.runtimeId || !emptyDrafts.has(id)) continue;
+      const attempt = draftPersists.current.get(id);
+      if (attempt?.pending || attempt?.done) continue;
+      if (attempt && attempt.retryAt > now) { wake = Math.min(wake, attempt.retryAt); continue; }
+      draftPersists.current.set(id, { pending: true, failures: attempt?.failures || 0 });
+      // A confirmed session stays done: its stored row arrives with the refreshed listing.
+      controller.persistDraft(scope, row).then(() => draftPersists.current.set(id, { done: true }), error => {
+        const failures = (attempt?.failures || 0) + 1;
+        const delay = Math.min(5000 * 2 ** (failures - 1), 300000);
+        draftPersists.current.set(id, { pending: false, failures, retryAt: Date.now() + delay });
+        setDraftRetry(value => value + 1);
+      });
+    }
+    if (wake === Infinity) return undefined;
+    const timer = setTimeout(() => setDraftRetry(value => value + 1), Math.max(0, wake - now));
+    return () => clearTimeout(timer);
+  }, [emptyCandidates, emptyDrafts, controller, scope, draftRetry]);
   const searching = !!query.trim();
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
   const filtering = searching || project !== '*';

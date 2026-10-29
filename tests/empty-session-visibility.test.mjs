@@ -52,7 +52,9 @@ test('draft-bearing empty session displays exact runtime project, glyph, color a
 	assert.equal(draft.dataset.hasDraft, 'true');
 	assert.equal(document.body.textContent.includes('PRIVATE'), false);
 	assert.equal(JSON.stringify(mock.queryClient.getQueryCache().getAll().map(query => query.state.data)).includes('PRIVATE'), false);
-	assert.ok(!mock.calls.some(call => call[0] === 'rest' && call[2]?.method === 'POST'));
+	// Without backend support the only write is the refused draft persistence request, which carries identities only.
+	const posts = mock.calls.filter(call => call[0] === 'rest' && call[2]?.method === 'POST');
+	assert.deepEqual(posts.map(call => [call[1], call[2].body]), [['/sessions/live-empty/draft', { runtime_id: 'runtime-empty' }]]);
 	mock.control.mountedDrafts['live-empty'] = '';
 	await act(async () => mock.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-drafts'] })); await tick();
 	assert.equal(!!row('live-empty'), false);
@@ -68,6 +70,57 @@ test('inactive stored draft survives filtering, and the first real message keeps
 	Object.assign(mock.control.rows[0], { title: 'First reply', message_count: 2 });
 	await refresh(); assert.ok(row('stored-empty'));
 	assert.equal(row('stored-empty').querySelector('.sf-row-title').textContent, 'First reply');
+});
+
+const draftPosts = () => mock.calls.filter(call => call[0] === 'rest' && call[2]?.method === 'POST' && call[1].endsWith('/draft'));
+
+test('typing into an unsaved session persists its row once, and the card stays tinted after the composer is cleared', async () => {
+	fixtures(); mock.control.draftPersistence = true; mock.control.mountedDrafts['live-empty'] = 'PRIVATE unsent prompt';
+	await mount(); await tick();
+	assert.deepEqual(mock.control.draftRequests, [{ id: 'live-empty', body: { runtime_id: 'runtime-empty' } }]);
+	assert.equal(JSON.stringify(mock.calls.filter(call => call[0] === 'rest')).includes('PRIVATE'), false);
+	assert.equal(mock.calls.some(call => call[0] === 'rest' && call[2]?.method === 'POST' && !call[1].endsWith('/draft')), false, 'no plugin metadata is written');
+	// The stored row replaces the runtime-only card, keeping the runtime's project and provider.
+	await refresh();
+	let card = row('live-empty'); assert.ok(card);
+	assert.equal(card.querySelector('.sf-row-title').textContent, 'New session');
+	assert.equal(card.querySelector('.sf-project-name').textContent, 'Robot');
+	// Cleared composer: the session no longer disappears, and stays orange once another session is focused.
+	mock.control.mountedDrafts['live-empty'] = '';
+	await act(async () => mock.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-drafts'] })); await tick();
+	await act(async () => mock.host.state.focusedStoredSessionId.set('history')); await tick(); await refresh();
+	card = row('live-empty'); assert.ok(card);
+	assert.equal(card.dataset.current, 'false');
+	assert.equal(card.dataset.hasDraft, 'true');
+	assert.equal(draftPosts().length, 1, 'a stored session is not persisted again');
+	// The first message ends the draft treatment.
+	Object.assign(mock.control.rows.find(item => item.id === 'live-empty'), { title: 'First reply', message_count: 2 });
+	await refresh();
+	assert.equal(row('live-empty').querySelector('.sf-row-title').textContent, 'First reply');
+	assert.equal(row('live-empty').dataset.hasDraft, 'false');
+});
+
+test('a stored empty Desktop row stays visible and tinted without composer text; other sources and runtime-only rows do not', async () => {
+	fixtures(); mock.control.draftPersistence = true;
+	mock.control.rows.push({ id: 'acp-empty', source: 'acp', message_count: 0 }, { id: 'desktop-empty', source: 'desktop', message_count: 0 });
+	await mount();
+	assert.ok(row('desktop-empty')); assert.equal(row('desktop-empty').dataset.hasDraft, 'true');
+	assert.equal(row('desktop-empty').querySelector('.sf-row-title').textContent, 'New session');
+	assert.equal(!!row('acp-empty'), false, 'empty non-Desktop rows such as ACP health checks stay hidden');
+	assert.equal(!!row('stored-empty'), false, 'rows without known Desktop provenance stay hidden');
+	assert.equal(!!row('live-empty'), false, 'an unsaved session without text stays hidden');
+	assert.equal(draftPosts().length, 0, 'stored rows are never persisted again');
+});
+
+test('a refused or unconfirmed persistence backs off instead of repeating every render', async () => {
+	fixtures(); mock.control.mountedDrafts['live-empty'] = 'typed';
+	await mount(); await refresh(); await refresh();
+	assert.equal(draftPosts().length, 1);
+	assert.ok(row('live-empty'), 'the text still shows the card while unsupported');
+	mock.reset(); if (root) await act(async () => root.unmount()); root = null; controller?.dispose();
+	fixtures(); mock.control.draftPersistence = true; mock.control.draftWrongId = 'another'; mock.control.mountedDrafts['live-empty'] = 'typed';
+	await mount(); await refresh();
+	assert.equal(draftPosts().length, 1);
 });
 
 test('empty visibility remains fail-closed on failed composer reads', async () => {
