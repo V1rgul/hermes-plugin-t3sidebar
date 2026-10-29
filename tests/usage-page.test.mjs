@@ -233,7 +233,7 @@ test('the verdict says waste when resets discard at least 5% of capacity and the
   // 0.5 units an hour for a day leaves 48 of Pro 100's 60 units to expire at its reset; afterwards 120 units outlast the week.
   assert.deepEqual([verdict.status, verdict.window, verdict.remaining, verdict.capacity, verdict.remaining_pct, verdict.empty_at, verdict.last_loss_at - now], ['waste', 'weekly', 60, 120, 50, null, D]);
   assert.equal(Math.round(verdict.lost * 1000) / 1000, 48); assert.equal(Math.round(verdict.lost_pct * 10) / 10, 40);
-  assert.match(usage.verdictText(verdict, now), /^48 plan units will expire unused by [A-Z][a-z]{2} — room for background work$/);
+  assert.match(usage.verdictText(verdict, now), /^48 plan units will expire unused by [A-Z][a-z]{2}$/, 'the fact only, no advice');
   const marks = usage.wasteMarks(usage.projectPool(verdictProvider(now).accounts, verdictProvider(now).history, 'weekly', now, 7 * D, { lookbackS: 12 * H, provider: 'openai-codex' }));
   assert.deepEqual(marks.map(mark => [mark.t - now, Math.round(mark.before), Math.round(mark.lost), mark.accounts.map(item => `${item.label} ${item.plan_label}`).join()]), [[D, 48, 48, 'chatgpt1 Pro 100']]);
   // A loss under 5% of capacity is noise: 13% of Pro 100 at 0.5 units an hour leaves 1 unit at the reset.
@@ -247,14 +247,14 @@ test('the verdict says short when the projection hits zero before a reset, using
   // Two units an hour: 12 units still expire at Pro 100's reset after a day, then its fresh 100 run out 50 hours later, 22 hours before the Business seat resets.
   const verdict = usage.limitsVerdict(verdictProvider(now, { perHour: 2 }), usage.USAGE_DEFAULTS, now);
   assert.deepEqual([verdict.status, Math.round(verdict.empty_at - now), verdict.next_reset_at - now], ['short', 74 * H, 4 * D]);
-  assert.match(usage.verdictText(verdict, now), /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset — cut optional work$/);
+  assert.match(usage.verdictText(verdict, now), /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset$/, 'the fact only, no advice');
   // The verdict reads the user's lookback: one hour of the same steady drain gives the same rate, so the same empty time.
   assert.equal(Math.round(usage.limitsVerdict(verdictProvider(now, { perHour: 2 }), { ...usage.USAGE_DEFAULTS, lookback: 1 }, now).empty_at - now), 74 * H);
   const steep = verdictProvider(now, { perHour: 2 });
   steep.history = steep.history.map(item => item.account === 'second' && item.t === now - H ? { ...item, remaining_percent: 70 } : item);
   assert.ok(usage.limitsVerdict(steep, { ...usage.USAGE_DEFAULTS, lookback: 1 }, now).empty_at < usage.limitsVerdict(steep, usage.USAGE_DEFAULTS, now).empty_at, 'a steeper last hour moves the 1h-lookback verdict earlier');
   const now0 = usage.limitsVerdict(verdictProvider(now, { left: 0, perHour: 2 }), usage.USAGE_DEFAULTS, now);
-  assert.match(usage.verdictText(now0, now), /^Out of quota now, 1d 0h before the next reset/);
+  assert.equal(usage.verdictText(now0, now), 'Out of quota now, 1d 0h before the next reset');
 });
 
 test('the verdict is unknown without drain data, with stale readings or for a logged-out provider', () => {
@@ -347,21 +347,36 @@ test('scales, formats and colors are compact and stable per series key', () => {
 
 test('preferences validate every field and fall back to safe defaults', () => {
   assert.deepEqual(usage.validUsagePreferences(null), usage.USAGE_DEFAULTS);
-  assert.deepEqual(usage.validUsagePreferences({ days: 30, split: 'model', mode: 'independent', horizon: 30, lookback: 72, window: 'five_hour', provider: 'anthropic' }),
-    { days: 30, split: 'model', mode: 'independent', horizon: 30, lookback: 72, window: 'five_hour', provider: 'anthropic' });
-  assert.deepEqual(usage.validUsagePreferences({ days: '7', split: 1, mode: 'stack', horizon: 14, lookback: 6, window: '', provider: 5 }), usage.USAGE_DEFAULTS);
-  // Preferences saved before the split pages: the Usage|Limits tab is dropped and the retired 1d/3d horizons become 7d.
-  assert.equal(Object.hasOwn(usage.validUsagePreferences({ tab: 'limits' }), 'tab'), false);
+  assert.deepEqual(usage.validUsagePreferences({ days: 30, split: 'model', mode: 'independent', horizon: 30, lookback: 72, window: 'five_hour', accounts: { 'openai-codex': true, anthropic: false } }),
+    { days: 30, split: 'model', mode: 'independent', horizon: 30, lookback: 72, window: 'five_hour', accounts: { 'openai-codex': true, anthropic: false } });
+  assert.deepEqual(usage.validUsagePreferences({ days: '7', split: 1, mode: 'stack', horizon: 14, lookback: 6, window: '', accounts: 'open' }), usage.USAGE_DEFAULTS);
+  // Saved before the overview: the Usage|Limits tab and the provider picked by the retired Limits tabs are dropped.
+  const legacy = usage.validUsagePreferences({ tab: 'limits', provider: 'anthropic' });
+  assert.deepEqual([Object.hasOwn(legacy, 'tab'), Object.hasOwn(legacy, 'provider')], [false, false]);
   assert.deepEqual([1, 3, 7, 30].map(horizon => usage.validUsagePreferences({ horizon }).horizon), [7, 7, 7, 30]);
   for (const bad of ['12', 0, 13, 1000, null, Infinity]) assert.equal(usage.validUsagePreferences({ lookback: bad }).lookback, 12, `lookback ${bad} falls back to 12h`);
+  // Account folds keep only booleans under provider-shaped keys; anything else reads as folded.
+  assert.deepEqual(usage.validUsagePreferences({ accounts: { a: true, b: 'yes', c: 1, '': true, ['x'.repeat(201)]: true, d: false } }).accounts, { a: true, d: false });
+  assert.deepEqual([usage.validUsagePreferences({ accounts: [true] }).accounts, usage.validUsagePreferences({ accounts: null }).accounts], [{}, {}]);
   mock.control.storageReadError = true;
   assert.deepEqual(usage.readUsagePreferences(mock.ctx.storage), usage.USAGE_DEFAULTS);
   mock.control.storageReadError = false; mock.control.storageWriteError = true;
   assert.equal(usage.writeUsagePreferences(mock.ctx.storage, { days: 30 }), false);
 });
 
+test('overview order puts providers with accounts first and logged-out ones last, otherwise keeping the backend order', () => {
+  const out = { provider: 'xai', auth: 'logged_out', accounts: [] }, empty = { provider: 'nous', accounts: [] }, first = { provider: 'openai-codex', accounts: [{ id: 'a' }] }, second = { provider: 'anthropic', accounts: [{ id: 'b' }] };
+  assert.deepEqual(usage.limitsProviderOrder([out, empty, first, second]).map(item => item.provider), ['openai-codex', 'anthropic', 'nous', 'xai']);
+  assert.deepEqual(usage.limitsProviderOrder([second, out, first]).map(item => item.provider), ['anthropic', 'openai-codex', 'xai']);
+  const windows = usage.sharedWindowCatalog([{ accounts: [{ windows: [{ key: 'weekly', label: 'Weekly' }] }], history: [] }, { accounts: [{ windows: [{ key: 'five_hour', label: '5-hour' }, { key: 'weekly', label: 'Weekly' }] }], history: [] }, { auth: 'logged_out', accounts: [{ windows: [{ key: 'w7200' }] }], history: [] }]);
+  assert.deepEqual(windows.map(item => item.key), ['five_hour', 'weekly'], 'the shared selector offers every logged-in provider\'s windows');
+  assert.deepEqual([usage.chartWindow(windows, 'five_hour')?.key, usage.chartWindow([{ key: 'weekly' }], 'five_hour')?.key, usage.chartWindow([{ key: 'w7200' }], 'five_hour')?.key, usage.chartWindow([], 'weekly')], ['five_hour', 'weekly', 'w7200', null]);
+});
+
 // Sidebar footer and registration -----------------------------------------------------------------------------------
-test('Usage and Limits register as two routes and the sidebar footer has one icon button for each', async () => {
+const ADVICE = /cut optional|background work|room for|optional work/i;
+const adviceFree = () => !ADVICE.test(document.body.textContent) && $$('[aria-label]').every(node => !ADVICE.test(node.getAttribute('aria-label'))) && $$('[title]').every(node => !ADVICE.test(node.getAttribute('title')));
+test('Usage and Limits register as two routes and the sidebar footer has the Usage icon button then one Limits button', async () => {
   plugin.register(mock.ctx);
   assert.deepEqual([page().area, page().title, page().data.path], ['routes', 'Usage', '/t3sidebar-usage']);
   assert.deepEqual([limitsPage().area, limitsPage().title, limitsPage().data.path], ['routes', 'Limits', '/t3sidebar-limits']);
@@ -369,12 +384,15 @@ test('Usage and Limits register as two routes and the sidebar footer has one ico
   await render(mock.control.contributions[0]);
   const footer = $('.sf > footer.sf-footer');
   assert.equal(footer !== null, true); assert.equal($('.sf').lastElementChild?.className, 'sf-footer', 'the footer is the last row of the pane');
-  const buttons = [...footer.querySelectorAll('button.sf-utility')];
-  // Icon-only: the name comes from aria-label and the tooltip, never from visible text.
-  assert.deepEqual(buttons.map(node => [node.getAttribute('aria-label'), node.textContent, node.getAttribute('title'), node.querySelector('svg')?.getAttribute('data-icon')]),
-    [['Usage', '', 'Token usage', 'BarChart3'], ['Limits', '', 'Subscription limits', 'Gauge']]);
+  const buttons = [...footer.querySelectorAll('button')];
+  // Icon-only Usage: the name comes from aria-label and the tooltip, never from visible text.
+  assert.deepEqual(buttons.map(node => node.className), ['sf-utility', 'sf-limits'], 'exactly two controls: Usage and the single Limits button');
+  assert.deepEqual([buttons[0].getAttribute('aria-label'), buttons[0].textContent, buttons[0].getAttribute('title'), buttons[0].querySelector('svg')?.getAttribute('data-icon')], ['Usage', '', 'Token usage', 'BarChart3']);
+  assert.deepEqual($$('.sf-footer .sf-limit').map(node => node.dataset.provider), ['openai-codex', 'anthropic'], 'the default fixture has two logged-in providers');
   await click(buttons[0]); await click(buttons[1]);
   assert.deepEqual(mock.calls.filter(call => call[0] === 'navigate').map(call => call[1]), ['/t3sidebar-usage', '/t3sidebar-limits']);
+  assert.equal(Object.hasOwn(mock.ctx.storage.get('usage-preferences') ?? {}, 'provider'), false, 'opening the Limits page picks no provider');
+  assert.equal(adviceFree(), true);
 });
 
 // Page rendering -----------------------------------------------------------------------------------------------------
@@ -446,42 +464,107 @@ async function slide(node, value) {
   await tick(); await tick();
 }
 
-test('the Limits page pools accounts, projects resets and lists per-account windows', async () => {
+test('the Limits page is one overview of every provider under a shared controls bar', async () => {
   plugin.register(mock.ctx); await render(limitsPage());
   assert.deepEqual(restPaths(), ['/usage/limits?hours=168'], 'the Limits page fetches only its own endpoint');
   assert.deepEqual([$('.su').dataset.view, button('Usage') === undefined, $('.su-chart[data-metric]') === null], ['limits', true, true]);
-  assert.deepEqual($$('.su-provider').map(node => [node.firstChild.textContent, node.lastChild.textContent, node.getAttribute('aria-pressed')]), [['OpenAI Codex', '2', 'true'], ['Anthropic', 'logged out', 'false']]);
-  assert.equal($('.su-pooled').dataset.window, 'weekly', 'weekly is the default window');
-  // Business (20 units) plus Pro 100 (100 units): the pool counts capacity in plan units, not percent.
-  assert.deepEqual([$('.su-capacity').textContent, $('.su-composition').textContent, $('.su-pooled').dataset.capacity], ['/ 120 plan units', '(Business: 20, Pro 100: 100)', '120']);
-  assert.match($('.su-pool').textContent, /^\d+(\.\d)?$/);
-  assert.match($('.su-rate').textContent, /^~\d+(\.\d)? units per hour$/);
-  assert.deepEqual($$('.su-pooled .su-yaxis span').map(node => node.textContent), ['plan units', '0', '25', '50', '75', '100', '120'], 'the vertical axis runs to the pool capacity in plan units');
-  assert.deepEqual([$('.su-lookback-label').textContent, $('.su-lookback-value').textContent], ['Projections based on', '12h']);
+  assert.deepEqual([$$('.su-provider-tabs').length, $$('button.su-provider').length], [0, 0], 'no provider tabs');
+  assert.deepEqual($$('.su-provider-limits').map(node => node.dataset.provider), ['openai-codex', 'anthropic']);
+  assert.deepEqual($$('.su-provider-head').map(node => [node.textContent, node.querySelector('svg[data-provider-mark]')?.dataset.providerMark]), [['OpenAI Codex', 'openai-codex'], ['Anthropic', 'anthropic']]);
+  // One chart per provider with data, each in its own section with its own headline and verdict.
+  assert.deepEqual($$('.su-provider-limits').map(node => node.querySelectorAll('.su-pooled').length), [1, 1]);
+  assert.deepEqual($$('.su-pooled').map(node => [node.dataset.window, node.getAttribute('aria-label')]), [['weekly', 'OpenAI Codex pooled remaining quota'], ['weekly', 'Anthropic pooled remaining quota']], 'weekly is the default window');
+  // Business (20 units) plus Pro 100 (100 units), and one Max 20x (200 weekly units): pools count capacity in plan units, not percent.
+  assert.deepEqual($$('.su-capacity').map(node => node.textContent), ['/ 120 plan units', '/ 200 plan units']);
+  assert.deepEqual($$('.su-composition').map(node => node.textContent), ['(Business: 20, Pro 100: 100)', '(Max 20x: 200)']);
+  assert.equal($$('.su-pool').every(node => /^\d+(\.\d)?$/.test(node.textContent)), true);
+  assert.equal($$('.su-rate').every(node => /^~\d+(\.\d)? units per hour$/.test(node.textContent)), true);
+  assert.deepEqual($$('.su-pooled').map(chart => [...chart.querySelectorAll('.su-yaxis span')].map(node => node.textContent).join()), ['plan units,0,25,50,75,100,120', 'plan units,0,50,100,150,200']);
+  assert.deepEqual($$('.su-verdict').map(node => node.closest('.su-provider-limits').dataset.provider), ['openai-codex', 'anthropic']);
+  assert.equal($$('.su-pooled .su-line.su-past').length + $$('.su-pooled .su-line.su-projected').length + $$('.su-now').length, 6);
+  assert.ok($$('.su-pooled')[1].querySelectorAll('.su-day-grid').length >= 9, 'a week of history plus a week ahead crosses at least nine midnights');
   assert.equal($('.su-legend'), null, 'the Remaining/Projected legend is gone');
-  assert.match($('.su-chart-notes').textContent, /^Next reset \+\d+(\.\d)? units · /);
-  assert.ok($('.su-pooled .su-line.su-past')); assert.ok($('.su-pooled .su-line.su-projected')); assert.ok($('.su-now'));
-  assert.ok($$('.su-pooled .su-day-grid').length >= 9, 'a week of history plus a week ahead crosses at least nine midnights');
-  assert.equal($$('.su-account').length, 2);
+  assert.equal($$('.su-chart-notes').every(node => /^Next reset \+\d+(\.\d)? units · /.test(node.textContent)), true);
+  // One controls bar at the top: lookback, window, horizon and refresh, none of them repeated per chart.
+  const bar = $('.su-limits-controls');
+  assert.equal(bar.parentElement.className, 'su', 'the controls head the page');
+  assert.equal(bar.compareDocumentPosition($('.su-provider-limits')) & 4, 4, 'the controls come before the first section');
+  assert.deepEqual([$$('.su-lookback').length, $$('.su-horizon').length, $$('.su [role=group][aria-label=Window]').length], [1, 1, 1]);
+  assert.deepEqual([bar.querySelector('.su-lookback') !== null, bar.querySelector('.su-horizon') !== null, bar.querySelector('[aria-label=Window]') !== null, bar.querySelector('[aria-label=Refresh]') !== null], [true, true, true, true]);
+  assert.deepEqual([$('.su-lookback-label').textContent, $('.su-lookback-value').textContent], ['Projections based on', '12h']);
+  assert.deepEqual([...bar.querySelectorAll('[aria-label=Window] button')].map(node => node.textContent), ['5-hour', 'Weekly']);
+  // Account details are folded under each chart; the shared footnote appears once at the bottom.
+  assert.equal($$('.su-account').length, 0, 'accounts are folded by default');
+  assert.deepEqual($$('.su-disclosure').map(node => [node.textContent, node.getAttribute('aria-expanded')]), [['Accounts (2)', 'false'], ['Accounts (1)', 'false']]);
+  assert.equal($$('.su-footnote').length, 1);
+  assert.match($('.su-footnote').textContent, /^Sampled every 5m · last sample .*averaged over the selected period.*20 plan units = one \$20 plan's allowance/);
+  assert.equal($('.su-overview').lastElementChild.className, 'su-footnotes', 'the footnotes close the page');
+  assert.equal(button('3d'), undefined, 'the 1d/3d/7d horizon control is gone');
+  await click(button('5-hour'));
+  assert.deepEqual($$('.su-pooled').map(node => node.dataset.window), ['five_hour', 'five_hour'], 'the window choice applies to every chart');
+  // Codex plans weigh the same in every window; Max 20x is 400 units in five hours. The verdicts keep judging the weekly pools.
+  assert.deepEqual($$('.su-capacity').map(node => node.textContent), ['/ 120 plan units', '/ 400 plan units']);
+  assert.deepEqual($$('.su-verdict').map(node => [node.dataset.window, node.textContent.startsWith('Weekly: ')]), [['weekly', true], ['weekly', true]]);
+  assert.equal(mock.ctx.storage.get('usage-preferences').window, 'five_hour');
+  assert.equal(adviceFree(), true, 'no verdict, label or title gives advice');
+});
+
+test('the shared lookback and horizon controls change every chart at once', async () => {
+  plugin.register(mock.ctx); await render(limitsPage());
+  const rates = () => $$('.su-rate').map(node => node.textContent);
+  const before = rates();
+  await slide($('.su-lookback input[type=range]'), 1);
+  assert.equal($('.su-lookback-value').textContent, '15d');
+  const after = rates();
+  assert.deepEqual(after.map((text, index) => text !== before[index] && /^(~\d+(\.\d)? units per hour|no drain data)$/.test(text)), [true, true], `every provider's rate follows the slider (${before} → ${after})`);
+  assert.deepEqual($$('.su-measure[data-kind="average"]').map(node => node.textContent.split(' · ')[0]), ['Average over 15d', 'Average over 15d']);
+  const spans = () => $$('.su-pooled .su-plot').map(node => Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100);
+  assert.deepEqual(spans(), [9.1, 9.1]);
+  await click($('.su-horizon'));
+  assert.deepEqual([spans(), $$('.su-pooled').map(node => node.dataset.horizon)], [[39, 39], ['30', '30']], 'one toggle extends every chart');
+  await click($('.su-horizon'));
+  assert.deepEqual(spans(), [9.1, 9.1]);
+});
+
+test('account details are folded by default and each provider remembers its own fold across a remount', async () => {
+  plugin.register(mock.ctx); await render(limitsPage());
+  const section = id => $(`.su-provider-limits[data-provider="${id}"]`);
+  const toggle = id => section(id).querySelector('.su-disclosure');
+  await click(toggle('openai-codex'));
+  assert.deepEqual([toggle('openai-codex').getAttribute('aria-expanded'), toggle('anthropic').getAttribute('aria-expanded')], ['true', 'false']);
+  assert.equal(toggle('openai-codex').getAttribute('aria-controls'), section('openai-codex').querySelector('.su-accounts').id);
+  assert.deepEqual([section('openai-codex').querySelectorAll('.su-account').length, section('anthropic').querySelectorAll('.su-account').length], [2, 0]);
+  assert.deepEqual(mock.ctx.storage.get('usage-preferences').accounts, { 'openai-codex': true });
   const first = $('.su-account[data-account="acct-team"]');
   assert.match(first.querySelector('.su-account-head').textContent, /^chatgptvitibotBusiness · 20 unitspriority 0.*0 banked resets/);
   assert.equal($('.su-account[data-account="acct-prolite"] .su-badge').textContent, 'Pro 100 · 100 units');
-  assert.equal($('.su-assumed'), null, 'both plans are in the capacity table');
+  assert.equal($('.su-assumed'), null, 'every plan is in the capacity table');
   assert.equal(first.querySelectorAll('.su-window').length, 2);
   assert.equal(first.querySelectorAll('.su-pace').length, 2, 'every window with a length and reset time has a pace tick');
   assert.match(first.querySelector('.su-window[data-window="weekly"] .su-window-reset').textContent, /^resets in 4d \d+h$/);
-  assert.match($('.su-footnote').textContent, /^Sampled every 5m · last sample .*averaged over the selected period/);
-  assert.equal(button('3d'), undefined, 'the 1d/3d/7d horizon control is gone');
-  await click(button('5-hour'));
-  assert.equal($('.su-pooled').dataset.window, 'five_hour');
-  // Business and Pro 100 weigh the same in every Codex window, and the verdict keeps judging the weekly pool.
-  assert.equal($('.su-capacity').textContent, '/ 120 plan units');
-  assert.deepEqual([$('.su-verdict').dataset.window, $('.su-verdict').textContent.startsWith('Weekly: ')], ['weekly', true]);
-  await click($$('.su-provider')[1]);
-  assert.equal($('.su-pooled'), null, 'a logged-out provider has no chart');
-  assert.equal($('[data-auth="logged_out"] .su-logged-out').textContent, 'Logged out in Hermes — sign in to track limits' + 'No usable Anthropic credential in the Hermes pool');
-  assert.equal($$('.su-account').length, 0);
-  assert.equal(mock.ctx.storage.get('usage-preferences').provider, 'anthropic');
+  await act(async () => root.unmount()); root = null; mock.queryClient.clear();
+  await render(limitsPage());
+  assert.deepEqual([toggle('openai-codex').getAttribute('aria-expanded'), toggle('anthropic').getAttribute('aria-expanded'), $$('.su-account').length], ['true', 'false', 2], 'the fold survives a remount');
+  await click(toggle('anthropic'));
+  assert.equal($('.su-account[data-account="acct-claude"] .su-badge').textContent, 'Max 20x · 200 units');
+  await click(toggle('openai-codex'));
+  assert.deepEqual(mock.ctx.storage.get('usage-preferences').accounts, { 'openai-codex': false, anthropic: true });
+  assert.deepEqual($$('.su-account').map(node => node.dataset.account), ['acct-claude']);
+});
+
+test('a logged-out provider is a compact muted row after every chart', async () => {
+  mock.control.limitsScenario = 'logged-out';
+  plugin.register(mock.ctx); await render(limitsPage());
+  assert.deepEqual($$('.su-provider-limits').map(node => [node.dataset.provider, node.dataset.auth ?? 'ok']), [['openai-codex', 'ok'], ['anthropic', 'logged_out']]);
+  const row = $('.su-provider-limits[data-auth="logged_out"]');
+  assert.equal(row.querySelector('.su-logged-out-row').textContent, 'Anthropic · logged out in Hermes — sign in to track limits' + 'No usable Anthropic credential in the Hermes pool');
+  assert.deepEqual([row.querySelectorAll('.su-pooled').length, row.querySelectorAll('.su-disclosure').length, row.querySelector('svg[data-provider-mark]')?.dataset.providerMark], [0, 0, 'anthropic']);
+  assert.equal($$('.su-pooled').length, 1);
+  // Listed first by the backend, the logged-out provider still comes last.
+  const data = mock.syntheticUsageLimits(168, 'logged-out');
+  mock.control.usageLimits = { ...data, providers: [...data.providers].reverse() };
+  await click(button('Refresh'));
+  assert.deepEqual($$('.su-provider-limits').map(node => node.dataset.provider), ['openai-codex', 'anthropic']);
 });
 
 test('the Limits page shows the verdict and a waste measurement at each reset that discards quota', async () => {
@@ -492,7 +575,7 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
   assert.equal($('.su-capacity').getAttribute('title'), '20 plan units = one $20 plan\'s allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.');
   const verdict = $('.su-verdict');
   assert.equal(verdict.dataset.status, 'waste');
-  assert.match(verdict.textContent, /^48 plan units will expire unused by [A-Z][a-z]{2} — room for background work$/);
+  assert.match(verdict.textContent, /^48 plan units will expire unused by [A-Z][a-z]{2}$/);
   assert.equal(verdict.querySelector('[data-verdict-icon]')?.dataset.verdictIcon, 'waste');
   const marks = $$('.su-pooled .su-waste');
   assert.equal(marks.length, 1);
@@ -510,7 +593,7 @@ test('a pool that runs dry before its next reset gets the short verdict alongsid
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [verdictProvider(now, { perHour: 2 })] };
   plugin.register(mock.ctx); await render(limitsPage());
   assert.equal($('.su-verdict').dataset.status, 'short');
-  assert.match($('.su-verdict').textContent, /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset — cut optional work$/);
+  assert.match($('.su-verdict').textContent, /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset$/);
   assert.equal($('.su-verdict [data-verdict-icon]').dataset.verdictIcon, 'short');
   assert.deepEqual($$('.su-pooled .su-waste .su-waste-text').map(node => node.textContent), ['12 lost']);
   // About 74 hours ahead; the page reads its own clock a moment after the fixture's.
@@ -519,46 +602,57 @@ test('a pool that runs dry before its next reset gets the short verdict alongsid
 
 // Sidebar footer status ------------------------------------------------------------------------------------------------
 const footerItems = () => $$('.sf-footer .sf-limits .sf-limit').map(node => ({ provider: node.dataset.provider, status: node.dataset.status, value: node.querySelector('.sf-limit-value').textContent,
-  icon: node.querySelector('[data-verdict-icon]')?.dataset.verdictIcon ?? null, mark: node.querySelector('svg[data-provider-mark]')?.dataset.providerMark ?? null, title: node.getAttribute('title') }));
+  icon: node.querySelector('[data-verdict-icon]')?.dataset.verdictIcon ?? null, mark: node.querySelector('svg[data-provider-mark]')?.dataset.providerMark ?? null }));
 
-test('the sidebar footer shows each provider\'s pooled units with a verdict glyph only when the week runs short or wastes quota', async () => {
+test('the single Limits button shows each provider\'s pooled units with a verdict glyph only when the week runs short or wastes quota', async () => {
   const now = Date.now() / 1000;
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [
+    { provider: 'xai', label: 'xAI', auth: 'logged_out', accounts: [], history: [] },
     verdictProvider(now, { perHour: 2 }),
     verdictProvider(now, { provider: 'anthropic', label: 'Anthropic', plans: ['pro', 'max_5x'] }),
-    verdictProvider(now, { provider: 'nous', label: 'Nous', plans: [null, null], left: 13 }),
-    { provider: 'xai', label: 'xAI', auth: 'logged_out', accounts: [], history: [] }] };
+    verdictProvider(now, { provider: 'nous', label: 'Nous', plans: [null, null], left: 13 })] };
   plugin.register(mock.ctx); await render(mock.control.contributions[0]);
   assert.equal(restPaths().filter(path => path.startsWith('/usage/limits?')).length, 1, 'one limits request, keyed like the Limits page');
   assert.equal(restPaths().find(path => path.startsWith('/usage/limits?')), '/usage/limits?hours=168');
-  const items = footerItems();
-  assert.deepEqual(items.map(item => [item.provider, item.status, item.value, item.icon, item.mark]), [
+  assert.deepEqual(footerItems().map(item => [item.provider, item.status, item.value, item.icon, item.mark]), [
     ['openai-codex', 'short', '60', 'short', 'openai-codex'], ['anthropic', 'waste', '60', 'waste', 'anthropic'], ['nous', 'ok', '2.6', null, 'nous']], 'the logged-out provider is left out');
-  assert.match(items[0].title, /^OpenAI Codex: 60 \/ 120 plan units\. Runs out .* — cut optional work\.$/);
-  assert.match(items[1].title, /^Anthropic: 60 \/ 120 plan units\. 48 plan units will expire unused by [A-Z][a-z]{2} — room for background work\.$/);
-  assert.equal($$('.sf-footer .sf-utility').length, 2, 'the Usage and Limits buttons stay first');
-  await click($('.sf-limit[data-provider="anthropic"]'));
+  const limits = $('.sf-footer .sf-limits');
+  assert.deepEqual([$$('.sf-footer button').length, limits.querySelectorAll('button').length, limits.dataset.empty, limits.getAttribute('title')], [2, 0, 'false', null], 'one button holds every item; its tooltip is the SDK Tip, not a title');
+  // The accessible name repeats the tooltip: one factual line per provider, no advice.
+  const name = limits.getAttribute('aria-label');
+  assert.match(name, /^Limits\. OpenAI Codex: 60 \/ 120 plan units · Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset\. Anthropic: 60 \/ 120 plan units · 48 plan units will expire unused by [A-Z][a-z]{2}\. Nous: 2\.6 \/ 40 plan units · On track for the next 7 days: nothing runs out and little expires unused\.$/);
+  assert.equal(ADVICE.test(name), false);
+  const codex = mock.control.usageLimits.providers[1];
+  assert.equal(usage.limitsFooterLine(codex, usage.limitsVerdict(codex, usage.USAGE_DEFAULTS, now), now).startsWith('OpenAI Codex: 60 / 120 plan units · Runs out '), true);
+  await click(limits);
   assert.deepEqual(mock.calls.filter(call => call[0] === 'navigate').map(call => call[1]), ['/t3sidebar-limits']);
-  assert.equal(mock.ctx.storage.get('usage-preferences').provider, 'anthropic', 'the Limits page opens on the clicked provider');
+  assert.equal(mock.ctx.storage.get('usage-preferences', null), null, 'clicking only opens the page');
 });
 
-test('the footer shares the Limits page cache, follows its preferences and renders nothing without the companion or data', async () => {
+test('the Limits button shares the page cache, follows its preferences and falls back to the gauge without data', async () => {
   plugin.register(mock.ctx);
   mock.control.usageError = 'fixture limits unavailable';
   await render(mock.control.contributions[0]);
-  assert.equal($('.sf-limits'), null, 'a failed read shows no error in the footer');
-  assert.equal($('.sf-footer').children.length, 2);
+  const gauge = () => { const node = $('.sf-footer .sf-limits'); return node && [node.dataset.empty, node.getAttribute('aria-label'), node.getAttribute('title'), node.querySelector('svg')?.getAttribute('data-icon'), node.querySelectorAll('.sf-limit').length, node.textContent]; };
+  assert.deepEqual(gauge(), ['true', 'Limits', 'Subscription limits', 'Gauge', 0, ''], 'a failed read leaves the gauge, never an error');
+  assert.equal($$('.sf-footer button').length, 2);
+  await click($('.sf-footer .sf-limits'));
+  assert.deepEqual(mock.calls.filter(call => call[0] === 'navigate').map(call => call[1]), ['/t3sidebar-limits'], 'the page stays reachable');
   await act(async () => root.unmount()); root = null; mock.queryClient.clear(); mock.calls.length = 0;
   mock.control.usageError = null; mock.control.backendMissing = true;
   await render(mock.control.contributions[0]);
   assert.equal(restPaths().some(path => path.startsWith('/usage/')), false, 'without the companion the footer does not ask for limits');
-  assert.equal($('.sf-limits'), null);
+  assert.deepEqual(gauge(), ['true', 'Limits', 'Subscription limits', 'Gauge', 0, '']);
   await act(async () => root.unmount()); root = null; mock.queryClient.clear(); mock.calls.length = 0;
   mock.control.backendMissing = false;
   mock.ctx.storage.set('usage-preferences', { lookback: 360 });
   await render(mock.control.contributions[0]);
   assert.deepEqual(restPaths().filter(path => path.startsWith('/usage/')), ['/usage/limits?hours=360'], 'the saved lookback sizes the request like the Limits page');
-  assert.equal($$('.sf-limit').length, 1, 'the synthetic Codex pool shows; logged-out Anthropic does not');
+  assert.deepEqual(footerItems().map(item => item.provider), ['openai-codex', 'anthropic'], 'both synthetic pools show');
+  await act(async () => root.unmount()); root = null; mock.queryClient.clear();
+  mock.control.limitsScenario = 'logged-out';
+  await render(mock.control.contributions[0]);
+  assert.deepEqual(footerItems().map(item => item.provider), ['openai-codex'], 'logged-out Anthropic is left out');
 });
 
 test('the lookback slider moves between stops, changes the drain rate and widens the history request', async () => {
@@ -601,7 +695,7 @@ test('one toggle at the end of the time axis switches the projection between 7 a
   const state = () => [toggle().getAttribute('aria-pressed'), toggle().getAttribute('aria-label'), toggle().getAttribute('title'), toggle().querySelector('svg')?.getAttribute('data-icon'), $('.su-pooled').dataset.horizon];
   const days = () => { const node = $('.su-pooled .su-plot'); return Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100; };
   assert.deepEqual(state(), ['false', 'Project 30 days ahead', 'Extend the projection to 30 days', 'ArrowBarRight', '7']);
-  assert.equal(toggle().closest('.su-horizon-cell')?.parentElement?.className, 'su-limits-grid', 'the toggle sits in the chart grid beside the axis end');
+  assert.equal(toggle().closest('.su-limits-controls') !== null, true, 'the toggle sits in the shared controls bar');
   assert.equal(days(), 9.1, 'seven days ahead plus 30% of that before Now');
   await click(toggle());
   assert.deepEqual(state(), ['true', 'Project 30 days ahead', 'Shrink the projection back to 7 days', 'ArrowBarLeft', '30']);
@@ -639,13 +733,13 @@ test('the averaging period is measured left of Now and cut at the plot edge with
 });
 
 test('stale, failing and unread accounts keep the normal view', async () => {
-  mock.ctx.storage.set('usage-preferences', { provider: 'anthropic' });
   const now = Date.now() / 1000;
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [{ provider: 'anthropic', label: 'Anthropic', auth: 'ok', history: [], accounts: [
     { id: 'acct-b1', label: 'claude-max', priority: 1, plan: 'max', fetched_at: now - 3 * H, stale: true, error: null, windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: 39, resets_at: now + D }] },
     { id: 'acct-b2', label: 'claude-team', priority: 2, fetched_at: null, stale: false, error: 'HTTP 401 from usage endpoint', windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: null, resets_at: null }] }] }] };
   plugin.register(mock.ctx); await render(limitsPage());
-  assert.equal($('.su-provider .su-count').textContent, '2');
+  assert.equal($('.su-disclosure').textContent, 'Accounts (2)');
+  await click($('.su-disclosure'));
   assert.equal($('.su-capacity').textContent, '/ 20 plan units', 'the account without a reading is left out of the pool');
   // "max" alone does not say 5x or 20x: counted as one base plan, flagged on the row and in a footnote.
   assert.deepEqual([$('.su-account[data-account="acct-b1"] .su-badge').textContent, $('.su-account[data-account="acct-b1"] .su-assumed').textContent], ['max · 20 units', 'capacity unknown, counted as 20*']);
@@ -666,6 +760,7 @@ test('a pool with no account readings shows a dash instead of 0%', async () => {
     { id: 'x', label: 'x', priority: 1, fetched_at: null, stale: false, error: 'timeout', windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: null, resets_at: null }] }] }] };
   plugin.register(mock.ctx); await render(limitsPage());
   assert.deepEqual([$('.su-pool').textContent, $('.su-capacity').textContent], ['—', 'no account readings yet']);
+  await click($('.su-disclosure'));
   assert.equal($('.su-window-value').textContent, '—');
 });
 

@@ -930,12 +930,13 @@ const CSS = `
 /* Empty-state text waits for leaving cards to collapse instead of appearing under them (visibility only, no fade). */
 @keyframes sf-after-exit{from{visibility:hidden}}.sf-empty{animation:sf-after-exit .22s step-end}
 /* T3's sidebar utility row: fixed height below the list, so shelves keep their flex allocation within a shorter column. */
-.sf-footer{display:flex;align-items:center;gap:2px;flex-shrink:0;height:36px;padding:4px 6px}.sf .sf-footer .sf-utility{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-secondary)}.sf .sf-footer .sf-utility:hover,.sf .sf-footer .sf-utility:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-footer .sf-utility svg{width:16px;height:16px;flex-shrink:0}
-/* Limits status after the footer buttons. The group wraps and clips its second line, so a pane too narrow for every provider drops
-   whole items instead of squeezing or overflowing; clip (not hidden) keeps a focused clipped item from scrolling the row. */
-.sf-limits{display:flex;flex-wrap:wrap;align-items:center;flex:1 1 0;min-width:0;height:28px;margin-left:4px;overflow:clip}
-.sf .sf-limit{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;max-width:100%;height:28px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);font:inherit;font-size:11px;line-height:1;cursor:pointer}
-.sf .sf-limit:hover,.sf .sf-limit:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-secondary)}
+.sf-footer{display:flex;align-items:center;gap:2px;flex-shrink:0;min-width:0;height:36px;padding:4px 6px}.sf .sf-footer .sf-utility{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-secondary)}.sf .sf-footer .sf-utility:hover,.sf .sf-footer .sf-utility:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-footer .sf-utility svg{width:16px;height:16px;flex-shrink:0}
+/* The single Limits button after Usage, sized to its content but free to shrink: its item strip wraps and clips its second line, so a pane too narrow for every provider drops whole items instead of squeezing or overflowing; clip (not hidden) keeps focus from scrolling it. Without data it is a 28px icon button like Usage. */
+.sf .sf-footer .sf-limits{display:inline-flex;align-items:center;justify-content:flex-start;flex:0 1 auto;gap:0;min-width:0;max-width:100%;height:28px;margin-left:2px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);font:inherit;font-size:11px;font-weight:400;line-height:1;white-space:nowrap;overflow:clip;cursor:pointer}
+.sf .sf-footer .sf-limits[data-empty=true]{flex-shrink:0;justify-content:center;width:28px;padding:0;color:var(--ui-text-secondary)}.sf-footer .sf-limits[data-empty=true] svg{width:16px;height:16px;flex-shrink:0}
+.sf .sf-footer .sf-limits:hover,.sf .sf-footer .sf-limits:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
+.sf-limits-items{display:flex;flex-wrap:wrap;align-items:center;column-gap:10px;min-width:0;height:28px;overflow:clip}
+.sf-limit{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;height:28px}
 .sf-limit svg[data-provider-mark]{width:13px;height:13px;flex-shrink:0;opacity:.7}
 .sf-limit-value{font-variant-numeric:tabular-nums;white-space:nowrap}.sf-limit-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sf-limit .su-verdict-icon{display:inline-flex;flex-shrink:0}.sf-limit .su-verdict-icon svg{width:14px;height:14px}
@@ -1948,15 +1949,22 @@ export function limitsHistoryHours(lookback, horizonDays = HORIZON_DAYS[0]) {
   const past = Math.ceil(limitsPastSeconds((Number.isFinite(horizonDays) ? horizonDays : 0) * DAY_S) / HOUR_S);
   return Math.min(840, Math.max(168, past, Number.isFinite(lookback) ? lookback : 0));
 }
-export const USAGE_DEFAULTS = Object.freeze({ days: 7, split: 'provider', mode: 'stacked', horizon: 7, lookback: 12, window: 'weekly', provider: null });
-// Unknown keys (such as the former Usage|Limits `tab`) are dropped, and retired horizons (1d, 3d) fall back to the 7-day default.
+export const USAGE_DEFAULTS = Object.freeze({ days: 7, split: 'provider', mode: 'stacked', horizon: 7, lookback: 12, window: 'weekly', accounts: Object.freeze({}) });
+// Unknown keys (the former Usage|Limits `tab`, the provider picked by the retired Limits tabs) are dropped, and retired horizons (1d, 3d) fall back to the 7-day default.
 const USAGE_CHOICES = { days: [1, 7, 30, 90], split: ['provider', 'model'], mode: ['stacked', 'independent'], horizon: HORIZON_DAYS, lookback: LOOKBACK_STOPS };
 export function validUsagePreferences(value) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const result = { ...USAGE_DEFAULTS };
   for (const [key, choices] of Object.entries(USAGE_CHOICES)) if (choices.includes(source[key])) result[key] = source[key];
-  // Window and provider keys come from the backend, so only their shape is checked; the page falls back when they disappear.
-  for (const key of ['window', 'provider']) if (typeof source[key] === 'string' && source[key].length > 0 && source[key].length <= 200) result[key] = source[key];
+  // Window keys come from the backend, so only their shape is checked; the page falls back when one disappears.
+  const chosen = source.window;
+  if (typeof chosen === 'string' && chosen.length > 0 && chosen.length <= 200) result.window = chosen;
+  // Whether each provider's account list is unfolded on the Limits page: only booleans under provider-shaped keys survive, so anything else reads as folded.
+  const accounts = {};
+  if (source.accounts && typeof source.accounts === 'object' && !Array.isArray(source.accounts)) {
+    for (const [key, open] of Object.entries(source.accounts).slice(0, 100)) if (key.length > 0 && key.length <= 200 && typeof open === 'boolean') accounts[key] = open;
+  }
+  result.accounts = accounts;
   return result;
 }
 export function readUsagePreferences(storage) {
@@ -1966,44 +1974,43 @@ export function writeUsagePreferences(storage, value) {
   try { storage.set(USAGE_PREFERENCES_KEY, validUsagePreferences(value)); return true; } catch (_) { return false; }
 }
 // T3 Code's SidebarUtilityItem: icon-only ghost buttons with a tooltip, in one fixed-height footer row below the shelves, so the flex shelf allocation only sees a shorter list.
-const UTILITY_LINKS = [
-  { route: USAGE_ROUTE, label: 'Usage', tip: 'Token usage', icon: 'BarChart3', glyph: '▥' },
-  { route: LIMITS_ROUTE, label: 'Limits', tip: 'Subscription limits', icon: 'Gauge', glyph: '◔' }
-];
+const USAGE_LINK = { route: USAGE_ROUTE, label: 'Usage', tip: 'Token usage', icon: 'BarChart3', glyph: '▥' };
+const openRoute = route => { try { host.navigate(route); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ } };
 function UtilityLink({ link }) {
-  const open = () => { try { host.navigate(link.route); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ } };
   const tip = typeof sdk.Tip === 'function';
   // Without the SDK tooltip, a native title still names the icon on hover.
-  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-sm', className: 'sf-utility', 'aria-label': link.label, title: tip ? undefined : link.tip, 'data-route': link.route, onClick: open }, icon(link.icon, link.glyph));
+  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-sm', className: 'sf-utility', 'aria-label': link.label, title: tip ? undefined : link.tip, 'data-route': link.route, onClick: () => openRoute(link.route) }, icon(link.icon, link.glyph));
   return tip ? h(sdk.Tip, { label: link.tip, side: 'top' }, button) : button;
 }
-// After the two buttons, one compact status per provider with limits data: its mark, the pooled plan units left, and a verdict glyph only when the week ahead runs short or wastes quota. It renders nothing until data arrives and nothing on failure, so the fixed footer row never shows a placeholder or an error; items that do not fit a narrow pane wrap onto a clipped second line and vanish.
 function UsageFooter({ ctx, scope, companion = false }) {
-  return h('footer', { className: 'sf-footer' }, UTILITY_LINKS.map(link => h(UtilityLink, { key: link.route, link })),
-    ctx && scope ? h(LimitsFooterStatus, { ctx, scope, enabled: companion }) : null);
+  return h('footer', { className: 'sf-footer' }, h(UtilityLink, { link: USAGE_LINK }),
+    ctx && scope ? h(LimitsFooterStatus, { ctx, scope, enabled: companion }) : h(LimitsFooterButton, { items: [], now: 0 }));
 }
+// The Limits entry point is one button whatever the data: every provider's mark, pooled plan units and a verdict glyph (only when the week runs short or wastes quota), or the gauge alone while there is nothing to show (loading, failure, no companion, no provider with limits), so the page stays reachable and no placeholder or error ever appears in the row.
 function LimitsFooterStatus({ ctx, scope, enabled }) {
-  const client = useQueryClient(), prefs = useUsagePreferences(ctx);
+  const prefs = useUsagePreferences(ctx);
   // Same key as the Limits page with the same preferences, so both read one cache entry.
   const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHistoryHours(prefs.lookback, prefs.horizon)), enabled });
   const now = useMemo(() => Date.now() / 1000, [limits.dataUpdatedAt]);
-  const items = useMemo(() => (limits.data?.providers || []).filter(item => item.auth !== 'logged_out')
-    .map(item => ({ provider: item, verdict: limitsVerdict(item, prefs, now) })).filter(item => item.verdict.capacity > 0), [limits.data, prefs, now]);
-  if (!items.length) return null;
-  return h('div', { className: 'sf-limits', role: 'group', 'aria-label': 'Subscription limits' }, items.map(({ provider, verdict }) => {
-    const name = provider.label || provider.provider;
-    const tip = `${name}: ${unitsText(verdict.remaining)} / ${unitsText(verdict.capacity)} plan units. ${verdictText(verdict, now)}.`;
-    const open = () => {
-      updateUsagePreferences(ctx, client, { provider: provider.provider });
-      try { host.navigate(LIMITS_ROUTE); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ }
-    };
-    const mark = providerMark(provider.provider);
-    const button = h('button', { type: 'button', className: 'sf-limit', 'data-provider': provider.provider, 'data-status': verdict.status, 'aria-label': tip, title: typeof sdk.Tip === 'function' ? undefined : tip, onClick: open },
-      mark || h('span', { className: 'sf-limit-name' }, name),
+  const items = useMemo(() => limitsProviderOrder(limits.data?.providers || []).filter(item => item.auth !== 'logged_out')
+    .map(item => ({ provider: item, verdict: limitsVerdict(item, prefs, now) })).filter(item => item.verdict.capacity > 0), [limits.data, prefs.lookback, prefs.window, now]);
+  return h(LimitsFooterButton, { items, now });
+}
+// One tooltip line per provider, also used (joined) as the button's accessible name: facts only, no advice.
+export const limitsFooterLine = (provider, verdict, now) => `${provider.label || provider.provider}: ${unitsText(verdict.remaining)} / ${unitsText(verdict.capacity)} plan units · ${verdictText(verdict, now)}`;
+function LimitsFooterButton({ items, now }) {
+  const lines = items.map(({ provider, verdict }) => limitsFooterLine(provider, verdict, now));
+  const tip = typeof sdk.Tip === 'function';
+  // Block lines keep one provider per tooltip line; the SDK Tip takes a node label.
+  const label = lines.length ? h('span', { style: { display: 'block', textAlign: 'left' } }, lines.map(line => h('span', { key: line, style: { display: 'block' } }, line))) : 'Subscription limits';
+  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-limits', 'data-route': LIMITS_ROUTE, 'data-empty': !lines.length,
+    'aria-label': lines.length ? `Limits. ${lines.join('. ')}.` : 'Limits', title: tip ? undefined : lines.length ? lines.join('\n') : 'Subscription limits', onClick: () => openRoute(LIMITS_ROUTE) },
+    lines.length ? h('span', { className: 'sf-limits-items' }, items.map(({ provider, verdict }) => h('span', { key: provider.provider, className: 'sf-limit', 'data-provider': provider.provider, 'data-status': verdict.status },
+      providerMark(provider.provider) || h('span', { className: 'sf-limit-name' }, provider.label || provider.provider),
       h('span', { className: 'sf-limit-value' }, unitsText(verdict.remaining)),
-      verdictIcon(verdict.status));
-    return typeof sdk.Tip === 'function' ? h(sdk.Tip, { key: provider.provider, label: tip, side: 'top' }, button) : h(Fragment, { key: provider.provider }, button);
-  }));
+      verdictIcon(verdict.status))))
+      : icon('Gauge', '◔'));
+  return tip ? h(sdk.Tip, { label, side: 'top' }, button) : button;
 }
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 const finiteOrNull = value => Number.isFinite(value) ? value : null;
@@ -2393,7 +2400,7 @@ export function projectPool(accounts, history, windowKey, now, horizonS, options
   return { rate, unknown: rate === null, coveredS: stats.coveredS, partial: rate !== null && stats.partial, capacity, current, points, resets, nextReset, members,
     accounts: state.map(item => ({ id: item.id, remaining: item.units / item.weight * 100, units: item.units })), unknownAccounts };
 }
-// Projected resets that discard quota, one mark per reset time (accounts resetting together are summed). Losses under minShare of the pool's capacity are left out: a sliver of a percent is noise, not room for extra work.
+// Projected resets that discard quota, one mark per reset time (accounts resetting together are summed). Losses under minShare of the pool's capacity are left out: a sliver of a percent is noise.
 export function wasteMarks(projection, minShare = 0.01) {
   const byTime = new Map();
   for (const item of projection?.resets || []) {
@@ -2405,7 +2412,7 @@ export function wasteMarks(projection, minShare = 0.01) {
   const floor = (projection?.capacity || 0) * minShare;
   return [...byTime.values()].filter(mark => mark.lost >= floor).sort((a, b) => a.t - b.t);
 }
-// The Limits decision in one value: will the pool run short (cut optional work) or throw quota away at resets (room for background work) within the next week? Judged on the weekly window (a week ahead of a five-hour window says little, and the 5h merge is postponed), falling back to the saved window choice when a provider has no weekly one; uses the saved lookback and the pooled plan-unit projection.
+// The Limits decision in one value: will the pool run short or throw quota away at resets within the next week? Judged on the weekly window (a week ahead of a five-hour window says little, and the 5h merge is postponed), falling back to the saved window choice when a provider has no weekly one; uses the saved lookback and the pooled plan-unit projection.
 export const VERDICT_DAYS = 7;
 export const WASTE_SHARE = 0.05;
 export function limitsVerdict(provider, prefs, now) {
@@ -2429,14 +2436,14 @@ export function limitsVerdict(provider, prefs, now) {
   Object.assign(result, { lost, lost_pct: lost / projection.capacity * 100, last_loss_at: losses.length ? losses.at(-1).t : null });
   return { ...result, status: lost >= WASTE_SHARE * projection.capacity ? 'waste' : 'ok' };
 }
-// One sentence for the verdict, shared by the Limits page and the sidebar footer tooltip.
+// One factual sentence for the verdict, shared by the Limits page and the sidebar footer: what happens and when, never what to do about it (Virgile draws the conclusion himself).
 export function verdictText(verdict, now) {
   if (verdict?.status === 'short') {
     const at = verdict.empty_at - now < 60 ? 'Out of quota now' : `Runs out ${resetTime(verdict.empty_at, now)}`;
     const gap = verdict.next_reset_at === null ? `with no reset in the next ${VERDICT_DAYS} days` : `${formatDurationShort(verdict.next_reset_at - verdict.empty_at)} before the next reset`;
-    return `${at}, ${gap} — cut optional work`;
+    return `${at}, ${gap}`;
   }
-  if (verdict?.status === 'waste') return `${unitsText(verdict.lost)} plan units will expire unused by ${formatAt(verdict.last_loss_at, { weekday: 'short' })} — room for background work`;
+  if (verdict?.status === 'waste') return `${unitsText(verdict.lost)} plan units will expire unused by ${formatAt(verdict.last_loss_at, { weekday: 'short' })}`;
   if (verdict?.status === 'ok') return `On track for the next ${VERDICT_DAYS} days: nothing runs out and little expires unused`;
   return `Not enough recent readings to judge the next ${VERDICT_DAYS} days`;
 }
@@ -2447,6 +2454,19 @@ export function windowCatalog(provider) {
   return [...found.values()].sort((a, b) => windowRank(a.key) - windowRank(b.key) || (a.seconds ?? 0) - (b.seconds ?? 0) || a.key.localeCompare(b.key));
 }
 function windowRank(key) { const base = key.split(':')[0]; return (key.includes(':') ? 10 : 0) + (base === 'five_hour' ? 0 : base === 'weekly' ? 1 : 2); }
+// Providers with accounts first and logged-out ones last, otherwise in the backend's order, so the overview sections and footer items never reshuffle between polls.
+export function limitsProviderOrder(providers) {
+  const rank = item => item?.auth === 'logged_out' ? 2 : item?.accounts?.length ? 0 : 1;
+  return (providers || []).map((item, index) => ({ item, index })).sort((a, b) => rank(a.item) - rank(b.item) || a.index - b.index).map(entry => entry.item);
+}
+// The one window selector of the overview offers every window any logged-in provider reports.
+export function sharedWindowCatalog(providers) {
+  const found = new Map();
+  for (const provider of providers || []) if (provider?.auth !== 'logged_out') for (const item of windowCatalog(provider)) if (!found.has(item.key)) found.set(item.key, item);
+  return [...found.values()].sort((a, b) => windowRank(a.key) - windowRank(b.key) || (a.seconds ?? 0) - (b.seconds ?? 0) || a.key.localeCompare(b.key));
+}
+// A provider without the chosen window charts its weekly one, else its first.
+export const chartWindow = (windows, key) => windows.find(item => item.key === key) || windows.find(item => item.key === 'weekly') || windows[0] || null;
 // T3's pace mark: share of the window still to run, which is where an even spend would leave the remaining bar.
 export function paceRemainingPercent(win, now) {
   if (!Number.isFinite(win?.resets_at) || !Number.isFinite(win?.window_seconds) || win.window_seconds <= 0) return null;
@@ -2467,10 +2487,12 @@ const USAGE_PREFERENCES_QUERY = ['hermes-t3sidebar-preferences', 'usage'];
 function useUsagePreferences(ctx) {
   return useQuery({ queryKey: USAGE_PREFERENCES_QUERY, queryFn: () => readUsagePreferences(ctx.storage), initialData: () => readUsagePreferences(ctx.storage), staleTime: Infinity }).data;
 }
-// Two pages can be open at once, so a change is merged into what is stored now rather than into one page's copy, which would overwrite the other page's later choices.
+// Two pages can be open at once, so a change is merged into what is stored now rather than into one page's copy, which would overwrite the other page's later choices. A function patch derives nested values (the per-provider account folds) from whichever copy it is merged into.
+const resolvePatch = (patch, base) => typeof patch === 'function' ? patch(base) : patch;
 function updateUsagePreferences(ctx, client, patch) {
-  writeUsagePreferences(ctx.storage, { ...readUsagePreferences(ctx.storage), ...patch });
-  client.setQueryData(USAGE_PREFERENCES_QUERY, previous => validUsagePreferences({ ...previous, ...patch }));
+  const stored = readUsagePreferences(ctx.storage);
+  writeUsagePreferences(ctx.storage, { ...stored, ...resolvePatch(patch, stored) });
+  client.setQueryData(USAGE_PREFERENCES_QUERY, previous => validUsagePreferences({ ...previous, ...resolvePatch(patch, validUsagePreferences(previous)) }));
 }
 // One component for both route pages; `view` picks the content and the only endpoint that page fetches.
 export function UsagePage({ ctx, view = 'usage' }) {
@@ -2491,11 +2513,11 @@ function Segmented({ label, options, value, onChange, showLabel = true, sizing }
 }
 function ScopedUsagePage({ ctx, scope, view }) {
   const client = useQueryClient(), shared = useUsagePreferences(ctx);
-  // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made elsewhere, such as a provider picked from the sidebar footer.
+  // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made on the other page.
   const [prefs, setPrefs] = useState(shared);
   useEffect(() => { setPrefs(shared); }, [shared]);
   const update = useCallback(patch => {
-    setPrefs(previous => validUsagePreferences({ ...previous, ...patch }));
+    setPrefs(previous => validUsagePreferences({ ...previous, ...resolvePatch(patch, previous) }));
     updateUsagePreferences(ctx, client, patch);
   }, [ctx, client]);
   const tz = useMemo(() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (_) { return 'UTC'; } }, []);
@@ -2520,8 +2542,8 @@ function ScopedUsagePage({ ctx, scope, view }) {
         h(Segmented, { label: 'Mode', options: [{ id: 'stacked', label: 'Stacked' }, { id: 'independent', label: 'Independent' }], value: prefs.mode, onChange: mode => update({ mode }) }),
         toolbar),
       h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs })))
-      // The provider tabs head the Limits page, so its refresh control sits at the end of that row.
-      : h('div', { className: 'su-body' }, h(LimitsView, { query: limits, prefs, update, toolbar })));
+      // The shared projection controls head the Limits page, so its refresh control sits at the end of that row.
+      : h(LimitsView, { query: limits, prefs, update, toolbar }));
 }
 function UsageState({ error = false, children }) { return h('div', { className: 'su-state', role: error ? 'alert' : 'status' }, children); }
 function QueryProblem({ query, what }) {
@@ -2605,46 +2627,62 @@ const rateText = rate => rate === null ? 'no drain data' : `~${rateNumber(rate)}
 function resetTime(seconds, now) {
   return formatAt(seconds, seconds - now < 6 * DAY_S ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
+// Overview of every provider on one scrollable page: one controls bar applies the lookback, window and horizon to all charts, then one section per provider, logged-out ones last as a compact row, and the shared footnotes once at the bottom.
 function LimitsView({ query, prefs, update, toolbar }) {
   const data = query.data;
   // Countdowns and the Now line follow successful polls rather than a separate timer.
   const now = useMemo(() => Date.now() / 1000, [query.dataUpdatedAt]);
-  // Without a saved choice, open the first provider that can show limits rather than a logged-out one.
-  const providers = data?.providers || [];
-  const provider = providers.find(item => item.provider === prefs.provider) || providers.find(item => item.auth !== 'logged_out') || providers[0];
-  const tabs = h('header', { className: 'su-providers' },
-    providers.length ? h('div', { className: 'su-provider-tabs', role: 'group', 'aria-label': 'Provider' }, providers.map(item => h('button', { key: item.provider, type: 'button', className: 'su-provider', 'aria-pressed': item === provider,
-      style: { '--su-color': providerHueColor(item.provider) }, onClick: () => update({ provider: item.provider }) },
-      item.label || item.provider, item.auth === 'logged_out' ? h('span', { className: 'su-auth' }, 'logged out')
-        : h('span', { className: 'su-count', 'aria-label': `${item.accounts.length} accounts` }, item.accounts.length)))) : null,
-    toolbar);
-  if (!data) return h(Fragment, null, tabs, query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…'));
-  return h(Fragment, null,
-    tabs,
-    query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
-    providers.length ? null : h(UsageState, null, 'No subscription limits recorded yet.'),
-    provider ? h(ProviderLimits, { key: provider.provider, provider, prefs, update, now }) : null,
-    h(SamplerInfo, { sampler: data.sampler, now }));
-}
-function ProviderLimits({ provider, prefs, update, now }) {
-  const windows = useMemo(() => windowCatalog(provider), [provider]);
-  const selected = windows.find(item => item.key === prefs.window) || windows.find(item => item.key === 'weekly') || windows[0];
-  const color = providerHueColor(provider.provider);
-  // The verdict always looks a week ahead whatever horizon the chart shows, so it reads the same as the sidebar footer.
-  const verdict = useMemo(() => limitsVerdict(provider, prefs, now), [provider, prefs, now]);
-  const assumed = provider.accounts.filter(account => planAssumed(provider.provider, account.plan));
-  // Hermes knows the provider but has no usable credential, so there is nothing to sample or project.
-  if (provider.auth === 'logged_out') return h('div', { className: 'su-provider-limits', 'data-auth': 'logged_out', style: { '--su-color': color } },
-    h('div', { className: 'su-state su-logged-out', role: 'status' }, h('div', null, 'Logged out in Hermes — sign in to track limits'), provider.auth_reason ? h('div', { className: 'su-muted' }, provider.auth_reason) : null),
-    provider.accounts.length ? h('div', { className: 'su-accounts' }, provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: selected?.key, now }))) : null);
-  return h('div', { className: 'su-provider-limits', style: { '--su-color': color } },
+  const providers = useMemo(() => limitsProviderOrder(data?.providers || []), [data]);
+  const active = useMemo(() => providers.filter(item => item.auth !== 'logged_out'), [providers]);
+  const windows = useMemo(() => sharedWindowCatalog(active), [active]);
+  const selected = chartWindow(windows, prefs.window);
+  // Stable per provider id, so a section's toggle callback survives polls.
+  const setExpanded = useCallback((id, open) => update(previous => ({ accounts: { ...previous.accounts, [id]: open } })), [update]);
+  const controls = h('header', { className: 'su-header su-limits-controls' },
+    h(LookbackSlider, { hours: prefs.lookback, onChange: lookback => update({ lookback }) }),
     windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windows.map(item => ({ id: item.key, label: item.label })), value: selected.key, onChange: value => update({ window: value }) }) : null,
-    selected ? h(PooledLimitChart, { provider, windowKey: selected.key, now, verdict, horizonDays: prefs.horizon, setHorizon: horizon => update({ horizon }), lookback: prefs.lookback, setLookback: lookback => update({ lookback }) })
+    h(HorizonToggle, { days: prefs.horizon, onChange: horizon => update({ horizon }) }),
+    toolbar);
+  if (!data) return h(Fragment, null, controls, h('div', { className: 'su-body' }, query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…')));
+  return h(Fragment, null, controls,
+    h('div', { className: 'su-body su-overview' },
+      query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
+      providers.length ? null : h(UsageState, null, 'No subscription limits recorded yet.'),
+      providers.map(provider => provider.auth === 'logged_out' ? h(LoggedOutProvider, { key: provider.provider, provider })
+        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded })),
+      h(LimitsFootnotes, { providers: active, sampler: data.sampler, now })));
+}
+// Hermes knows the provider but has no usable credential, so there is nothing to sample or project: one muted row instead of a chart.
+function LoggedOutProvider({ provider }) {
+  return h('section', { className: 'su-provider-limits su-logged-out', 'data-provider': provider.provider, 'data-auth': 'logged_out' },
+    h('div', { className: 'su-logged-out-row', role: 'status' }, providerMark(provider.provider),
+      h('span', { className: 'su-logged-out-text' }, `${provider.label || provider.provider} · logged out in Hermes — sign in to track limits`),
+      provider.auth_reason ? h('span', { className: 'su-muted su-logged-out-reason' }, provider.auth_reason) : null));
+}
+function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded }) {
+  const name = provider.label || provider.provider;
+  // The verdict always looks a week ahead whatever horizon the chart shows, so it reads the same as the sidebar footer.
+  const verdict = useMemo(() => limitsVerdict(provider, { lookback: prefs.lookback, window: prefs.window }, now), [provider, prefs.lookback, prefs.window, now]);
+  return h('section', { className: 'su-provider-limits', 'data-provider': provider.provider, style: { '--su-color': providerHueColor(provider.provider) } },
+    h('h2', { className: 'su-provider-head' }, providerMark(provider.provider), h('span', null, name)),
+    windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, horizonDays: prefs.horizon, lookback: prefs.lookback })
       : h(UsageState, null, 'No limit windows reported for this provider.'),
-    h('div', { className: 'su-accounts' }, provider.accounts.length ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: selected?.key, now }))
-      : h(UsageState, null, 'No accounts in this provider pool.')),
-    // Capacities outside the plan table are a guess; say so once under the rows as well as on each affected row.
-    assumed.length ? h('p', { className: 'su-footnote su-assumption' }, `* Capacity unknown for ${assumed.map(account => `${account.label || account.id} (${planLabel(provider.provider, account.plan) || 'no plan reported'})`).join(', ')}: counted as ${BASE_PLAN_UNITS} plan units, one $20 plan.`) : null);
+    h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open) }));
+}
+// Per-account rows (plan, priority, banked resets, window bars) are detail under each chart, folded until asked for; the fold is remembered per provider.
+function AccountsDisclosure({ provider, windowKey, now, open, onToggle }) {
+  const id = `su-accounts-${provider.provider.replace(/[^A-Za-z0-9_-]/g, '_')}`, count = provider.accounts.length;
+  return h('div', { className: 'su-accounts-group', 'data-open': open },
+    h('button', { type: 'button', className: 'su-disclosure', 'aria-expanded': open, 'aria-controls': open ? id : undefined, onClick: () => onToggle(!open) },
+      h('span', { className: 'su-disclosure-chevron', 'aria-hidden': true }, icon('ChevronRight', '›')), `Accounts (${count})`),
+    open ? h('div', { className: 'su-accounts', id }, count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now }))
+      : h(UsageState, null, 'No accounts in this provider pool.')) : null);
+}
+// Shared notes once under every section: how the samples and projections work, what a plan unit is, and which capacities are guessed.
+function LimitsFootnotes({ providers, sampler, now }) {
+  const assumed = providers.flatMap(provider => provider.accounts.filter(account => planAssumed(provider.provider, account.plan)).map(account => `${account.label || account.id} (${planLabel(provider.provider, account.plan) || 'no plan reported'})`));
+  return h('div', { className: 'su-footnotes' }, h(SamplerInfo, { sampler, now }),
+    assumed.length ? h('p', { className: 'su-footnote su-assumption' }, `* Capacity unknown for ${assumed.join(', ')}: counted as ${BASE_PLAN_UNITS} plan units, one $20 plan.`) : null);
 }
 // Longest lookback on the left: moving left reaches further into the past. The native value is the visual position (0 = 30d), so arrow keys follow the visual direction (Right = shorter); the preference itself stores hours, never the position.
 export const lookbackPosition = hours => { const index = LOOKBACK_STOPS.indexOf(hours); return LOOKBACK_STOPS.length - 1 - (index < 0 ? LOOKBACK_STOPS.indexOf(USAGE_DEFAULTS.lookback) : index); };
@@ -2660,7 +2698,7 @@ function LookbackSlider({ hours, onChange }) {
     // A fixed-width value keeps the row from shifting while the thumb is dragged.
     h('output', { className: 'su-lookback-value', 'aria-hidden': true }, lookbackLabel(hours)));
 }
-// Projection horizon toggle at the end of the time axis: the arrow pushes the axis out to 30 days, then pulls it back to 7.
+// Projection horizon toggle in the controls bar, applied to every chart: the arrow pushes the time axes out to 30 days, then pulls them back to 7.
 function HorizonToggle({ days, onChange }) {
   const extended = days === HORIZON_DAYS[1];
   const tip = extended ? `Shrink the projection back to ${HORIZON_DAYS[0]} days` : `Extend the projection to ${HORIZON_DAYS[1]} days`;
@@ -2771,7 +2809,7 @@ function WasteMarks({ marks, xPct, cap, now }) {
 }
 // "Business: 20, Pro 100: 100": what each account adds to the pool's capacity, an asterisk marking a guessed one.
 const poolComposition = members => members.map(item => `${item.plan_label || 'Unknown plan'}: ${unitsText(item.weight)}${item.assumed ? '*' : ''}`).join(', ');
-function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, setHorizon, lookback, setLookback }) {
+function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, lookback }) {
   const horizonS = horizonDays * DAY_S, lookbackS = lookback * HOUR_S, providerId = provider.provider;
   const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey, providerId), [provider, windowKey, providerId]);
   const past = useMemo(() => pooledHistory(samples), [samples]);
@@ -2818,7 +2856,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, setH
   const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
   const move = event => { const box = event.currentTarget.getBoundingClientRect(); if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1)); };
   const composition = projection.members.length ? poolComposition(projection.members) : '';
-  return h('section', { className: 'su-chart su-pooled', 'data-window': windowKey, 'data-horizon': horizonDays, 'data-capacity': projection.capacity, 'aria-label': 'Pooled remaining quota' },
+  return h('div', { className: 'su-chart su-pooled', 'data-window': windowKey, 'data-horizon': horizonDays, 'data-capacity': projection.capacity, role: 'group', 'aria-label': `${provider.label || providerId} pooled remaining quota` },
     h('div', { className: 'su-headline' },
       // Without any account reading the pool is unknown, not empty.
       h('span', { className: 'su-pool' }, projection.capacity ? unitsText(projection.current) : '—'),
@@ -2848,14 +2886,12 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, setH
           h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
           h('div', { className: 'su-tip su-tip-inline', style: hover > 0.6 ? { right: `calc(${100 - hover * 100}% + 10px)` } : { left: `calc(${hover * 100}% + 10px)` } },
             `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${unitsText(hoverValue)} units left${hoverT > now ? ' (projected)' : ''}`))),
-      h('div', { className: 'su-horizon-cell' }, h(HorizonToggle, { days: horizonDays, onChange: setHorizon })),
       h('div', { className: 'su-xaxis' }, axis.times.map((t, index) => {
         const share = x(t) / VIEW_W * 100;
         return h('span', { key: t, 'data-edge': share < 3 ? 'start' : share > 97 ? 'end' : undefined, style: { left: `${share}%` } }, axis.labels[index]);
       })),
       h(MeasureRow, { nowPct, average, empty: emptyMeasured ? { fromPct: nowPct, toPct: emptyPct, text: emptyText } : null })),
     h('div', { className: 'su-chart-foot' },
-      h(LookbackSlider, { hours: lookback, onChange: setLookback }),
       h('div', { className: 'su-chart-notes' },
         h('span', null, projection.nextReset ? projection.nextReset.gain === null ? `Next reset · ${resetTime(projection.nextReset.t, now)}` : `Next reset +${unitsText(projection.nextReset.gain)} units · ${resetTime(projection.nextReset.t, now)}` : 'No reset time reported'),
         emptyText && !emptyMeasured ? h('span', { className: 'su-empty-note' }, emptyText) : null,
@@ -2950,13 +2986,22 @@ const USAGE_CSS = `
 .su-xaxis{position:relative;height:16px;margin-left:56px;font-size:10px;color:var(--ui-text-quaternary)}
 .su-xaxis span{position:absolute;top:2px;transform:translateX(-50%);white-space:nowrap}.su-xaxis span[data-edge=start]{transform:none}.su-xaxis span[data-edge=end]{transform:translateX(-100%)}
 .su-footnote{margin:0;font-size:11px;line-height:1.5;color:var(--ui-text-tertiary)}.su-error{color:var(--ui-red,var(--ui-text-primary))}
-.su-providers{display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--ui-stroke-secondary)}.su-provider-tabs{display:flex;flex-wrap:wrap;gap:2px}
-.su-provider{display:inline-flex;align-items:center;gap:6px;margin-bottom:-1px;padding:6px 10px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
-.su-provider:hover{color:var(--ui-text-primary)}.su-provider[aria-pressed=true]{color:var(--ui-text-primary);border-bottom-color:var(--su-color)}
-.su-count{padding:0 5px;border-radius:8px;background:var(--ui-bg-quaternary);font-size:10px;color:var(--ui-text-tertiary)}
-.su-auth{font-size:10px;font-style:italic;color:var(--ui-text-quaternary,var(--ui-text-tertiary))}
-.su-logged-out{display:flex;flex-direction:column;align-items:center;gap:4px}
-.su-provider-limits{display:flex;flex-direction:column;gap:14px}
+.su-limits-controls{--su-color:var(--ui-accent);padding-bottom:10px;border-bottom:1px solid var(--ui-stroke-secondary)}
+/* Overview: one section per provider, divided by a hairline; the shared footnotes close the page. */
+.su-overview{gap:28px}
+.su-provider-limits{display:flex;flex-direction:column;gap:14px;min-width:0}
+.su-provider-limits+.su-provider-limits,.su-overview>.su-footnotes{padding-top:20px;border-top:1px solid var(--ui-stroke-secondary)}
+.su-provider-head{display:flex;align-items:center;gap:8px;margin:0;font-size:14px;font-weight:600;color:var(--ui-text-primary)}
+.su-provider-head svg[data-provider-mark],.su-logged-out-row svg[data-provider-mark]{width:16px;height:16px;flex-shrink:0}
+.su-provider-limits.su-logged-out{gap:0}
+.su-logged-out-row{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;color:var(--ui-text-tertiary)}
+.su-logged-out-row svg[data-provider-mark]{opacity:.7}
+.su-accounts-group{display:flex;flex-direction:column;gap:8px}
+.su-disclosure{display:inline-flex;align-self:flex-start;align-items:center;gap:4px;margin-left:-4px;padding:3px 6px 3px 2px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-secondary);font-size:12px;font-weight:500;cursor:pointer}
+.su-disclosure:hover{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
+.su-disclosure-chevron{display:inline-flex;transition:transform .12s ease}.su-disclosure-chevron svg{width:14px;height:14px}.su-disclosure[aria-expanded=true] .su-disclosure-chevron{transform:rotate(90deg)}
+@media(prefers-reduced-motion:reduce){.su-disclosure-chevron{transition:none}}
+.su-footnotes{display:flex;flex-direction:column;gap:4px}
 .su-headline{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}.su-pool{font-size:24px;font-weight:600;color:var(--su-color);font-variant-numeric:tabular-nums}
 .su-capacity{font-size:13px;color:var(--ui-text-secondary)}.su-rate{margin-left:10px;font-size:12px;color:var(--ui-text-tertiary)}.su-coverage{font-size:11px;color:var(--ui-text-quaternary,var(--ui-text-tertiary))}
 .su-lookback{display:inline-flex;align-items:center;gap:8px;font-size:11px;color:var(--ui-text-secondary)}
@@ -2969,10 +3014,10 @@ const USAGE_CSS = `
 .su-range::-moz-range-thumb{width:10px;height:10px;border:2px solid var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:50%;background:var(--su-color)}
 .su-range:focus-visible{outline:2px solid var(--ui-accent);outline-offset:2px;border-radius:4px}
 .su-empty-dot{position:absolute;bottom:0;width:9px;height:9px;margin:0 0 -4.5px -4.5px;border:2px solid var(--ui-red,var(--su-color));border-radius:50%;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:none}
-/* Pooled chart grid: y-axis | plot | horizon toggle, then the x-axis and the measurement row under the plot column. */
-.su-limits-grid{display:grid;grid-template-columns:56px minmax(0,1fr) 32px;grid-template-rows:auto 16px 30px;margin-top:6px}
+/* Pooled chart grid: y-axis | plot, then the x-axis and the measurement row under the plot column. */
+.su-limits-grid{display:grid;grid-template-columns:56px minmax(0,1fr);grid-template-rows:auto 16px 30px;margin-top:6px}
 .su-limits-grid>.su-yaxis{grid-area:1/1}.su-limits-grid>.su-plot{grid-area:1/2}.su-limits-grid>.su-xaxis{grid-area:2/2;margin:0}
-.su-horizon-cell{grid-area:1/3/3/4;align-self:end;justify-self:start;margin:0 0 -4px 4px}.su .su-horizon{color:var(--ui-text-secondary)}.su-horizon svg{width:16px;height:16px}
+.su .su-horizon{color:var(--ui-text-secondary)}.su-horizon svg{width:16px;height:16px}
 .su-measures{grid-area:3/2;position:relative;color:var(--ui-text-secondary)}
 .su-measure-span{position:absolute;top:22px;height:0}
 .su-measure-line{position:absolute;left:0;right:0;top:-0.5px;border-top:1px solid currentColor}
@@ -2982,7 +3027,7 @@ const USAGE_CSS = `
 .su-measure-span[data-tight=true] .su-measure-line{left:-10px;right:-10px}
 .su-measure-text{position:absolute;top:2px;transform:translateX(-50%);overflow:hidden;text-overflow:ellipsis;font-size:11px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .su-empty-note{color:var(--ui-text-tertiary)}
-.su-chart-foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 24px;font-size:11px;color:var(--ui-text-tertiary)}
+.su-chart-foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px 24px;font-size:11px;color:var(--ui-text-tertiary)}
 .su-chart-notes{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px 16px}
 .su-accounts{display:flex;flex-direction:column;gap:8px}
 .su-account{padding:10px 12px;border:1px solid var(--ui-stroke-secondary);border-radius:6px}

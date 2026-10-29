@@ -343,10 +343,11 @@ export function syntheticUsageHistory(days = 7, tz = 'UTC') {
   return { generated_at: Date.now() / 1000, days, tz, resolution: hourly ? 'hour' : 'day', buckets, by_provider, by_model,
     totals: { tokens: total('tokens'), cost_usd: total('cost_usd'), user_messages: total('user_messages') }, pricing_missing: ['copilot/gpt-5.5'], approximate: true };
 }
-// Two Codex accounts on different plans (a 20-unit Business seat drained first, then a 100-unit Pro 100), drained in pool priority order by an office-hours workload: ten days of 15-minute samples with weekly resets as visible step-ups. Consumption is in plan units, the weekday/hour profile follows the local clock (nights and weekends line up with the charts' midnight gridlines), and the last 12 hours run hotter than the days before, as in a burst of work. Scenarios (control.limitsScenario):
-// - 'mixed' (default): the burst would leave Pro 100 with unused quota at tomorrow's reset (a waste arrow) yet still empty the pool   days before the Business seat resets (the time-to-empty arrow); the verdict is short.
-// - 'light': the same accounts with a gentle workload; resets throw quota away and the verdict is waste.
-// - 'steady': consumption that roughly matches the capacity; the verdict is ok.
+// Two Codex accounts on different plans (a 20-unit Business seat drained first, then a 100-unit Pro 100) and one Anthropic Max 20x account (200 units weekly), each pool drained in priority order by an office-hours workload: ten days of 15-minute samples with weekly resets as visible step-ups. Consumption is in plan units, the weekday/hour profile follows the local clock (nights and weekends line up with the charts' midnight gridlines), and Codex's last 12 hours run hotter than the days before, as in a burst of work. Scenarios (control.limitsScenario):
+// - 'mixed' (default): Codex's burst would leave Pro 100 with unused quota at tomorrow's reset (a waste arrow) yet still empty the pool days before the Business seat resets (the time-to-empty arrow), so its verdict is short; Anthropic's lighter use leaves quota to expire at its reset (waste).
+// - 'light': the same accounts with a gentle Codex workload; resets throw quota away and both verdicts are waste.
+// - 'steady': consumption that roughly matches each pool's capacity; both verdicts are ok.
+// - 'logged-out': 'mixed' with Anthropic logged out in Hermes (no credential left in its pool).
 const LIMIT_WEEK = 604800, LIMIT_FIVE_HOURS = 18000;
 const resetAfter = (anchor, period, t) => anchor - (Math.ceil((anchor - t) / period) - 1) * period;
 function limitLoad(t) {
@@ -355,45 +356,55 @@ function limitLoad(t) {
   return hour >= 9 && hour < 12 ? 4 : hour >= 12 && hour < 14 ? 1.5 : hour >= 14 && hour < 19 ? 4.5 : hour >= 19 && hour < 23 ? 1 : 0;
 }
 const LIMIT_SCENARIOS = {
-  mixed: { base: 0.28, burst: 1.0, team: 0.3, prolite: 0.6, proliteReset: 1.0, teamReset: 4.2 },
-  light: { base: 0.28, burst: 0.37, team: 0.3, prolite: 0.6, proliteReset: 1.0, teamReset: 4.2 },
-  steady: { base: 0.3, burst: 0.56, team: 0.3, prolite: 0.6, proliteReset: 4.6, teamReset: 2.2 }
+  mixed: { base: 0.28, burst: 1.0, team: 0.3, prolite: 0.6, proliteReset: 1.0, teamReset: 4.2, claude: 0.35, claudeLoad: 0.8, claudeReset: 2.5, anthropic: true },
+  light: { base: 0.28, burst: 0.37, team: 0.3, prolite: 0.6, proliteReset: 1.0, teamReset: 4.2, claude: 0.35, claudeLoad: 0.8, claudeReset: 2.5, anthropic: true },
+  steady: { base: 0.3, burst: 0.56, team: 0.3, prolite: 0.6, proliteReset: 4.6, teamReset: 2.2, claude: 0.35, claudeLoad: 0.7, claudeReset: 4.5, anthropic: true }
 };
-export function syntheticUsageLimits(hours = 168, scenario = 'mixed') {
-  const shape = LIMIT_SCENARIOS[scenario] || LIMIT_SCENARIOS.mixed;
-  const now = Date.now() / 1000, step = 900, fetched = now - 140, from = Math.floor(now / step) * step - 10 * 86400;
-  const accounts = [
-    { id: 'acct-team', label: 'chatgptvitibot', priority: 0, plan: 'team', units: 20, banked_resets: 0, weekly: now + shape.teamReset * 86400, five: now + 1.3 * 3600, left: shape.team },
-    { id: 'acct-prolite', label: 'chatgpt1', priority: 1, plan: 'prolite', units: 100, banked_resets: 1, weekly: now + shape.proliteReset * 86400, five: now + 3.1 * 3600, left: shape.prolite }
-  ].map(account => ({ ...account, remaining: account.units * account.left, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: resetAfter(account.five, LIMIT_FIVE_HOURS, from), fiveUsed: 0 }));
-  const history = [];
+LIMIT_SCENARIOS['logged-out'] = { ...LIMIT_SCENARIOS.mixed, anthropic: false };
+// One pool's samples: the load is taken from accounts in priority order, each refilled at its weekly and five-hour resets. The seed shifts the deterministic ±40% jitter so two pools do not drain in lockstep.
+function simulateLimitPool(accounts, { from, fetched, since, scaleAt, seed = 0 }) {
+  const step = 900, history = [];
   const round = value => Math.round(value * 10) / 10;
   const percent = account => round(account.remaining / account.units * 100);
   // A five-hour window holds about a third of the account's weekly capacity.
   const fiveLeft = account => round(Math.max(0, 100 - account.fiveUsed / (account.units * 0.3) * 100));
   for (let t = from, index = 0; t < fetched; index++) {
     const next = Math.min(t + step, fetched);
-    // Deterministic ±40% jitter so the drain is not a ruler-straight line.
-    const scale = t >= now - 12 * 3600 ? shape.burst : shape.base;
-    let need = limitLoad(t) * scale * (0.6 + (index * 37 % 17) / 20) * (next - t) / 3600;
+    let need = limitLoad(t) * scaleAt(t) * (0.6 + ((index + seed) * 37 % 17) / 20) * (next - t) / 3600;
     for (const account of accounts) { const take = Math.min(account.remaining, need); account.remaining -= take; account.fiveUsed += take; need -= take; if (need <= 0) break; }
     for (const account of accounts) {
       if (account.weekReset <= next) { account.remaining = account.units; account.weekReset += LIMIT_WEEK; }
       if (account.fiveReset <= next) { account.fiveUsed = 0; account.fiveReset += LIMIT_FIVE_HOURS; }
     }
     t = next;
-    if (t >= now - hours * 3600) for (const account of accounts) history.push(
+    if (t >= since) for (const account of accounts) history.push(
       { t, account: account.id, window: 'five_hour', remaining_percent: fiveLeft(account), resets_at: account.fiveReset },
       { t, account: account.id, window: 'weekly', remaining_percent: percent(account), resets_at: account.weekReset });
   }
+  const snapshot = account => ({ id: account.id, label: account.label, priority: account.priority, plan: account.plan, ...(Number.isFinite(account.banked_resets) ? { banked_resets: account.banked_resets } : {}),
+    fetched_at: fetched, stale: false, error: null, windows: [
+      { key: 'five_hour', label: '5-hour', window_seconds: LIMIT_FIVE_HOURS, scope: 'account', model: null, used_percent: round(100 - fiveLeft(account)), remaining_percent: fiveLeft(account), resets_at: account.fiveReset },
+      { key: 'weekly', label: 'Weekly', window_seconds: LIMIT_WEEK, scope: 'account', model: null, used_percent: round(100 - percent(account)), remaining_percent: percent(account), resets_at: account.weekReset }
+    ] });
+  return { history, accounts: accounts.map(snapshot) };
+}
+export function syntheticUsageLimits(hours = 168, scenario = 'mixed') {
+  const shape = LIMIT_SCENARIOS[scenario] || LIMIT_SCENARIOS.mixed;
+  const now = Date.now() / 1000, fetched = now - 140, from = Math.floor(now / 900) * 900 - 10 * 86400, since = now - hours * 3600;
+  const prepare = list => list.map(account => ({ ...account, remaining: account.units * account.left, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: resetAfter(account.five, LIMIT_FIVE_HOURS, from), fiveUsed: 0 }));
+  const codex = simulateLimitPool(prepare([
+    { id: 'acct-team', label: 'chatgptvitibot', priority: 0, plan: 'team', units: 20, banked_resets: 0, weekly: now + shape.teamReset * 86400, five: now + 1.3 * 3600, left: shape.team },
+    { id: 'acct-prolite', label: 'chatgpt1', priority: 1, plan: 'prolite', units: 100, banked_resets: 1, weekly: now + shape.proliteReset * 86400, five: now + 3.1 * 3600, left: shape.prolite }
+  ]), { from, fetched, since, scaleAt: t => t >= now - 12 * 3600 ? shape.burst : shape.base });
+  // Max 20x as Anthropic's usage endpoint names it (rateLimitTier), which the plugin maps to 200 weekly plan units.
+  const claude = simulateLimitPool(prepare([
+    { id: 'acct-claude', label: 'claude-max', priority: 0, plan: 'default_claude_max_20x', units: 200, weekly: now + shape.claudeReset * 86400, five: now + 2.2 * 3600, left: shape.claude }
+  ]), { from, fetched, since, scaleAt: () => shape.claudeLoad, seed: 5 });
   return { generated_at: now, sampler: { interval_s: 300, started_at: now - 10 * 86400, last_run_at: fetched, last_error: null }, providers: [
-    { provider: 'openai-codex', label: 'OpenAI Codex', history, accounts: accounts.map(account => ({ id: account.id, label: account.label, priority: account.priority, plan: account.plan, banked_resets: account.banked_resets,
-      fetched_at: fetched, stale: false, error: null, windows: [
-        { key: 'five_hour', label: '5-hour', window_seconds: LIMIT_FIVE_HOURS, scope: 'account', model: null, used_percent: round(100 - fiveLeft(account)), remaining_percent: fiveLeft(account), resets_at: account.fiveReset },
-        { key: 'weekly', label: 'Weekly', window_seconds: LIMIT_WEEK, scope: 'account', model: null, used_percent: round(100 - percent(account)), remaining_percent: percent(account), resets_at: account.weekReset }
-      ] })) },
-    // Hermes knows the provider but holds no usable credential for it.
-    { provider: 'anthropic', label: 'Anthropic', auth: 'logged_out', auth_reason: 'No usable Anthropic credential in the Hermes pool', accounts: [], history: [] }
+    { provider: 'openai-codex', label: 'OpenAI Codex', history: codex.history, accounts: codex.accounts },
+    shape.anthropic ? { provider: 'anthropic', label: 'Anthropic', history: claude.history, accounts: claude.accounts }
+      // Hermes knows the provider but holds no usable credential for it.
+      : { provider: 'anthropic', label: 'Anthropic', auth: 'logged_out', auth_reason: 'No usable Anthropic credential in the Hermes pool', accounts: [], history: [] }
   ] };
 }
 export function Button({ variant, size, children, ...props }) { return h('button', props, children); }
@@ -406,7 +417,8 @@ export function Tip({ label, side = 'top', children }) {
   const hide = () => setAnchor(null);
   const keyboardFocus = event => { try { if (event.currentTarget.matches(':focus-visible')) show(event); } catch (_) { /* Selector unsupported: no bubble. */ } };
   const chain = (name, handler) => event => { children.props[name]?.(event); handler(event); };
-  const trigger = React.cloneElement(children, { title: children.props.title ?? label, onPointerEnter: chain('onPointerEnter', show), onPointerLeave: chain('onPointerLeave', hide),
+  // A node label (the Limits footer's one line per provider) has no plain text to put in a title, so only string labels become one.
+  const trigger = React.cloneElement(children, { title: children.props.title ?? (typeof label === 'string' ? label : undefined), onPointerEnter: chain('onPointerEnter', show), onPointerLeave: chain('onPointerLeave', hide),
     onPointerDown: chain('onPointerDown', hide), onFocus: chain('onFocus', keyboardFocus), onBlur: chain('onBlur', hide) });
   const position = side === 'bottom' ? { left: anchor?.left + anchor?.width / 2, top: anchor?.bottom + 5 } : side === 'left' ? { left: anchor?.left - 5, top: anchor?.top + anchor?.height / 2 }
     : side === 'right' ? { left: anchor?.right + 5, top: anchor?.top + anchor?.height / 2 } : { left: anchor?.left + anchor?.width / 2, top: anchor?.top - 5 };
