@@ -640,6 +640,11 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
     assert.deepEqual(marks.map(item => item.id), ['acct-team', 'acct-prolite'], 'stacked in pool priority order');
     assert.deepEqual([Math.abs(marks[1].base - marks[0].top) < 1e-9, Math.abs(marks[1].top - 120) < 1e-9], [true, true], 'the Pro 100 segment starts where the Business one ends and refills the pool');
     assert.deepEqual(marks.map(item => item.label), marks.map(item => `+${usage.unitsText(item.gain)}`));
+    assert.equal(codexSection.querySelector('.su-reset-seg'), null, 'only the normal curve connects reset discs');
+    for (const node of stacked.querySelectorAll('.su-reset-mark')) {
+      assert.ok(Math.abs(parseFloat(node.style.bottom) - Number(node.dataset.top) / 120 * 100) < 1e-9, 'each disc is anchored directly at its cumulative level');
+      assert.equal(node.style.height, '', 'a reset mark does not span the reset step');
+    }
     assert.deepEqual([Number(stacked.dataset.t), codexSection.querySelector('.su-waste').dataset.t], [Math.round(fixed / 1000 + D), stacked.dataset.t], 'the waste arrow sits at the same x');
     // Two credits expiring ten minutes apart, five hours from now, get one flag each; the nine-day ones are beyond the 7-day chart.
     const flags = () => [...codexSection.querySelectorAll('.su-flag')].map(node => [node.dataset.account, node.getAttribute('aria-label').replace(/expires \w{3} \d{1,2}:\d{2} (AM|PM)/g, 'expires <time>')]);

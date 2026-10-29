@@ -1933,9 +1933,14 @@ try {
       check('Each banked credit gets its own flag above the Codex plot, pole on its expiry within 1px, the close second one lifted onto the next row without overlap, no count badge, one tooltip line each', flag.flags.length === 2 && flag.flags.every(item => item.pole <= 1)
         && flag.flags.map(item => item.row).join() === '0,1' && flag.apart && flag.above && flag.counts === 0 && flag.other === 0
         && flagTips.every(lines => lines.length === 1) && /^chatgptvitibot · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTips[0][0]) && /^chatgpt1 · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTips[1][0]));
-      // Projected reset steps are dashed like the projection line; only realized (past) step-ups are solid.
-      const segments = await usage.evaluate(selector => [...document.querySelectorAll(`${selector} .su-reset-mark`)].map(node => { const style = getComputedStyle(node.querySelector('.su-reset-seg')); return { kind: node.dataset.kind, dashed: style.backgroundImage.includes('repeating-linear-gradient'), solid: style.borderLeftStyle === 'solid' }; }), CODEX);
-      check('Projected reset segments are dashed, never a solid line', segments.some(item => item.kind === 'projected') && segments.filter(item => item.kind === 'projected').every(item => item.dashed && !item.solid));
+      // Reset discs add no segment overlay: the unchanged SVG projection supplies the dashed steps.
+      const resetsStyle = await usage.evaluate(selector => {
+        const chart = document.querySelector(selector), curve = chart.querySelector('.su-line.su-projected');
+        return { segments: chart.querySelectorAll('.su-reset-seg').length, marks: chart.querySelectorAll('.su-reset-mark').length, dash: getComputedStyle(curve).strokeDasharray,
+          points: curve.getAttribute('d').match(/[ML][\d.]+,[\d.]+/g).map(point => point.slice(1).split(',').map(Number)) };
+      }, CODEX);
+      check('Reset discs have no segment overlay and the normal dashed curve still draws the vertical reset steps', resetsStyle.marks > 0 && resetsStyle.segments === 0 && resetsStyle.dash === '5px, 4px'
+        && resetsStyle.points.some((point, index, points) => index > 0 && point[0] === points[index - 1][0] && point[1] < points[index - 1][1]));
       await usage.mouse.move(5, 5);
     }
     // Pixels along the slider's middle row: the track left of the thumb stays unfilled and the part to its right carries the fill color (the thumb's own color), since the filled part is the averaged period reaching back from now.
