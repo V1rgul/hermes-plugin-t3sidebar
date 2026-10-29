@@ -579,20 +579,25 @@ test('the Limits page is one overview of every provider under a shared controls 
 });
 
 test('the shared lookback and horizon controls change every chart at once', async () => {
-  plugin.register(mock.ctx); await render(limitsPage());
-  const rates = () => $$('.su-rate').map(node => node.textContent);
-  const before = rates();
-  await slide($('.su-lookback input[type=range]'), 1);
-  assert.equal($('.su-lookback-value').textContent, '15d');
-  const after = rates();
-  assert.deepEqual(after.map((text, index) => text !== before[index] && /^(~\d+(\.\d)? units per hour|no drain data)$/.test(text)), [true, true], `every provider's rate follows the slider (${before} → ${after})`);
-  assert.deepEqual($$('.su-measure[data-kind="average"]').map(node => node.textContent.split(' · ')[0]), ['Average over 15d', 'Average over 15d']);
-  const spans = () => $$('.su-pooled .su-plot').map(node => Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100);
-  assert.deepEqual(spans(), [9.1, 9.1]);
-  await click(button('30d'));
-  assert.deepEqual([spans(), $$('.su-pooled').map(node => node.dataset.horizon)], [[39, 39], ['30', '30']], 'one horizon choice extends every chart');
-  await click(button('7d'));
-  assert.deepEqual(spans(), [9.1, 9.1]);
+  // The synthetic drain follows office hours, so at some times of day the 12h and 15d averages coincide; pin the same weekday afternoon as the browser smoke.
+  const realNow = Date.now, fixed = Date.parse('2026-10-28T15:00:00+01:00');
+  Date.now = () => fixed;
+  try {
+    plugin.register(mock.ctx); await render(limitsPage());
+    const rates = () => $$('.su-rate').map(node => node.textContent);
+    const before = rates();
+    await slide($('.su-lookback input[type=range]'), 1);
+    assert.equal($('.su-lookback-value').textContent, '15d');
+    const after = rates();
+    assert.deepEqual(after.map((text, index) => text !== before[index] && /^(~\d+(\.\d)? units per hour|no drain data)$/.test(text)), [true, true], `every provider's rate follows the slider (${before} → ${after})`);
+    assert.deepEqual($$('.su-measure[data-kind="average"]').map(node => node.textContent.split(' · ')[0]), ['Average over 15d', 'Average over 15d']);
+    const spans = () => $$('.su-pooled .su-plot').map(node => Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100);
+    assert.deepEqual(spans(), [9.1, 9.1]);
+    await click(button('30d'));
+    assert.deepEqual([spans(), $$('.su-pooled').map(node => node.dataset.horizon)], [[39, 39], ['30', '30']], 'one horizon choice extends every chart');
+    await click(button('7d'));
+    assert.deepEqual(spans(), [9.1, 9.1]);
+  } finally { Date.now = realNow; }
 });
 
 test('account details are folded by default and each provider remembers its own fold across a remount', async () => {
