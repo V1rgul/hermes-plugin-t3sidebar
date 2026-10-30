@@ -18,7 +18,7 @@ npm run harness
 
 Open `http://127.0.0.1:4173`. The right-hand panel is a labeled test workspace, not an alternative chat implementation. Browser tests write screenshots to `t3-sidebar-ui-verification/` under `TMPDIR` (or the Hermes scratch directory when unset). The README's maintained screenshots live in `docs/images/`.
 
-README screenshots render the current plugin with sample sessions and a development SDK adapter, using the Midnight dark palette and native Codicon font. They are not captures of a live Desktop connection.
+README screenshots render the current plugin with sample sessions and a development SDK adapter, using the Midnight dark palette and native Codicon font. Usage and Limits captures use the synthetic `syntheticUsageHistory` and `syntheticUsageLimits` fixtures from `tests/sdk.mock.mjs`, with the clock fixed on Wed 2026-11-04 15:00 Paris. They are not captures of a live Desktop connection.
 
 The production plugin itself needs none of these Node development dependencies or generated bundles.
 

@@ -1,7 +1,7 @@
 name: hermes-t3sidebar
 version: "0.1.0"
 requires_hermes: ">=0.21.0"
-description: hermes-t3sidebar desktop sidebar with shared completion markers, snooze and pins.
+description: "Hermes Desktop T3 Code-style session sidebar: status shelves, pins, snooze, unsent drafts, project picker, AutoTitler rename, token/cost Usage page and OpenAI Codex / Anthropic Claude rate-limit Limits page."
 provides_hooks:
   - pre_llm_call
   - on_session_end

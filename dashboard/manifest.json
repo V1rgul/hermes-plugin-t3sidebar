@@ -1,7 +1,7 @@
 {
 	"name": "hermes-t3sidebar",
 	"label": "hermes-t3sidebar",
-	"description": "Persistent settlement, snooze and pin metadata for the hermes-t3sidebar desktop sidebar.",
+	"description": "Backend companion for the hermes-t3sidebar desktop sidebar: shared completion, snooze and pin metadata, token usage history and rate-limit sampling.",
 	"version": "0.1.0",
 	"tab": { "hidden": true },
 	"api": "plugin_api.py"
