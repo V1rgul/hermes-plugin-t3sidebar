@@ -3027,7 +3027,6 @@ function ChartMarks({ waste, resets, past, flags, xPct, cap, now }) {
     flags.map(flag => h(BankedFlag, { key: Math.floor(flag.t / 60), flag, xPct, now })));
 }
 // "Business: 20, Pro 100: 100": what each account adds to the pool's capacity, an asterisk marking a guessed one.
-const poolComposition = members => members.map(item => `${item.plan_label || 'Unknown plan'}: ${unitsText(item.weight)}${item.assumed ? '*' : ''}`).join(', ');
 function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, lookback }) {
   const horizonS = horizonDays * DAY_S, lookbackS = lookback * HOUR_S, providerId = provider.provider;
   const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey, providerId), [provider, windowKey, providerId]);
@@ -3083,7 +3082,6 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
     const box = event.currentTarget.getBoundingClientRect();
     if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1));
   };
-  const composition = projection.members.length ? poolComposition(projection.members) : '';
   // Reset times now show as markers in the chart; the notes keep only what the chart cannot show.
   const notes = [
     projection.nextReset ? null : h('span', { key: 'none' }, 'No reset time reported'),
@@ -3095,7 +3093,6 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
       // Without any account reading the pool is unknown, not empty.
       h('span', { className: 'su-pool' }, projection.capacity ? unitsText(projection.current) : '—'),
       h('span', { className: 'su-capacity', title: PLAN_UNITS_NOTE }, projection.capacity ? `/ ${unitsText(projection.capacity)} units` : 'no account readings yet'),
-      composition ? h('span', { className: 'su-composition', title: PLAN_UNITS_NOTE }, `(${composition})`) : null,
       h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate))),
     verdict ? h(VerdictLine, { verdict, now, windowKey }) : null,
     h('div', { className: 'su-limits-grid' },
@@ -3307,7 +3304,6 @@ const USAGE_CSS = `
 .su-bar-track{right:0;background:color-mix(in srgb,var(--ui-text-primary) 12%,transparent)}.su-bar-fill{background:var(--su-color)}
 .su-pace{position:absolute;top:1px;width:2px;height:14px;margin-left:-1px;border-radius:1px;background:var(--ui-text-primary)}
 /* Unit headline, verdict and the marks over the plot. */
-.su-composition{font-size:11px;color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}
 .su-verdict{display:flex;align-items:center;gap:6px;margin:-6px 0 0;font-size:12px;color:var(--ui-text-tertiary)}
 /* The text of a short or waste verdict stays neutral; only its glyph carries the severity colour, as in the sidebar footer. */
 .su-verdict[data-status=short],.su-verdict[data-status=waste]{color:var(--ui-text-secondary)}

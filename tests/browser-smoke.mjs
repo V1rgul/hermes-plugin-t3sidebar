@@ -1875,12 +1875,12 @@ try {
         && /^Runs out \w{3} \d{1,2}:\d{2} (AM|PM), ((\d+d \d+h|\d+h \d+m) before the next reset|still empty at the end of the 7 days) · missing ~\d+ units$/.test(waste.verdict.text) && neutral(waste.verdict.color) && waste.verdict.iconColor[0] > waste.verdict.iconColor[1] + 40);
       check('Limits Anthropic chart has its own waste verdict (muted clock-x: under a third of the capacity) and a waste measurement at the Max 20x reset', claude.verdict?.status === 'waste' && claude.verdict.severity === 'low' && claude.verdict.icon === 'ClockX' && neutral(claude.verdict.iconColor)
         && /^\d+(\.\d)? units will expire unused by \w{3}$/.test(claude.verdict.text) && claude.marks.length === 1 && claude.marks.every(mark => wasteOk(mark, 'claude-max · Max 20x')) && claude.apart);
-      const headline = await usage.evaluate(() => [...document.querySelectorAll('.su-pooled')].map(chart => ({ pool: chart.querySelector('.su-pool').textContent, capacity: chart.querySelector('.su-capacity').textContent, composition: chart.querySelector('.su-composition').textContent,
+      const headline = await usage.evaluate(() => [...document.querySelectorAll('.su-pooled')].map(chart => ({ pool: chart.querySelector('.su-pool').textContent, capacity: chart.querySelector('.su-capacity').textContent, composition: !!chart.querySelector('.su-composition'),
         ticks: [...chart.querySelectorAll('.su-yaxis span')].map(el => el.textContent).join() })));
       console.log(`USAGE LIMITS HEADLINE: ${JSON.stringify(headline)}`);
       check('Limits headlines and axes are in units: Business 20 + Pro 100 100 = 120, Max 20x = 200', headline.length === 2 && headline.every(item => /^\d+(\.\d)?$/.test(item.pool))
-        && headline[0].capacity === '/ 120 units' && headline[0].composition === '(Business: 20, Pro 100: 100)' && headline[0].ticks === 'units,0,25,50,75,100,120'
-        && headline[1].capacity === '/ 200 units' && headline[1].composition === '(Max 20x: 200)' && headline[1].ticks === 'units,0,50,100,150,200');
+        && headline[0].capacity === '/ 120 units' && !headline[0].composition && headline[0].ticks === 'units,0,25,50,75,100,120'
+        && headline[1].capacity === '/ 200 units' && !headline[1].composition && headline[1].ticks === 'units,0,50,100,150,200');
       check('No Next reset line and no plan units wording anywhere on the Limits page', await usage.evaluate(() => !/Next reset|plan units/i.test(document.querySelector('.su').innerText) && [...document.querySelectorAll('[title],[aria-label]')].every(node => !/plan units/i.test(`${node.getAttribute('title') || ''} ${node.getAttribute('aria-label') || ''}`))));
       check('No advice anywhere on the Limits page or in the footer', await usage.evaluate(source => { const advice = new RegExp(source, 'i'); return !advice.test(document.body.innerText) && [...document.querySelectorAll('[aria-label],[title]')].every(node => !advice.test(node.getAttribute('aria-label') || '') && !advice.test(node.getAttribute('title') || '')); }, ADVICE.source));
     }
