@@ -1579,7 +1579,11 @@ try {
       check('Limits button tooltip lists one factual line per provider, matches its accessible name and stays inside the window', tip.count === 1 && tip.lines.length === 2 && codexLine.test(tip.lines[0]) && anthropicLine.test(tip.lines[1])
         && status.label === `Limits. ${tip.lines.join('. ')}.` && !ADVICE.test(status.label) && tip.above && tip.inside);
       check('Limits button hover shows the ghost background', await limitsButton.evaluate(el => getComputedStyle(el).backgroundColor) !== idle);
+      // Past the 100ms opacity transition in both directions.
+      await usage.waitForTimeout(200);
+      check('Limits button hover lifts the coloured verdict glyph to full opacity with the neutral items', await usage.evaluate(() => getComputedStyle(document.querySelector('.sf-limit[data-severity=high] .su-verdict-icon')).opacity) === '1');
       await usage.mouse.move(5, 5);
+      await usage.waitForTimeout(200);
       const toolbarIcons = await usage.evaluate(() => [...document.querySelectorAll('.sf-header svg, .sf-footer svg')].map(svg => {
         const box = svg.getBoundingClientRect(), path = svg.querySelector('path'), mark = !!svg.dataset.providerMark, verdict = svg.closest('[data-verdict-icon]');
         return { icon: svg.dataset.icon || svg.dataset.providerMark, size: box.width, line: mark ? null : Math.round(parseFloat(getComputedStyle(path).strokeWidth) * box.width / 24 * 100) / 100,
