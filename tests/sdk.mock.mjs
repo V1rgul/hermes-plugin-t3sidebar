@@ -513,7 +513,8 @@ function listenForEscape(doc) {
     openPopovers.at(-1).current(false);
   });
 }
-export function PopoverContent({ align, side, children, style, onKeyDown, ...props }) {
+// Radix-only props are consumed here rather than leaking onto the DOM node.
+export function PopoverContent({ align, side, sideOffset = 6, alignOffset = 0, onInteractOutside, onEscapeKeyDown, onCloseAutoFocus, children, style, onKeyDown, ...props }) {
   const value = useContext(PopoverContext), content = useRef(null), close = useRef(value.onOpenChange);
   close.current = value.onOpenChange;
   useLayoutEffect(() => {
@@ -534,6 +535,15 @@ export function PopoverContent({ align, side, children, style, onKeyDown, ...pro
     };
     reposition(); window.addEventListener('resize', reposition);
     return () => window.removeEventListener('resize', reposition);
+  });
+  // Radix's bottom/end placement: the content's right edge on the anchor's right, moved by -alignOffset (floating-ui negates the offset for end alignment), and below it by sideOffset plus Desktop's 7px arrow.
+  const below = side === 'bottom' && align === 'end';
+  useLayoutEffect(() => {
+    if (!value.open || !below) return;
+    const node = content.current, anchor = value.anchor.current?.getBoundingClientRect();
+    if (!node || !anchor) return;
+    node.style.left = `${anchor.right - node.getBoundingClientRect().width - alignOffset}px`;
+    node.style.top = `${anchor.bottom + sideOffset + 7}px`;
   });
   const rect = value.anchor.current?.getBoundingClientRect();
   return value.open ? createPortal(h('div', { ...props, ref: content, style: { ...style, ...(style?.width === 'max-content' ? { maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' } : {}), position: 'fixed', left: Math.max(8, Math.min((rect?.right || 280) + 6, window.innerWidth - (style?.width === 'max-content' ? Math.min(510, window.innerWidth - 16) : 300) - 8)), top: Math.max(10, Math.min(rect?.top || 120, window.innerHeight - 440)) }, role: 'dialog', className: 'mock-popover', onKeyDown }, children), document.body) : null;
