@@ -60,6 +60,8 @@ _LABEL_KEYS = {
 # Words that name a window's period rather than its model, stripped when deriving a model-scoped window's model.
 _PERIOD_WORDS = {"current", "session", "week", "weekly", "5h", "7d", "limit", "window", "usage"}
 _CODEX_LABEL_BY_SECONDS = {18000: "Session", 604800: "Weekly"}
+# Anthropic's usage endpoint names its windows (five_hour, seven_day, seven_day_opus...) without a duration, and Hermes passes on only their labels; the names are the durations, so its five_hour and weekly keys (model-scoped ones included) get them back.
+_ANTHROPIC_SECONDS_BY_KEY = {key: seconds for seconds, key in _SECONDS_KEYS.items()}
 _ACCOUNT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 _EXCEPTION_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
@@ -111,6 +113,14 @@ def window_key(label, window_seconds=None, scope="account"):
 		return base, None
 	model = _slug(" ".join(word for word in words.split() if word not in _PERIOD_WORDS)) or None
 	return (f"{base}:{model}", model) if model else (base, None)
+
+
+def window_seconds(provider, key, seconds):
+	"""A window's duration: the reported one, else Anthropic's implied by its key, else None."""
+	seconds = _positive_int(seconds)
+	if seconds is None and provider == "anthropic" and isinstance(key, str):
+		return _ANTHROPIC_SECONDS_BY_KEY.get(key.split(":", 1)[0])
+	return seconds
 
 
 def _codex_window_seconds(raw, windows):
@@ -235,7 +245,7 @@ def normalize_snapshot(provider, snapshot):
 			unique, suffix = f"{key}_{suffix}", suffix + 1
 		used_keys.add(unique)
 		result_windows.append({
-			"key": unique, "label": label or None, "window_seconds": duration, "scope": scope, "model": model,
+			"key": unique, "label": label or None, "window_seconds": window_seconds(provider, unique, duration), "scope": scope, "model": model,
 			"used_percent": _finite(getattr(window, "used_percent", None)),
 			"resets_at": _timestamp(getattr(window, "reset_at", None)),
 		})
@@ -759,7 +769,8 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 			account["fetched_at"], account["sample"], account["windows"] = t, (plan, banked), []
 		remaining = None if used is None else max(0.0, min(100.0, 100.0 - used))
 		account["windows"].append({
-			"key": key, "label": window_label, "window_seconds": seconds, "scope": scope, "model": model,
+			# Samples stored before durations were inferred carry none; window_seconds fills them in the same way.
+			"key": key, "label": window_label, "window_seconds": window_seconds(slug, key, seconds), "scope": scope, "model": model,
 			"used_percent": used, "remaining_percent": remaining, "resets_at": resets_at,
 		})
 		if since <= t <= now:

@@ -114,7 +114,7 @@ class UsageHistoryTests(unittest.TestCase):
 		# Context before call 1 = 9 chars, before call 2 = 9 + 20 + 10 + 60 = 99; the +1 keeps weights positive.
 		self.db.usage("s1", "gpt-x", "openai-codex", first, second, calls=2, input=1100, cache_read=2200, output=410, reasoning=41)
 		payload = self.payload()
-		entry = series(payload, "openai-codex/gpt-x")
+		entry = series(payload, "gpt-x")
 		self.assertEqual(daily(payload, entry["input"])[5:7], [100, 1000])
 		self.assertEqual(daily(payload, entry["cache_read"])[5:7], [200, 2000])
 		# Reply sizes 30 and 9 -> weights 31 and 10.
@@ -144,7 +144,7 @@ class UsageHistoryTests(unittest.TestCase):
 		self.db.message("s1", "assistant", call + 600, "b" * 20)
 		self.db.usage("s1", "m", "p", call, call + 600, calls=2, input=40)
 		payload = self.payload()
-		entry = series(payload, "p/m")
+		entry = series(payload, "m")
 		# Contexts 9 and 29 (not 18 and 58) -> weights 10 and 30.
 		self.assertEqual(daily(payload, entry["input"])[6], 40)
 		self.assertEqual(daily(payload, entry["user_messages"])[6], 1)
@@ -162,7 +162,7 @@ class UsageHistoryTests(unittest.TestCase):
 		self.db.usage("s1", "alpha", "anthropic", early, early + 100, calls=2, input=500, output=50)
 		self.db.usage("s1", "beta", "openai-codex", late, late, calls=1, input=70, output=7)
 		payload = self.payload()
-		alpha, beta = series(payload, "anthropic/alpha"), series(payload, "openai-codex/beta")
+		alpha, beta = series(payload, "alpha"), series(payload, "beta")
 		self.assertEqual(sum(alpha["input"]), 500)
 		self.assertEqual(daily(payload, alpha["input"])[3], 500)
 		self.assertEqual(daily(payload, beta["input"]), [0, 0, 0, 0, 0, 70, 0])
@@ -170,6 +170,21 @@ class UsageHistoryTests(unittest.TestCase):
 		self.assertEqual(daily(payload, alpha["user_messages"])[3], 1)
 		self.assertEqual(daily(payload, beta["user_messages"])[5], 1)
 		self.assertEqual([entry["key"] for entry in payload["by_provider"]], ["anthropic", "openai-codex"])
+
+	def test_model_view_merges_one_model_across_providers(self):
+		self.db.session("s1")
+		times = [self.day[6] + 100, self.day[6] + 200, self.day[6] + 300]
+		for timestamp in times:
+			self.db.message("s1", "assistant", timestamp, "x")
+		self.db.usage("s1", "gpt", "openai-codex", times[0], times[0], calls=1, input=40)
+		self.db.usage("s1", "gpt", "openrouter", times[1], times[1], calls=1, input=2)
+		self.db.usage("s1", "solo", "openrouter", times[2], times[2], calls=1, input=5)
+		payload = self.payload()
+		self.assertEqual([(entry["key"], entry["label"], entry["model"]) for entry in payload["by_model"]], [("gpt", "gpt", "gpt"), ("solo", "solo", "solo")])
+		# A model served by several providers names none; a single provider stays named.
+		self.assertEqual([entry["provider"] for entry in payload["by_model"]], [None, "openrouter"])
+		self.assertEqual(sum(series(payload, "gpt")["input"]), 42)
+		self.assertEqual(sum(series(payload, "openrouter", "by_provider")["input"]), 7)
 
 	def test_auxiliary_and_unmatched_rows_spread_evenly(self):
 		self.db.session("s1")
@@ -180,9 +195,9 @@ class UsageHistoryTests(unittest.TestCase):
 		self.db.session("s2")
 		self.db.usage("s2", "sol", "openai-codex", self.day[2] + 7200, self.day[3] + 7200, calls=2, input=50)
 		payload = self.payload()
-		self.assertEqual(daily(payload, series(payload, "openai-codex/luna")["input"]), [0, 0, 0, 0, 100, 100, 100])
-		self.assertEqual(daily(payload, series(payload, "openai-codex/luna")["output"]), [0, 0, 0, 0, 10, 10, 10])
-		self.assertEqual(daily(payload, series(payload, "openai-codex/sol")["input"]), [0, 0, 25, 25, 0, 0, 0])
+		self.assertEqual(daily(payload, series(payload, "luna")["input"]), [0, 0, 0, 0, 100, 100, 100])
+		self.assertEqual(daily(payload, series(payload, "luna")["output"]), [0, 0, 0, 0, 10, 10, 10])
+		self.assertEqual(daily(payload, series(payload, "sol")["input"]), [0, 0, 25, 25, 0, 0, 0])
 		self.assertEqual(daily(payload, series(payload, "openai-codex", "by_provider")["input"]), [0, 0, 25, 25, 100, 100, 100])
 
 	def test_rows_straddling_the_window_keep_full_session_weights(self):
@@ -192,13 +207,13 @@ class UsageHistoryTests(unittest.TestCase):
 		self.db.message("s1", "assistant", before, "a" * 20)
 		self.db.message("s1", "assistant", inside, "b")
 		self.db.usage("s1", "m", "p", before, inside, calls=2, input=400)
-		entry = series(self.payload(), "p/m")
+		entry = series(self.payload(), "m")
 		# Weights 10 and 30 computed over the whole session; only the in-window share is shown.
 		self.assertEqual(sum(entry["input"]), 300)
 		self.db.session("s2")
 		self.db.usage("s2", "old", "p", before - 86400 * 3, before - 86400 * 2, calls=1, input=999)
 		history.clear_cache()
-		self.assertNotIn("p/old", [entry["key"] for entry in self.payload()["by_model"]])
+		self.assertNotIn("old", [entry["key"] for entry in self.payload()["by_model"]])
 
 	def test_sub_day_buckets_follow_local_wall_clock_across_dst_in_paris_and_new_york(self):
 		self.db.session("s1")
@@ -239,12 +254,12 @@ class UsageHistoryTests(unittest.TestCase):
 		self.db.usage("s1", "c", "p", self.day[7], self.day[7], calls=1, input=10)
 		history.clear_cache()
 		payload = self.payload(now=self.day[7] - 1)
-		self.assertEqual(daily(payload, series(payload, "p/a")["input"]), [0, 0, 0, 10, 0, 0, 0])
+		self.assertEqual(daily(payload, series(payload, "a")["input"]), [0, 0, 0, 10, 0, 0, 0])
 		self.assertEqual(payload["buckets"][3 * 24], int(edge))
-		self.assertEqual(series(payload, "p/a")["input"][3 * 24], 10)
+		self.assertEqual(series(payload, "a")["input"][3 * 24], 10)
 		keys = [entry["key"] for entry in payload["by_model"]]
-		self.assertNotIn("p/b", keys)
-		self.assertNotIn("p/c", keys)
+		self.assertNotIn("b", keys)
+		self.assertNotIn("c", keys)
 
 	def test_24h_mode_across_spring_forward(self):
 		# 2026-03-29 02:00 Paris jumps to 03:00; buckets stay ten real minutes apart.
@@ -259,7 +274,7 @@ class UsageHistoryTests(unittest.TestCase):
 		self.assertEqual(payload["window_end"], int(local(PARIS, 2026, 3, 29, 12, 50)))
 		self.assertEqual(payload["buckets"][-1], int(local(PARIS, 2026, 3, 29, 12, 40)))
 		self.assertEqual({b - a for a, b in zip(payload["buckets"], payload["buckets"][1:])}, {600})
-		entry = series(payload, "p/m")
+		entry = series(payload, "m")
 		index = payload["buckets"].index(int(local(PARIS, 2026, 3, 29, 3, 10)))
 		self.assertEqual(entry["tokens"][index], 6)
 		# The step before 03:00 summer time is 01:50 winter time.
@@ -292,8 +307,8 @@ class UsageHistoryTests(unittest.TestCase):
 		self.db.usage("child", "m2", "p", call + 200, call + 200, calls=1, input=1)
 		payload = self.payload()
 		# please do it + steer + skill invocation in the parent, next question in the child.
-		self.assertEqual(daily(payload, series(payload, "p/m")["user_messages"])[6], 3)
-		self.assertEqual(daily(payload, series(payload, "p/m2")["user_messages"])[6], 1)
+		self.assertEqual(daily(payload, series(payload, "m")["user_messages"])[6], 3)
+		self.assertEqual(daily(payload, series(payload, "m2")["user_messages"])[6], 1)
 		self.assertEqual(payload["totals"]["user_messages"], 4)
 		self.assertEqual(daily(payload, series(payload, "p", "by_provider")["user_messages"])[6], 4)
 
@@ -320,7 +335,7 @@ class UsageHistoryTests(unittest.TestCase):
 		self.db.usage("s1", "big", "p", call - 9000, call - 8000, calls=1, input=100)
 		self.db.usage("s1", "aux", "p", call, call, task="title_generation", calls=1, input=1000)
 		payload = self.payload()
-		self.assertEqual(sum(series(payload, "p/big")["user_messages"]), 1)
+		self.assertEqual(sum(series(payload, "big")["user_messages"]), 1)
 		self.assertEqual(payload["totals"]["user_messages"], 1)
 
 	def test_pricing_maps_subscription_providers_and_reports_missing(self):
@@ -344,11 +359,11 @@ class UsageHistoryTests(unittest.TestCase):
 		self.assertNotIn("openai-codex", seen)
 		self.assertIn(None, seen)
 		self.assertEqual(payload["pricing_missing"], ["copilot/mystery"])
-		self.assertEqual(daily(payload, series(payload, "copilot/mystery")["cost_usd"])[6], 0.0)
-		self.assertAlmostEqual(daily(payload, series(payload, "openai-codex/sol")["cost_usd"])[6], 0.01)
+		self.assertEqual(daily(payload, series(payload, "mystery")["cost_usd"])[6], 0.0)
+		self.assertAlmostEqual(daily(payload, series(payload, "sol")["cost_usd"])[6], 0.01)
 		unknown = series(payload, "unknown", "by_provider")
 		self.assertEqual(daily(payload, unknown["tokens"])[6], 7)
-		self.assertEqual(series(payload, "unknown/nameless")["provider"], "unknown")
+		self.assertEqual(series(payload, "nameless")["provider"], "unknown")
 		self.assertAlmostEqual(payload["totals"]["cost_usd"], 0.01 + 0.04 + 0.007, places=6)
 
 	def test_class_costs_keep_tiered_total_and_probe_proportions(self):
@@ -396,7 +411,7 @@ class UsageHistoryTests(unittest.TestCase):
 		self.assertEqual(daily(fresh, fresh["by_model"][0]["input"])[6], 10)
 		self.db.run("UPDATE session_model_usage SET input_tokens = 30, last_seen = ?", call + 1)
 		fresh = self.payload(pricing=counting)
-		self.assertEqual(daily(fresh, series(fresh, "p/m")["input"])[6], 30)
+		self.assertEqual(daily(fresh, series(fresh, "m")["input"])[6], 30)
 		self.db.message("s1", "user", call - 5, "a new human message")
 		self.assertEqual(self.payload(pricing=counting)["totals"]["user_messages"], 1)
 
@@ -445,8 +460,8 @@ class UsageHistoryTests(unittest.TestCase):
 		self.db.usage("s1", "small", "p", times[0], times[-1], calls=7, input=10)
 		self.db.usage("s1", "large", "q", times[0], times[-1], calls=7, input=1000)
 		payload = self.payload()
-		self.assertEqual([entry["key"] for entry in payload["by_model"]], ["q/large", "p/small"])
-		self.assertEqual(sum(series(payload, "p/small")["input"]), 10)
+		self.assertEqual([entry["key"] for entry in payload["by_model"]], ["large", "small"])
+		self.assertEqual(sum(series(payload, "small")["input"]), 10)
 		self.assertEqual(payload["totals"]["tokens"], 1010)
 		for entry in payload["by_model"]:
 			self.assertTrue(all(type(value) is int for value in entry["tokens"]))

@@ -30,7 +30,7 @@ SOFTWARE.
 
 ## Tabler Icons
 
-Every `BUNDLED_ICONS` glyph in `desktop/plugin.js` except the Lucide Usage icon and the Lucide-derived axis-range glyphs (`UnfoldLeft`, `UnfoldRight`, `UnfoldCrease`) is path data from [`@tabler/icons`](https://github.com/tabler/tabler-icons) 3.44.0 (`pencil-ai` from 3.48.0); `ArrowBarToDownTouching` is modified from `arrow-bar-to-down`.
+Every `BUNDLED_ICONS` glyph in `desktop/plugin.js` except the Lucide Usage and refresh icons and the Lucide-derived axis-range glyphs (`UnfoldLeft`, `UnfoldRight`, `UnfoldCrease`) is path data from [`@tabler/icons`](https://github.com/tabler/tabler-icons) 3.44.0 (`pencil-ai` from 3.48.0); `ArrowBarToDownTouching` is modified from `arrow-bar-to-down`.
 
 ```
 MIT License
@@ -58,7 +58,7 @@ SOFTWARE.
 
 ## Lucide
 
-The session status glyphs (`STATUS_ICONS`) and the Usage icon (`chart-no-axes-column`) in `desktop/plugin.js` are path data from [Lucide](https://github.com/lucide-icons/lucide) 1.59.0. The Compacting glyph combines Lucide `circle` and `minimize-2` paths. The Limits chart's axis-range arrows and crease (`UnfoldLeft`, `UnfoldRight`, `UnfoldCrease` in `BUNDLED_ICONS`) are modified from Lucide `unfold-horizontal`: its two arrows split apart with lengthened shafts, and its dashed crease.
+The session status glyphs (`STATUS_ICONS`), the Usage icon (`chart-no-axes-column`) and the refresh icon (`refresh-cw`) in `desktop/plugin.js` are path data from [Lucide](https://github.com/lucide-icons/lucide) 1.59.0. The Compacting glyph combines Lucide `circle` and `minimize-2` paths. The Limits chart's axis-range arrows and crease (`UnfoldLeft`, `UnfoldRight`, `UnfoldCrease` in `BUNDLED_ICONS`) are modified from Lucide `unfold-horizontal`: its two arrows split apart with lengthened shafts, and its dashed crease.
 
 ```
 ISC License
