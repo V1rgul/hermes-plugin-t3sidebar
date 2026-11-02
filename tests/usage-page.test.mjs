@@ -667,8 +667,8 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.equal(button('3d'), undefined, 'the 1d/3d/7d horizon control is gone');
   await click(button('5-hour'));
   assert.deepEqual($$('.su-pooled').map(node => node.dataset.window), ['five_hour', 'five_hour'], 'the window choice applies to every chart');
-  // Codex plans weigh the same in every window; Max 20x is 400 units in five hours. The verdicts keep judging the weekly pools.
-  assert.deepEqual($$('.su-capacity').map(node => node.textContent), ['/ 120 units', '/ 400 units']);
+  // The Pro 100 account has no five-hour window, so Codex's five-hour pool is the Business seat alone; Max 20x is 400 units in five hours. The verdicts keep judging the weekly pools.
+  assert.deepEqual($$('.su-capacity').map(node => node.textContent), ['/ 20 units', '/ 400 units']);
   assert.deepEqual($$('.su-verdict').map(node => [node.dataset.window, node.textContent.startsWith('Weekly: ')]), [['weekly', true], ['weekly', true]]);
   assert.equal(mock.ctx.storage.get('usage-preferences').window, 'five_hour');
   assert.equal(adviceFree(), true, 'no verdict, label or title gives advice');

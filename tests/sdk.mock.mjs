@@ -379,7 +379,7 @@ const LIMIT_SCENARIOS = {
   steady: { base: 0.3, burst: 0.56, team: 0.3, prolite: 0.6, proliteReset: 4.6, teamReset: 2.2, claude: 0.35, claudeLoad: 0.7, claudeReset: 4.5, anthropic: true }
 };
 LIMIT_SCENARIOS['logged-out'] = { ...LIMIT_SCENARIOS.mixed, anthropic: false };
-// One pool's samples: the load is taken from accounts in priority order, each refilled at its weekly and five-hour resets. The seed shifts the deterministic ±40% jitter so two pools do not drain in lockstep.
+// One pool's samples: the load is taken from accounts in priority order, each refilled at its weekly and five-hour resets; an account without a five-hour reset (`five: null`) has only a weekly window, as Codex Pro plans currently do. The seed shifts the deterministic ±40% jitter so two pools do not drain in lockstep.
 function simulateLimitPool(accounts, { from, fetched, since, scaleAt, seed = 0 }) {
   const step = 900, history = [];
   const round = value => Math.round(value * 10) / 10;
@@ -392,16 +392,16 @@ function simulateLimitPool(accounts, { from, fetched, since, scaleAt, seed = 0 }
     for (const account of accounts) { const take = Math.min(account.remaining, need); account.remaining -= take; account.fiveUsed += take; need -= take; if (need <= 0) break; }
     for (const account of accounts) {
       if (account.weekReset <= next) { account.remaining = account.units; account.weekReset += LIMIT_WEEK; }
-      if (account.fiveReset <= next) { account.fiveUsed = 0; account.fiveReset += LIMIT_FIVE_HOURS; }
+      if (account.fiveReset !== null && account.fiveReset <= next) { account.fiveUsed = 0; account.fiveReset += LIMIT_FIVE_HOURS; }
     }
     t = next;
     if (t >= since) for (const account of accounts) history.push(
-      { t, account: account.id, window: 'five_hour', remaining_percent: fiveLeft(account), resets_at: account.fiveReset },
+      ...(account.fiveReset === null ? [] : [{ t, account: account.id, window: 'five_hour', remaining_percent: fiveLeft(account), resets_at: account.fiveReset }]),
       { t, account: account.id, window: 'weekly', remaining_percent: percent(account), resets_at: account.weekReset });
   }
   const snapshot = account => ({ id: account.id, label: account.label, priority: account.priority, plan: account.plan, ...(Number.isFinite(account.banked_resets) ? { banked_resets: account.banked_resets } : {}), banked_credits: account.banked_credits ?? null,
     fetched_at: fetched, stale: false, error: null, windows: [
-      { key: 'five_hour', label: '5-hour', window_seconds: LIMIT_FIVE_HOURS, scope: 'account', model: null, used_percent: round(100 - fiveLeft(account)), remaining_percent: fiveLeft(account), resets_at: account.fiveReset },
+      ...(account.fiveReset === null ? [] : [{ key: 'five_hour', label: '5-hour', window_seconds: LIMIT_FIVE_HOURS, scope: 'account', model: null, used_percent: round(100 - fiveLeft(account)), remaining_percent: fiveLeft(account), resets_at: account.fiveReset }]),
       { key: 'weekly', label: 'Weekly', window_seconds: LIMIT_WEEK, scope: 'account', model: null, used_percent: round(100 - percent(account)), remaining_percent: percent(account), resets_at: account.weekReset }
     ] });
   return { history, accounts: accounts.map(snapshot) };
@@ -431,10 +431,10 @@ export function compactLimitHistory(rows) {
 export function syntheticUsageLimits(hours = 168, scenario = 'mixed', { compact = true } = {}) {
   const shape = LIMIT_SCENARIOS[scenario] || LIMIT_SCENARIOS.mixed;
   const now = Date.now() / 1000, fetched = now - 140, from = Math.floor(now / 900) * 900 - 10 * 86400, since = now - hours * 3600;
-  const prepare = list => list.map(account => ({ ...account, remaining: account.units * account.left, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: resetAfter(account.five, LIMIT_FIVE_HOURS, from), fiveUsed: 0 }));
+  const prepare = list => list.map(account => ({ ...account, remaining: account.units * account.left, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: Number.isFinite(account.five) ? resetAfter(account.five, LIMIT_FIVE_HOURS, from) : null, fiveUsed: 0 }));
   const codex = simulateLimitPool(prepare([
     { id: 'acct-team', label: 'codex-team', priority: 0, plan: 'team', units: 20, banked_resets: 2, banked_credits: bankedCredits(now, [5, 9 * 24], 2), weekly: now + shape.teamReset * 86400, five: now + 1.3 * 3600, left: shape.team },
-    { id: 'acct-prolite', label: 'codex-pro', priority: 1, plan: 'prolite', units: 100, banked_resets: 2, banked_credits: bankedCredits(now, [5 + 10 / 60, 9 * 24], 0), weekly: now + shape.proliteReset * 86400, five: now + 3.1 * 3600, left: shape.prolite }
+    { id: 'acct-prolite', label: 'codex-pro', priority: 1, plan: 'prolite', units: 100, banked_resets: 2, banked_credits: bankedCredits(now, [5 + 10 / 60, 9 * 24], 0), weekly: now + shape.proliteReset * 86400, five: null, left: shape.prolite }
   ]), { from, fetched, since, scaleAt: t => t >= now - 12 * 3600 ? shape.burst : shape.base });
   // Max 20x as Anthropic's usage endpoint names it (rateLimitTier), which the plugin maps to 200 weekly plan units.
   const claude = simulateLimitPool(prepare([
