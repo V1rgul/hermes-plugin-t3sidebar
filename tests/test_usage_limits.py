@@ -88,6 +88,8 @@ class StoreTests(unittest.TestCase):
 		(provider,) = limits.limits_payload(self.store, hours=1, now=NOW)["providers"]
 		opus = provider["accounts"][0]["windows"][1]
 		self.assertEqual((opus["key"], opus["scope"], opus["model"]), ("weekly:opus", "model", "opus"))
+		# Samples stored without a duration get Anthropic's implied one on the way out.
+		self.assertEqual([w["window_seconds"] for w in provider["accounts"][0]["windows"]], [604800, 604800])
 		self.assertEqual(provider["label"], "Anthropic")
 
 	def test_unknown_fields_stay_null(self):
@@ -211,6 +213,10 @@ class NormalizeTests(unittest.TestCase):
 			W(label="Opus week", used_percent=float("nan"), reset_at=None, scope="model"),
 			W(label="Opus week", used_percent=1.0, reset_at=None, scope="model")], plan=None))
 		self.assertEqual([w["key"] for w in out["windows"]], ["five_hour", "weekly:opus", "weekly:opus_2"])
+		# Anthropic reports no durations; its window names imply them, model-scoped ones included.
+		self.assertEqual([w["window_seconds"] for w in out["windows"]], [18000, 604800, 604800])
+		codex = limits.normalize_snapshot("openai-codex", self.snap([W(label="Weekly", used_percent=1.0, reset_at=None, scope="account")]))
+		self.assertIsNone(codex["windows"][0]["window_seconds"])
 		self.assertIsNone(out["windows"][0]["used_percent"])
 		self.assertIsNone(out["windows"][1]["used_percent"])
 		self.assertIsNone(out["plan"])

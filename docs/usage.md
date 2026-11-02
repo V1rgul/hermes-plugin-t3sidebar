@@ -4,7 +4,7 @@ The sidebar footer's **Usage** button opens the `/t3sidebar-usage` page, modeled
 
 ## Usage tab
 
-Three charts on one time axis: tokens, API-equivalent cost and human user messages, in roughly 500 buckets per period: 24 h in 3-minute buckets, 7/30/90 days in 20-minute, 90-minute and 4-hour buckets from local midnight (in the Desktop client's time zone, ending with the bucket in progress). Every chart plots a rate per day, each bucket scaled by its real length (a DST day stretches or shrinks one bucket by an hour); tooltips also give the bucket's raw amount. **Split** draws one series per provider or per model; **Mode** stacks the series or draws them independently from zero.
+Three charts on one time axis: tokens, API-equivalent cost and human user messages, in roughly 500 buckets per period: 24 h in 3-minute buckets, 7/30/90 days in 20-minute, 90-minute and 4-hour buckets from local midnight (in the Desktop client's time zone, ending with the bucket in progress). Every chart plots a rate per day, each bucket scaled by its real length (a DST day stretches or shrinks one bucket by an hour); tooltips also give the bucket's raw amount. **Split** draws one series per provider or per model (a model served through several providers is one series); **Mode** stacks the series or draws them independently from zero.
 
 - Source: Hermes `session_model_usage` (exact totals per session × model × task), read strictly read-only through `GET /usage/history` (`usage_history.py`). No extra data is stored.
 - Timing: Hermes keeps no per-call token counts, so each total is spread over the session's assistant messages (one per API call). Input-side tokens are weighted by the context size at each call and output-side tokens by the reply's size, both measured in characters. Totals are exact; placement within a bucket is approximate.
@@ -13,9 +13,9 @@ Three charts on one time axis: tokens, API-equivalent cost and human user messag
 
 ## Limits tab
 
-For each provider, a pooled chart sums every pool account's remaining percentage for one window (5-hour, weekly or a model-scoped window). Past samples are drawn as a solid area, then comes a **Now** line and a dashed projection. The projection drains at the pooled rate of the last six hours, uses accounts in pool priority order, and steps up when an account's window resets. Under each chart, a folded **Accounts** card previews the account names; unfolded, it holds one card per account showing each window with a pace tick and its reset time.
+For each provider, a pooled chart sums every pool account's remaining percentage for one window (5-hour, weekly or a model-scoped window). Past samples are drawn as a solid area, then comes a **Now** line and a dashed projection. The projection drains at the pooled rate of the last six hours, uses accounts in pool priority order, and steps up when an account's window resets. Under each chart, a folded **Accounts** card previews the account names; unfolded, it holds one card per account showing its pool priority, plan and each window with a pace tick and its reset time. Anthropic reports no window durations, so its 5-hour and weekly windows (model-scoped ones included) take the durations their names imply, which also places their pace ticks.
 
-On both tabs the controls bar stays fixed at the top while the charts scroll beneath it.
+On both tabs the controls bar stays fixed at the top while the charts scroll beneath it; its refresh icon spins while a refresh is in flight.
 
 - Source: `GET /usage/limits` (`usage_limits.py`) reads samples from `<HERMES_HOME>/plugin-data/hermes-t3sidebar/usage-limits.sqlite3`, kept for 35 days.
 - Wire format: each account window's history is one series of parallel arrays (`t`, `remaining_percent`, `resets_at`) in whole seconds and one-decimal percentages, keeping only both ends, every change of value or reset time and the sample just before each change. Unchanged readings carry no information for the step chart, so the live history measured 17× smaller than one object per sample (623 KB to 36 KB); the drain average counts an unchanged stretch that straddles the lookback start from that start.

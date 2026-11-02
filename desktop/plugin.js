@@ -1063,6 +1063,8 @@ function statusIcon(status, glyph = status) {
 const BUNDLED_ICONS = {
   // Lucide v1.59.0 chart-no-axes-column (ISC), the status glyphs' family: three separate bars, where Tabler's chart-histogram overlaps its curve, bars and axis.
   ChartNoAxesColumn: ['M5 21v-6', 'M12 21V3', 'M19 21V9'],
+  // Lucide v1.59.0 refresh-cw (ISC): point-symmetric about the box centre, so the Usage and Limits refresh icon spins in place whatever the SDK's own glyph draws.
+  RefreshCw: ['M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8', 'M21 3v5h-5', 'M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16', 'M8 16H3v5'],
   Gauge: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M13.41 10.59l2.59 -2.59', 'M7 12a5 5 0 0 1 5 -5'],
   ClockX: ['M20.926 13.15a9 9 0 1 0 -7.835 7.784', 'M12 7v5l2 2', 'M22 22l-5 -5', 'M17 22l5 -5'],
   // Derived from Tabler v3.44.0 arrow-bar-to-down (MIT) with the tip moved down to meet the bar's top edge, because Virgile wants the arrow to touch the floor.
@@ -2161,18 +2163,14 @@ export function validBankedCredits(value) {
   }).sort((a, b) => (a.expires_at === null) - (b.expires_at === null) || (a.expires_at ?? 0) - (b.expires_at ?? 0));
   return { fetched_at: finiteOrNull(value.fetched_at), applicable_count: Number.isInteger(value.applicable_count) && value.applicable_count >= 0 ? value.applicable_count : null, credits };
 }
-// One series per backend entry for the chosen split; series with nothing to draw for this metric are left out of its chart and legend.
+// One series per backend entry for the chosen split (the model split is by model alone, whichever providers served it); series with nothing to draw for this metric are left out of its chart and legend.
 export function usageSeries(history, split, metric) {
   const count = history?.buckets?.length || 0;
   const list = history?.[split === 'model' ? 'by_model' : 'by_provider'];
-  const series = (Array.isArray(list) ? list : []).map(item => {
+  return (Array.isArray(list) ? list : []).map(item => {
     const values = Array.from({ length: count }, (_, index) => { const value = Number(item?.[metric]?.[index]); return Number.isFinite(value) && value > 0 ? value : 0; });
     return { key: String(item?.key ?? ''), label: String(item?.label || item?.key || 'Unknown'), provider: item?.provider ?? null, model: item?.model ?? null, values, total: values.reduce((sum, value) => sum + value, 0) };
   }).filter(series => series.key && series.total > 0);
-  // The same model can be billed through several providers (or through an unrecorded one), which gives two series one bare model label; name the provider only for those.
-  const labels = new Map();
-  for (const item of series) labels.set(item.label, (labels.get(item.label) || 0) + 1);
-  return series.map(item => labels.get(item.label) > 1 && item.provider ? { ...item, label: `${item.label} · ${item.provider}` } : item);
 }
 // Slopes (value per bucket) of a smooth curve through every value: a cubic Hermite curve whose slope at a point is Catmull-Rom's (the slope between its two neighbours), limited so no segment rises above or dips below its two end points. A peak, a trough, the edge of a flat run and both ends get slope 0, and no slope exceeds three times either adjacent segment's (Fritsch–Carlson's monotone bound), so a curve of non-negative values never dips below zero.
 export function curveSlopes(values) {
@@ -2762,8 +2760,8 @@ function ScopedUsagePage({ ctx, scope, view }) {
   const active = view === 'limits' ? limits : history;
   const toolbar = h(Fragment, null,
     h('span', { className: 'su-spacer' }),
-    active.isFetching && active.data ? h('span', { className: 'su-muted', role: 'status' }, 'Updating…') : null,
-    h('button', { type: 'button', className: 'su-icon', 'aria-label': 'Refresh', title: 'Refresh', disabled: active.isFetching, onClick: () => void active.refetch() }, icon('RefreshCw', '↻')));
+    // A refetch behind data already on screen spins the refresh icon instead of adding text; screen readers hear the busy state.
+    h('button', { type: 'button', className: 'su-icon su-refresh', 'aria-label': active.isFetching ? 'Updating' : 'Refresh', title: active.isFetching ? 'Updating…' : 'Refresh', 'aria-busy': active.isFetching, 'data-spinning': !!(active.isFetching && active.data), disabled: active.isFetching, onClick: () => void active.refetch() }, icon('RefreshCw', '↻')));
   return h('div', { className: 'su', 'data-view': view }, h('style', null, USAGE_CSS),
     view === 'usage' ? h(Fragment, null,
       h('div', { className: 'su-top' }, h('header', { className: 'su-header' },
@@ -3370,8 +3368,8 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
 }
 function Badge({ tone, title, children }) { return h('span', { className: 'su-badge', 'data-tone': tone, title }, children); }
 // One pill split in two: the subject keeps the plain badge look and the detail half carries the colour.
-function SplitBadge({ tone, title, subject, detail }) {
-  return h('span', { className: 'su-badge su-badge-split', title }, h('span', null, subject), h('span', { className: 'su-badge-half', 'data-tone': tone }, detail));
+function SplitBadge({ kind, tone, title, subject, detail }) {
+  return h('span', { className: 'su-badge su-badge-split', 'data-badge': kind, title }, h('span', null, subject), h('span', { className: 'su-badge-half', 'data-tone': tone }, detail));
 }
 function LimitAccount({ provider, account, selected, now }) {
   const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
@@ -3380,8 +3378,8 @@ function LimitAccount({ provider, account, selected, now }) {
   return h('div', { className: 'su-account', 'data-account': account.id },
     h('div', { className: 'su-account-head' },
       h('strong', null, account.label || account.id),
-      Number.isFinite(account.priority) ? h('span', { className: 'su-muted' }, `priority ${account.priority}`) : null,
-      h(SplitBadge, { title: PLAN_UNITS_NOTE, tone: 'primary', subject: label || 'Unknown plan', detail: `${unitsText(units)} units` }),
+      Number.isFinite(account.priority) ? h(SplitBadge, { kind: 'priority', title: 'Pool priority: the lowest number is used first.', tone: 'primary', subject: 'priority', detail: String(account.priority) }) : null,
+      h(SplitBadge, { kind: 'plan', title: PLAN_UNITS_NOTE, tone: 'primary', subject: label || 'Unknown plan', detail: `${unitsText(units)} units` }),
       assumed ? h('span', { className: 'su-muted su-assumed' }, `capacity unknown, counted as ${BASE_PLAN_UNITS}*`) : null,
       Number.isFinite(account.banked_resets) ? h(BankedBadge, { count: account.banked_resets, windows }) : null,
       account.stale ? h(Badge, { tone: 'warn', title: 'The latest reading is older than the cache freshness limit.' }, 'Stale') : null,
@@ -3403,7 +3401,7 @@ function BankedBadge({ count, windows }) {
   const redeemable = count > 0 ? bankedRedeemable(windows) : null;
   const text = `${count} banked reset${count === 1 ? '' : 's'}`;
   if (redeemable === null) return h(Badge, null, text);
-  return h(SplitBadge, { tone: redeemable ? 'success' : 'warn', subject: text, detail: redeemable ? 'usable now' : `not usable now (all ≥${BANKED_REDEEM_BELOW_PERCENT}%)`,
+  return h(SplitBadge, { kind: 'banked', tone: redeemable ? 'success' : 'warn', subject: text, detail: redeemable ? 'usable now' : `not usable now (all ≥${BANKED_REDEEM_BELOW_PERCENT}%)`,
     title: redeemable ? `An allowance has less than ${BANKED_REDEEM_BELOW_PERCENT}% left, so a reset can be redeemed now.` : `Every allowance has ${BANKED_REDEEM_BELOW_PERCENT}% or more left; Codex refuses a reset until one drops below.` });
 }
 // One line per banked reset credit under the account's bars, soonest expiry first; a credit expiring within a day turns orange.
@@ -3451,6 +3449,10 @@ const USAGE_CSS = `
 .su-spacer{flex:1}.su-muted{color:var(--ui-text-tertiary);font-size:11px}
 .su-icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
 .su-icon:hover:not(:disabled){background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.su-icon:disabled{opacity:.5;cursor:default}
+/* A spinning icon already says busy, so it keeps full opacity rather than the disabled dimming. */
+.su-refresh[data-spinning=true]:disabled{opacity:1}.su-refresh[data-spinning=true]>*{animation:su-spin .8s linear infinite}
+@keyframes su-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.su-refresh[data-spinning=true]>*{animation-duration:2.4s}}
 .su button:focus-visible,.su-plot:focus-visible{outline:2px solid var(--ui-accent);outline-offset:1px}
 .su-state{padding:18px;border:1px dashed var(--ui-stroke-secondary);border-radius:6px;color:var(--ui-text-secondary);text-align:center}.su-state[role=alert]{color:var(--ui-red,var(--ui-text-primary))}
 .su-link{padding:0;border:0;background:transparent;color:var(--ui-accent);text-decoration:underline;cursor:pointer}

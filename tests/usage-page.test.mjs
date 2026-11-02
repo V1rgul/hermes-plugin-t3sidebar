@@ -477,9 +477,9 @@ test('curve slopes pass through every value without overshooting, and stacked bo
   }
 });
 
-test('model labels name the provider only when two series share a model', () => {
-  const shared = { buckets: [0], by_model: [{ key: 'openai-codex/gpt', label: 'gpt', provider: 'openai-codex', tokens: [5] }, { key: 'unknown/gpt', label: 'gpt', provider: 'unknown', tokens: [1] }, { key: 'anthropic/c', label: 'c', provider: 'anthropic', tokens: [2] }] };
-  assert.deepEqual(usage.usageSeries(shared, 'model', 'tokens').map(item => item.label), ['gpt · openai-codex', 'gpt · unknown', 'c']);
+test('model series are split by model alone and keep their bare model labels', () => {
+  const merged = { buckets: [0], by_model: [{ key: 'gpt', label: 'gpt', provider: null, tokens: [6] }, { key: 'c', label: 'c', provider: 'anthropic', tokens: [2] }] };
+  assert.deepEqual(usage.usageSeries(merged, 'model', 'tokens').map(item => [item.key, item.label]), [['gpt', 'gpt'], ['c', 'c']]);
 });
 
 test('scales, formats and colors are compact and stable per series key', () => {
@@ -674,6 +674,22 @@ test('preferences persist through a remount and the page shows empty and error s
   assert.equal(seriesCount('tokens'), 4);
 });
 
+test('a refetch behind shown data spins the refresh icon on both pages instead of showing text', async () => {
+  plugin.register(mock.ctx);
+  for (const contribution of [page(), limitsPage()]) {
+    await render(contribution);
+    const refresh = () => $('.su-refresh');
+    assert.deepEqual([refresh().dataset.spinning, refresh().getAttribute('aria-label')], ['false', 'Refresh']);
+    let release; mock.control.usageGate = new Promise(resolve => { release = resolve; });
+    await click(refresh());
+    assert.deepEqual([refresh().dataset.spinning, refresh().getAttribute('aria-busy'), refresh().getAttribute('aria-label'), refresh().disabled], ['true', 'true', 'Updating', true]);
+    assert.ok(!document.body.textContent.includes('Updating'), 'no visible Updating text');
+    mock.control.usageGate = null; release(); await tick(); await tick();
+    assert.deepEqual([refresh().dataset.spinning, refresh().getAttribute('aria-label')], ['false', 'Refresh']);
+    await act(async () => root.unmount()); root = null;
+  }
+});
+
 async function slide(node, value) {
   assert.ok(node, 'slider exists');
   await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(node, String(value)); node.dispatchEvent(new window.Event('input', { bubbles: true })); });
@@ -790,9 +806,10 @@ test('account details are folded by default and each provider remembers its own 
   // Open, the card holds the account cards and drops the name preview they would repeat.
   assert.deepEqual([section('openai-codex').querySelector('.su-accounts').parentElement.className, toggle('openai-codex').querySelector('.su-disclosure-names') === null, toggle('anthropic').querySelector('.su-disclosure-names') !== null], ['su-accounts-group', true, true]);
   const first = $('.su-account[data-account="acct-team"]');
-  assert.match(first.querySelector('.su-account-head').textContent, /^codex-teampriority 0Business20 units2 banked resets/);
-  const plan = (id, part = '.su-badge') => [...$(`.su-account[data-account="${id}"] ${part}`).children].map(half => `${half.dataset.tone ?? ''}|${half.textContent}`).join(' ');
+  assert.match(first.querySelector('.su-account-head').textContent, /^codex-teampriority0Business20 units2 banked resets/);
+  const plan = (id, part = '.su-badge[data-badge=plan]') => [...$(`.su-account[data-account="${id}"] ${part}`).children].map(half => `${half.dataset.tone ?? ''}|${half.textContent}`).join(' ');
   assert.equal(plan('acct-prolite'), '|Pro 100 primary|100 units', 'the plan pill splits, units in the primary colour');
+  assert.equal(plan('acct-prolite', '.su-badge[data-badge=priority]'), '|priority primary|1', 'the priority pill splits, its number in the primary colour');
   assert.equal($('.su-assumed'), null, 'every plan is in the capacity table');
   assert.equal(first.querySelectorAll('.su-window').length, 2);
   assert.equal(first.querySelectorAll('.su-pace').length, 2, 'every window with a length and reset time has a pace tick');
@@ -1151,7 +1168,7 @@ test('stale, failing and unread accounts keep the normal view', async () => {
   await click($('.su-disclosure'));
   assert.equal($('.su-capacity').textContent, '/ 20 units', 'the account without a reading is left out of the pool');
   // "max" alone does not say 5x or 20x: counted as one base plan, flagged on the row and in a footnote.
-  assert.deepEqual([$('.su-account[data-account="acct-b1"] .su-badge').textContent, $('.su-account[data-account="acct-b1"] .su-assumed').textContent], ['max20 units', 'capacity unknown, counted as 20*']);
+  assert.deepEqual([$('.su-account[data-account="acct-b1"] .su-badge[data-badge=plan]').textContent, $('.su-account[data-account="acct-b1"] .su-assumed').textContent], ['max20 units', 'capacity unknown, counted as 20*']);
   assert.match($('.su-assumption').textContent, /^\* Capacity unknown for claude-max \(max\), claude-team \(no plan reported\): counted as 20 units, one \$20 plan\.$/);
   assert.equal($('.su-verdict').dataset.status, 'unknown', 'a stale pool without drain data gets no verdict');
   assert.match($('.su-chart-notes').textContent, /1 account without a reading left out of the pool/);

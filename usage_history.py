@@ -541,8 +541,13 @@ def _round_preserving_sum(values):
 
 def _render(days, tz, now, buckets, window_end, series, missing):
 	width = len(buckets)
-	by_model = []
+	models = {}
 	providers = {}
+	fields = ("tokens", *TOKEN_CLASSES, "reasoning", "user_messages")
+
+	def empty(key, label, provider, model):
+		return {"key": key, "label": label, "provider": provider, "model": model, **{name: [0] * width for name in fields}, "cost_usd": [0.0] * width}
+
 	for (provider, model), data in series.items():
 		arrays = {name: _round_preserving_sum([max(0.0, value) for value in data.values[name]]) for name in (*TOKEN_CLASSES, "reasoning")}
 		arrays["tokens"] = [sum(arrays[name][index] for name in TOKEN_CLASSES) for index in range(width)]
@@ -551,17 +556,16 @@ def _render(days, tz, now, buckets, window_end, series, missing):
 		if not any(arrays["tokens"]) and not any(users) and not any(round(value, 6) for value in cost):
 			continue
 		label = provider or "unknown"
-		entry = {"key": f"{label}/{model}", "label": model, "provider": label, "model": model}
-		for name in ("tokens", *TOKEN_CLASSES, "reasoning"):
-			entry[name] = arrays[name]
-		entry["cost_usd"] = cost
-		entry["user_messages"] = users
-		by_model.append(entry)
-		bucket = providers.setdefault(label, {"key": label, "label": label, "provider": label, "model": None, **{name: [0] * width for name in ("tokens", *TOKEN_CLASSES, "reasoning")}, "cost_usd": [0.0] * width, "user_messages": [0] * width})
-		# Provider series are sums of the already-rounded model series so the two views always agree to the token.
-		for name in ("tokens", *TOKEN_CLASSES, "reasoning", "user_messages"):
-			bucket[name] = [left + right for left, right in zip(bucket[name], entry[name])]
-		bucket["cost_usd"] = [left + right for left, right in zip(bucket["cost_usd"], cost)]
+		entry = {**arrays, "cost_usd": cost, "user_messages": users}
+		# The model view is split by model alone: one model billed through several providers (or an unrecorded one) is one series, naming its provider only while there is a single one. Both views sum the already-rounded (provider, model) series, so they always agree to the token.
+		model_bucket = models.setdefault(model, empty(model, model, label, model))
+		if model_bucket["provider"] != label:
+			model_bucket["provider"] = None
+		for bucket in (model_bucket, providers.setdefault(label, empty(label, label, label, None))):
+			for name in fields:
+				bucket[name] = [left + right for left, right in zip(bucket[name], entry[name])]
+			bucket["cost_usd"] = [left + right for left, right in zip(bucket["cost_usd"], cost)]
+	by_model = list(models.values())
 	by_provider = list(providers.values())
 	for entry in (*by_model, *by_provider):
 		entry["cost_usd"] = [round(value, 6) for value in entry["cost_usd"]]

@@ -147,6 +147,8 @@ export const ctx = {
     calls.push(['rest', path, options]); if (control.backendMissing) throw new Error('404 backend not enabled');
     if (path.startsWith('/usage/')) {
       if (control.usageError) throw new Error(control.usageError);
+      // A pending promise here holds every usage read in flight until the test resolves it.
+      if (control.usageGate) await control.usageGate;
       const params = new URLSearchParams(path.split('?')[1] || '');
       // control.usageHistory is one payload for every period, or a function of the requested days (the README capture kit serves real history per period that way).
       if (path.startsWith('/usage/history?')) return clone(typeof control.usageHistory === 'function' ? control.usageHistory(Number(params.get('days'))) : control.usageHistory ?? syntheticUsageHistory(Number(params.get('days')), params.get('tz')));
@@ -347,7 +349,7 @@ export function syntheticUsageHistory(days = 7, tz = 'UTC') {
   const by_model = FIXTURE_MODELS.map(([provider, model, weight], seriesIndex) => {
     const tokens = buckets.map(t => Math.round(wave(t, seriesIndex) * weight * 14_000_000 * share));
     const input = tokens.map(value => Math.round(value * 0.2)), output = tokens.map(value => Math.round(value * 0.05)), cache_read = tokens.map((value, index) => value - input[index] - output[index]);
-    return { key: `${provider}/${model}`, label: model, provider, model, tokens, input, output, cache_read, cache_write: tokens.map(() => 0), reasoning: output.map(value => Math.round(value / 3)),
+    return { key: model, label: model, provider, model, tokens, input, output, cache_read, cache_write: tokens.map(() => 0), reasoning: output.map(value => Math.round(value / 3)),
       cost_usd: tokens.map(value => Math.round(value * (provider === 'anthropic' ? 2.4 : 1.1)) / 1e6),
       user_messages: tokens.map(value => Math.round(value / (600_000 * share))) };
   });
