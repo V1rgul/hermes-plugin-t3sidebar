@@ -2085,12 +2085,13 @@ function UtilityLink({ link }) {
   const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-sm', className: 'sf-utility', 'aria-label': link.label, title: tip ? undefined : link.tip, 'data-route': link.route, 'aria-current': current ? 'page' : undefined, onClick: () => openRoute(link.route) }, icon(link.icon, link.glyph));
   return tip ? h(sdk.Tip, { label: link.tip, side: 'top' }, button) : button;
 }
-function UsageFooter({ ctx, scope, companion = false }) {
+// Memoized: toolbar, search and fold changes re-render the sidebar, and the footer's limits verdict would otherwise be re-formatted with each one.
+const UsageFooter = memo(function UsageFooter({ ctx, scope, companion = false }) {
   // Providers sit on the left and the Usage stats button on the right; DOM order matches so keyboard focus follows the visual order.
   return h('footer', { className: 'sf-footer' },
     ctx && scope ? h(LimitsFooterStatus, { ctx, scope, enabled: companion }) : h(LimitsFooterButton, { items: [], now: 0 }),
     h('span', { className: 'sf-footer-end' }, h(UtilityLink, { link: USAGE_LINK })));
-}
+});
 // The Limits entry point is one button whatever the data: every provider's mark, pooled units and a verdict glyph (only when the week runs short or wastes quota, coloured by severity), or the gauge alone while there is nothing to show (loading, failure, no companion, no provider with limits), so the page stays reachable and no placeholder or error ever appears in the row.
 function LimitsFooterStatus({ ctx, scope, enabled }) {
   const prefs = useUsagePreferences(ctx);
