@@ -2711,7 +2711,8 @@ function ScopedUsagePage({ ctx, scope, view }) {
   const client = useQueryClient(), shared = useUsagePreferences(ctx);
   // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made on the other page.
   const [prefs, setPrefs] = useState(shared);
-  useEffect(() => { setPrefs(shared); }, [shared]);
+  // The shared copy echoes every local change a tick later as an equal but new object; keeping the current one then spares the charts a redundant render, which would otherwise land in the middle of a range glide.
+  useEffect(() => { setPrefs(previous => JSON.stringify(previous) === JSON.stringify(shared) ? previous : shared); }, [shared]);
   const update = useCallback(patch => {
     setPrefs(previous => validUsagePreferences({ ...previous, ...resolvePatch(patch, previous) }));
     updateUsagePreferences(ctx, client, patch);
@@ -2859,7 +2860,8 @@ function LoggedOutProvider({ provider }) {
       h('span', { className: 'su-logged-out-text' }, `${provider.label || provider.provider} · logged out in Hermes — sign in to track limits`),
       provider.auth_reason ? h('span', { className: 'su-muted su-logged-out-reason' }, provider.auth_reason) : null));
 }
-function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange }) {
+// Memoized: its props only change with the data, the clock, the preferences or the window, so a page render for anything else (the toolbar's fetching state, the preference echo) skips the charts.
+const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange }) {
   const name = provider.label || provider.provider;
   // The verdict always looks a week ahead whatever range the chart shows, so it reads the same as the sidebar footer.
   const verdict = useMemo(() => limitsVerdict(provider, { lookback: prefs.lookback, window: prefs.window }, now), [provider, prefs.lookback, prefs.window, now]);
@@ -2868,7 +2870,7 @@ function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded
     windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, range: prefs.range[rangeGroup(windowKey)], lookback: prefs.lookback, onRange: (side, hours) => setRange(rangeGroup(windowKey), side, hours) })
       : h(UsageState, null, 'No limit windows reported for this provider.'),
     h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open) }));
-}
+});
 // Per-account rows (plan, priority, banked resets, window bars) are detail under each chart, folded until asked for; the fold is remembered per provider.
 // The fold is a card whose whole header row is the toggle and which holds the account cards once open: a bare text toggle was easy to miss under the chart.
 function AccountsDisclosure({ provider, windowKey, now, open, onToggle }) {
@@ -3061,13 +3063,105 @@ function AxisRangeControl({ side, hours, stops, onChange }) {
     h('span', { className: 'su-axis-crease', 'aria-hidden': true }, icon('UnfoldCrease', '┆')),
     past ? arrow('right', -1, 'Shortest past shown') : arrow('right', 1, 'Longest projection shown'));
 }
+// A range change glides instead of jumping: one animation-frame loop moves the visible time window from the old range to the new one. The SVG follows through its viewBox, because a CSS scale would thicken its non-scaling strokes (measured: a 2px vertical line drew 6px at scale 3), and every HTML mark, the Now line and the axis labels slide with `translate`, which costs no layout. The measurement row's arrows and labels follow the same mapping. Each frame only sets one attribute and a few dozen translates; nothing re-renders.
+const RANGE_MOTION_MS = 220;
+const easeOutCubic = progress => 1 - (1 - progress) ** 3;
+// `drawn` is the time range React drew the chart for: the new range when it grows (drawn on the click), or the wider range still on screen when it shrinks, so the glide zooms in on real content; `onEnd` then asks React to draw the new range, and the next layout effect cancels the glide, which settles it.
+function glideRange(grid, from, to, drawn, onEnd) {
+  const frame = globalThis.requestAnimationFrame, cancelFrame = globalThis.cancelAnimationFrame;
+  const plot = grid.querySelector('.su-plot'), svg = plot?.querySelector(':scope > svg'), span = drawn.end - drawn.start;
+  if (!svg || typeof frame !== 'function' || !(span > 0) || !(from.end > from.start) || !(to.end > to.start)) return null;
+  const width = plot.getBoundingClientRect().width;
+  // Every glider is positioned by a left percentage of the plot width, so its time follows from it.
+  const gliders = [...grid.querySelectorAll('.su-plot > .su-now, .su-plot > .su-empty-dot, .su-marks > *, .su-xaxis > span')]
+    .map(node => ({ node, share: parseFloat(node.style.left) / 100 })).filter(item => Number.isFinite(item.share));
+  // Screen share of the plot where a share of the drawn range lands in the window being shown.
+  const at = (share, start, end) => (drawn.start + share * span - start) / (end - start);
+  // The measurement row glides too: each span's ends follow the time mapping, which also changes its width, so span boxes are set per frame (a handful of small boxes); each label keeps placeMeasureLabels' rule, centred on its span and clamped to its side of Now, with its full text width measured once. Bounds at 0 or 100% are the plot's edges, not times.
+  const row = grid.querySelector('.su-measures');
+  const spans = row ? [...row.querySelectorAll('.su-measure-span')].map(node => ({ node, left: node.style.left, size: node.style.width, tight: node.dataset.tight, from: parseFloat(node.style.left) / 100, to: (parseFloat(node.style.left) + parseFloat(node.style.width)) / 100 })) : [];
+  const labels = row ? [...row.querySelectorAll('.su-measure-text')].map(node => ({ node, side: node.dataset.side, low: Number(node.dataset.low) / 100, high: Number(node.dataset.high) / 100, center: Number(node.dataset.center) / 100, full: node.scrollWidth })) : [];
+  // Should the window ever show past the drawn range's ends, the horizontal gridlines, which hold no data, still stretch over it.
+  const gridlines = [...svg.querySelectorAll(':scope > line.su-grid')];
+  let shown = { ...from }, handle = 0, started = null, done = false;
+  const show = (start, end) => {
+    shown = { start, end };
+    const left = (start - drawn.start) / span * VIEW_W, visible = (end - start) / span * VIEW_W;
+    svg.setAttribute('viewBox', `${left.toFixed(3)} 0 ${visible.toFixed(3)} ${VIEW_H}`);
+    for (const line of gridlines) { line.setAttribute('x1', Math.min(0, left).toFixed(3)); line.setAttribute('x2', Math.max(VIEW_W, left + visible).toFixed(3)); }
+    for (const { node, share } of gliders) node.style.translate = `${(at(share, start, end) - share) * width}px 0`;
+    for (const item of spans) {
+      const a = at(item.from, start, end), b = at(item.to, start, end);
+      item.node.style.left = `${a * 100}%`; item.node.style.width = `${(b - a) * 100}%`; item.node.dataset.tight = String((b - a) * width < TIGHT_SPAN_PX);
+    }
+    const bound = share => clamp(share <= 0 || share >= 1 ? share : at(share, start, end), 0, 1) * width;
+    for (const item of labels) {
+      const low = bound(item.low) + (item.side === 'right' ? MEASURE_GAP_PX : 0), high = bound(item.high) - (item.side === 'left' ? MEASURE_GAP_PX : 0);
+      const room = Math.max(0, high - low), own = Math.min(item.full, room), center = at(item.center, start, end) * width;
+      item.node.style.maxWidth = `${room}px`; item.node.style.left = `${clamp(center - own / 2, low, Math.max(low, high - own))}px`;
+    }
+  };
+  // Runs once, after React has drawn the new range when it was not drawn yet. The measurement row remounts whenever the drawn range changes, so a span still in the page has the props it had when captured and gets them back (React only writes styles whose props change); both label layers are then placed again for the final geometry.
+  const settle = () => {
+    if (done) return;
+    done = true; handle = 0; shown = { ...to };
+    svg.setAttribute('viewBox', `0 0 ${VIEW_W} ${VIEW_H}`);
+    for (const line of gridlines) { line.setAttribute('x1', '0'); line.setAttribute('x2', String(VIEW_W)); }
+    for (const { node } of gliders) node.style.translate = '';
+    for (const item of spans) if (item.node.isConnected) { item.node.style.left = item.left; item.node.style.width = item.size; }
+    if (row?.isConnected) placeMeasureLabels(row);
+    const marks = grid.querySelector('.su-marks'); if (marks) placeMarkLabels(marks);
+    delete grid.dataset.gliding;
+  };
+  const step = time => {
+    started ??= time;
+    const progress = Math.min(1, (time - started) / RANGE_MOTION_MS);
+    // At the end the window is exactly the new range: settle now if it is what React drew, else hold this frame until React draws it.
+    if (progress >= 1) { if (onEnd) { show(to.start, to.end); handle = 0; onEnd(); } else settle(); return; }
+    const eased = easeOutCubic(progress);
+    show(from.start + (to.start - from.start) * eased, from.end + (to.end - from.end) * eased);
+    handle = frame(step);
+  };
+  // Content entering from beyond the old range is clipped to the plot; marks above it (flags, the Now label) stay visible.
+  grid.dataset.gliding = 'true';
+  show(from.start, from.end);
+  handle = frame(step);
+  return { shown: () => shown, cancel: () => { if (handle) cancelFrame?.(handle); settle(); } };
+}
 // "Business: 20, Pro 100: 100": what each account adds to the pool's capacity, an asterisk marking a guessed one.
 function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, onRange }) {
-  const horizonS = range.future * HOUR_S, lookbackS = lookback * HOUR_S, providerId = provider.provider, stops = LIMITS_RANGE_STOPS[rangeGroup(windowKey)];
+  const lookbackS = lookback * HOUR_S, providerId = provider.provider, stops = LIMITS_RANGE_STOPS[rangeGroup(windowKey)];
+  const target = { past: range.past * HOUR_S, future: range.future * HOUR_S }, targetKey = `${windowKey}|${range.past}|${range.future}`;
+  const grid = useRef(null), glide = useRef({ last: null, run: null });
+  // What the chart is drawn for, in seconds before and after Now. A grown range is drawn on the click. A shrunk one keeps the wider range on screen drawn while the glide zooms in, and is drawn once at its end. The change is derived while rendering (React's adjust-state-during-render pattern), so the click still renders once.
+  const [drawn, setDrawn] = useState(() => ({ key: targetKey, windowKey, ...target }));
+  let view = drawn;
+  if (drawn.key !== targetKey) {
+    const shown = glide.current.run?.shown(), canGlide = drawn.windowKey === windowKey && typeof globalThis.requestAnimationFrame === 'function' && !reducedMotion();
+    const visible = shown ? { past: now - shown.start, future: shown.end - now } : drawn;
+    view = { key: targetKey, windowKey, past: canGlide ? Math.max(target.past, visible.past) : target.past, future: canGlide ? Math.max(target.future, visible.future) : target.future };
+    setDrawn(view);
+  }
+  const held = view.past !== target.past || view.future !== target.future;
+  const horizonS = view.future;
   const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey, providerId), [provider, windowKey, providerId]);
   const past = useMemo(() => pooledHistory(samples), [samples]);
   const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS, { lookbackS, provider: providerId }), [provider, windowKey, now, horizonS, lookbackS, providerId]);
-  const start = now - range.past * HOUR_S, end = now + horizonS;
+  const start = now - view.past, end = now + view.future, targetStart = now - target.past, targetEnd = now + target.future;
+  // Only a past or future change of the same window glides; a poll moving Now, a window switch or reduced motion redraw at once. An interrupted glide restarts from the window it was showing.
+  useLayoutEffect(() => {
+    const record = glide.current, last = record.last, running = record.run, node = grid.current;
+    const from = running ? running.shown() : last && { start: last.start, end: last.end };
+    if (running) { running.cancel(); record.run = null; }
+    record.last = { start: targetStart, end: targetEnd, windowKey, key: targetKey };
+    if (node && last && last.windowKey === windowKey && last.key !== targetKey && !reducedMotion()) {
+      const key = targetKey, final = { key, windowKey, ...target };
+      record.run = glideRange(node, from, { start: targetStart, end: targetEnd }, { start, end }, held ? () => setDrawn(current => current.key === key ? final : current) : null);
+    }
+    // A wider drawing with no glide left to show it (a poll or a cancelled glide) gives way to the range at once.
+    if (!record.run && held) setDrawn({ key: targetKey, windowKey, ...target });
+  }, [start, end, targetStart, targetEnd, windowKey, targetKey]);
+  useEffect(() => () => glide.current.run?.cancel(), []);
   const waste = useMemo(() => wasteMarks(projection).filter(mark => mark.t > now && mark.t < end), [projection, now, end]);
   const resets = useMemo(() => resetMarkers(projection, now, end), [projection, now, end]);
   const pastResets = useMemo(() => pastResetMarkers(provider.accounts, samples, start, now, providerId), [provider, samples, start, now, providerId]);
@@ -3129,7 +3223,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
       h('span', { className: 'su-capacity', title: PLAN_UNITS_NOTE }, projection.capacity ? `/ ${unitsText(projection.capacity)} units` : 'no account readings yet'),
       h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate))),
     verdict ? h(VerdictLine, { verdict, now, windowKey }) : null,
-    h('div', { className: 'su-limits-grid' },
+    h('div', { className: 'su-limits-grid', ref: grid },
       // No unit caption (the headline already says units) and no 0 label, which would sit on the past range control under it; the 0 gridline stays.
       h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, ticks.filter(tick => tick > 0).map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, unitsText(tick)))),
       h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota in units over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end), 'data-cap': cap,
@@ -3155,7 +3249,8 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
         return h('span', { key: t, 'data-edge': share < 3 ? 'start' : share > 97 ? 'end' : undefined, style: { left: `${share}%` } }, axis.labels[index]);
       })),
       h(AxisRangeControl, { side: 'future', hours: range.future, stops, onChange: hours => onRange('future', hours) }),
-      h(MeasureRow, { nowPct, average, empty: emptyMeasured ? { fromPct: nowPct, toPct: emptyPct, text: emptyText } : null })),
+      // Keyed by the drawn range, so a redraw at the end of a glide gets fresh nodes rather than ones the glide restyled.
+      h(MeasureRow, { key: `${view.past}|${view.future}`, nowPct, average, empty: emptyMeasured ? { fromPct: nowPct, toPct: emptyPct, text: emptyText } : null })),
     notes.length ? h('div', { className: 'su-chart-foot' }, h('div', { className: 'su-chart-notes' }, notes)) : null);
 }
 function Badge({ tone, title, children }) { return h('span', { className: 'su-badge', 'data-tone': tone, title }, children); }
@@ -3317,6 +3412,8 @@ const USAGE_CSS = `
 .su-axis-step:disabled{opacity:.35;cursor:default}
 .su-axis-step svg,.su-axis-crease svg{width:16px;height:16px}
 .su-axis-crease{display:inline-flex;margin:0 -3px;color:var(--ui-text-quaternary)}
+/* While a range change glides, what slides in from beyond the old range is clipped at the plot's sides only, so flags and the Now label above it stay visible. */
+.su-limits-grid[data-gliding] .su-plot,.su-limits-grid[data-gliding] .su-xaxis{overflow-x:clip;overflow-y:visible}
 .su-measures{grid-area:3/2;position:relative;color:var(--ui-text-secondary)}
 .su-measure-span{position:absolute;top:22px;height:0}
 .su-measure-line{position:absolute;left:0;right:0;top:-0.5px;border-top:1px solid currentColor}

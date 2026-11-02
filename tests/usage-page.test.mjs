@@ -889,6 +889,76 @@ test('unfold arrows beside each end of the x axis set four page-wide ranges that
   assert.deepEqual([chart().dataset.past, chart().dataset.future], ['720', '24']);
 });
 
+test('a range change glides through the viewBox and translates, then settles; polls, window switches and reduced motion do not glide', async t => {
+  // A manual frame queue stands in for requestAnimationFrame, so the test steps the glide at chosen timestamps.
+  const queue = [], saved = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame, media: globalThis.matchMedia };
+  let reduce = false;
+  Object.assign(globalThis, { requestAnimationFrame: callback => queue.push(callback), cancelAnimationFrame: handle => { queue[handle - 1] = null; }, matchMedia: () => ({ matches: reduce }) });
+  t.after(() => Object.assign(globalThis, { requestAnimationFrame: saved.raf, cancelAnimationFrame: saved.caf, matchMedia: saved.media }));
+  const run = async time => act(async () => { for (const callback of queue.splice(0)) callback?.(time); });
+  plugin.register(mock.ctx); await render(limitsPage());
+  const grid = () => $('.su-limits-grid'), viewBox = () => grid().querySelector('.su-plot > svg').getAttribute('viewBox');
+  const translated = () => $$('.su-limits-grid .su-xaxis > span, .su-limits-grid .su-marks > *, .su-limits-grid .su-now').filter(node => node.style.translate !== '').length;
+  assert.deepEqual([grid().dataset.gliding, viewBox()], [undefined, '0 0 1000 100'], 'nothing glides on the first render');
+  const spans = () => $$('.su-limits-grid .su-measure-span').map(node => `${node.style.left}|${node.style.width}`).join(), sevenDays = spans();
+  // Glide frames compute positions through the time mapping, so an identity frame can differ from React's percentages in the last float digits.
+  const near = (a, b) => { const x = a.split(/[|,]/).map(parseFloat), y = b.split(/[|,]/).map(parseFloat); return x.length === y.length && x.every((value, index) => Math.abs(value - y[index]) < 1e-9); };
+  // 7d → 30d ahead with 7d of past is drawn on the click: the old 14 days are 14/37 of the new span, so the glide opens on that slice of the viewBox.
+  await click($('.su-axis-range[data-side=future] [data-direction=right]'));
+  assert.deepEqual($$('.su-limits-grid').map(node => node.dataset.gliding), ['true', 'true'], 'both charts glide, since the range is page-wide');
+  assert.equal(viewBox(), `0.000 0 ${(14 / 37 * 1000).toFixed(3)} 100`);
+  assert.ok(translated() > 0, 'marks, the Now line and axis labels carry a translate');
+  // The measurement arrows glide too: their spans start at the old mapping and end exactly where React placed them.
+  const gliding = spans();
+  await run(1000); await run(1110);
+  const middle = Number(viewBox().split(' ')[2]);
+  assert.ok(middle > 14 / 37 * 1000 && middle < 1000, `half way the window is between the ranges (${viewBox()})`);
+  await run(1300);
+  assert.deepEqual([grid().dataset.gliding, viewBox(), translated(), queue.length], [undefined, '0 0 1000 100', 0, 0], 'settled: the React viewBox is back and every translate is cleared');
+  const settled = spans();
+  assert.ok(settled !== gliding && settled.split(',').every(item => /^[\d.]+%\|[\d.]+%$/.test(item)), `measurement spans moved (${gliding}) and settled on React's percentages (${settled})`);
+  // Shrinking 30d → 7d keeps the 37-day drawing on the click and opens on all of it, zooms in on its first 14 days, then draws the 7-day range once, at the end. The drawn range shows in the plot's data-end.
+  const plotEnd = () => $('.su-pooled .su-plot').dataset.end, ends = [];
+  const observer = new window.MutationObserver(records => records.forEach(() => ends.push(plotEnd())));
+  observer.observe($('.su-pooled .su-plot'), { attributes: true, attributeFilter: ['data-end'] });
+  await click($('.su-axis-range[data-side=future] [data-direction=left]'));
+  const gridline = () => grid().querySelector('.su-plot > svg > line.su-grid');
+  assert.deepEqual([grid().dataset.gliding, viewBox(), gridline().getAttribute('x2'), near(spans(), settled), ends.length], ['true', '0.000 0 1000.000 100', '1000.000', true, 0], 'the click keeps the wide drawing');
+  await run(1500); await run(1610);
+  const zoom = Number(viewBox().split(' ')[2]);
+  assert.ok(zoom < 1000 && zoom > 14 / 37 * 1000 && ends.length === 0, `half way it zooms inside the same drawing (${viewBox()})`);
+  await run(1800);
+  assert.deepEqual([grid().dataset.gliding, viewBox(), translated(), gridline().getAttribute('x2'), spans(), ends.length], [undefined, '0 0 1000 100', 0, '1000', sevenDays, 1], 'the 7-day range is drawn once, at the end, with React\'s spans');
+  // Growing again draws once, on the click.
+  ends.length = 0;
+  await click($('.su-axis-range[data-side=future] [data-direction=right]'));
+  assert.equal(ends.length, 1);
+  await run(1900); await run(2200);
+  assert.deepEqual([ends.length, spans(), grid().dataset.gliding], [1, settled, undefined]);
+  observer.disconnect();
+  // A change while gliding restarts from the window being shown: shrink the future, then the past half way through.
+  await click($('.su-axis-range[data-side=future] [data-direction=left]'));
+  await run(3000); await run(3050);
+  const shown = viewBox();
+  await click($('.su-axis-range[data-side=past] [data-direction=right]'));
+  assert.equal(grid().dataset.gliding, 'true');
+  await run(4000); await run(4300);
+  const plot = $('.su-pooled .su-plot');
+  assert.deepEqual([grid().dataset.gliding, viewBox(), translated(), gridline().getAttribute('x1'), gridline().getAttribute('x2'), (Number(plot.dataset.end) - Number(plot.dataset.start)) / D],
+    [undefined, '0 0 1000 100', 0, '0', '1000', 8], `the interrupted glide (at ${shown}) settles on one day back and seven ahead`);
+  // A poll moves Now and both ends of the axis but keeps the range: no glide.
+  const before = $('.su-pooled .su-plot').dataset.start;
+  await act(async () => { await mock.queryClient.refetchQueries(); }); await tick();
+  assert.deepEqual([$('.su-pooled .su-plot').dataset.start !== before || restPaths().length > 0, grid().dataset.gliding, viewBox()], [true, undefined, '0 0 1000 100']);
+  // Switching the window redraws at once: a different series, not the same one at another range.
+  await click(button('5-hour'));
+  assert.deepEqual([grid().dataset.gliding, viewBox()], [undefined, '0 0 1000 100']);
+  // Reduced motion: the range changes instantly.
+  reduce = true;
+  await click($('.su-axis-range[data-side=future] [data-direction=right]'));
+  assert.deepEqual([grid().dataset.gliding, viewBox(), grid().closest('.su-pooled').dataset.future], [undefined, '0 0 1000 100', '168']);
+});
+
 test('the averaging period is measured left of Now and cut at the plot edge without a left arrowhead', async () => {
   plugin.register(mock.ctx); await render(limitsPage());
   const shape = () => {

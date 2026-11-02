@@ -2094,6 +2094,41 @@ try {
       await usage.mouse.move(5, 5);
     }
     {
+      // Range glide, on its own page without reduced motion: during the glide the Now line, reset dots and axis labels stay on the SVG's time mapping, and it settles to the same geometry as an instant change.
+      const glide = await browser.newPage({ viewport: { width: 1300, height: 1000 }, deviceScaleFactor: 1, timezoneId: 'Europe/Paris' });
+      glide.on('pageerror', error => errors.push(error.message));
+      await glide.clock.install({ time: new Date('2026-10-28T15:00:00+01:00') });
+      await glide.goto(`http://127.0.0.1:${server.address().port}/?route=/t3sidebar-limits`);
+      await glide.waitForSelector(`${CODEX} .su-axis-range[data-side=future]`);
+      // Each frame, compare where the SVG draws Now (its share of the new range through the current viewBox) with where the Now line is.
+      await glide.evaluate(selector => {
+        const grid = document.querySelector(`${selector} .su-limits-grid`), samples = window.__glide = [];
+        const loop = () => {
+          if (grid.dataset.gliding) {
+            const plot = grid.querySelector('.su-plot').getBoundingClientRect(), [x0, , width] = grid.querySelector('.su-plot > svg').getAttribute('viewBox').split(' ').map(Number);
+            const now = grid.querySelector('.su-now'), share = parseFloat(now.style.left) / 100, drawn = plot.left + (share * 1000 - x0) / width * plot.width;
+            const empty = grid.querySelector('.su-measure[data-kind=empty] .su-measure-span');
+            samples.push({ width, offset: Math.abs(now.getBoundingClientRect().left - drawn), measure: empty ? Math.abs(empty.getBoundingClientRect().left - now.getBoundingClientRect().left) : null, clip: getComputedStyle(grid.querySelector('.su-plot')).overflowX });
+          }
+          if (samples.length < 60) requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
+      }, CODEX);
+      await glide.locator(`${CODEX} .su-axis-range[data-side=future] [data-direction=right]`).click();
+      await glide.waitForFunction(selector => !document.querySelector(`${selector} .su-limits-grid`).dataset.gliding && document.querySelector(`${selector} .su-pooled`).dataset.future === '720', CODEX, { timeout: 2000 });
+      const result = await glide.evaluate(selector => {
+        const grid = document.querySelector(`${selector} .su-limits-grid`), plot = grid.querySelector('.su-plot').getBoundingClientRect(), now = grid.querySelector('.su-now');
+        return { samples: window.__glide, viewBox: grid.querySelector('.su-plot > svg').getAttribute('viewBox'), translates: [...grid.querySelectorAll('.su-xaxis > span, .su-marks > *, .su-now, .su-empty-dot')].filter(node => node.style.translate).length,
+          nowAt: Math.abs(now.getBoundingClientRect().left - (plot.left + parseFloat(now.style.left) / 100 * plot.width)), clip: getComputedStyle(grid.querySelector('.su-plot')).overflowX };
+      }, CODEX);
+      console.log(`USAGE RANGE GLIDE: ${JSON.stringify({ frames: result.samples.length, widths: result.samples.map(item => Math.round(item.width)), maxOffset: Math.max(...result.samples.map(item => item.offset)), maxMeasure: Math.max(...result.samples.map(item => item.measure ?? 0)), viewBox: result.viewBox, translates: result.translates, nowAt: result.nowAt, clip: result.clip })}`);
+      check('A range change glides over several frames, widening the SVG window from the old range to the new one', result.samples.length >= 5 && result.samples.every((item, index, all) => index === 0 || item.width >= all[index - 1].width - 1e-6) && result.samples[0].width < 1000);
+      check('During the glide the Now line stays on the SVG\'s time mapping within 1.5px, with the plot clipped at its sides', result.samples.every(item => item.offset <= 1.5 && item.clip === 'clip'));
+      check('During the glide the time-to-empty arrow keeps starting on the Now line within 1.5px', result.samples.some(item => item.measure !== null) && result.samples.every(item => item.measure === null || item.measure <= 1.5));
+      check('After the glide the SVG viewBox, translates and clipping are back to the instant-change state', result.viewBox === '0 0 1000 100' && result.translates === 0 && result.nowAt <= 0.5 && result.clip === 'visible');
+      await glide.close();
+    }
+    {
       // Account details: folded by default, unfolded per provider, remembered across a reload.
       await usage.locator(`${CODEX} .su-disclosure`).click();
       await usage.waitForSelector(`${CODEX} .su-account`);
