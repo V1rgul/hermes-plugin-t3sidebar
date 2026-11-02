@@ -711,8 +711,23 @@ def _credits_block(row, now):
 	return {"fetched_at": fetched_at, "applicable_count": applicable, "credits": [{"status": "available", "expires_at": c.get("expires_at"), "granted_at": c.get("granted_at")} for c in available]}
 
 
+def _history_number(value, digits=0):
+	"""Rounded for the wire: whole seconds for times, one decimal for percentages; whole numbers lose their ``.0``."""
+	if value is None:
+		return None
+	rounded = round(value, digits)
+	return int(rounded) if rounded == int(rounded) else rounded
+
+
+def _compact_series(account_id, key, samples):
+	"""One account window's history as parallel arrays, keeping only the samples a step chart and the drain average need: both ends, every change of value or reset, and the sample just before each change. A held reading between two kept samples was sampled unchanged."""
+	kept = [sample for index, sample in enumerate(samples)
+		if index == 0 or index == len(samples) - 1 or sample[1:] != samples[index - 1][1:] or sample[1:] != samples[index + 1][1:]]
+	return {"account": account_id, "window": key, "t": [s[0] for s in kept], "remaining_percent": [s[1] for s in kept], "resets_at": [s[2] for s in kept]}
+
+
 def limits_payload(store, *, hours, now, sampler_status=None):
-	"""``GET /usage/limits`` body: latest windows per account from its newest sample plus ascending history within ``hours``."""
+	"""``GET /usage/limits`` body: latest windows per account from its newest sample plus, per account window, the compacted history within ``hours`` (``_compact_series``)."""
 	if type(hours) is not int or not 1 <= hours <= MAX_HOURS:
 		raise ValueError(f"hours must be an integer between 1 and {MAX_HOURS}")
 	now = _finite(now)
@@ -727,7 +742,7 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 		if slug not in providers:
 			providers[slug] = {
 				"provider": slug, "label": PROVIDER_LABELS.get(slug, slug), "error": _safe_error(statuses.get(slug)),
-				"accounts": {}, "history": [],
+				"accounts": {}, "series": {},
 			}
 		return providers[slug]
 
@@ -748,7 +763,7 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 			"used_percent": used, "remaining_percent": remaining, "resets_at": resets_at,
 		})
 		if since <= t <= now:
-			block["history"].append({"t": t, "account": account_id, "window": key, "remaining_percent": remaining, "resets_at": resets_at})
+			block["series"].setdefault((account_id, key), []).append((_history_number(t), _history_number(remaining, 1), _history_number(resets_at)))
 	result = []
 	for slug in sorted(providers):
 		block = providers[slug]
@@ -765,10 +780,10 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 				"windows": account["windows"],
 			})
 		accounts.sort(key=lambda a: (a["priority"] is None, a["priority"] or 0, a["label"] or "", a["id"]))
-		block["history"].sort(key=lambda point: (point["t"], point["account"], point["window"]))
+		history = [_compact_series(account_id, key, samples) for (account_id, key), samples in sorted(block.pop("series").items())]
 		# A logged-out provider is an authentication state, not a sampling failure.
 		logged_out = block["error"] == "logged_out"
-		result.append({**block, "error": None if logged_out else block["error"], "auth": "logged_out" if logged_out else "ok", "auth_reason": None, "accounts": accounts})
+		result.append({**block, "error": None if logged_out else block["error"], "auth": "logged_out" if logged_out else "ok", "auth_reason": None, "accounts": accounts, "history": history})
 	if sampler_status is None:
 		sampler_status = store.read_status()
 	return {"generated_at": now, "sampler": _sampler_block(sampler_status), "providers": result}

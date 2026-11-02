@@ -78,8 +78,8 @@ class StoreTests(unittest.TestCase):
 		self.assertEqual([w["key"] for w in second["windows"]], ["five_hour", "weekly"])
 		self.assertEqual(second["windows"][1]["remaining_percent"], 58.0)
 		self.assertEqual(provider["accounts"][0]["banked_resets"], 0)
-		self.assertEqual([(h["t"], h["account"], h["window"]) for h in provider["history"]],
-			[(NOW - 100, "7ad3ca", "five_hour"), (NOW - 100, "7ad3ca", "weekly"), (NOW - 50, "7c202b", "weekly")])
+		self.assertEqual([(h["account"], h["window"], h["t"]) for h in provider["history"]],
+			[("7ad3ca", "five_hour", [NOW - 100]), ("7ad3ca", "weekly", [NOW - 100]), ("7c202b", "weekly", [NOW - 50])])
 
 	def test_model_scoped_windows_keep_model(self):
 		self.store.record([{"provider": "anthropic", "error": None, "accounts": [account("a1b2c3", NOW - 10, [
@@ -99,7 +99,22 @@ class StoreTests(unittest.TestCase):
 		self.assertIsNone(acct["banked_resets"])
 		self.assertEqual(acct["windows"], [{"key": "w3600", "label": None, "window_seconds": None, "scope": "account", "model": None,
 			"used_percent": None, "remaining_percent": None, "resets_at": None}])
-		self.assertEqual(provider["history"], [{"t": NOW - 10, "account": "7ad3ca", "window": "w3600", "remaining_percent": None, "resets_at": None}])
+		self.assertEqual(provider["history"], [{"account": "7ad3ca", "window": "w3600", "t": [NOW - 10], "remaining_percent": [None], "resets_at": [None]}])
+
+	def test_history_is_compacted_and_rounded_for_the_wire(self):
+		# Seven readings five minutes apart: unchanged, a change, unchanged again; reset times jitter by microseconds and percentages carry many decimals.
+		used = [10.0, 10.0, 10.0, 10.0, 33.333, 33.333, 33.333]
+		for index, value in enumerate(used):
+			t = NOW - 1800 + index * 300 + 0.4
+			self.store.record(codex(account("7ad3ca", t, [window("weekly", value, NOW + 9000 + index * 1e-6)])), checked_at=t)
+		(provider,) = limits.limits_payload(self.store, hours=1, now=NOW + 60)["providers"]
+		(series,) = provider["history"]
+		# Kept: the first reading, the last unchanged one before the change, the change, and the last; whole seconds and one decimal, ints when whole.
+		self.assertEqual(series, {"account": "7ad3ca", "window": "weekly", "t": [int(NOW) - 1800, int(NOW) - 900, int(NOW) - 600, int(NOW)],
+			"remaining_percent": [90, 90, 66.7, 66.7], "resets_at": [int(NOW) + 9000] * 4})
+		self.assertEqual([type(value) for value in series["t"] + series["resets_at"]], [int] * 8)
+		# The latest snapshot keeps its full precision.
+		self.assertEqual(provider["accounts"][0]["windows"][0]["remaining_percent"], 100.0 - 33.333)
 
 	def test_retention_prunes_on_write(self):
 		self.store.record(codex(account("7ad3ca", NOW - 36 * 86400, [window("weekly", 1.0)])), checked_at=NOW - 36 * 86400)
@@ -112,14 +127,14 @@ class StoreTests(unittest.TestCase):
 			self.store.record(codex(account("7ad3ca", NOW - offset, [window("weekly", used, NOW + 100)])), checked_at=NOW - offset)
 		payload = limits.limits_payload(self.store, hours=1, now=NOW, sampler_status={"interval_s": 300, "started_at": 1.0, "last_run_at": 2.0, "last_error": None, "secret": "x"})
 		(provider,) = payload["providers"]
-		self.assertEqual([h["t"] for h in provider["history"]], [NOW - 1800])
+		self.assertEqual([h["t"] for h in provider["history"]], [[NOW - 1800]])
 		self.assertEqual(provider["accounts"][0]["windows"][0]["used_percent"], 20.0)
 		self.assertTrue(provider["accounts"][0]["stale"])
 		self.assertEqual(payload["sampler"], {"interval_s": 300.0, "started_at": 1.0, "last_run_at": 2.0, "last_error": None})
 		self.assertEqual(payload["generated_at"], NOW)
 		fresh = limits.limits_payload(self.store, hours=2, now=NOW - 1800 + 899)["providers"][0]
 		self.assertFalse(fresh["accounts"][0]["stale"])
-		self.assertEqual([h["t"] for h in fresh["history"]], [NOW - 7200, NOW - 1800])
+		self.assertEqual([h["t"] for h in fresh["history"]], [[NOW - 7200, NOW - 1800]])
 		for hours in (0, 841, True, 1.5, "24"):
 			with self.assertRaises(ValueError):
 				limits.limits_payload(self.store, hours=hours, now=NOW)
