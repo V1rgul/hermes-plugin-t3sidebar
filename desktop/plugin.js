@@ -2131,12 +2131,22 @@ export function validUsageHistory(value) {
   for (const field of ['by_provider', 'by_model']) if (value[field] != null && !Array.isArray(value[field])) throw new Error('Unsupported usage history response.');
   return { ...value, by_provider: value.by_provider || [], by_model: value.by_model || [], pricing_missing: Array.isArray(value.pricing_missing) ? value.pricing_missing.filter(item => typeof item === 'string') : [] };
 }
+// The backend sends each account window's history as parallel arrays ({ account, window, t, remaining_percent, resets_at }) holding only the samples where the value or reset changes, the one just before each change and both ends. The charts read them as per-sample rows in time order.
+export function limitHistoryRows(history) {
+  const rows = [];
+  for (const item of Array.isArray(history) ? history : []) {
+    if (!item || typeof item.account !== 'string' || typeof item.window !== 'string' || !Array.isArray(item.t)) continue;
+    const values = Array.isArray(item.remaining_percent) ? item.remaining_percent : [], resets = Array.isArray(item.resets_at) ? item.resets_at : [];
+    item.t.forEach((t, index) => rows.push({ t, account: item.account, window: item.window, remaining_percent: values[index] ?? null, resets_at: resets[index] ?? null }));
+  }
+  return rows.sort((a, b) => a.t - b.t || a.account.localeCompare(b.account) || (a.window < b.window ? -1 : a.window > b.window ? 1 : 0));
+}
 export function validUsageLimits(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.providers)) throw new Error('Unsupported usage limits response.');
   const providers = value.providers.filter(item => item && typeof item.provider === 'string').map(item => ({
     // Only an explicit logged_out marks a provider without a usable credential; anything else keeps the normal view.
     ...item, auth: item.auth === 'logged_out' ? 'logged_out' : 'ok', auth_reason: typeof item.auth_reason === 'string' && item.auth_reason ? item.auth_reason : null, accounts: Array.isArray(item.accounts) ? item.accounts.filter(account => account && typeof account.id === 'string').map(account => ({ ...account, windows: Array.isArray(account.windows) ? account.windows.filter(win => win && typeof win.key === 'string') : [], banked_credits: validBankedCredits(account.banked_credits) })) : [],
-    history: Array.isArray(item.history) ? item.history : []
+    history: limitHistoryRows(item.history)
   }));
   return { ...value, providers, sampler: value.sampler && typeof value.sampler === 'object' ? value.sampler : null };
 }
@@ -2425,18 +2435,27 @@ export function pooledHistory(samples) {
 }
 // Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in units per hour (a drop on a 100-unit plan weighs five times a drop of the same percent on a 20-unit one), or null without at least 15 minutes of paired readings.
 export function drainStats(samples, now, lookbackS = 12 * HOUR_S) {
-  const from = now - lookbackS, groups = new Map();
-  for (const sample of samples) if (sample.t >= from && sample.t <= now) { if (!groups.has(sample.account)) groups.set(sample.account, []); groups.get(sample.account).push(sample); }
+  const from = now - lookbackS, groups = new Map(), before = new Map();
+  for (const sample of samples) {
+    if (sample.t < from) { if (!(before.get(sample.account)?.t > sample.t)) before.set(sample.account, sample); continue; }
+    if (sample.t <= now) { if (!groups.has(sample.account)) groups.set(sample.account, []); groups.get(sample.account).push(sample); }
+  }
   let consumed = 0, first = Infinity, last = -Infinity, pairs = 0;
-  for (const list of groups.values()) {
+  // A rise, or a later reset time, means the window restarted in between. That interval's consumption is unknown, so it counts as none rather than as negative drain (resets_at jitter of under a minute is not a restart).
+  const restarted = (earlier, later) => later.value > earlier.value || later.resets_at !== null && earlier.resets_at !== null && later.resets_at > earlier.resets_at + 60;
+  for (const [account, list] of groups) {
     list.sort((a, b) => a.t - b.t);
+    // The pair straddling the lookback start counts from that start, with the share of its drop after it. Compacted history keeps an unchanged stretch only at its ends, so without this a lookback starting inside one would begin its coverage at the stretch's later end.
+    const held = before.get(account);
+    if (held && list[0].t > from) {
+      first = Math.min(first, from); last = Math.max(last, list[0].t); pairs++;
+      if (!restarted(held, list[0])) consumed += (sampleUnits(held) - sampleUnits(list[0])) * (list[0].t - from) / (list[0].t - held.t);
+    }
     for (let index = 1; index < list.length; index++) {
-      const before = list[index - 1], after = list[index];
-      if (after.t <= before.t) continue;
-      first = Math.min(first, before.t); last = Math.max(last, after.t); pairs++;
-      // A rise, or a later reset time, means the window restarted in between. That interval's consumption is unknown, so it counts as none rather than as negative drain (resets_at jitter of under a minute is not a restart).
-      const restarted = after.value > before.value || after.resets_at !== null && before.resets_at !== null && after.resets_at > before.resets_at + 60;
-      if (!restarted) consumed += sampleUnits(before) - sampleUnits(after);
+      const earlier = list[index - 1], later = list[index];
+      if (later.t <= earlier.t) continue;
+      first = Math.min(first, earlier.t); last = Math.max(last, later.t); pairs++;
+      if (!restarted(earlier, later)) consumed += sampleUnits(earlier) - sampleUnits(later);
     }
   }
   const coveredS = pairs ? last - first : 0;

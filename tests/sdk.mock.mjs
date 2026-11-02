@@ -408,7 +408,27 @@ function simulateLimitPool(accounts, { from, fetched, since, scaleAt, seed = 0 }
 }
 // Both accounts' nine-day credits expire at the same instant, so the 30-day chart shows one ×2 flag beside single flags. The backend's banked_credits block: available credits expiring the given hours from now, granted a week before, and how many could be redeemed now.
 const bankedCredits = (now, hours, applicable) => ({ fetched_at: now - 900, applicable_count: applicable, credits: hours.map(hour => ({ status: 'available', expires_at: now + hour * 3600, granted_at: now + hour * 3600 - 30 * 86400 })) });
-export function syntheticUsageLimits(hours = 168, scenario = 'mixed') {
+// The backend's history wire shape: one series of parallel arrays per account window. limitSeries keeps every sample as given, for hand-built test histories; compactLimitHistory also applies usage_limits._compact_series (whole seconds, one decimal, both ends, every change of value or reset and the sample just before it).
+export function limitSeries(rows) {
+  const series = new Map();
+  for (const row of rows) {
+    const key = `${row.account}\u0000${row.window}`;
+    if (!series.has(key)) series.set(key, { account: row.account, window: row.window, t: [], remaining_percent: [], resets_at: [] });
+    const item = series.get(key);
+    item.t.push(row.t); item.remaining_percent.push(row.remaining_percent ?? null); item.resets_at.push(row.resets_at ?? null);
+  }
+  return [...series.values()].sort((a, b) => a.account.localeCompare(b.account) || a.window.localeCompare(b.window));
+}
+export function compactLimitHistory(rows) {
+  const number = (value, digits = 0) => value === null || value === undefined ? null : Math.round(value * 10 ** digits) / 10 ** digits;
+  return limitSeries(rows.map(row => ({ ...row, t: number(row.t), remaining_percent: number(row.remaining_percent, 1), resets_at: number(row.resets_at) }))).map(item => {
+    const same = (a, b) => item.remaining_percent[a] === item.remaining_percent[b] && item.resets_at[a] === item.resets_at[b], last = item.t.length - 1;
+    const kept = item.t.map((_, index) => index).filter(index => index === 0 || index === last || !same(index, index - 1) || !same(index, index + 1));
+    return { account: item.account, window: item.window, t: kept.map(index => item.t[index]), remaining_percent: kept.map(index => item.remaining_percent[index]), resets_at: kept.map(index => item.resets_at[index]) };
+  });
+}
+// `compact: false` keeps every sample at full precision, as the reference for compaction tests.
+export function syntheticUsageLimits(hours = 168, scenario = 'mixed', { compact = true } = {}) {
   const shape = LIMIT_SCENARIOS[scenario] || LIMIT_SCENARIOS.mixed;
   const now = Date.now() / 1000, fetched = now - 140, from = Math.floor(now / 900) * 900 - 10 * 86400, since = now - hours * 3600;
   const prepare = list => list.map(account => ({ ...account, remaining: account.units * account.left, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: resetAfter(account.five, LIMIT_FIVE_HOURS, from), fiveUsed: 0 }));
@@ -421,8 +441,8 @@ export function syntheticUsageLimits(hours = 168, scenario = 'mixed') {
     { id: 'acct-claude', label: 'claude-max', priority: 0, plan: 'default_claude_max_20x', units: 200, weekly: now + shape.claudeReset * 86400, five: now + 2.2 * 3600, left: shape.claude }
   ]), { from, fetched, since, scaleAt: () => shape.claudeLoad, seed: 5 });
   return { generated_at: now, sampler: { interval_s: 300, started_at: now - 10 * 86400, last_run_at: fetched, last_error: null }, providers: [
-    { provider: 'openai-codex', label: 'OpenAI Codex', history: codex.history, accounts: codex.accounts },
-    shape.anthropic ? { provider: 'anthropic', label: 'Anthropic', history: claude.history, accounts: claude.accounts }
+    { provider: 'openai-codex', label: 'OpenAI Codex', history: (compact ? compactLimitHistory : limitSeries)(codex.history), accounts: codex.accounts },
+    shape.anthropic ? { provider: 'anthropic', label: 'Anthropic', history: (compact ? compactLimitHistory : limitSeries)(claude.history), accounts: claude.accounts }
       // Hermes knows the provider but holds no usable credential for it.
       : { provider: 'anthropic', label: 'Anthropic', auth: 'logged_out', auth_reason: 'No usable Anthropic credential in the Hermes pool', accounts: [], history: [] }
   ] };

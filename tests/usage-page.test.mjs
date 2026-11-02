@@ -76,6 +76,51 @@ test('without drain data the projection is flat apart from resets, and unknown r
   assert.deepEqual(result.unknownAccounts, ['u']); assert.equal(result.capacity, 100);
 });
 
+test('compacted history gives the same drain rates, pooled line, past resets, projection and verdict as every sample', () => {
+  // The synthetic drain follows office hours; pin the browser smoke's weekday afternoon so idle nights and weekends give long unchanged stretches.
+  const realNow = Date.now, fixed = Date.parse('2026-10-28T15:00:00+01:00');
+  Date.now = () => fixed;
+  try {
+    const now = fixed / 1000, round = (value, digits = 0) => value === null ? null : Math.round(value * 10 ** digits) / 10 ** digits;
+    for (const scenario of ['mixed', 'light', 'steady']) {
+      // Reference: every sample at the wire precision (whole seconds, one decimal), so only the dropped samples differ.
+      const raw = mock.syntheticUsageLimits(840, scenario, { compact: false });
+      const precise = series => series.map(item => ({ ...item, t: item.t.map(t => round(t)), remaining_percent: item.remaining_percent.map(value => round(value, 1)), resets_at: item.resets_at.map(value => round(value)) }));
+      const reference = usage.validUsageLimits({ ...raw, providers: raw.providers.map(item => ({ ...item, history: precise(item.history) })) });
+      const compact = usage.validUsageLimits(mock.syntheticUsageLimits(840, scenario));
+      for (const [index, full] of reference.providers.entries()) {
+        const kept = compact.providers[index], label = `${scenario} ${full.provider}`;
+        assert.ok(kept.history.length < full.history.length, `${label}: compaction keeps ${kept.history.length} of ${full.history.length} samples`);
+        for (const windowKey of ['weekly', 'five_hour']) {
+          const a = usage.limitSamples(full.accounts, full.history, windowKey, full.provider), b = usage.limitSamples(kept.accounts, kept.history, windowKey, kept.provider);
+          for (const hours of usage.LOOKBACK_STOPS) {
+            const x = usage.drainStats(a, now, hours * H), y = usage.drainStats(b, now, hours * H);
+            assert.ok(Math.abs(x.rate - y.rate) <= 1e-9 * Math.max(1, Math.abs(x.rate)) && x.coveredS === y.coveredS && x.partial === y.partial, `${label} ${windowKey} ${hours}h: ${JSON.stringify([x, y])}`);
+          }
+          const pooledA = usage.pooledHistory(a), pooledB = usage.pooledHistory(b);
+          const at = (points, t) => { let value = null; for (const point of points) { if (point.t > t) break; value = point.value; } return value; };
+          assert.ok(pooledA.every(point => Math.abs(at(pooledB, point.t) - point.value) < 1e-9), `${label} ${windowKey}: the pooled step line is unchanged`);
+          const marks = samples => usage.pastResetMarkers(full.accounts, samples, now - 35 * D, now, full.provider).map(group => [group.t, group.accounts.map(item => [item.id, round(item.base, 6), round(item.top, 6)])]);
+          assert.deepEqual(marks(b), marks(a), `${label} ${windowKey}: past reset markers`);
+          const points = history => usage.projectPool(full.accounts, history, windowKey, now, 30 * D, { lookbackS: 12 * H, provider: full.provider }).points.map(point => [point.t, round(point.value, 6)]);
+          assert.deepEqual(points(kept.history), points(full.history), `${label} ${windowKey}: projection`);
+        }
+        assert.deepEqual(usage.limitsVerdict(kept, usage.USAGE_DEFAULTS, now), usage.limitsVerdict(full, usage.USAGE_DEFAULTS, now), `${label}: verdict`);
+      }
+    }
+  } finally { Date.now = realNow; }
+});
+
+test('limit history rows come from the compacted series, in time order', () => {
+  const series = [{ account: 'b', window: 'weekly', t: [10, 30], remaining_percent: [50, 49.5], resets_at: [100, null] }, { account: 'a', window: 'weekly', t: [10, 20], remaining_percent: [60, null], resets_at: [90, 90] }, { account: 5, window: 'weekly', t: [1] }, null];
+  assert.deepEqual(usage.limitHistoryRows(series), [
+    { t: 10, account: 'a', window: 'weekly', remaining_percent: 60, resets_at: 90 }, { t: 10, account: 'b', window: 'weekly', remaining_percent: 50, resets_at: 100 },
+    { t: 20, account: 'a', window: 'weekly', remaining_percent: null, resets_at: 90 }, { t: 30, account: 'b', window: 'weekly', remaining_percent: 49.5, resets_at: null }]);
+  // Per-sample objects are not a history shape: they are dropped.
+  assert.deepEqual(usage.limitHistoryRows([{ t: 20, account: 'a', window: 'weekly', remaining_percent: 1, resets_at: null }]), []);
+  assert.deepEqual([usage.limitHistoryRows(null), usage.validUsageLimits({ providers: [{ provider: 'x', history: series }] }).providers[0].history.length], [[], 4]);
+});
+
 test('drain rate pools consumption over the lookback and ignores reset jumps', () => {
   const now = 100 * H;
   const samples = usage.limitSamples([{ id: 'a', plan: 'prolite' }, { id: 'b', plan: 'prolite' }], [
@@ -88,8 +133,9 @@ test('drain rate pools consumption over the lookback and ignores reset jumps', (
     { t: now - H, account: 'b', window: 'weekly', remaining_percent: 49, resets_at: now + 4 * D },
     { t: now - H, account: 'b', window: 'five_hour', remaining_percent: 0, resets_at: null }
   ], 'weekly', 'openai-codex');
-  // a: 80→70 (10) and 100→90 (10); the rise is a reset. b: 50→49 straddles a new reset time, so it counts as none.
-  assert.equal(Math.round(usage.drainRate(samples, now, 6 * H) * 1000) / 1000, Math.round(20 / 3 * 1000) / 1000);
+  // a: 80→70 (10) and 100→90 (10); the rise is a reset. b: 50→49 straddles a new reset time, so it counts as none. The 99→80 pair straddles the 6h lookback start, so its last 3 of 5 hours count (11.4) and the coverage starts at the lookback.
+  const six = usage.drainStats(samples, now, 6 * H);
+  assert.deepEqual([Math.round(six.rate * 1000) / 1000, six.coveredS, Math.round(six.consumed * 1000) / 1000, six.partial], [Math.round(31.4 / 6 * 1000) / 1000, 6 * H, 31.4, false]);
   // Twelve hours reach back to the 99% reading: 99→80 adds 19 points over the 8 hours the readings cover.
   const wide = usage.drainStats(samples, now, 12 * H);
   assert.deepEqual([wide.rate, wide.coveredS, wide.consumed, wide.partial], [39 / 8, 8 * H, 39, true], 'less history than the lookback uses what exists and says so');
@@ -218,6 +264,8 @@ test('the pool weighs accounts by plan units: a raw point on Pro 100 moves it fi
 });
 
 // A two-account pool for verdict cases: the priority-0 Business seat is empty and resets in 4 days, while the Pro 100 account (one percent = one unit) has `left` percent, resets in 1 day and has dropped `perHour` points every hour for the last 12 hours.
+// What the backend would serve for a hand-built provider: its per-sample rows as series on the wire.
+const served = provider => ({ ...provider, history: mock.limitSeries(provider.history) });
 function verdictProvider(now, { provider = 'openai-codex', label = 'OpenAI Codex', plans = ['team', 'prolite'], left = 60, perHour = 0.5, stale = false, auth = 'ok' } = {}) {
   const history = [];
   for (let hour = 12; hour >= 0; hour--) history.push(
@@ -722,7 +770,7 @@ test('a logged-out provider is a compact muted row after every chart', async () 
 
 test('the Limits page shows the verdict and a waste measurement at each reset that discards quota', async () => {
   const now = Date.now() / 1000;
-  mock.control.usageLimits = { generated_at: now, sampler: null, providers: [verdictProvider(now)] };
+  mock.control.usageLimits = { generated_at: now, sampler: null, providers: [served(verdictProvider(now))] };
   plugin.register(mock.ctx); await render(limitsPage());
   assert.deepEqual([$('.su-pool').textContent, $('.su-capacity').textContent], ['60', '/ 120 units']);
   assert.equal($('.su-capacity').getAttribute('title'), '20 units = one $20 plan\'s allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.');
@@ -750,7 +798,7 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
 
 test('a pool that runs dry before its next reset gets the short verdict alongside its waste and time-to-empty measurements', async () => {
   const now = Date.now() / 1000;
-  mock.control.usageLimits = { generated_at: now, sampler: null, providers: [verdictProvider(now, { perHour: 2 })] };
+  mock.control.usageLimits = { generated_at: now, sampler: null, providers: [served(verdictProvider(now, { perHour: 2 }))] };
   plugin.register(mock.ctx); await render(limitsPage());
   assert.equal($('.su-verdict').dataset.status, 'short');
   assert.match($('.su-verdict').textContent, /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset · missing ~168 units$/);
@@ -768,9 +816,9 @@ test('the single Limits button shows each provider\'s pooled units with a verdic
   const now = Date.now() / 1000;
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [
     { provider: 'xai', label: 'xAI', auth: 'logged_out', accounts: [], history: [] },
-    verdictProvider(now, { perHour: 2 }),
-    verdictProvider(now, { provider: 'anthropic', label: 'Anthropic', plans: ['pro', 'max_5x'] }),
-    verdictProvider(now, { provider: 'nous', label: 'Nous', plans: [null, null], left: 13 })] };
+    served(verdictProvider(now, { perHour: 2 })),
+    served(verdictProvider(now, { provider: 'anthropic', label: 'Anthropic', plans: ['pro', 'max_5x'] })),
+    served(verdictProvider(now, { provider: 'nous', label: 'Nous', plans: [null, null], left: 13 }))] };
   plugin.register(mock.ctx); await render(mock.control.contributions[0]);
   assert.equal(restPaths().filter(path => path.startsWith('/usage/limits?')).length, 1, 'one limits request, keyed like the Limits page');
   assert.equal(restPaths().find(path => path.startsWith('/usage/limits?')), '/usage/limits?hours=168');
@@ -785,7 +833,7 @@ test('the single Limits button shows each provider\'s pooled units with a verdic
   const name = limits.getAttribute('aria-label');
   assert.match(name, /^Limits\. OpenAI Codex: 60 \/ 120 units · Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset · missing ~168 units\. Anthropic: 60 \/ 120 units · 48 units will expire unused by [A-Z][a-z]{2}\. Nous: 2\.6 \/ 40 units · On track for the next 7 days: nothing runs out and little expires unused\.$/);
   assert.equal(ADVICE.test(name), false);
-  const codex = mock.control.usageLimits.providers[1];
+  const codex = usage.validUsageLimits(mock.control.usageLimits).providers[1];
   assert.equal(usage.limitsFooterLine(codex, usage.limitsVerdict(codex, usage.USAGE_DEFAULTS, now), now).startsWith('OpenAI Codex: 60 / 120 units · Runs out '), true);
   await click(limits);
   assert.deepEqual(mock.calls.filter(call => call[0] === 'navigate').map(call => call[1]), ['/t3sidebar-limits']);
@@ -822,7 +870,7 @@ test('the lookback slider moves between stops, changes the drain rate and widens
   const now = Date.now() / 1000;
   // Four points per hour for the last two hours, one per hour for the eight hours before.
   const history = [[-10 * H + 30, 90], [-2 * H + 30, 82], [-H + 30, 78], [-30, 74]].map(([offset, value]) => ({ t: now + offset, account: 'a', window: 'weekly', remaining_percent: value, resets_at: now + 5 * D }));
-  mock.control.usageLimits = { generated_at: now, sampler: null, providers: [{ provider: 'openai-codex', label: 'OpenAI Codex', history,
+  mock.control.usageLimits = { generated_at: now, sampler: null, providers: [{ provider: 'openai-codex', label: 'OpenAI Codex', history: mock.limitSeries(history),
     accounts: [{ id: 'a', label: 'a', priority: 0, plan: 'prolite', fetched_at: now - 60, windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: 74, resets_at: now + 5 * D }] }] }] };
   mock.ctx.storage.set('usage-preferences', { lookback: 2 });
   plugin.register(mock.ctx); await render(limitsPage());
