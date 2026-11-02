@@ -573,7 +573,8 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.deepEqual([/Next reset/.test(document.body.textContent), /plan units/i.test(document.body.textContent), $$('[title]').some(node => /plan units/i.test(node.title))], [false, false, false]);
   // One controls bar at the top: lookback, window, horizon and refresh, none of them repeated per chart.
   const bar = $('.su-limits-controls');
-  assert.equal(bar.parentElement.className, 'su', 'the controls head the page');
+  // The bar sits in its own fixed strip above the scrolling pane, so it stays visible whatever is scrolled.
+  assert.deepEqual([bar.parentElement.className, bar.parentElement.parentElement.className, bar.closest('.su-scroll') === null, $('.su-scroll').contains($('.su-overview'))], ['su-top', 'su', true, true], 'the controls head the page outside the scrolling pane');
   assert.equal(bar.compareDocumentPosition($('.su-provider-limits')) & 4, 4, 'the controls come before the first section');
   assert.deepEqual([$$('.su-lookback').length, $$('.su-horizon').length, $$('.su [role=group][aria-label=Window]').length, $$('.su [role=group][aria-label=Horizon]').length], [1, 1, 1, 1]);
   assert.deepEqual([bar.querySelector('.su-lookback') !== null, bar.querySelector('.su-horizon') !== null, bar.querySelector('[aria-label=Window]') !== null, bar.querySelector('[aria-label=Refresh]') !== null], [true, true, true, true]);
@@ -581,7 +582,9 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.deepEqual([...bar.querySelectorAll('[aria-label=Window] button')].map(node => node.textContent), ['5-hour', 'Weekly']);
   // Account details are folded under each chart; the shared footnote appears once at the bottom.
   assert.equal($$('.su-account').length, 0, 'accounts are folded by default');
-  assert.deepEqual($$('.su-disclosure').map(node => [node.textContent, node.getAttribute('aria-expanded')]), [['Accounts (2)', 'false'], ['Accounts (1)', 'false']]);
+  assert.deepEqual($$('.su-disclosure').map(node => [node.getAttribute('aria-label'), node.getAttribute('aria-expanded')]), [['Accounts (2)', 'false'], ['Accounts (1)', 'false']]);
+  // The folded card previews its accounts by name; the label and count stay separate spans so the count can be quieter.
+  assert.deepEqual([...$('.su-disclosure').children].slice(1).map(node => `${node.className}|${node.textContent}`), ['su-disclosure-label|Accounts', 'su-disclosure-count|2', 'su-disclosure-names|chatgptvitibot · chatgpt1']);
   assert.equal($$('.su-footnote').length, 1);
   assert.match($('.su-footnote').textContent, /^Sampled every 5m · last sample .*averaged over the selected period.*20 units = one \$20 plan's allowance/);
   assert.equal($('.su-overview').lastElementChild.className, 'su-footnotes', 'the footnotes close the page');
@@ -627,6 +630,8 @@ test('account details are folded by default and each provider remembers its own 
   assert.equal(toggle('openai-codex').getAttribute('aria-controls'), section('openai-codex').querySelector('.su-accounts').id);
   assert.deepEqual([section('openai-codex').querySelectorAll('.su-account').length, section('anthropic').querySelectorAll('.su-account').length], [2, 0]);
   assert.deepEqual(mock.ctx.storage.get('usage-preferences').accounts, { 'openai-codex': true });
+  // Open, the card holds the account cards and drops the name preview they would repeat.
+  assert.deepEqual([section('openai-codex').querySelector('.su-accounts').parentElement.className, toggle('openai-codex').querySelector('.su-disclosure-names') === null, toggle('anthropic').querySelector('.su-disclosure-names') !== null], ['su-accounts-group', true, true]);
   const first = $('.su-account[data-account="acct-team"]');
   assert.match(first.querySelector('.su-account-head').textContent, /^chatgptvitibotpriority 0Business20 units2 banked resets/);
   const plan = (id, part = '.su-badge') => [...$(`.su-account[data-account="${id}"] ${part}`).children].map(half => `${half.dataset.tone ?? ''}|${half.textContent}`).join(' ');
@@ -885,7 +890,7 @@ test('stale, failing and unread accounts keep the normal view', async () => {
     { id: 'acct-b1', label: 'claude-max', priority: 1, plan: 'max', fetched_at: now - 3 * H, stale: true, error: null, windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: 39, resets_at: now + D }] },
     { id: 'acct-b2', label: 'claude-team', priority: 2, fetched_at: null, stale: false, error: 'HTTP 401 from usage endpoint', windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: null, resets_at: null }] }] }] };
   plugin.register(mock.ctx); await render(limitsPage());
-  assert.equal($('.su-disclosure').textContent, 'Accounts (2)');
+  assert.equal($('.su-disclosure').getAttribute('aria-label'), 'Accounts (2)');
   await click($('.su-disclosure'));
   assert.equal($('.su-capacity').textContent, '/ 20 units', 'the account without a reading is left out of the pool');
   // "max" alone does not say 5x or 20x: counted as one base plan, flagged on the row and in a footnote.
