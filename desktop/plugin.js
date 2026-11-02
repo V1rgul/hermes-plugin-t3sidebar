@@ -2711,12 +2711,12 @@ function ScopedUsagePage({ ctx, scope, view }) {
     h('button', { type: 'button', className: 'su-icon', 'aria-label': 'Refresh', title: 'Refresh', disabled: active.isFetching, onClick: () => void active.refetch() }, icon('RefreshCw', '↻')));
   return h('div', { className: 'su', 'data-view': view }, h('style', null, USAGE_CSS),
     view === 'usage' ? h(Fragment, null,
-      h('header', { className: 'su-header' },
+      h('div', { className: 'su-top' }, h('header', { className: 'su-header' },
         h(Segmented, { label: 'Period', showLabel: false, options: [{ id: 1, label: '24h' }, { id: 7, label: '7d' }, { id: 30, label: '30d' }, { id: 90, label: '90d' }], value: prefs.days, onChange: days => update({ days }) }),
         h(Segmented, { label: 'Split', options: [{ id: 'provider', label: 'Provider' }, { id: 'model', label: 'Model' }], value: prefs.split, onChange: split => update({ split }) }),
         h(Segmented, { label: 'Mode', options: [{ id: 'stacked', label: 'Stacked' }, { id: 'independent', label: 'Independent' }], value: prefs.mode, onChange: mode => update({ mode }) }),
-        toolbar),
-      h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs })))
+        toolbar)),
+      h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs }))))
       // The shared projection controls head the Limits page, so its refresh control sits at the end of that row.
       : h(LimitsView, { query: limits, prefs, update, toolbar }));
 }
@@ -2815,20 +2815,21 @@ function LimitsView({ query, prefs, update, toolbar }) {
   const selected = chartWindow(windows, prefs.window);
   // Stable per provider id, so a section's toggle callback survives polls.
   const setExpanded = useCallback((id, open) => update(previous => ({ accounts: { ...previous.accounts, [id]: open } })), [update]);
-  const controls = h('header', { className: 'su-header su-limits-controls' },
+  // The controls stay put above the scrolling sections, so they remain reachable however far down the page is read.
+  const controls = h('div', { className: 'su-top' }, h('header', { className: 'su-header su-limits-controls' },
     h(LookbackSlider, { hours: prefs.lookback, onChange: lookback => update({ lookback }) }),
     windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windows.map(item => ({ id: item.key, label: item.label })), value: selected.key, onChange: value => update({ window: value }) }) : null,
     // An explicit 7d | 30d choice rather than an icon toggle: both horizons stay visible, and the pressed one is the chart's.
     h(Segmented, { label: 'Horizon', className: 'su-horizon', options: HORIZON_DAYS.map(days => ({ id: days, label: `${days}d` })), value: prefs.horizon, onChange: horizon => update({ horizon }) }),
-    toolbar);
-  if (!data) return h(Fragment, null, controls, h('div', { className: 'su-body' }, query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…')));
-  return h(Fragment, null, controls,
+    toolbar));
+  if (!data) return h(Fragment, null, controls, h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…'))));
+  return h(Fragment, null, controls, h('div', { className: 'su-scroll' },
     h('div', { className: 'su-body su-overview' },
       query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
       providers.length ? null : h(UsageState, null, 'No subscription limits recorded yet.'),
       providers.map(provider => provider.auth === 'logged_out' ? h(LoggedOutProvider, { key: provider.provider, provider })
         : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded })),
-      h(LimitsFootnotes, { providers: active, sampler: data.sampler, now })));
+      h(LimitsFootnotes, { providers: active, sampler: data.sampler, now }))));
 }
 // Hermes knows the provider but has no usable credential, so there is nothing to sample or project: one muted row instead of a chart.
 function LoggedOutProvider({ provider }) {
@@ -2848,11 +2849,16 @@ function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded
     h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open) }));
 }
 // Per-account rows (plan, priority, banked resets, window bars) are detail under each chart, folded until asked for; the fold is remembered per provider.
+// The fold is a card whose whole header row is the toggle and which holds the account cards once open: a bare text toggle was easy to miss under the chart.
 function AccountsDisclosure({ provider, windowKey, now, open, onToggle }) {
   const id = `su-accounts-${provider.provider.replace(/[^A-Za-z0-9_-]/g, '_')}`, count = provider.accounts.length;
+  // While folded, the account names preview what the card holds; once open, the cards themselves name them.
+  const names = open ? '' : provider.accounts.map(account => account.label || account.id).join(' · ');
   return h('div', { className: 'su-accounts-group', 'data-open': open },
-    h('button', { type: 'button', className: 'su-disclosure', 'aria-expanded': open, 'aria-controls': open ? id : undefined, onClick: () => onToggle(!open) },
-      h('span', { className: 'su-disclosure-chevron', 'aria-hidden': true }, icon('ChevronRight', '›')), `Accounts (${count})`),
+    h('button', { type: 'button', className: 'su-disclosure', 'aria-expanded': open, 'aria-controls': open ? id : undefined, 'aria-label': `Accounts (${count})`, onClick: () => onToggle(!open) },
+      h('span', { className: 'su-disclosure-chevron', 'aria-hidden': true }, icon('ChevronRight', '›')),
+      h('span', { className: 'su-disclosure-label' }, 'Accounts'), h('span', { className: 'su-disclosure-count' }, count),
+      names ? h('span', { className: 'su-disclosure-names', title: names }, names) : null),
     open ? h('div', { className: 'su-accounts', id }, count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now }))
       : h(UsageState, null, 'No accounts in this provider pool.')) : null);
 }
@@ -3187,10 +3193,13 @@ function SamplerInfo({ sampler, now }) {
 }
 // The page renders in the workspace pane, outside the sidebar stylesheet, so it carries its own theme-variable styles.
 const USAGE_CSS = `
-.su{box-sizing:border-box;height:100%;overflow-y:auto;padding:14px 24px 28px;font:12px/1.45 var(--font-sans,inherit);color:var(--ui-text-primary)}
+.su{box-sizing:border-box;display:flex;flex-direction:column;height:100%;overflow:hidden;font:12px/1.45 var(--font-sans,inherit);color:var(--ui-text-primary)}
+/* The top bar sits outside the scrolling pane. Both reserve the same scrollbar gutter, so the centred bar and sections share their edges whether or not the page overflows. */
+.su-top{flex:none;padding:14px 24px 0;overflow:hidden;scrollbar-gutter:stable}
+.su-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:16px 24px 28px;scrollbar-gutter:stable}
 .su *{box-sizing:border-box}.su button{font:inherit}
 .su-header,.su-body{max-width:1100px;margin:0 auto}
-.su-header{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-bottom:16px}
+.su-header{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding-bottom:10px;border-bottom:1px solid var(--ui-stroke-secondary)}
 .su-body{display:flex;flex-direction:column;gap:20px}
 .su-control{display:inline-flex;align-items:center;gap:6px}.su-control-label{font-size:11px;color:var(--ui-text-tertiary)}
 .su-seg{display:inline-flex;gap:2px;padding:2px;border-radius:5px;background:var(--ui-bg-quaternary)}
@@ -3232,7 +3241,7 @@ const USAGE_CSS = `
 .su-xaxis{position:relative;height:16px;margin-left:56px;font-size:10px;color:var(--ui-text-quaternary)}
 .su-xaxis span{position:absolute;top:2px;transform:translateX(-50%);white-space:nowrap}.su-xaxis span[data-edge=start]{transform:none}.su-xaxis span[data-edge=end]{transform:translateX(-100%)}
 .su-footnote{margin:0;font-size:11px;line-height:1.5;color:var(--ui-text-tertiary)}.su-error{color:var(--ui-red,var(--ui-text-primary))}
-.su-limits-controls{--su-color:var(--ui-accent);padding-bottom:10px;border-bottom:1px solid var(--ui-stroke-secondary)}
+.su-limits-controls{--su-color:var(--ui-accent)}
 /* Overview: one section per provider, divided by a hairline; the shared footnotes close the page. */
 .su-overview{gap:28px}
 .su-provider-limits{display:flex;flex-direction:column;gap:14px;min-width:0}
@@ -3242,9 +3251,12 @@ const USAGE_CSS = `
 .su-provider-limits.su-logged-out{gap:0}
 .su-logged-out-row{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;color:var(--ui-text-tertiary)}
 .su-logged-out-row svg[data-provider-mark]{opacity:.7}
-.su-accounts-group{display:flex;flex-direction:column;gap:8px}
-.su-disclosure{display:inline-flex;align-self:flex-start;align-items:center;gap:4px;margin-left:-4px;padding:3px 6px 3px 2px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-secondary);font-size:12px;font-weight:500;cursor:pointer}
-.su-disclosure:hover{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
+.su-accounts-group{display:flex;flex-direction:column;border:1px solid var(--ui-stroke-secondary);border-radius:8px;background:color-mix(in srgb,var(--ui-text-primary) 3%,transparent)}
+.su-disclosure{display:flex;align-items:center;gap:6px;width:100%;min-width:0;padding:8px 12px 8px 8px;border:0;border-radius:7px;background:transparent;color:var(--ui-text-primary);font-size:12px;font-weight:500;text-align:left;cursor:pointer}
+.su-disclosure:hover{background:var(--chrome-action-hover,var(--ui-bg-quaternary))}
+.su-accounts-group[data-open=true]>.su-disclosure{border-radius:7px 7px 0 0}
+.su-disclosure-count{font-weight:400;color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}
+.su-disclosure-names{flex:1 1 0;min-width:0;margin-left:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400;color:var(--ui-text-tertiary);text-align:right}
 .su-disclosure-chevron{display:inline-flex;transition:transform .12s ease}.su-disclosure-chevron svg{width:14px;height:14px}.su-disclosure[aria-expanded=true] .su-disclosure-chevron{transform:rotate(90deg)}
 @media(prefers-reduced-motion:reduce){.su-disclosure-chevron{transition:none}}
 .su-footnotes{display:flex;flex-direction:column;gap:4px}
@@ -3274,8 +3286,8 @@ const USAGE_CSS = `
 .su-empty-note{color:var(--ui-text-tertiary)}
 .su-chart-foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px 24px;font-size:11px;color:var(--ui-text-tertiary)}
 .su-chart-notes{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px 16px}
-.su-accounts{display:flex;flex-direction:column;gap:8px}
-.su-account{padding:10px 12px;border:1px solid var(--ui-stroke-secondary);border-radius:6px}
+.su-accounts{display:flex;flex-direction:column;gap:8px;padding:2px 8px 8px}
+.su-account{padding:10px 12px;border:1px solid var(--ui-stroke-secondary);border-radius:6px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary))}
 .su-account-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin-bottom:8px}.su-account-head strong{font-weight:600}
 .su-badge{padding:1px 6px;border-radius:8px;background:var(--ui-bg-quaternary);font-size:10px;color:var(--ui-text-secondary)}
 .su-badge-split{display:inline-flex;padding:0;overflow:hidden}.su-badge-split>span{padding:1px 6px}

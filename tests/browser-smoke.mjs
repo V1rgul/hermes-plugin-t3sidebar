@@ -1664,7 +1664,7 @@ try {
       const root = document.querySelector('.su'), charts = [...root.querySelectorAll('.su-chart')], r = el => el.getBoundingClientRect();
       const plots = charts.map(chart => r(chart.querySelector('.su-plot')));
       const inside = [...root.querySelectorAll('.su-header *, .su-legend *, .su-xaxis span, .su-yaxis span, .su-footnote')].every(el => { const box = r(el), bounds = r(root); return box.width === 0 || box.left >= bounds.left - 0.5 && box.right <= bounds.right + 0.5; });
-      return { overflowX: root.scrollWidth - root.clientWidth, charts: charts.map(chart => chart.dataset.metric), aligned: plots.every(p => Math.abs(p.left - plots[0].left) < 1 && Math.abs(p.width - plots[0].width) < 1), plotWidth: plots[0].width,
+      return { overflowX: Math.max(...[...document.querySelectorAll('.su-top, .su-scroll')].map(el => el.scrollWidth - el.clientWidth)), charts: charts.map(chart => chart.dataset.metric), aligned: plots.every(p => Math.abs(p.left - plots[0].left) < 1 && Math.abs(p.width - plots[0].width) < 1), plotWidth: plots[0].width,
         series: charts.map(chart => chart.querySelectorAll('svg g[data-series]').length), drawn: charts.every(chart => [...chart.querySelectorAll('svg .su-line')].every(path => path.getTotalLength() > 50 && r(path).width > 0.9 * plots[0].width)), inside };
     });
     let layout = await usageLayout();
@@ -1756,11 +1756,13 @@ try {
         const parts = [lookback, bar.querySelector('[aria-label=Window]'), bar.querySelector('.su-horizon'), bar.querySelector('[aria-label=Refresh]')];
         return { tabs: document.querySelectorAll('.su-provider-tabs, button.su-provider').length, sections: sections.map(node => node.dataset.provider), headings: sections.map(node => node.querySelector('.su-provider-head')?.textContent),
           marks: sections.map(node => !!node.querySelector('.su-provider-head svg[data-provider-mark]')), charts: sections.map(node => node.querySelectorAll('.su-pooled').length),
-          barFirst: bar.parentElement.classList.contains('su') && r(bar).bottom <= r(sections[0]).top, parts: parts.map(Boolean), ordered: parts.every((node, index) => index === 0 || r(node).left >= r(parts[index - 1]).right),
+          barFirst: bar.parentElement.classList.contains('su-top') && bar.parentElement.parentElement.classList.contains('su') && !bar.closest('.su-scroll') && r(bar).bottom <= r(sections[0]).top, parts: parts.map(Boolean), ordered: parts.every((node, index) => index === 0 || r(node).left >= r(parts[index - 1]).right),
           oneRow: parts.every(node => Math.abs(mid(r(node)) - mid(r(parts[0]))) <= 2), once: ['.su-lookback', '.su-horizon', '[aria-label=Window]', '[aria-label=Refresh]'].map(selector => document.querySelectorAll(`.su ${selector}`).length),
           sliderRow: label.right <= range.left && range.right <= value.left && Math.abs(mid(label) - mid(range)) <= 1.5 && Math.abs(mid(value) - mid(range)) <= 1.5,
           sliderText: [lookback.querySelector('.su-lookback-label').textContent, lookback.querySelector('.su-lookback-value').textContent], accounts: document.querySelectorAll('.su-account').length,
-          disclosures: [...document.querySelectorAll('.su-disclosure')].map(node => `${node.textContent}|${node.getAttribute('aria-expanded')}`), footnotes: document.querySelectorAll('.su-footnote').length,
+          disclosures: [...document.querySelectorAll('.su-disclosure')].map(node => `${node.getAttribute('aria-label')}|${node.getAttribute('aria-expanded')}`),
+          cards: [...document.querySelectorAll('.su-accounts-group')].map(group => { const toggle = group.querySelector('.su-disclosure'), names = toggle.querySelector('.su-disclosure-names');
+            return Math.abs(r(group).width - r(group.closest('.su-provider-limits')).width) <= 1 && Math.abs(r(toggle).width - group.clientWidth) <= 1 && getComputedStyle(group).borderTopStyle === 'solid' && !!names?.textContent && r(names).right <= r(toggle).right; }), footnotes: document.querySelectorAll('.su-footnote').length,
           footnoteLast: document.querySelector('.su-overview').lastElementChild.classList.contains('su-footnotes') };
       });
       console.log(`USAGE LIMITS OVERVIEW: ${JSON.stringify(overview)}`);
@@ -1769,12 +1771,13 @@ try {
       check('One shared controls bar heads the page: Projections based on [slider] value, Window, 7d | 30d horizon, Refresh, in one row and only once', overview.barFirst && overview.parts.every(Boolean) && overview.ordered && overview.oneRow
         && overview.once.join() === '1,1,1,1' && overview.sliderRow && overview.sliderText.join() === 'Projections based on,12h');
       check('Accounts are folded under every chart by default and the footnote appears once at the bottom', overview.accounts === 0 && overview.disclosures.join() === 'Accounts (2)|false,Accounts (1)|false' && overview.footnotes === 1 && overview.footnoteLast);
+      check('Each folded Accounts disclosure is a full-width bordered card whose whole header row toggles it and previews the account names', overview.cards.length === 2 && overview.cards.every(Boolean));
     }
     const chartState = section => usage.evaluate(selector => {
       const chart = document.querySelector(selector), r = el => el.getBoundingClientRect(), plot = r(chart.querySelector('.su-pooled .su-plot'));
       const now = r(chart.querySelector('.su-now')), past = chart.querySelector('.su-line.su-past'), projected = chart.querySelector('.su-line.su-projected');
       return { nowInside: now.left > plot.left && now.left < plot.right, pastEndsAtNow: Math.abs(r(past).right - now.left) <= 2, projectedStartsAtNow: Math.abs(r(projected).left - now.left) <= 2,
-        projectedReachesEnd: Math.abs(r(projected).right - plot.right) <= 2, dashed: getComputedStyle(projected).strokeDasharray !== 'none', overflowX: document.querySelector('.su').scrollWidth - document.querySelector('.su').clientWidth };
+        projectedReachesEnd: Math.abs(r(projected).right - plot.right) <= 2, dashed: getComputedStyle(projected).strokeDasharray !== 'none', overflowX: Math.max(...[...document.querySelectorAll('.su-top, .su-scroll')].map(el => el.scrollWidth - el.clientWidth)) };
     }, section);
     for (const [name, section] of [['Codex', CODEX], ['Anthropic', ANTHROPIC]]) {
       const state = await chartState(section);
@@ -1982,15 +1985,18 @@ try {
     await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-top.png') });
     {
       // The overview scrolled so the second provider's section starts at the top of the page.
-      await usage.evaluate(selector => { const page = document.querySelector('.su'), section = document.querySelector(selector); page.scrollTop += section.getBoundingClientRect().top - page.getBoundingClientRect().top - 12; }, ANTHROPIC);
+      await usage.evaluate(selector => { const page = document.querySelector('.su-scroll'), section = document.querySelector(selector); page.scrollTop += section.getBoundingClientRect().top - page.getBoundingClientRect().top - 12; }, ANTHROPIC);
       await settle(usage);
-      const scrolled = await usage.evaluate(selector => { const node = document.querySelector('.su'), page = node.getBoundingClientRect(), section = document.querySelector(selector), chart = section.querySelector('.su-pooled').getBoundingClientRect();
-        return { scrollTop: node.scrollTop, bottom: node.scrollHeight - node.clientHeight - node.scrollTop, top: section.getBoundingClientRect().top - page.top, chartShown: chart.top >= page.top && chart.bottom <= page.bottom }; }, ANTHROPIC);
+      const scrolled = await usage.evaluate(selector => { const node = document.querySelector('.su-scroll'), page = node.getBoundingClientRect(), section = document.querySelector(selector), chart = section.querySelector('.su-pooled').getBoundingClientRect();
+        const root = document.querySelector('.su'), bar = document.querySelector('.su-limits-controls').getBoundingClientRect();
+        return { scrollTop: node.scrollTop, bottom: node.scrollHeight - node.clientHeight - node.scrollTop, top: section.getBoundingClientRect().top - page.top, chartShown: chart.top >= page.top && chart.bottom <= page.bottom,
+          rootScroll: root.scrollTop, barTop: bar.top - root.getBoundingClientRect().top, paneBelowBar: page.top >= bar.bottom - 0.5 }; }, ANTHROPIC);
       console.log(`USAGE LIMITS SCROLLED: ${JSON.stringify(scrolled)}`);
       // The page may end before the section reaches the top; then it is scrolled all the way down.
       check('The overview scrolls to the Anthropic section and shows its whole chart', scrolled.scrollTop > 0 && (Math.abs(scrolled.top - 12) <= 1 || scrolled.bottom <= 1) && scrolled.chartShown);
+      check('The controls bar stays at the top outside the scrolling pane, which starts below it', scrolled.rootScroll === 0 && Math.abs(scrolled.barTop - 14) <= 1 && scrolled.paneBelowBar);
       await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-second.png') });
-      await usage.evaluate(() => { document.querySelector('.su').scrollTop = 0; });
+      await usage.evaluate(() => { document.querySelector('.su-scroll').scrollTop = 0; });
     }
     {
       const before = { rates: await rates(), paths: await usage.evaluate(() => [...document.querySelectorAll('.su-line.su-projected')].map(path => path.getAttribute('d'))), empty: (await measure()).empty?.right };
@@ -2067,13 +2073,14 @@ try {
       await usage.locator(`${CODEX} .su-disclosure`).click();
       await usage.waitForSelector(`${CODEX} .su-account`);
       const accounts = await usage.evaluate(selector => {
-        const r = el => el.getBoundingClientRect(), page = document.querySelector('.su');
+        const r = el => el.getBoundingClientRect();
         const bars = [...document.querySelectorAll(`${selector} .su-window`)].map(row => { const bar = r(row.querySelector('.su-bar')), pace = row.querySelector('.su-pace'); return !pace || r(pace).left >= bar.left - 1 && r(pace).right <= bar.right + 1; });
-        return { codex: document.querySelectorAll(`${selector} .su-account`).length, total: document.querySelectorAll('.su-account').length, paces: bars.length > 0 && bars.every(Boolean), overflowX: page.scrollWidth - page.clientWidth,
+        return { codex: document.querySelectorAll(`${selector} .su-account`).length, total: document.querySelectorAll('.su-account').length, paces: bars.length > 0 && bars.every(Boolean), overflowX: Math.max(...[...document.querySelectorAll('.su-top, .su-scroll')].map(el => el.scrollWidth - el.clientWidth)),
+          inCard: [...document.querySelectorAll(`${selector} .su-account`)].every(account => account.parentElement.closest('.su-accounts-group')), names: [...document.querySelectorAll('.su-disclosure-names')].map(node => node.closest('.su-provider-limits').dataset.provider),
           stored: JSON.parse(localStorage.getItem('hermes.plugin.hermes-t3sidebar.usage-preferences')).accounts };
       }, CODEX);
       console.log(`USAGE LIMITS ACCOUNTS: ${JSON.stringify(accounts)}`);
-      check('Unfolding Codex accounts shows its two rows with pace ticks inside the bars, leaves Anthropic folded and stores the fold', accounts.codex === 2 && accounts.total === 2 && accounts.paces && accounts.overflowX <= 0
+      check('Unfolding Codex accounts shows its two rows with pace ticks inside the bars, leaves Anthropic folded and stores the fold', accounts.codex === 2 && accounts.total === 2 && accounts.paces && accounts.overflowX <= 0 && accounts.inCard && accounts.names.join() === 'anthropic'
         && JSON.stringify(accounts.stored) === '{"openai-codex":true}');
       const banked = await usage.evaluate(() => {
         const rgb = el => { const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1; const paint = canvas.getContext('2d'); paint.fillStyle = getComputedStyle(el).color; paint.fillRect(0, 0, 1, 1); return [...paint.getImageData(0, 0, 1, 1).data.slice(0, 3)]; };
@@ -2093,11 +2100,11 @@ try {
       await usage.waitForSelector(`${CODEX} .su-account`);
       const reloaded = await usage.evaluate(() => [...document.querySelectorAll('.su-disclosure')].map(node => node.getAttribute('aria-expanded')).join());
       check('The account fold survives a reload', reloaded === 'true,false');
-      await usage.evaluate(selector => { const page = document.querySelector('.su'), toggle = document.querySelector(`${selector} .su-disclosure`); page.scrollTop += toggle.getBoundingClientRect().top - page.getBoundingClientRect().top - 260; }, CODEX);
+      await usage.evaluate(selector => { const page = document.querySelector('.su-scroll'), toggle = document.querySelector(`${selector} .su-disclosure`); page.scrollTop += toggle.getBoundingClientRect().top - page.getBoundingClientRect().top - 260; }, CODEX);
       await settle(usage);
       await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-accounts.png') });
       await usage.locator(`${CODEX} .su-disclosure`).click();
-      await usage.evaluate(() => { document.querySelector('.su').scrollTop = 0; });
+      await usage.evaluate(() => { document.querySelector('.su-scroll').scrollTop = 0; });
     }
     {
       // A logged-out provider is a compact muted row after the charts, without a chart or account details.
@@ -2116,7 +2123,7 @@ try {
       console.log(`USAGE LIMITS LOGGED OUT: ${JSON.stringify(state)}`);
       check('Logged-out Anthropic is a compact muted row after the Codex chart, without a chart or accounts, and is left out of the footer', state.sections.join() === 'openai-codex,anthropic'
         && state.text === 'Anthropic · logged out in Hermes — sign in to track limits' + 'No usable Anthropic credential in the Hermes pool' && !state.chart && !state.disclosure && state.mark && state.height < 60 && state.footer === 'openai-codex');
-      await loggedOut.evaluate(() => { const page = document.querySelector('.su'); page.scrollTop = page.scrollHeight; });
+      await loggedOut.evaluate(() => { const page = document.querySelector('.su-scroll'); page.scrollTop = page.scrollHeight; });
       await loggedOut.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-logged-out.png') });
       await loggedOut.close();
     }
@@ -2158,7 +2165,7 @@ try {
     }), null, { timeout: 5000 });
     await settle(usage);
     {
-      const geometry = await measure(), other = await measureIn(ANTHROPIC), overflow = await usage.evaluate(() => { const root = document.querySelector('.su'); return root.scrollWidth - root.clientWidth; });
+      const geometry = await measure(), other = await measureIn(ANTHROPIC), overflow = await usage.evaluate(() => Math.max(...[...document.querySelectorAll('.su-top, .su-scroll')].map(el => el.scrollWidth - el.clientWidth)));
       console.log(`USAGE LIMITS NARROW: ${JSON.stringify({ geometry, other, overflow })}`);
       // Too narrow for a whole averaging label left of Now: it is ellipsized (full text in its title) rather than crossing Now.
       check('Limits page fits a narrow workspace: no overflow and every chart keeps its measurement labels on their side of Now', overflow <= 0 && averageOk(geometry) && labelsOk(geometry, { full: false }) && averageOk(other) && labelsOk(other, { full: false }));
