@@ -37,11 +37,11 @@
 ### Usage page
 
 - Footer chart button → **Usage** page.
-- Charts on one time axis: tokens, API-equivalent cost, human user messages, as per-day rates.
+- Charts on one time axis: tokens, API-equivalent cost, human user messages, as amounts per bucket sized to the period.
 - Configurable period, per-provider or per-model series, stacking.
 - Read-only from Hermes's `session_model_usage`; no extra storage.
 
-![Usage page: tokens, API-equivalent cost and user messages per day over 7 days, stacked by provider](docs/images/usage.png)
+![Usage page: tokens, API-equivalent cost and user messages per hour over 7 days, stacked by provider with the largest on top, curved through every hourly value](docs/images/usage.png)
 
 ### Limits page
 
