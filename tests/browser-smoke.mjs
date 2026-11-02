@@ -1899,7 +1899,7 @@ try {
       const stacked = resets.groups.find(group => group.marks.length === 2);
       check('Both Codex accounts resetting together stack two markers on one vertical line in priority order, each dot within 1px of its cumulative level', !!stacked && stacked.marks.map(mark => mark.account).join() === 'acct-team,acct-prolite'
         && Math.abs(stacked.marks[1].base - stacked.marks[0].top) < 1e-6 && Math.abs(stacked.marks[1].top - 120) < 1e-6 && stacked.marks.every(mark => mark.dx <= 1 && mark.dy <= 1) && stacked.marks[0].dot.top - stacked.marks[1].dot.bottom > 8);
-      check('Stacked reset labels read +N and stay shown, apart from each other and from every dot; the waste arrow shares the reset x', !!stacked && stacked.marks.every(mark => /^\+\d+(\.\d)?$/.test(mark.text) && !mark.hidden) && resets.labelsApart && resets.labelsClearOfDots && resets.wasteT === stacked.t);
+      check('Stacked reset labels read ⟳W +N and stay shown, apart from each other and from every dot; the waste arrow shares the reset x', !!stacked && stacked.marks.every(mark => /^⟳\d+(\.\d)? \+\d+(\.\d)?$/.test(mark.text) && !mark.hidden) && resets.labelsApart && resets.labelsClearOfDots && resets.wasteT === stacked.t);
       // Hovering the upper dot shows its tooltip; the crosshair and its inline tooltip step aside.
       await usage.locator(`${CODEX} .su-reset-mark[data-account="acct-prolite"] .su-reset-dot`).hover();
       await usage.waitForSelector('.mock-tip');

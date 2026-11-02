@@ -2535,7 +2535,7 @@ export function resetMarkers(projection, from, to, minShare = 0.01) {
     const accounts = group.items.map(item => {
       const base = item.before + (restored.get(item.t) || 0);
       restored.set(item.t, (restored.get(item.t) || 0) + item.gain);
-      return { id: item.account, label: item.label, plan_label: item.plan_label, t: item.t, base, top: base + item.gain, gain: item.gain, lost: item.lost };
+      return { id: item.account, label: item.label, plan_label: item.plan_label, t: item.t, base, top: base + item.gain, weight: item.weight, gain: item.gain, lost: item.lost };
     }).filter(item => item.gain >= floor && item.gain > 1e-9);
     return { t: group.t, accounts };
   }).filter(group => group.accounts.length);
@@ -2973,12 +2973,13 @@ function placeMarkLabels(layer) {
     if (fit) placed.push(fit); else { label.dataset.side = 'right'; label.dataset.hidden = 'true'; }
   }
 }
-// Mark the level each account restores with a disc; only the curve connects resets. Past step-ups are quieter: a hollow dot, no label.
+// Mark the level each account restores with a disc; only the curve connects resets. Past step-ups are quieter: a hollow dot, no label. The label reads ⟳weight +gain: the account's full plan units it returns to, then what that adds to the pool.
+export const resetMarkText = item => `⟳${unitsText(item.weight)} +${unitsText(item.gain)}`;
 function ResetMark({ item, kind, yPct, lines }) {
   const dot = h('span', { className: 'su-reset-dot', role: 'img', 'aria-label': lines.join('. '), title: typeof sdk.Tip === 'function' ? undefined : lines.join('\n') });
-  return h('span', { className: 'su-reset-mark', 'data-kind': kind, 'data-account': item.id, 'data-base': item.base, 'data-top': item.top, 'data-gain': item.gain, style: { bottom: `${yPct(item.top)}%` } },
+  return h('span', { className: 'su-reset-mark', 'data-kind': kind, 'data-account': item.id, 'data-base': item.base, 'data-top': item.top, 'data-weight': item.weight, 'data-gain': item.gain, style: { bottom: `${yPct(item.top)}%` } },
     withTip(lines, dot),
-    kind === 'projected' ? h('span', { className: 'su-reset-text', 'data-side': 'right', 'aria-hidden': true }, `+${unitsText(item.gain)}`) : null);
+    kind === 'projected' ? h('span', { className: 'su-reset-text', 'data-side': 'right', 'aria-hidden': true }, resetMarkText(item)) : null);
 }
 // Banked reset credits expiring at one time: a flag above the plot with its pole on the expiry, and ×N when several expire together.
 function BankedFlag({ flag, xPct, now }) {
