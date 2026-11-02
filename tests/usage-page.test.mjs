@@ -122,9 +122,9 @@ test('lookback stops are discrete, labeled and drive how much history the limits
   assert.deepEqual(usage.LOOKBACK_STOPS.map(usage.lookbackPosition), [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
   assert.deepEqual([usage.lookbackPosition(999), usage.lookbackAtPosition(-3), usage.lookbackAtPosition(42), usage.lookbackAtPosition('x')], [6, 720, 1, 720], 'unknown hours show the 12h default; out-of-range positions clamp');
   assert.deepEqual([1, 12, 168, 360, 720].map(hours => usage.limitsHistoryHours(hours)), [168, 168, 168, 360, 720]);
-  // The 30-day horizon shows nine days of past, which needs more than the default week of history.
-  assert.deepEqual([usage.limitsHistoryHours(12, 7), usage.limitsHistoryHours(12, 30), usage.limitsHistoryHours(360, 30)], [168, 216, 360]);
-  assert.deepEqual([usage.limitsPastSeconds(7 * D) / H, usage.limitsPastSeconds(30 * D) / D, usage.limitsPastSeconds(H) / H], [50.4, 9, 6]);
+  // The longest past of either window group counts too, so switching the window never waits for more history: 30 days of weekly past need 720 hours, a week of session past no more than the week minimum.
+  const range = (weekly, session) => ({ weekly: { past: weekly, future: 168 }, session: { past: session, future: 24 } });
+  assert.deepEqual([usage.limitsHistoryHours(12, range(720, 5)), usage.limitsHistoryHours(12, range(24, 168)), usage.limitsHistoryHours(360, range(168, 24)), usage.limitsHistoryHours(12, null)], [720, 168, 360, 168]);
   assert.equal(usage.limitsHistoryHours(2000), 840, 'the backend caps history at 840 hours');
   assert.deepEqual([usage.coverageText(20 * 60), usage.coverageText(5.4 * H), usage.coverageText(47 * H), usage.coverageText(9.8 * D)], ['20m', '5h', '47h', '10d']);
 });
@@ -432,13 +432,19 @@ test('scales, formats and colors are compact and stable per series key', () => {
 
 test('preferences validate every field and fall back to safe defaults', () => {
   assert.deepEqual(usage.validUsagePreferences(null), usage.USAGE_DEFAULTS);
-  assert.deepEqual(usage.validUsagePreferences({ days: 30, split: 'model', mode: 'independent', horizon: 30, lookback: 72, window: 'five_hour', accounts: { 'openai-codex': true, anthropic: false } }),
-    { days: 30, split: 'model', mode: 'independent', horizon: 30, lookback: 72, window: 'five_hour', accounts: { 'openai-codex': true, anthropic: false } });
-  assert.deepEqual(usage.validUsagePreferences({ days: '7', split: 1, mode: 'stack', horizon: 14, lookback: 6, window: '', accounts: 'open' }), usage.USAGE_DEFAULTS);
+  const range = { weekly: { past: 720, future: 24 }, session: { past: 168, future: 5 } };
+  assert.deepEqual(usage.validUsagePreferences({ days: 30, split: 'model', mode: 'independent', lookback: 72, window: 'five_hour', range, accounts: { 'openai-codex': true, anthropic: false } }),
+    { days: 30, split: 'model', mode: 'independent', lookback: 72, window: 'five_hour', range, accounts: { 'openai-codex': true, anthropic: false } });
+  assert.deepEqual(usage.validUsagePreferences({ days: '7', split: 1, mode: 'stack', lookback: 6, window: '', range: 'wide', accounts: 'open' }), usage.USAGE_DEFAULTS);
   // Saved before the overview: the Usage|Limits tab and the provider picked by the retired Limits tabs are dropped.
   const legacy = usage.validUsagePreferences({ tab: 'limits', provider: 'anthropic' });
   assert.deepEqual([Object.hasOwn(legacy, 'tab'), Object.hasOwn(legacy, 'provider')], [false, false]);
-  assert.deepEqual([1, 3, 7, 30].map(horizon => usage.validUsagePreferences({ horizon }).horizon), [7, 7, 7, 30]);
+  // The retired 7d | 30d horizon is dropped; each of the four ranges keeps only a stop of its own window group, else its default (weekly 7d past, 7d ahead; session 5h past, 1d ahead).
+  assert.equal(Object.hasOwn(usage.validUsagePreferences({ horizon: 30 }), 'horizon'), false);
+  assert.deepEqual(usage.LIMITS_RANGE_STOPS, { weekly: [24, 168, 720], session: [5, 24, 168] });
+  assert.deepEqual(usage.validUsagePreferences({ range: { weekly: { past: 5, future: 720 }, session: { past: '24', future: 168 } } }).range, { weekly: { past: 168, future: 720 }, session: { past: 5, future: 168 } });
+  assert.deepEqual(usage.validUsagePreferences({ range: { weekly: null, session: [] } }).range, { weekly: { past: 168, future: 168 }, session: { past: 5, future: 24 } });
+  assert.deepEqual(['five_hour', 'five_hour:opus', 'weekly', 'weekly:opus', 'w7200', undefined].map(usage.rangeGroup), ['session', 'session', 'weekly', 'weekly', 'weekly', 'weekly']);
   for (const bad of ['12', 0, 13, 1000, null, Infinity]) assert.equal(usage.validUsagePreferences({ lookback: bad }).lookback, 12, `lookback ${bad} falls back to 12h`);
   // Account folds keep only booleans under provider-shaped keys; anything else reads as folded.
   assert.deepEqual(usage.validUsagePreferences({ accounts: { a: true, b: 'yes', c: 1, '': true, ['x'.repeat(201)]: true, d: false } }).accounts, { a: true, d: false });
@@ -564,20 +570,21 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.equal($$('.su-composition').length, 0, 'the plan list stays in the Accounts fold, not the headline');
   assert.equal($$('.su-pool').every(node => /^\d+(\.\d)?$/.test(node.textContent)), true);
   assert.equal($$('.su-rate').every(node => /^~\d+(\.\d)? units per hour$/.test(node.textContent)), true);
-  assert.deepEqual($$('.su-pooled').map(chart => [...chart.querySelectorAll('.su-yaxis span')].map(node => node.textContent).join()), ['units,0,25,50,75,100,120', 'units,0,50,100,150,200']);
+  assert.deepEqual($$('.su-pooled').map(chart => [...chart.querySelectorAll('.su-yaxis span')].map(node => node.textContent).join()), ['25,50,75,100,120', '50,100,150,200'], 'no unit caption and no 0 label beside the past range control');
   assert.deepEqual($$('.su-verdict').map(node => node.closest('.su-provider-limits').dataset.provider), ['openai-codex', 'anthropic']);
   assert.equal($$('.su-pooled .su-line.su-past').length + $$('.su-pooled .su-line.su-projected').length + $$('.su-now').length, 6);
-  assert.ok($$('.su-pooled')[1].querySelectorAll('.su-day-grid').length >= 9, 'a week of history plus a week ahead crosses at least nine midnights');
+  assert.ok($$('.su-pooled')[1].querySelectorAll('.su-day-grid').length >= 13, 'a week of past plus a week ahead crosses at least thirteen midnights');
   assert.equal($('.su-legend'), null, 'the Remaining/Projected legend is gone');
   // Reset times are markers in the charts now, never a Next reset line; no wording anywhere still says plan units.
   assert.deepEqual([/Next reset/.test(document.body.textContent), /plan units/i.test(document.body.textContent), $$('[title]').some(node => /plan units/i.test(node.title))], [false, false, false]);
-  // One controls bar at the top: lookback, window, horizon and refresh, none of them repeated per chart.
+  // One controls bar at the top: lookback, window and refresh, none of them repeated per chart; the past and future ranges sit beside each chart's x axis instead.
   const bar = $('.su-limits-controls');
   // The bar sits in its own fixed strip above the scrolling pane, so it stays visible whatever is scrolled.
   assert.deepEqual([bar.parentElement.className, bar.parentElement.parentElement.className, bar.closest('.su-scroll') === null, $('.su-scroll').contains($('.su-overview'))], ['su-top', 'su', true, true], 'the controls head the page outside the scrolling pane');
   assert.equal(bar.compareDocumentPosition($('.su-provider-limits')) & 4, 4, 'the controls come before the first section');
-  assert.deepEqual([$$('.su-lookback').length, $$('.su-horizon').length, $$('.su [role=group][aria-label=Window]').length, $$('.su [role=group][aria-label=Horizon]').length], [1, 1, 1, 1]);
-  assert.deepEqual([bar.querySelector('.su-lookback') !== null, bar.querySelector('.su-horizon') !== null, bar.querySelector('[aria-label=Window]') !== null, bar.querySelector('[aria-label=Refresh]') !== null], [true, true, true, true]);
+  assert.deepEqual([$$('.su-lookback').length, $$('.su-horizon').length, $$('.su [role=group][aria-label=Window]').length, $$('.su [role=group][aria-label=Horizon]').length], [1, 0, 1, 0]);
+  assert.deepEqual([bar.querySelector('.su-lookback') !== null, bar.querySelector('.su-axis-range') === null, bar.querySelector('[aria-label=Window]') !== null, bar.querySelector('[aria-label=Refresh]') !== null], [true, true, true, true]);
+  assert.deepEqual($$('.su-pooled').map(chart => [...chart.querySelectorAll('.su-limits-grid > .su-axis-range')].map(node => node.dataset.side).join()), ['past,future', 'past,future'], 'every chart has its own past and future range controls');
   assert.deepEqual([$('.su-lookback-label').textContent, $('.su-lookback-value').textContent], ['Projections based on', '12h']);
   assert.deepEqual([...bar.querySelectorAll('[aria-label=Window] button')].map(node => node.textContent), ['5-hour', 'Weekly']);
   // Account details are folded under each chart; the shared footnote appears once at the bottom.
@@ -598,7 +605,7 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.equal(adviceFree(), true, 'no verdict, label or title gives advice');
 });
 
-test('the shared lookback and horizon controls change every chart at once', async () => {
+test('the shared lookback and the page-wide axis ranges change every chart at once', async () => {
   // The synthetic drain follows office hours, so at some times of day the 12h and 15d averages coincide; pin the same weekday afternoon as the browser smoke.
   const realNow = Date.now, fixed = Date.parse('2026-10-28T15:00:00+01:00');
   Date.now = () => fixed;
@@ -613,11 +620,15 @@ test('the shared lookback and horizon controls change every chart at once', asyn
     // The fixtures hold ten days of history, so a 15d lookback averages over those ten days.
     assert.deepEqual($$('.su-measure[data-kind="average"]').map(node => node.textContent.split(' · ')[0]), ['Average over 10d', 'Average over 10d']);
     const spans = () => $$('.su-pooled .su-plot').map(node => Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100);
-    assert.deepEqual(spans(), [9.1, 9.1]);
-    await click(button('30d'));
-    assert.deepEqual([spans(), $$('.su-pooled').map(node => node.dataset.horizon)], [[39, 39], ['30', '30']], 'one horizon choice extends every chart');
-    await click(button('7d'));
-    assert.deepEqual(spans(), [9.1, 9.1]);
+    assert.deepEqual(spans(), [14, 14]);
+    // Either chart's arrows set the page-wide range, so the other chart follows.
+    await click($$('.su-pooled')[1].querySelector('.su-axis-range[data-side=future] [data-direction=right]'));
+    assert.deepEqual([spans(), $$('.su-pooled').map(node => node.dataset.future)], [[37, 37], ['720', '720']], 'one future choice extends every chart');
+    await click($$('.su-pooled')[0].querySelector('.su-axis-range[data-side=past] [data-direction=left]'));
+    assert.deepEqual([spans(), $$('.su-pooled').map(node => node.dataset.past)], [[60, 60], ['720', '720']], 'one past choice extends every chart');
+    await click($('.su-axis-range[data-side=future] [data-direction=left]'));
+    await click($('.su-axis-range[data-side=past] [data-direction=right]'));
+    assert.deepEqual(spans(), [14, 14]);
   } finally { Date.now = realNow; }
 });
 
@@ -674,12 +685,13 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
     assert.deepEqual(flags(), [['acct-team', 'chatgptvitibot · banked reset expires <time>'], ['acct-prolite', 'chatgpt1 · banked reset expires <time>']]);
     assert.equal(codexSection.querySelectorAll('.su-flag-count').length, 0, 'different expiries are never counted together');
     assert.equal($$('.su-provider-limits[data-provider="anthropic"] .su-flag').length, 0, 'never-read credits draw no flag');
-    await click(button('30d'));
-    assert.deepEqual([flags().length, [...codexSection.querySelectorAll('.su-flag-count')].map(node => node.textContent).join()], [3, '×2'], 'the 30-day chart adds one ×2 flag for the two credits expiring at the same instant');
-    // The weekly resets six days ago are within the 30-day chart's nine days of past: a quieter stacked marker without labels.
+    const axisStep = (side, direction) => click(codexSection.querySelector(`.su-axis-range[data-side=${side}] [data-direction=${direction}]`));
+    await axisStep('future', 'right'); await axisStep('past', 'left');
+    assert.deepEqual([flags().length, [...codexSection.querySelectorAll('.su-flag-count')].map(node => node.textContent).join()], [3, '×2'], 'the 30-day projection adds one ×2 flag for the two credits expiring at the same instant');
+    // The weekly resets six days ago are within the past shown: a quieter stacked marker without labels.
     const past = [...codexSection.querySelectorAll('.su-reset[data-kind=past]')].find(node => node.querySelectorAll('.su-reset-mark').length === 2);
     assert.deepEqual([past !== undefined, past?.querySelectorAll('.su-reset-text').length], [true, 0]);
-    await click(button('7d'));
+    await axisStep('future', 'left'); await axisStep('past', 'right');
     await click(codexSection.querySelector('.su-disclosure'));
     const lines = id => [...$(`.su-account[data-account="${id}"]`).querySelectorAll('.su-banked-credit')].map(node => `${node.dataset.soon}|${node.textContent}`);
     const team = lines('acct-team'), prolite = lines('acct-prolite');
@@ -722,8 +734,8 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
   const marks = $$('.su-pooled .su-waste');
   assert.equal(marks.length, 1);
   const mark = marks[0], near = (a, b, tolerance = 0.01) => Math.abs(a - b) < tolerance;
-  // 7-day chart: 50.4 hours of past, so the reset one day ahead sits (50.4 + 24) / 218.4 of the way along; the pool holds 48 of its 120 units just before the reset, all of which expire.
-  assert.ok(near(parseFloat(mark.style.left), 74.4 / 218.4 * 100), `x ${mark.style.left}`);
+  // Default weekly range: seven days either side of Now, so the reset one day ahead sits 192 / 336 of the way along; the pool holds 48 of its 120 units just before the reset, all of which expire.
+  assert.ok(near(parseFloat(mark.style.left), 192 / 336 * 100), `x ${mark.style.left}`);
   assert.ok(near(parseFloat(mark.style.top), 60) && near(parseFloat(mark.style.height), 40), `span ${mark.style.top} + ${mark.style.height}`);
   assert.deepEqual([mark.querySelector('.su-waste-text').textContent, mark.querySelectorAll('.su-waste-arrow').length, mark.querySelectorAll('.su-waste-tick').length], ['48 lost', 2, 2]);
   assert.match(mark.getAttribute('title'), /^chatgpt1 · Pro 100 · 48 units unused at reset [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
@@ -838,24 +850,43 @@ test('the lookback slider moves between stops, changes the drain rate and widens
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 720, 'the leftmost stop is the longest lookback');
 });
 
-test('a 7d | 30d segmented control in the controls bar switches the projection horizon', async () => {
-  // A horizon saved by the retired 1d/3d/7d control opens at the 7-day default.
-  mock.ctx.storage.set('usage-preferences', { horizon: 3 });
+test('unfold arrows beside each end of the x axis set four page-wide ranges that survive a remount', async () => {
+  // A horizon saved by the retired 7d | 30d control is dropped: the chart opens at the weekly defaults.
+  mock.ctx.storage.set('usage-preferences', { horizon: 30 });
   plugin.register(mock.ctx); await render(limitsPage());
-  const group = () => $('.su-horizon');
-  const state = () => [...group().querySelectorAll('button')].map(node => `${node.textContent}:${node.getAttribute('aria-pressed')}`).join() + `|${$('.su-pooled').dataset.horizon}`;
-  const days = () => { const node = $('.su-pooled .su-plot'); return Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100; };
-  assert.deepEqual([group().getAttribute('role'), group().getAttribute('aria-label'), group().closest('.su-limits-controls') !== null, group().querySelector('.su-control-label')?.textContent], ['group', 'Horizon', true, 'Horizon'], 'a labelled group in the shared controls bar');
-  assert.equal(state(), '7d:true,30d:false|7');
-  assert.equal(group().querySelectorAll('svg').length, 0, 'text choices, no arrow icon');
-  assert.equal(days(), 9.1, 'seven days ahead plus 30% of that before Now');
-  await click(button('30d'));
-  assert.equal(state(), '7d:false,30d:true|30');
-  assert.equal(days(), 39);
-  assert.equal(mock.ctx.storage.get('usage-preferences').horizon, 30);
-  assert.equal(restPaths().at(-1), '/usage/limits?hours=216', 'nine days of past need more than a week of history');
-  await click(button('7d'));
-  assert.deepEqual([state(), mock.ctx.storage.get('usage-preferences').horizon], ['7d:true,30d:false|7', 7]);
+  const chart = () => $('.su-pooled'), group = side => chart().querySelector(`.su-axis-range[data-side=${side}]`);
+  const arrows = side => [...group(side).querySelectorAll('button')].map(node => `${node.dataset.direction}:${node.getAttribute('aria-label')}:${node.disabled}`);
+  const days = () => { const node = chart().querySelector('.su-plot'); return Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 1000) / 1000; };
+  const stored = () => mock.ctx.storage.get('usage-preferences').range;
+  // Each control is a left arrow, a decorative dashed crease and a right arrow: on the past side ← reaches further back, on the future side → projects further ahead.
+  assert.deepEqual([group('past').getAttribute('role'), group('past').getAttribute('aria-label'), group('future').getAttribute('aria-label')], ['group', 'Past shown: 7d', 'Projection: 7d']);
+  assert.deepEqual([...group('past').children].map(node => `${node.tagName}:${node.getAttribute('aria-hidden') ?? ''}:${node.querySelector('svg')?.dataset.icon}`), ['BUTTON::UnfoldLeft', 'SPAN:true:UnfoldCrease', 'BUTTON::UnfoldRight']);
+  assert.deepEqual([arrows('past'), arrows('future')], [['left:Show 30d before Now:false', 'right:Show 1d before Now:false'], ['left:Project 1d ahead:false', 'right:Project 30d ahead:false']]);
+  assert.deepEqual([chart().dataset.past, chart().dataset.future, days()], ['168', '168', 14]);
+  assert.equal(restPaths().at(-1), '/usage/limits?hours=168');
+  await click(group('past').querySelector('[data-direction=right]'));
+  assert.deepEqual([arrows('past'), days()], [['left:Show 7d before Now:false', 'right:Shortest past shown:true'], 8], 'one day back, the first weekly stop');
+  await click(group('past').querySelector('[data-direction=left]'));
+  await click(group('past').querySelector('[data-direction=left]'));
+  assert.deepEqual([arrows('past'), days()], [['left:Longest past shown:true', 'right:Show 7d before Now:false'], 37], 'thirty days back, the last weekly stop');
+  assert.equal(restPaths().at(-1), '/usage/limits?hours=720', 'thirty days of past need 720 hours of history');
+  await click(group('future').querySelector('[data-direction=left]'));
+  assert.deepEqual([arrows('future'), days()], [['left:Shortest projection shown:true', 'right:Project 7d ahead:false'], 31]);
+  assert.deepEqual(stored(), { weekly: { past: 720, future: 24 }, session: { past: 5, future: 24 } });
+  // The five-hour window has its own past and future stops (5h, 1d, 7d); setting them leaves the weekly ones alone.
+  await click(button('5-hour'));
+  assert.deepEqual([chart().dataset.past, chart().dataset.future, group('past').getAttribute('aria-label'), group('future').getAttribute('aria-label'), days()], ['5', '24', 'Past shown: 5h', 'Projection: 1d', 1.208]);
+  assert.deepEqual([arrows('past'), arrows('future')], [['left:Show 1d before Now:false', 'right:Shortest past shown:true'], ['left:Project 5h ahead:false', 'right:Project 7d ahead:false']]);
+  await click(group('future').querySelector('[data-direction=right]'));
+  await click(group('past').querySelector('[data-direction=left]'));
+  assert.deepEqual([chart().dataset.past, chart().dataset.future, days()], ['24', '168', 8]);
+  assert.deepEqual(stored(), { weekly: { past: 720, future: 24 }, session: { past: 24, future: 168 } });
+  // Saved in client storage: a remount restores all four.
+  await act(async () => root.unmount()); root = null; mock.queryClient.clear();
+  await render(limitsPage());
+  assert.deepEqual([chart().dataset.window, chart().dataset.past, chart().dataset.future], ['five_hour', '24', '168']);
+  await click(button('Weekly'));
+  assert.deepEqual([chart().dataset.past, chart().dataset.future], ['720', '24']);
 });
 
 test('the averaging period is measured left of Now and cut at the plot edge without a left arrowhead', async () => {
@@ -867,21 +898,21 @@ test('the averaging period is measured left of Now and cut at the plot edge with
   };
   const nowPct = () => parseFloat($('.su-now').style.left);
   const near = (a, b) => Math.abs(a - b) < 1e-6;
-  // 7-day horizon: 50.4 hours of past, so 12 hours start 38.4 hours into it.
+  // Default weekly range: seven days of past, so 12 hours start 156 hours into it.
   let geometry = shape();
   assert.deepEqual([geometry.cap, geometry.startArrows, geometry.endArrows, geometry.endTicks], ['true', 2, 1, 1], 'inside the plot both ends get an arrowhead and a tick');
-  assert.ok(near(geometry.left, 38.4 / 218.4 * 100) && near(geometry.right, nowPct()), `12h spans its lookback up to Now (${JSON.stringify(geometry)})`);
+  assert.ok(near(geometry.left, 156 / 336 * 100) && near(geometry.right, nowPct()), `12h spans its lookback up to Now (${JSON.stringify(geometry)})`);
   const label = $('.su-measure[data-kind="average"] .su-measure-text');
   assert.deepEqual([label.dataset.side, Number(label.dataset.low), near(Number(label.dataset.high), nowPct())], ['left', 0, true], 'the averaging label stays left of Now');
   await slide($('.su-lookback input[type=range]'), 1);
   geometry = shape();
   assert.deepEqual([geometry.cap, geometry.startArrows, geometry.endArrows, geometry.left, near(geometry.right, nowPct())], ['false', 0, 1, 0, true], '15d reaches past the plot: cut at the edge, no left arrowhead or tick');
   assert.match($('.su-measure[data-kind="average"]').textContent, /^Average over 10d · (~\d+(\.\d)? units\/h|no drain data)$/, 'ten days of history: the span and label cover those, still past the plot edge');
-  await click(button('30d'));
-  assert.equal(shape().cap, 'false', 'nine days of past still start after 15 days back');
+  await click($('.su-axis-range[data-side=past] [data-direction=right]'));
+  assert.equal(shape().cap, 'false', 'one day of past still starts after 15 days back');
   await slide($('.su-lookback input[type=range]'), 6);
   geometry = shape();
-  assert.ok(geometry.cap === 'true' && near(geometry.left, (216 - 12) / 936 * 100), '12h sits inside the 30-day chart too');
+  assert.ok(geometry.cap === 'true' && near(geometry.left, (24 - 12) / 192 * 100), '12h sits inside one day of past too');
 });
 
 test('stale, failing and unread accounts keep the normal view', async () => {

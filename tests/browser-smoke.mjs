@@ -1759,18 +1759,18 @@ try {
       // The footer status already holds the same limits query (same key), so the page may reuse it without a new request.
       check('Limits button opens /t3sidebar-limits, which shows only limits and fetches only /usage/limits', state.navigated && state.title === 'Limits' && state.view === 'limits' && state.usageCharts === 0
         && state.paths.every(path => path === '/usage/limits'));
-      check('Limits charts have no Remaining/Projected legend and the only day choices are the 7d | 30d horizon', state.legend === 0 && state.segmented.filter(label => /^\d+d$/.test(label)).join() === '7d,30d');
+      check('Limits charts have no Remaining/Projected legend and no day choices among the pressed controls (ranges sit beside each x axis)', state.legend === 0 && state.segmented.filter(label => /^\d+d$/.test(label)).length === 0);
     }
     {
       // Overview: the shared controls bar first, then one section per provider with data, each with its logo heading, chart and folded accounts.
       const overview = await usage.evaluate(() => {
         const r = el => el.getBoundingClientRect(), bar = document.querySelector('.su-limits-controls'), sections = [...document.querySelectorAll('.su-provider-limits')], mid = box => (box.top + box.bottom) / 2;
         const lookback = bar?.querySelector('.su-lookback'), label = r(lookback.querySelector('.su-lookback-label')), range = r(lookback.querySelector('input[type=range]')), value = r(lookback.querySelector('.su-lookback-value'));
-        const parts = [lookback, bar.querySelector('[aria-label=Window]'), bar.querySelector('.su-horizon'), bar.querySelector('[aria-label=Refresh]')];
+        const parts = [lookback, bar.querySelector('[aria-label=Window]'), bar.querySelector('[aria-label=Refresh]')];
         return { tabs: document.querySelectorAll('.su-provider-tabs, button.su-provider').length, sections: sections.map(node => node.dataset.provider), headings: sections.map(node => node.querySelector('.su-provider-head')?.textContent),
           marks: sections.map(node => !!node.querySelector('.su-provider-head svg[data-provider-mark]')), charts: sections.map(node => node.querySelectorAll('.su-pooled').length),
           barFirst: bar.parentElement.classList.contains('su-top') && bar.parentElement.parentElement.classList.contains('su') && !bar.closest('.su-scroll') && r(bar).bottom <= r(sections[0]).top, parts: parts.map(Boolean), ordered: parts.every((node, index) => index === 0 || r(node).left >= r(parts[index - 1]).right),
-          oneRow: parts.every(node => Math.abs(mid(r(node)) - mid(r(parts[0]))) <= 2), once: ['.su-lookback', '.su-horizon', '[aria-label=Window]', '[aria-label=Refresh]'].map(selector => document.querySelectorAll(`.su ${selector}`).length),
+          oneRow: parts.every(node => Math.abs(mid(r(node)) - mid(r(parts[0]))) <= 2), once: ['.su-lookback', '[aria-label=Window]', '[aria-label=Refresh]'].map(selector => document.querySelectorAll(`.su ${selector}`).length), barRanges: bar.querySelectorAll('.su-axis-range, .su-horizon').length,
           sliderRow: label.right <= range.left && range.right <= value.left && Math.abs(mid(label) - mid(range)) <= 1.5 && Math.abs(mid(value) - mid(range)) <= 1.5,
           sliderText: [lookback.querySelector('.su-lookback-label').textContent, lookback.querySelector('.su-lookback-value').textContent], accounts: document.querySelectorAll('.su-account').length,
           disclosures: [...document.querySelectorAll('.su-disclosure')].map(node => `${node.getAttribute('aria-label')}|${node.getAttribute('aria-expanded')}`),
@@ -1781,8 +1781,8 @@ try {
       console.log(`USAGE LIMITS OVERVIEW: ${JSON.stringify(overview)}`);
       check('Limits page is one overview without provider tabs: a Codex then an Anthropic section, each with its logo heading and one chart', overview.tabs === 0 && overview.sections.join() === 'openai-codex,anthropic'
         && overview.headings.join() === 'OpenAI Codex,Anthropic' && overview.marks.every(Boolean) && overview.charts.join() === '1,1');
-      check('One shared controls bar heads the page: Projections based on [slider] value, Window, 7d | 30d horizon, Refresh, in one row and only once', overview.barFirst && overview.parts.every(Boolean) && overview.ordered && overview.oneRow
-        && overview.once.join() === '1,1,1,1' && overview.sliderRow && overview.sliderText.join() === 'Projections based on,12h');
+      check('One shared controls bar heads the page: Projections based on [slider] value, Window, Refresh, in one row and only once, with no range control', overview.barFirst && overview.parts.every(Boolean) && overview.ordered && overview.oneRow
+        && overview.once.join() === '1,1,1' && overview.barRanges === 0 && overview.sliderRow && overview.sliderText.join() === 'Projections based on,12h');
       check('Accounts are folded under every chart by default and the footnote appears once at the bottom', overview.accounts === 0 && overview.disclosures.join() === 'Accounts (2)|false,Accounts (1)|false' && overview.footnotes === 1 && overview.footnoteLast);
       check('Each folded Accounts disclosure is a full-width bordered card whose whole header row toggles it and previews the account names', overview.cards.length === 2 && overview.cards.every(Boolean));
     }
@@ -1891,9 +1891,9 @@ try {
       const headline = await usage.evaluate(() => [...document.querySelectorAll('.su-pooled')].map(chart => ({ pool: chart.querySelector('.su-pool').textContent, capacity: chart.querySelector('.su-capacity').textContent, composition: !!chart.querySelector('.su-composition'),
         ticks: [...chart.querySelectorAll('.su-yaxis span')].map(el => el.textContent).join() })));
       console.log(`USAGE LIMITS HEADLINE: ${JSON.stringify(headline)}`);
-      check('Limits headlines and axes are in units: Business 20 + Pro 100 100 = 120, Max 20x = 200', headline.length === 2 && headline.every(item => /^\d+(\.\d)?$/.test(item.pool))
-        && headline[0].capacity === '/ 120 units' && !headline[0].composition && headline[0].ticks === 'units,0,25,50,75,100,120'
-        && headline[1].capacity === '/ 200 units' && !headline[1].composition && headline[1].ticks === 'units,0,50,100,150,200');
+      check('Limits headlines are in units and the axes tick in units without a caption or 0 label: Business 20 + Pro 100 100 = 120, Max 20x = 200', headline.length === 2 && headline.every(item => /^\d+(\.\d)?$/.test(item.pool))
+        && headline[0].capacity === '/ 120 units' && !headline[0].composition && headline[0].ticks === '25,50,75,100,120'
+        && headline[1].capacity === '/ 200 units' && !headline[1].composition && headline[1].ticks === '50,100,150,200');
       check('No Next reset line and no plan units wording anywhere on the Limits page', await usage.evaluate(() => !/Next reset|plan units/i.test(document.querySelector('.su').innerText) && [...document.querySelectorAll('[title],[aria-label]')].every(node => !/plan units/i.test(`${node.getAttribute('title') || ''} ${node.getAttribute('aria-label') || ''}`))));
       check('No advice anywhere on the Limits page or in the footer', await usage.evaluate(source => { const advice = new RegExp(source, 'i'); return !advice.test(document.body.innerText) && [...document.querySelectorAll('[aria-label],[title]')].every(node => !advice.test(node.getAttribute('aria-label') || '') && !advice.test(node.getAttribute('title') || '')); }, ADVICE.source));
     }
@@ -1917,7 +1917,7 @@ try {
         && Math.abs(stacked.marks[1].base - stacked.marks[0].top) < 1e-6 && Math.abs(stacked.marks[1].top - 120) < 1e-6 && stacked.marks.every(mark => mark.dx <= 1 && mark.dy <= 1) && stacked.marks[0].dot.top - stacked.marks[1].dot.bottom > 8);
       check('Stacked reset labels read ⟳W +N and stay shown, apart from each other and from every dot; the waste arrow shares the reset x', !!stacked && stacked.marks.every(mark => /^⟳\d+(\.\d)? \+\d+(\.\d)?$/.test(mark.text) && !mark.hidden) && resets.labelsApart && resets.labelsClearOfDots && resets.wasteT === stacked.t);
       // Hovering the upper dot shows its tooltip; the crosshair and its inline tooltip step aside.
-      await usage.locator(`${CODEX} .su-reset-mark[data-account="acct-prolite"] .su-reset-dot`).hover();
+      await usage.locator(`${CODEX} .su-reset[data-kind=projected] .su-reset-mark[data-account="acct-prolite"] .su-reset-dot`).hover();
       await usage.waitForSelector('.mock-tip');
       const tip = await usage.evaluate(selector => ({ count: document.querySelectorAll('.mock-tip').length, lines: [...document.querySelectorAll('.mock-tip span > span')].map(node => node.textContent),
         cross: document.querySelectorAll(`${selector} .su-cross`).length, inline: document.querySelectorAll(`${selector} .su-tip`).length }), CODEX);
@@ -2042,43 +2042,55 @@ try {
       await usage.locator('.su-lookback input[type=range]').blur();
     }
     {
-      // Horizon: an explicit 7d | 30d segmented control in the controls bar; 7 days by default, 30 days on every chart when chosen.
-      const toggleState = () => usage.evaluate(() => {
-        const group = document.querySelector('.su-horizon'), charts = [...document.querySelectorAll('.su-pooled')];
-        return { role: group.getAttribute('role'), name: group.getAttribute('aria-label'), choices: [...group.querySelectorAll('button')].map(button => `${button.textContent}:${button.getAttribute('aria-pressed')}`).join(), icons: group.querySelectorAll('svg').length, inBar: !!group.closest('.su-limits-controls'),
-          days: charts.map(chart => { const plot = chart.querySelector('.su-plot'); return Math.round((Number(plot.dataset.end) - Number(plot.dataset.start)) / 864) / 100; }),
-          reachEnd: charts.every(chart => Math.abs(chart.querySelector('.su-line.su-projected').getBoundingClientRect().right - chart.querySelector('.su-plot').getBoundingClientRect().right) <= 2) };
+      // Axis ranges: an unfold control (← ┆ →) at each end of every chart's x axis; the weekly defaults are a week either side of Now, and each choice applies page-wide.
+      const step = (side, direction, selector = CODEX) => usage.locator(`${selector} .su-axis-range[data-side=${side}] [data-direction=${direction}]`);
+      const rangeState = () => usage.evaluate(() => {
+        const r = el => el.getBoundingClientRect(), mid = box => (box.top + box.bottom) / 2, charts = [...document.querySelectorAll('.su-pooled')];
+        return { days: charts.map(chart => { const plot = chart.querySelector('.su-plot'); return Math.round((Number(plot.dataset.end) - Number(plot.dataset.start)) / 864) / 100; }),
+          ranges: charts.map(chart => `${chart.dataset.past}/${chart.dataset.future}`).join(),
+          reachEnd: charts.every(chart => Math.abs(chart.querySelector('.su-line.su-projected').getBoundingClientRect().right - chart.querySelector('.su-plot').getBoundingClientRect().right) <= 2),
+          placed: charts.map(chart => { const plot = r(chart.querySelector('.su-plot')), xaxis = r(chart.querySelector('.su-xaxis')), section = r(chart.closest('.su-provider-limits')), past = r(chart.querySelector('.su-axis-range[data-side=past]')), future = r(chart.querySelector('.su-axis-range[data-side=future]'));
+            return past.right <= plot.left + 1 && future.left >= plot.right - 1 && past.left >= section.left && future.right <= section.right + 1 && [past, future].every(box => Math.abs(mid(box) - mid(xaxis)) <= 3); }),
+          buttons: [...document.querySelectorAll('.su-axis-step')].every(button => { const box = r(button), svg = r(button.querySelector('svg')), style = getComputedStyle(button); return box.width === 18 && box.height === 18 && svg.width === 16 && svg.height === 16 && style.backgroundColor === 'rgba(0, 0, 0, 0)' && style.borderTopWidth === '0px'; }),
+          creases: [...document.querySelectorAll('.su-axis-crease')].every(node => node.getAttribute('aria-hidden') === 'true' && node.querySelector('svg[data-icon=UnfoldCrease]')),
+          disabled: [...document.querySelectorAll('.su-axis-step:disabled')].map(button => button.getAttribute('aria-label')).join('|') };
       });
-      const initial = await toggleState();
-      console.log(`USAGE HORIZON 7D: ${JSON.stringify(initial)}`);
-      check('Limits horizon is a labelled 7d | 30d segmented control in the controls bar, 7 days pressed by default on every chart', initial.role === 'group' && initial.name === 'Horizon' && initial.choices === '7d:true,30d:false' && initial.icons === 0
-        && initial.inBar && initial.days.join() === '9.1,9.1');
-      // Keyboard: Tab reaches the 30d choice and Space presses it.
-      await usage.locator('.su-horizon button', { hasText: '7d' }).focus();
-      await usage.keyboard.press('Tab');
-      const focused = await usage.evaluate(() => document.activeElement?.textContent);
+      const initial = await rangeState();
+      console.log(`USAGE AXIS RANGES DEFAULT: ${JSON.stringify(initial)}`);
+      check('Every Limits chart has a past range control left of its x axis and a future one right of it, 18px buttons with 16px glyphs around a decorative crease', initial.placed.every(Boolean) && initial.placed.length === 2 && initial.buttons && initial.creases);
+      check('Weekly defaults are seven days of past and seven ahead on every chart, every arrow enabled between the stops', initial.ranges === '168/168,168/168' && initial.days.join() === '14,14' && initial.disabled === '');
+      await step('future', 'right').hover();
+      await usage.waitForTimeout(150);
+      const hovered = await usage.evaluate(selector => { const button = document.querySelector(`${selector} .su-axis-range[data-side=future] [data-direction=right]`), other = document.querySelector(`${selector} .su-axis-range[data-side=future] [data-direction=left]`); return [getComputedStyle(button).color, getComputedStyle(other).color, getComputedStyle(button).backgroundColor]; }, CODEX);
+      await usage.locator(`${CODEX} .su-limits-grid`).screenshot({ path: join(usageDir, 'v6-limits-axis-range-hover.png') });
+      check('Hovering a range arrow lifts its colour and tints its background, leaving its neighbour at rest', hovered[0] !== hovered[1] && hovered[2] !== 'rgba(0, 0, 0, 0)');
+      // Keyboard: focusing the future → arrow and pressing Space projects 30 days ahead on every chart; ← on the other chart's past side then shows 30 days back, which needs 720 hours of history.
+      await step('future', 'right').focus();
       await usage.keyboard.press('Space');
-      await usage.waitForFunction(() => [...document.querySelectorAll('.su-pooled')].every(chart => chart.dataset.horizon === '30'));
-      await usage.waitForFunction(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'rest' && call[1] === '/usage/limits?hours=216'));
-      await usage.locator('.su-horizon button', { hasText: '30d' }).blur();
+      await usage.waitForFunction(() => [...document.querySelectorAll('.su-pooled')].every(chart => chart.dataset.future === '720'));
+      await step('past', 'left', ANTHROPIC).click();
+      await usage.waitForFunction(() => [...document.querySelectorAll('.su-pooled')].every(chart => chart.dataset.past === '720'));
+      await usage.waitForFunction(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'rest' && call[1] === '/usage/limits?hours=720'));
       await usage.mouse.move(5, 5);
+      await usage.locator(`${CODEX} .su-axis-range[data-side=future] [data-direction=right]`).blur();
       await settle(usage);
-      const extended = await toggleState(), geometry = await measure(), other = await measureIn(ANTHROPIC), axis = await axisState(`${CODEX} .su-pooled`), otherAxis = await axisState(`${ANTHROPIC} .su-pooled`);
+      const extended = await rangeState(), geometry = await measure(), other = await measureIn(ANTHROPIC), axis = await axisState(`${CODEX} .su-pooled`), otherAxis = await axisState(`${ANTHROPIC} .su-pooled`);
       const plot = await usage.evaluate(selector => { const node = document.querySelector(`${selector} .su-pooled .su-plot`); return [Number(node.dataset.start), Number(node.dataset.end)]; }, CODEX);
       const midnights = await pageMidnights(...plot);
-      console.log(`USAGE HORIZON 30D: ${JSON.stringify({ focused, extended, geometry, other, axis, otherAxis, midnights })}`);
-      check('The keyboard picks 30d, which extends every chart to 30 days and persists', focused === '30d' && extended.choices === '7d:false,30d:true' && extended.days.join() === '39,39' && extended.reachEnd
-        && await usage.evaluate(() => JSON.parse(localStorage.getItem('hermes.plugin.hermes-t3sidebar.usage-preferences')).horizon) === 30);
-      check('Limits 30-day charts keep one gridline per midnight, readable labels and their measurements', axis.dayLines === midnights && otherAxis.dayLines === midnights && midnights >= 38 && monthsOnChange(axis.labels) && !axis.overlap && !otherAxis.overlap
+      const saved = await usage.evaluate(() => JSON.parse(localStorage.getItem('hermes.plugin.hermes-t3sidebar.usage-preferences')).range);
+      console.log(`USAGE AXIS RANGES 30D+30D: ${JSON.stringify({ extended, geometry, other, axis, otherAxis, midnights, saved })}`);
+      check('The keyboard and either chart\'s arrows extend every chart to 30 days back and 30 ahead, persisted in client storage', extended.ranges === '720/720,720/720' && extended.days.join() === '60,60' && extended.reachEnd && extended.placed.every(Boolean)
+        && extended.disabled === 'Longest past shown|Longest projection shown|Longest past shown|Longest projection shown' && saved.weekly.past === 720 && saved.weekly.future === 720 && saved.session.past === 5 && saved.session.future === 24);
+      check('Limits 60-day charts keep one gridline per midnight, readable labels and their measurements', axis.dayLines === midnights && otherAxis.dayLines === midnights && midnights >= 59 && monthsOnChange(axis.labels) && !axis.overlap && !otherAxis.overlap
         && averageOk(geometry) && geometry.lookbackX > geometry.plotLeft && labelsOk(geometry) && averageOk(other) && labelsOk(other));
-      check('Limits 30-day 12h averaging span is too short for inner arrowheads, so they point in from outside', geometry.average.tight && geometry.average.right - geometry.average.left < 16 && other.average.tight);
+      check('Limits 60-day 12h averaging span is too short for inner arrowheads, so they point in from outside', geometry.average.tight && geometry.average.right - geometry.average.left < 16 && other.average.tight);
       await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-30d.png') });
-      // The 30-day chart shows the banked credits expiring in nine days as their own flags, and last week's stacked resets as quieter past markers.
+      // Thirty days ahead show the banked credits expiring in nine days as their own flags, and the past last week's stacked resets as quieter past markers.
       const thirty = await usage.evaluate(selector => { const chart = document.querySelector(selector); return { flags: [...chart.querySelectorAll('.su-flag')].map(node => node.querySelector('.su-flag-count')?.textContent ?? '1').join(), past: [...chart.querySelectorAll('.su-reset[data-kind=past]')].map(node => node.querySelectorAll('.su-reset-mark').length).join(), pastLabels: chart.querySelectorAll('.su-reset[data-kind=past] .su-reset-text').length }; }, CODEX);
-      console.log(`USAGE HORIZON 30D MARKS: ${JSON.stringify(thirty)}`);
-      check('The 30-day Codex chart flags each banked expiry time (×2 only where two credits expire at the same instant) and marks last week\'s stacked resets quietly, without labels', thirty.flags === '1,1,×2' && thirty.past.split(',').includes('2') && thirty.pastLabels === 0);
-      await usage.locator('.su-horizon button', { hasText: '7d' }).click();
-      await usage.waitForFunction(() => [...document.querySelectorAll('.su-pooled')].every(chart => chart.dataset.horizon === '7'));
+      console.log(`USAGE AXIS RANGES MARKS: ${JSON.stringify(thirty)}`);
+      check('The 30-day Codex projection flags each banked expiry time (×2 only where two credits expire at the same instant) and the past marks last week\'s stacked resets quietly, without labels', thirty.flags === '1,1,×2' && thirty.past.split(',').includes('2') && thirty.pastLabels === 0);
+      await step('past', 'right').click(); await step('future', 'left').click();
+      await usage.waitForFunction(() => [...document.querySelectorAll('.su-pooled')].every(chart => chart.dataset.past === '168' && chart.dataset.future === '168'));
       await usage.mouse.move(5, 5);
     }
     {
