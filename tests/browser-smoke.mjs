@@ -1525,8 +1525,8 @@ try {
     });
     console.log(`USAGE FOOTER: ${JSON.stringify(footer)}`);
     check('Footer is a fixed 36px row at the bottom of the pane, below the shelves', footer?.last && footer.height === 36 && footer.bottomGap < 1 && footer.belowList);
-    check('Footer has exactly two controls: the single Limits button, then the 28px icon-only Usage button (BarChart3) with a tooltip', footer?.controls.join() === 'sf-limits,sf-utility' && footer.buttons.length === 1
-      && [footer.buttons[0].label, footer.buttons[0].text, footer.buttons[0].title, footer.buttons[0].icon].join('|') === 'Usage||Token usage|BarChart3'
+    check('Footer has exactly two controls: the single Limits button, then the 28px icon-only Usage button (Tabler chart-histogram) with a tooltip', footer?.controls.join() === 'sf-limits,sf-utility' && footer.buttons.length === 1
+      && [footer.buttons[0].label, footer.buttons[0].text, footer.buttons[0].title, footer.buttons[0].icon].join('|') === 'Usage||Token usage|ChartHistogram'
       && footer.buttons[0].width === 28 && footer.buttons[0].height === 28 && footer.buttons[0].glyph === 16 && footer.buttons[0].centered);
     const usageButton = usage.locator('.sf-footer').getByRole('button', { name: 'Usage', exact: true });
     const limitsButton = usage.locator('.sf-footer .sf-limits');
