@@ -273,8 +273,8 @@ function verdictProvider(now, { provider = 'openai-codex', label = 'OpenAI Codex
     { t: now - hour * H, account: 'first', window: 'weekly', remaining_percent: 0, resets_at: now + 4 * D });
   const win = (remaining, resets) => [{ key: 'weekly', label: 'Weekly', window_seconds: 7 * D, remaining_percent: remaining, resets_at: resets }];
   return { provider, label, auth, history, accounts: [
-    { id: 'first', label: 'chatgptvitibot', priority: 0, plan: plans[0], fetched_at: now, stale, windows: win(0, now + 4 * D) },
-    { id: 'second', label: 'chatgpt1', priority: 1, plan: plans[1], fetched_at: now, stale, windows: win(left, now + D) }] };
+    { id: 'first', label: 'codex-team', priority: 0, plan: plans[0], fetched_at: now, stale, windows: win(0, now + 4 * D) },
+    { id: 'second', label: 'codex-pro', priority: 1, plan: plans[1], fetched_at: now, stale, windows: win(left, now + D) }] };
 }
 
 test('the verdict says waste when resets discard at least 5% of capacity and the pool never runs dry', () => {
@@ -286,7 +286,7 @@ test('the verdict says waste when resets discard at least 5% of capacity and the
   assert.match(usage.verdictText(verdict, now), /^48 units will expire unused by [A-Z][a-z]{2}$/, 'the fact only, no advice');
   assert.deepEqual([verdict.severity, verdict.missing], ['medium', 0], '48 of 120 units lost is over a third of the capacity');
   const marks = usage.wasteMarks(usage.projectPool(verdictProvider(now).accounts, verdictProvider(now).history, 'weekly', now, 7 * D, { lookbackS: 12 * H, provider: 'openai-codex' }));
-  assert.deepEqual(marks.map(mark => [mark.t - now, Math.round(mark.before), Math.round(mark.lost), mark.accounts.map(item => `${item.label} ${item.plan_label}`).join()]), [[D, 48, 48, 'chatgpt1 Pro 100']]);
+  assert.deepEqual(marks.map(mark => [mark.t - now, Math.round(mark.before), Math.round(mark.lost), mark.accounts.map(item => `${item.label} ${item.plan_label}`).join()]), [[D, 48, 48, 'codex-pro Pro 100']]);
   // A loss under 5% of capacity is noise: 13% of Pro 100 at 0.5 units an hour leaves 1 unit at the reset.
   const ok = usage.limitsVerdict(verdictProvider(now, { left: 13 }), prefs, now);
   assert.deepEqual([ok.status, Math.round(ok.lost), ok.severity], ['ok', 1, null]);
@@ -374,15 +374,15 @@ test('banked reset credits are validated defensively and flagged by expiry', () 
   assert.deepEqual([[win(79.9)], [win(80), win(85)], [win(100), win(57)], [win(80), win(10, 'model')], [win(null)], []].map(usage.bankedRedeemable), [true, false, true, false, null, null], 'a reset is redeemable once any account allowance has less than 80% left; model windows and unknown readings do not count');
   const parsed = usage.validUsageLimits({ providers: [{ provider: 'openai-codex', accounts: [{ id: 'a', banked_credits: { credits: [{ status: 'available', expires_at: 10 }] } }, { id: 'b', banked_credits: 'broken' }] }] });
   assert.deepEqual(parsed.providers[0].accounts.map(account => account.banked_credits?.credits.length ?? null), [1, null]);
-  const now = 1000, accounts = [{ id: 'a', label: 'chatgpt1', banked_credits: { credits: [{ expires_at: now + 5 * H }, { expires_at: now + 9 * D }] } }, { id: 'b', label: 'chatgptvitibot', banked_credits: { credits: [{ expires_at: now + 5 * H + 600 }, { expires_at: null }] } }];
+  const now = 1000, accounts = [{ id: 'a', label: 'codex-pro', banked_credits: { credits: [{ expires_at: now + 5 * H }, { expires_at: now + 9 * D }] } }, { id: 'b', label: 'codex-team', banked_credits: { credits: [{ expires_at: now + 5 * H + 600 }, { expires_at: null }] } }];
   const flags = usage.bankedFlags(accounts, now, now + 7 * D);
-  assert.deepEqual(flags.map(flag => [flag.t - now, flag.credits.map(item => item.label).join()]), [[5 * H, 'chatgpt1'], [5 * H + 600, 'chatgptvitibot']], 'one flag per expiry, even ten minutes apart; ones outside the range or without a time get none');
+  assert.deepEqual(flags.map(flag => [flag.t - now, flag.credits.map(item => item.label).join()]), [[5 * H, 'codex-pro'], [5 * H + 600, 'codex-team']], 'one flag per expiry, even ten minutes apart; ones outside the range or without a time get none');
   const minute = 60 * 1000;
   const same = usage.bankedFlags([{ id: 'a', label: 'a', banked_credits: { credits: [{ expires_at: minute + 10 }] } }, { id: 'b', label: 'b', banked_credits: { credits: [{ expires_at: minute + 40 }, { expires_at: minute + 70 }] } }], 0, minute + D);
   assert.deepEqual(same.map(flag => flag.credits.length), [2, 1], 'credits expiring in the same minute share one flag; the next minute gets its own');
   const lines = usage.bankedFlagLines(flags[0], now);
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /^chatgpt1 · banked reset expires [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
+  assert.match(lines[0], /^codex-pro · banked reset expires [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
 });
 
 test('empty spans start at the zero crossing and end at the refill', () => {
@@ -660,7 +660,7 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.equal($$('.su-account').length, 0, 'accounts are folded by default');
   assert.deepEqual($$('.su-disclosure').map(node => [node.getAttribute('aria-label'), node.getAttribute('aria-expanded')]), [['Accounts (2)', 'false'], ['Accounts (1)', 'false']]);
   // The folded card previews its accounts by name; the label and count stay separate spans so the count can be quieter.
-  assert.deepEqual([...$('.su-disclosure').children].slice(1).map(node => `${node.className}|${node.textContent}`), ['su-disclosure-label|Accounts', 'su-disclosure-count|2', 'su-disclosure-names|chatgptvitibot · chatgpt1']);
+  assert.deepEqual([...$('.su-disclosure').children].slice(1).map(node => `${node.className}|${node.textContent}`), ['su-disclosure-label|Accounts', 'su-disclosure-count|2', 'su-disclosure-names|codex-team · codex-pro']);
   assert.equal($$('.su-footnote').length, 1);
   assert.match($('.su-footnote').textContent, /^Sampled every 5m · last sample .*averaged over the selected period.*20 units = one \$20 plan's allowance/);
   assert.equal($('.su-overview').lastElementChild.className, 'su-footnotes', 'the footnotes close the page');
@@ -713,7 +713,7 @@ test('account details are folded by default and each provider remembers its own 
   // Open, the card holds the account cards and drops the name preview they would repeat.
   assert.deepEqual([section('openai-codex').querySelector('.su-accounts').parentElement.className, toggle('openai-codex').querySelector('.su-disclosure-names') === null, toggle('anthropic').querySelector('.su-disclosure-names') !== null], ['su-accounts-group', true, true]);
   const first = $('.su-account[data-account="acct-team"]');
-  assert.match(first.querySelector('.su-account-head').textContent, /^chatgptvitibotpriority 0Business20 units2 banked resets/);
+  assert.match(first.querySelector('.su-account-head').textContent, /^codex-teampriority 0Business20 units2 banked resets/);
   const plan = (id, part = '.su-badge') => [...$(`.su-account[data-account="${id}"] ${part}`).children].map(half => `${half.dataset.tone ?? ''}|${half.textContent}`).join(' ');
   assert.equal(plan('acct-prolite'), '|Pro 100 primary|100 units', 'the plan pill splits, units in the primary colour');
   assert.equal($('.su-assumed'), null, 'every plan is in the capacity table');
@@ -751,7 +751,7 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
     assert.deepEqual([Number(stacked.dataset.t), codexSection.querySelector('.su-waste').dataset.t], [Math.round(fixed / 1000 + D), stacked.dataset.t], 'the waste arrow sits at the same x');
     // Two credits expiring ten minutes apart, five hours from now, get one flag each; the nine-day ones are beyond the 7-day chart.
     const flags = () => [...codexSection.querySelectorAll('.su-flag')].map(node => [node.dataset.account, node.getAttribute('aria-label').replace(/expires \w{3} \d{1,2}:\d{2} (AM|PM)/g, 'expires <time>')]);
-    assert.deepEqual(flags(), [['acct-team', 'chatgptvitibot · banked reset expires <time>'], ['acct-prolite', 'chatgpt1 · banked reset expires <time>']]);
+    assert.deepEqual(flags(), [['acct-team', 'codex-team · banked reset expires <time>'], ['acct-prolite', 'codex-pro · banked reset expires <time>']]);
     assert.equal(codexSection.querySelectorAll('.su-flag-count').length, 0, 'different expiries are never counted together');
     assert.equal($$('.su-provider-limits[data-provider="anthropic"] .su-flag').length, 0, 'never-read credits draw no flag');
     const axisStep = (side, direction) => click(codexSection.querySelector(`.su-axis-range[data-side=${side}] [data-direction=${direction}]`));
@@ -770,7 +770,7 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
     assert.match(prolite[0], /^true\|Banked reset · expires .* \(in 5h 10m\)$/, 'usability is an account badge, not repeated on each credit');
     assert.match(prolite[1], /^false\|Banked reset · expires .* \(in 9d 0h\)$/);
     const badge = id => $$(`.su-account[data-account="${id}"] .su-badge-split`).filter(node => node.textContent.includes('banked')).map(node => [...node.children].map(half => `${half.dataset.tone ?? ''}|${half.textContent}`));
-    assert.deepEqual([badge('acct-team'), badge('acct-prolite')], [[['|2 banked resets', 'success|usable now']], [['|2 banked resets', 'success|usable now']]], 'chatgpt1 is redeemable below 80% left even though Codex\'s applicable count is 0');
+    assert.deepEqual([badge('acct-team'), badge('acct-prolite')], [[['|2 banked resets', 'success|usable now']], [['|2 banked resets', 'success|usable now']]], 'codex-pro is redeemable below 80% left even though Codex\'s applicable count is 0');
   } finally { Date.now = realNow; }
 });
 
@@ -807,12 +807,12 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
   assert.ok(near(parseFloat(mark.style.left), 192 / 336 * 100), `x ${mark.style.left}`);
   assert.ok(near(parseFloat(mark.style.top), 60) && near(parseFloat(mark.style.height), 40), `span ${mark.style.top} + ${mark.style.height}`);
   assert.deepEqual([mark.querySelector('.su-waste-text').textContent, mark.querySelectorAll('.su-waste-arrow').length, mark.querySelectorAll('.su-waste-tick').length], ['48 lost', 2, 2]);
-  assert.match(mark.getAttribute('title'), /^chatgpt1 · Pro 100 · 48 units unused at reset [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
+  assert.match(mark.getAttribute('title'), /^codex-pro · Pro 100 · 48 units unused at reset [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
   // Each reset is a marker on its step: Pro 100 rises from the 48 units left by the 52 it restores; three days of half a unit an hour later the Business seat rises from 64 by its 20.
   const resets = $$('.su-pooled .su-reset[data-kind=projected] .su-reset-mark').map(node => [node.dataset.account, Math.round(Number(node.dataset.base)), Math.round(Number(node.dataset.top)), node.querySelector('.su-reset-text')?.textContent]);
   assert.deepEqual(resets, [['second', 48, 100, '⟳100 +52'], ['first', 64, 84, '⟳20 +20']]);
   const dot = $('.su-reset-mark[data-account=second] .su-reset-dot');
-  assert.deepEqual([dot.getAttribute('role'), dot.getAttribute('aria-label').replace(/Resets \w{3} \d{1,2}:\d{2} (AM|PM)/, 'Resets <time>')], ['img', 'chatgpt1 · Pro 100. Resets <time>. +52 units restored. 48 units lost at this reset']);
+  assert.deepEqual([dot.getAttribute('role'), dot.getAttribute('aria-label').replace(/Resets \w{3} \d{1,2}:\d{2} (AM|PM)/, 'Resets <time>')], ['img', 'codex-pro · Pro 100. Resets <time>. +52 units restored. 48 units lost at this reset']);
   assert.equal($('.su-reset-mark[data-account=first] .su-reset-dot').getAttribute('aria-label').endsWith('+20 units restored'), true, 'an empty account loses nothing at its reset');
   assert.equal($('.su-measure[data-kind="empty"]'), null, 'this pool never runs dry');
 });

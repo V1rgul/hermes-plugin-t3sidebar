@@ -66,15 +66,15 @@ class StoreTests(unittest.TestCase):
 	def test_multi_account_pool_payload(self):
 		self.store.record(codex(
 			account("7ad3ca", NOW - 100, [window("five_hour", 10.0, NOW + 3600, "Session", 18000), window("weekly", 42.0, NOW + 9000, "Weekly", 604800)],
-				label="chatgpt1", priority=1, banked=2),
-			account("7c202b", NOW - 50, [window("weekly", 80.0, NOW + 5000, "Weekly", 604800)], label="chatgptvitibot", priority=0, banked=0),
+				label="codex-pro", priority=1, banked=2),
+			account("7c202b", NOW - 50, [window("weekly", 80.0, NOW + 5000, "Weekly", 604800)], label="codex-team", priority=0, banked=0),
 		), checked_at=NOW)
 		payload = limits.limits_payload(self.store, hours=168, now=NOW, sampler_status=None)
 		(provider,) = payload["providers"]
 		self.assertEqual((provider["provider"], provider["label"], provider["error"]), ("openai-codex", "OpenAI Codex", None))
 		self.assertEqual([a["id"] for a in provider["accounts"]], ["7c202b", "7ad3ca"])
 		second = provider["accounts"][1]
-		self.assertEqual((second["label"], second["priority"], second["plan"], second["banked_resets"]), ("chatgpt1", 1, "Pro", 2))
+		self.assertEqual((second["label"], second["priority"], second["plan"], second["banked_resets"]), ("codex-pro", 1, "Pro", 2))
 		self.assertEqual([w["key"] for w in second["windows"]], ["five_hour", "weekly"])
 		self.assertEqual(second["windows"][1]["remaining_percent"], 58.0)
 		self.assertEqual(provider["accounts"][0]["banked_resets"], 0)
@@ -287,8 +287,8 @@ class CollectorTests(unittest.TestCase):
 	def test_collects_vetted_pools_read_only_without_keeping_tokens(self):
 		pool = {
 			"openai-codex": [
-				{"id": "7c202b", "label": "chatgptvitibot", "priority": 0, "access_token": "tok-a"},
-				{"id": "7ad3ca", "label": "chatgpt1", "priority": 1, "access_token": "tok-b"},
+				{"id": "7c202b", "label": "codex-team", "priority": 0, "access_token": "tok-a"},
+				{"id": "7ad3ca", "label": "codex-pro", "priority": 1, "access_token": "tok-b"},
 				{"id": "dup001", "label": "dup", "priority": 2, "access_token": "tok-a"},
 				{"id": "dead01", "label": "me@example.com", "priority": 3, "access_token": "tok-d", "last_status": "dead"},
 				{"id": "empty1", "priority": 4},

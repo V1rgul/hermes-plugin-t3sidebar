@@ -1914,7 +1914,7 @@ try {
       const waste = await wasteGeometry(usage, CODEX), claude = await wasteGeometry(usage, ANTHROPIC);
       console.log(`USAGE LIMITS WASTE (mixed): ${JSON.stringify({ waste, claude })}`);
       check('Limits draws a waste measurement at the Pro 100 reset: x within 1px, span = the expiring units within 1px, in the Now line colour, with arrowheads, ticks and a label',
-        waste.marks.length === 1 && waste.marks.every(mark => wasteOk(mark, 'chatgpt1 · Pro 100')) && waste.marks[0].span > 16 && !waste.marks[0].hidden && waste.apart);
+        waste.marks.length === 1 && waste.marks.every(mark => wasteOk(mark, 'codex-pro · Pro 100')) && waste.marks[0].span > 16 && !waste.marks[0].hidden && waste.apart);
       check('Limits Codex verdict under its headline: neutral factual text (when it runs out, the gap, the missing units) after a red arrow to the floor', waste.verdict?.status === 'short' && waste.verdict.severity === 'high' && waste.verdict.icon === 'ArrowBarToDownTouching'
         && /^Runs out \w{3} \d{1,2}:\d{2} (AM|PM), ((\d+d \d+h|\d+h \d+m) before the next reset|still empty at the end of the 7 days) · missing ~\d+ units$/.test(waste.verdict.text) && neutral(waste.verdict.color) && waste.verdict.iconColor[0] > waste.verdict.iconColor[1] + 40);
       check('Limits Anthropic chart has its own waste verdict (muted clock-x: under a third of the capacity) and a waste measurement at the Max 20x reset', claude.verdict?.status === 'waste' && claude.verdict.severity === 'low' && claude.verdict.icon === 'ClockX' && neutral(claude.verdict.iconColor)
@@ -1953,7 +1953,7 @@ try {
       const tip = await usage.evaluate(selector => ({ count: document.querySelectorAll('.mock-tip').length, lines: [...document.querySelectorAll('.mock-tip span > span')].map(node => node.textContent),
         cross: document.querySelectorAll(`${selector} .su-cross`).length, inline: document.querySelectorAll(`${selector} .su-tip`).length }), CODEX);
       console.log(`USAGE LIMITS RESET TIP: ${JSON.stringify(tip)}`);
-      check('Hovering a reset marker shows account and plan, reset time, units restored and units lost, without the crosshair', tip.count === 1 && tip.lines[0] === 'chatgpt1 · Pro 100' && /^Resets \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(tip.lines[1])
+      check('Hovering a reset marker shows account and plan, reset time, units restored and units lost, without the crosshair', tip.count === 1 && tip.lines[0] === 'codex-pro · Pro 100' && /^Resets \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(tip.lines[1])
         && /^\+\d+ units restored$/.test(tip.lines[2]) && /^\d+ units lost at this reset$/.test(tip.lines[3]) && tip.lines.length === 4 && tip.cross === 0 && tip.inline === 0);
       {
         const section = await usage.locator(CODEX).boundingBox(), bubble = await usage.locator('.mock-tip').boundingBox();
@@ -1981,7 +1981,7 @@ try {
       console.log(`USAGE LIMITS FLAG: ${JSON.stringify({ flag, flagTips })}`);
       check('Each banked credit gets its own flag above the Codex plot, pole on its expiry within 1px, the close second one lifted onto the next row without overlap, no count badge, one tooltip line each', flag.flags.length === 2 && flag.flags.every(item => item.pole <= 1)
         && flag.flags.map(item => item.row).join() === '0,1' && flag.apart && flag.above && flag.counts === 0 && flag.other === 0
-        && flagTips.every(lines => lines.length === 1) && /^chatgptvitibot · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTips[0][0]) && /^chatgpt1 · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTips[1][0]));
+        && flagTips.every(lines => lines.length === 1) && /^codex-team · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTips[0][0]) && /^codex-pro · banked reset expires \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(flagTips[1][0]));
       // Reset discs add no segment overlay: the unchanged SVG projection supplies the dashed steps.
       const resetsStyle = await usage.evaluate(selector => {
         const chart = document.querySelector(selector), curve = chart.querySelector('.su-line.su-projected');
@@ -2258,7 +2258,7 @@ try {
       const empty = await light.locator(`${CODEX} .su-measure[data-kind="empty"]`).count();
       console.log(`USAGE LIMITS WASTE (light): ${JSON.stringify({ waste, empty })}`);
       check('Limits light week: a factual waste verdict after an orange clock-x (over a third of the capacity) and a waste measurement at the reset, no time-to-empty', waste.verdict?.status === 'waste' && waste.verdict.severity === 'medium' && waste.verdict.icon === 'ClockX'
-        && waste.verdict.iconColor[0] > waste.verdict.iconColor[2] + 60 && /^\d+(\.\d)? units will expire unused by \w{3}$/.test(waste.verdict.text) && waste.marks.length >= 1 && waste.marks.every(mark => wasteOk(mark, 'chatgpt1 · Pro 100')) && waste.apart && empty === 0);
+        && waste.verdict.iconColor[0] > waste.verdict.iconColor[2] + 60 && /^\d+(\.\d)? units will expire unused by \w{3}$/.test(waste.verdict.text) && waste.marks.length >= 1 && waste.marks.every(mark => wasteOk(mark, 'codex-pro · Pro 100')) && waste.apart && empty === 0);
       await light.mouse.move(5, 5);
       await light.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-7d-waste.png') });
       await light.close();

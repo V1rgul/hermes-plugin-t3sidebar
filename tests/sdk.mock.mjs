@@ -362,7 +362,7 @@ export function syntheticUsageHistory(days = 7, tz = 'UTC') {
 }
 // Two Codex accounts on different plans (a 20-unit Business seat drained first, then a 100-unit Pro 100) and one Anthropic Max 20x account (200 units weekly), each pool drained in priority order by an office-hours workload: ten days of 15-minute samples with weekly resets as visible step-ups. Consumption is in plan units, the weekday/hour profile follows the local clock (nights and weekends line up with the charts' midnight gridlines), and Codex's last 12 hours run hotter than the days before, as in a burst of work. Scenarios (control.limitsScenario):
 // - 'mixed' (default): both Codex accounts reset together tomorrow (stacked reset markers on one vertical line); Codex's burst leaves Pro 100 with unused quota at that reset (a waste arrow) yet still empties the pool with no further reset that week (the time-to-empty arrow), so its verdict is short; Anthropic's lighter use leaves quota to expire at its reset (waste).
-// Both Codex accounts hold two banked reset credits, one expiring in about five hours (the two expiries ten minutes apart share one flag) and one in nine to ten days; chatgptvitibot could redeem them now, chatgpt1 could not.
+// Both Codex accounts hold two banked reset credits, one expiring in about five hours (the two expiries ten minutes apart share one flag) and one in nine to ten days; codex-team could redeem them now, codex-pro could not.
 // - 'light': the same accounts with a gentle Codex workload; resets throw quota away and both verdicts are waste.
 // - 'steady': consumption that roughly matches each pool's capacity; both verdicts are ok.
 // - 'logged-out': 'mixed' with Anthropic logged out in Hermes (no credential left in its pool).
@@ -433,8 +433,8 @@ export function syntheticUsageLimits(hours = 168, scenario = 'mixed', { compact 
   const now = Date.now() / 1000, fetched = now - 140, from = Math.floor(now / 900) * 900 - 10 * 86400, since = now - hours * 3600;
   const prepare = list => list.map(account => ({ ...account, remaining: account.units * account.left, weekReset: resetAfter(account.weekly, LIMIT_WEEK, from), fiveReset: resetAfter(account.five, LIMIT_FIVE_HOURS, from), fiveUsed: 0 }));
   const codex = simulateLimitPool(prepare([
-    { id: 'acct-team', label: 'chatgptvitibot', priority: 0, plan: 'team', units: 20, banked_resets: 2, banked_credits: bankedCredits(now, [5, 9 * 24], 2), weekly: now + shape.teamReset * 86400, five: now + 1.3 * 3600, left: shape.team },
-    { id: 'acct-prolite', label: 'chatgpt1', priority: 1, plan: 'prolite', units: 100, banked_resets: 2, banked_credits: bankedCredits(now, [5 + 10 / 60, 9 * 24], 0), weekly: now + shape.proliteReset * 86400, five: now + 3.1 * 3600, left: shape.prolite }
+    { id: 'acct-team', label: 'codex-team', priority: 0, plan: 'team', units: 20, banked_resets: 2, banked_credits: bankedCredits(now, [5, 9 * 24], 2), weekly: now + shape.teamReset * 86400, five: now + 1.3 * 3600, left: shape.team },
+    { id: 'acct-prolite', label: 'codex-pro', priority: 1, plan: 'prolite', units: 100, banked_resets: 2, banked_credits: bankedCredits(now, [5 + 10 / 60, 9 * 24], 0), weekly: now + shape.proliteReset * 86400, five: now + 3.1 * 3600, left: shape.prolite }
   ]), { from, fetched, since, scaleAt: t => t >= now - 12 * 3600 ? shape.burst : shape.base });
   // Max 20x as Anthropic's usage endpoint names it (rateLimitTier), which the plugin maps to 200 weekly plan units.
   const claude = simulateLimitPool(prepare([
