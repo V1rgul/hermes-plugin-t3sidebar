@@ -3508,9 +3508,11 @@ const USAGE_CSS = `
 .su-window{display:grid;grid-template-columns:minmax(80px,11rem) minmax(60px,1fr) 4.5rem 8rem;align-items:center;gap:12px;font-size:11px}
 .su-window-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ui-text-secondary)}.su-window[data-selected=true] .su-window-label{color:var(--ui-text-primary);font-weight:500}
 .su-window-value{text-align:right;font-variant-numeric:tabular-nums}.su-window-reset{color:var(--ui-text-tertiary);white-space:nowrap;font-variant-numeric:tabular-nums}
-.su-bar{position:relative;height:16px}.su-bar-track,.su-bar-fill{position:absolute;left:0;top:5px;height:6px;border-radius:3px}
+/* Weekly bars (and model-scoped weekly windows) are thick and the 5-hour bars thin, so the window the pool is judged on stands out; the pace tick overhangs each bar by 4px on both sides. */
+.su-bar{--su-bar:10px;position:relative;height:18px}.su-window[data-window^=five_hour] .su-bar{--su-bar:3px;height:16px}
+.su-bar-track,.su-bar-fill{position:absolute;left:0;top:calc(50% - var(--su-bar) / 2);height:var(--su-bar);border-radius:3px}
 .su-bar-track{right:0;background:color-mix(in srgb,var(--ui-text-primary) 12%,transparent)}.su-bar-fill{background:var(--su-color)}
-.su-pace{position:absolute;top:1px;width:2px;height:14px;margin-left:-1px;border-radius:1px;background:var(--ui-text-primary)}
+.su-pace{position:absolute;top:calc(50% - var(--su-bar) / 2 - 4px);width:2px;height:calc(var(--su-bar) + 8px);margin-left:-1px;border-radius:1px;background:var(--ui-text-primary)}
 /* Unit headline, verdict and the marks over the plot. */
 .su-verdict{display:flex;align-items:center;gap:6px;margin:-6px 0 0;font-size:12px;color:var(--ui-text-tertiary)}
 /* The text of a short or waste verdict stays neutral; only its glyph carries the severity colour, as in the sidebar footer. */
