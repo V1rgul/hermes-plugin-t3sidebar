@@ -2122,9 +2122,9 @@ const compactNumber = Intl.NumberFormat('en', { notation: 'compact', maximumFrac
 const integerNumber = Intl.NumberFormat('en', { maximumFractionDigits: 0 });
 const usdNumber = Intl.NumberFormat('en', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export const USAGE_METRICS = [
-  { key: 'tokens', title: 'Tokens', unit: 'tokens/day', format: value => compactNumber.format(value), integer: true },
-  { key: 'cost_usd', title: 'Cost', subtitle: 'API-equivalent', unit: '$/day', format: value => usdNumber.format(value), integer: false },
-  { key: 'user_messages', title: 'User messages', unit: 'messages/day', format: value => integerNumber.format(value), integer: true }
+  { key: 'tokens', title: 'Tokens', unit: 'tokens', format: value => compactNumber.format(value), integer: true },
+  { key: 'cost_usd', title: 'Cost', subtitle: 'API-equivalent', unit: '$', format: value => usdNumber.format(value), integer: false },
+  { key: 'user_messages', title: 'User messages', unit: 'messages', format: value => integerNumber.format(value), integer: true }
 ];
 export function validUsageHistory(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.buckets) || !value.buckets.every(Number.isFinite)) throw new Error('Unsupported usage history response.');
@@ -2174,16 +2174,28 @@ export function usageSeries(history, split, metric) {
   for (const item of series) labels.set(item.label, (labels.get(item.label) || 0) + 1);
   return series.map(item => labels.get(item.label) > 1 && item.provider ? { ...item, label: `${item.label} · ${item.provider}` } : item);
 }
-// Stacked: each band sits on the running total of the bands before it. Independent: every series starts from zero.
+// Slopes (value per bucket) of a smooth curve through every value: a cubic Hermite curve whose slope at a point is Catmull-Rom's (the slope between its two neighbours), limited so no segment rises above or dips below its two end points. A peak, a trough, the edge of a flat run and both ends get slope 0, and no slope exceeds three times either adjacent segment's (Fritsch–Carlson's monotone bound), so a curve of non-negative values never dips below zero.
+export function curveSlopes(values) {
+  const count = values.length;
+  return values.map((value, index) => {
+    if (index === 0 || index === count - 1) return 0;
+    const before = value - values[index - 1], after = values[index + 1] - value;
+    if (before * after <= 0) return 0;
+    const centred = (values[index + 1] - values[index - 1]) / 2;
+    return Math.sign(centred) * Math.min(Math.abs(centred), 3 * Math.abs(before), 3 * Math.abs(after));
+  });
+}
+// Stacked: each band sits on the running total of the bands before it. Independent: every series starts from zero. Each boundary carries its curve slopes: a stacked boundary is the sum of the curves below it (Hermite curves on shared points add up slope by slope), so every band is exactly its own series' curve and never crosses the one below.
 export function chartLayers(series, mode) {
-  const count = series[0]?.values.length || 0, running = new Array(count).fill(0);
+  const count = series[0]?.values.length || 0, running = new Array(count).fill(0), runningSlope = new Array(count).fill(0);
   let max = 0;
   const layers = series.map(item => {
-    const lower = mode === 'stacked' ? running.slice() : new Array(count).fill(0);
-    const upper = item.values.map((value, index) => lower[index] + value);
-    if (mode === 'stacked') upper.forEach((value, index) => { running[index] = value; });
+    const stacked = mode === 'stacked', slopes = curveSlopes(item.values);
+    const lower = stacked ? running.slice() : new Array(count).fill(0), lowerSlope = stacked ? runningSlope.slice() : new Array(count).fill(0);
+    const upper = item.values.map((value, index) => lower[index] + value), upperSlope = slopes.map((slope, index) => lowerSlope[index] + slope);
+    if (stacked) { upper.forEach((value, index) => { running[index] = value; }); upperSlope.forEach((slope, index) => { runningSlope[index] = slope; }); }
     for (const value of upper) if (value > max) max = value;
-    return { key: item.key, lower, upper };
+    return { key: item.key, lower, upper, lowerSlope, upperSlope };
   });
   return { layers, max };
 }
@@ -2222,30 +2234,32 @@ export function seriesColors(series, split) {
   }
   return colors;
 }
-// Charts plot rates per day so every period reads in the same unit whatever its bucket size. Each sub-day bucket is scaled by its own length (a DST change stretches or shrinks one by an hour); a day bucket already is per day.
-export function perDayFactors(buckets, windowEnd, bucketMinutes) {
-  if (bucketMinutes >= 1440) return buckets.map(() => 1);
+// Each bucket's real length in seconds, up to the next start or the window end: a DST change stretches or shrinks one bucket by an hour.
+export function bucketLengths(buckets, windowEnd, bucketMinutes) {
   return buckets.map((start, index) => {
     const end = index + 1 < buckets.length ? buckets[index + 1] : windowEnd;
-    return DAY_S / (Number.isFinite(end) && end > start ? end - start : bucketMinutes * 60);
+    return Number.isFinite(end) && end > start ? end - start : bucketMinutes * 60;
   });
 }
 // Nominal bucket minutes; backends that predate bucket_minutes only sent hour or day buckets.
 const historyBucketMinutes = history => Number.isInteger(history.bucket_minutes) && history.bucket_minutes > 0 ? history.bucket_minutes : history.resolution === 'hour' ? 60 : 1440;
 // "3 min", "1.5 h", "4 h": bucket lengths in tooltips and labels.
 const bucketDuration = seconds => seconds < HOUR_S ? `${Math.round(seconds / 60)} min` : `${Math.round(seconds / HOUR_S * 10) / 10} h`;
+// What each plotted point counts: "day", "6 h", "h", "10 min".
+export const bucketUnit = minutes => minutes >= 1440 && minutes % 1440 === 0 ? (minutes === 1440 ? 'day' : `${minutes / 1440} days`) : minutes === 60 ? 'h' : bucketDuration(minutes * 60);
 export function buildUsageCharts(history, split, mode) {
   const bucketMinutes = historyBucketMinutes(history), tz = typeof history.tz === 'string' && history.tz ? history.tz : undefined;
-  const factors = perDayFactors(history.buckets, history.window_end, bucketMinutes);
+  const lengths = bucketLengths(history.buckets, history.window_end, bucketMinutes);
   // Hour labels only fit a window of about a day; longer windows are labelled by local day whatever their bucket size.
-  const span = history.buckets.length ? history.buckets.at(-1) + DAY_S / factors.at(-1) - history.buckets[0] : 0;
+  const span = history.buckets.length ? history.buckets.at(-1) + lengths.at(-1) - history.buckets[0] : 0;
   const axis = bucketMinutes < 1440 && span <= 1.5 * DAY_S ? 'hour' : 'day';
-  const all = USAGE_METRICS.map(metric => ({ metric, series: usageSeries(history, split, metric.key) }));
+  // Largest total first, per chart: the legend and tooltip read biggest first, and the stack is drawn the other way round so the largest band sits on top and gives the stack's upper edge its colour (a negligible series stacked last would otherwise outline the whole chart).
+  const all = USAGE_METRICS.map(metric => ({ metric, series: usageSeries(history, split, metric.key).sort((a, b) => b.total - a.total || a.key.localeCompare(b.key)) }));
   // One color map across the three charts, so a series keeps its color even where it is absent from one metric.
   const colors = seriesColors(all.flatMap(chart => chart.series), split);
-  return { buckets: history.buckets, bucketMinutes, factors, tz, colors, ...usageAxis(history.buckets, axis, tz), charts: all.map(({ metric, series }) => {
-    const { layers, max } = chartLayers(series.map(item => ({ ...item, values: item.values.map((value, index) => value * factors[index]) })), mode);
-    // Totals stay the actual amounts for the period; only the plotted rates are scaled.
+  // Each point is the real amount in its bucket; the bucket size, chosen per period, is the chart's unit.
+  return { buckets: history.buckets, days: history.days, bucketMinutes, unit: bucketUnit(bucketMinutes), lengths, tz, colors, ...usageAxis(history.buckets, axis, tz), charts: all.map(({ metric, series }) => {
+    const { layers, max } = chartLayers([...series].reverse(), mode);
     return { metric, series, layers, scale: niceScale(max, 4, metric.integer), total: series.reduce((sum, item) => sum + item.total, 0) };
   }) };
 }
@@ -2753,11 +2767,10 @@ function ScopedUsagePage({ ctx, scope, view }) {
   return h('div', { className: 'su', 'data-view': view }, h('style', null, USAGE_CSS),
     view === 'usage' ? h(Fragment, null,
       h('div', { className: 'su-top' }, h('header', { className: 'su-header' },
-        h(Segmented, { label: 'Period', showLabel: false, options: [{ id: 1, label: '24h' }, { id: 7, label: '7d' }, { id: 30, label: '30d' }, { id: 90, label: '90d' }], value: prefs.days, onChange: days => update({ days }) }),
         h(Segmented, { label: 'Split', options: [{ id: 'provider', label: 'Provider' }, { id: 'model', label: 'Model' }], value: prefs.split, onChange: split => update({ split }) }),
         h(Segmented, { label: 'Mode', options: [{ id: 'stacked', label: 'Stacked' }, { id: 'independent', label: 'Independent' }], value: prefs.mode, onChange: mode => update({ mode }) }),
         toolbar)),
-      h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs }))))
+      h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs, setDays: days => update({ days }) }))))
       // The shared projection controls head the Limits page, so its refresh control sits at the end of that row.
       : h(LimitsView, { query: limits, prefs, update, toolbar }));
 }
@@ -2765,17 +2778,50 @@ function UsageState({ error = false, children }) { return h('div', { className: 
 function QueryProblem({ query, what }) {
   return h(UsageState, { error: true }, `${what} unavailable: ${query.error?.message || 'unknown error'} `, h('button', { type: 'button', className: 'su-link', onClick: () => void query.refetch() }, 'Retry'));
 }
-function UsageHistoryView({ query, prefs }) {
+// Usage periods are the history endpoint's days, offered through the same unfold control as the Limits past range.
+export const USAGE_RANGE_STOPS = Object.freeze([24, 168, 720, 2160]);
+// The time a usage payload draws: its first and last bucket starts sit on the plot's two edges.
+const usageSpan = data => data?.buckets?.length > 1 ? { start: data.buckets[0], end: data.buckets.at(-1) } : null;
+const canGlide = () => typeof globalThis.requestAnimationFrame === 'function' && !reducedMotion();
+// Every usage chart glides through its own plot at once; the handle reports the first one's window and settles them all, and a held glide asks for the redraw only once.
+function glideCharts(root, from, to, drawn, onEnd) {
+  let ended = false;
+  const end = onEnd && (() => { if (!ended) { ended = true; onEnd(); } });
+  const runs = [...root.querySelectorAll('.su-chart[data-metric]')].map(chart => glideRange(chart, from, to, drawn, end)).filter(Boolean);
+  return runs.length ? { shown: () => runs[0].shown(), cancel: () => runs.forEach(run => run.cancel()) } : null;
+}
+function UsageHistoryView({ query, prefs, setDays }) {
   const data = query.data;
+  const charts = useRef(null), glide = useRef({ last: null, run: null }), latest = useRef(data);
+  latest.current = data;
+  // The payload the charts are drawn from. A longer period needs its own payload, so it is drawn when it arrives and the glide widens onto it from the old span. A shorter one keeps the longer drawing while the glide zooms in on the new span, and is drawn once at the end, like a shrinking Limits range.
+  const [drawn, setDrawn] = useState(data);
+  let view = drawn;
+  if (data !== drawn && !(data && drawn && data.days < drawn.days && usageSpan(data) && usageSpan(drawn) && canGlide())) { view = data; setDrawn(data); }
   const [hover, setHover] = useState(null);
-  const model = useMemo(() => data ? buildUsageCharts(data, prefs.split, prefs.mode) : null, [data, prefs.split, prefs.mode]);
-  if (!data) return query.isError ? h(QueryProblem, { query, what: 'Usage history' }) : h(UsageState, null, 'Loading usage…');
+  const model = useMemo(() => view ? buildUsageCharts(view, prefs.split, prefs.mode) : null, [view, prefs.split, prefs.mode]);
+  const target = usageSpan(data), shown = usageSpan(view), held = view !== data;
+  const targetKey = target ? `${data.days}|${target.start}|${target.end}` : '', shownKey = shown ? `${shown.start}|${shown.end}` : '';
+  // Only a period change glides; a poll, which shifts the span by a bucket, redraws at once. An interrupted glide restarts from the window it was showing.
+  useLayoutEffect(() => {
+    const record = glide.current, last = record.last, running = record.run;
+    const from = running ? running.shown() : last;
+    if (running) { running.cancel(); record.run = null; }
+    record.last = target && { ...target, days: data.days };
+    if (charts.current && from && target && shown && last && last.days !== data.days && canGlide()) record.run = glideCharts(charts.current, from, target, shown, held ? () => setDrawn(latest.current) : null);
+    // A held drawing with no glide left to show it gives way to the new period at once.
+    if (!record.run && held) setDrawn(data);
+  }, [targetKey, shownKey]);
+  useEffect(() => () => glide.current.run?.cancel(), []);
+  if (!view) return query.isError ? h(QueryProblem, { query, what: 'Usage history' }) : h(UsageState, null, 'Loading usage…');
   const empty = !model.charts.some(chart => chart.series.length);
+  const range = { hours: prefs.days * 24, onChange: hours => setDays(hours / 24) };
   return h(Fragment, null,
     query.isError ? h(QueryProblem, { query, what: 'Latest usage' }) : null,
-    empty ? h(UsageState, null, 'No usage recorded in this period.') : model.charts.map((chart, index) => h(UsageChart, { key: chart.metric.key, chart, model, mode: prefs.mode, hover, setHover, axis: index === model.charts.length - 1 })),
+    empty ? h(Fragment, null, h(UsageState, null, 'No usage recorded in this period.'), h('div', { className: 'su-axis-row' }, h(AxisRangeControl, { side: 'past', stops: USAGE_RANGE_STOPS, ...range })))
+      : h('div', { className: 'su-charts', ref: charts }, model.charts.map(chart => h(UsageChart, { key: chart.metric.key, chart, model, mode: prefs.mode, hover, setHover, range }))),
     h('p', { className: 'su-footnote' }, 'Per-call timing is reconstructed from message timestamps, so placement within a bucket is approximate. Cost is the API-equivalent price of the same usage, not what a subscription bills.',
-      data.pricing_missing.length ? ` No price available for: ${data.pricing_missing.join(', ')} (counted as $0).` : ''));
+      view.pricing_missing.length ? ` No price available for: ${view.pricing_missing.join(', ')} (counted as $0).` : ''));
 }
 const VIEW_W = 1000, VIEW_H = 100;
 // Bucket centers span the full plot width; a single bucket becomes a flat segment across it.
@@ -2783,7 +2829,7 @@ const bucketX = (index, count) => count > 1 ? index / (count - 1) * VIEW_W : VIE
 function bucketLabel(model, index) {
   const start = model.buckets[index];
   if (model.bucketMinutes >= 1440) return formatAt(start, { weekday: 'short', month: 'short', day: 'numeric' }, model.tz);
-  return `${formatAt(start, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }, model.tz)} – ${formatAt(start + DAY_S / model.factors[index], { hour: 'numeric', minute: '2-digit' }, model.tz)}`;
+  return `${formatAt(start, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }, model.tz)} – ${formatAt(start + model.lengths[index], { hour: 'numeric', minute: '2-digit' }, model.tz)}`;
 }
 function plotKeys(event, count, hover, setHover) {
   const moves = { ArrowLeft: -1, ArrowRight: 1 };
@@ -2791,19 +2837,26 @@ function plotKeys(event, count, hover, setHover) {
   if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); setHover(event.key === 'Home' ? 0 : count - 1); }
   if (event.key === 'Escape') setHover(null);
 }
-// Tooltip values are per day like the plot; sub-day buckets also show the raw amount of that bucket.
-function TipValue({ metric, value, factor }) {
-  return h('b', null, `${metric.format(value * factor)}/day`, factor !== 1 ? h('span', { className: 'su-tip-raw' }, ` · ${metric.format(value)} in ${bucketDuration(DAY_S / factor)}`) : null);
-}
-function UsageChart({ chart, model, mode, hover, setHover, axis }) {
+// The total names the period it covers ("/ 7 days"); a payload without a known period falls back to "total".
+export const periodTotalLabel = days => days === 1 ? '/ day' : Number.isInteger(days) && days > 1 ? `/ ${days} days` : 'total';
+function UsageChart({ chart, model, mode, hover, setHover, range }) {
   const { metric, series, layers, scale } = chart, count = model.buckets.length;
   const y = value => VIEW_H - value / scale.max * VIEW_H;
   const xs = count === 1 ? [0, VIEW_W] : Array.from({ length: count }, (_, index) => bucketX(index, count));
   const widen = values => count === 1 ? [values[0], values[0]] : values;
-  const path = values => widen(values).map((value, index) => `${index ? 'L' : 'M'}${xs[index].toFixed(2)},${y(value).toFixed(2)}`).join(' ');
+  // The curve passes through every bucket's value; between two buckets it is the cubic Hermite segment with their curve slopes, converted from value per bucket to plot units. Walked backwards it is the same curve, so a stacked band's lower edge matches the band below exactly.
+  const step = count > 1 ? VIEW_W / (count - 1) : VIEW_W;
+  const curve = (values, slopes, backwards = false) => {
+    const order = count === 1 ? [0, 1] : Array.from({ length: count }, (_, index) => index), points = widen(values), turn = count === 1 ? [0, 0] : slopes;
+    if (backwards) order.reverse();
+    const at = index => `${xs[index].toFixed(2)},${y(points[index]).toFixed(2)}`, slope = index => -turn[index] / scale.max * VIEW_H / step;
+    return `${backwards ? 'L' : 'M'}${at(order[0])}` + order.slice(1).map((index, position) => {
+      const from = order[position], third = (xs[index] - xs[from]) / 3;
+      return ` C${(xs[from] + third).toFixed(2)},${(y(points[from]) + slope(from) * third).toFixed(2)} ${(xs[index] - third).toFixed(2)},${(y(points[index]) - slope(index) * third).toFixed(2)} ${at(index)}`;
+    }).join('');
+  };
   const hovered = hover !== null && hover < count ? hover : null;
   const pct = hovered === null ? null : bucketX(hovered, count) / VIEW_W * 100;
-  const ordered = mode === 'stacked' ? [...series].reverse() : series;
   const move = event => {
     const box = event.currentTarget.getBoundingClientRect();
     if (!(box.width > 0) || !count) return;
@@ -2811,21 +2864,25 @@ function UsageChart({ chart, model, mode, hover, setHover, axis }) {
   };
   return h('section', { className: 'su-chart', 'data-metric': metric.key, 'aria-label': `${metric.title} chart` },
     h('div', { className: 'su-chart-head' }, h('h3', null, metric.title), metric.subtitle ? h('span', { className: 'su-sub' }, metric.subtitle) : null,
-      h('span', { className: 'su-total' }, metric.format(chart.total), h('span', { className: 'su-total-label' }, ' total'))),
-    h('div', { className: 'su-legend' }, series.length ? series.map(item => h('span', { key: item.key, className: 'su-legend-item', 'data-series': item.key, title: `${item.label}: ${metric.format(item.total)} total in this period` },
-      h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', { className: 'su-legend-label' }, item.label), h('b', null, metric.format(item.total))))
-      : h('span', { className: 'su-muted' }, 'Nothing in this period')),
-    h('div', { className: 'su-plot-row su-plot-row-unit' },
-      h('div', { className: 'su-yaxis', 'aria-hidden': true }, h('span', { className: 'su-yunit' }, metric.unit), scale.ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / scale.max * 100}%` } }, metric.format(tick)))),
-      h('div', { className: 'su-plot', tabIndex: 0, 'aria-label': `${metric.title} per day, by ${model.bucketMinutes >= 1440 ? 'day' : `${bucketDuration(model.bucketMinutes * 60)} bucket`}; use arrow keys to inspect buckets`,
+      // The space before the period is in the total's own font: inside the smaller label it read narrower than the space after the slash.
+      h('span', { className: 'su-total' }, `${metric.format(chart.total)} `, h('span', { className: 'su-total-label' }, periodTotalLabel(model.days)))),
+    // The unit (amount per bucket) opens the line under the title and the legend fills it from the right.
+    h('div', { className: 'su-chart-sub' }, h('span', { className: 'su-yunit' }, `${metric.unit} / ${model.unit}`),
+      h('div', { className: 'su-legend' }, series.length ? series.map(item => h('span', { key: item.key, className: 'su-legend-item', 'data-series': item.key, title: `${item.label}: ${metric.format(item.total)} total in this period` },
+        h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', { className: 'su-legend-label' }, item.label), h('b', null, metric.format(item.total))))
+        : h('span', { className: 'su-muted' }, 'Nothing in this period'))),
+    h('div', { className: 'su-plot-row' },
+      // No 0 label, as on the Limits charts: the range control sits under it, and the 0 gridline stays.
+      h('div', { className: 'su-yaxis', 'aria-hidden': true }, scale.ticks.filter(tick => tick > 0).map(tick => h('span', { key: tick, style: { bottom: `${tick / scale.max * 100}%` } }, metric.format(tick)))),
+      h('div', { className: 'su-plot', tabIndex: 0, 'aria-label': `${metric.title} per ${model.unit}; use arrow keys to inspect buckets`,
         onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null), onKeyDown: event => plotKeys(event, count, hovered, setHover) },
         h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
           model.dayLines.map(index => h('line', { key: `d${index}`, className: 'su-day-grid', x1: bucketX(index, count), x2: bucketX(index, count), y1: 0, y2: VIEW_H })),
           scale.ticks.map(tick => h('line', { key: tick, className: 'su-grid', x1: 0, x2: VIEW_W, y1: y(tick), y2: y(tick) })),
           layers.map(layer => {
-            const color = model.colors.get(layer.key), top = path(layer.upper);
+            const color = model.colors.get(layer.key), top = curve(layer.upper, layer.upperSlope);
             // The area closes along the band below it (stacked) or the zero line (independent), walked backwards.
-            const bottom = widen(layer.lower).map((value, index) => [xs[index], y(value)]).reverse().map(([x, yValue]) => `L${x.toFixed(2)},${yValue.toFixed(2)}`).join(' ');
+            const bottom = curve(layer.lower, layer.lowerSlope, true);
             return h('g', { key: layer.key, 'data-series': layer.key },
               h('path', { className: 'su-area', d: `${top} ${bottom} Z`, style: { fill: color, fillOpacity: mode === 'stacked' ? 0.3 : 0.06 } }),
               h('path', { className: 'su-line', d: top, style: { stroke: color } }));
@@ -2835,10 +2892,12 @@ function UsageChart({ chart, model, mode, hover, setHover, axis }) {
           layers.map(layer => h('span', { key: layer.key, className: 'su-dot', style: { left: `${pct}%`, bottom: `${layer.upper[hovered] / scale.max * 100}%`, background: model.colors.get(layer.key) } })),
           h('div', { className: 'su-tip', 'data-side': pct > 60 ? 'left' : 'right', style: pct > 60 ? { right: `calc(${100 - pct}% + 10px)` } : { left: `calc(${pct}% + 10px)` } },
             h('div', { className: 'su-tip-head' }, bucketLabel(model, hovered)),
-            ordered.map(item => h('div', { key: item.key, className: 'su-tip-row' }, h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', null, item.label), h(TipValue, { metric, value: item.values[hovered], factor: model.factors[hovered] }))),
-            h('div', { className: 'su-tip-row su-tip-total' }, h('span'), h('span', null, 'Total'), h(TipValue, { metric, value: series.reduce((sum, item) => sum + item.values[hovered], 0), factor: model.factors[hovered] })))))),
-    axis ? h('div', { className: 'su-xaxis', 'aria-hidden': true }, model.labelIndexes.map((index, position) => h('span', { key: index, 'data-edge': index === 0 ? 'start' : index === count - 1 ? 'end' : undefined,
-      style: { left: `${bucketX(index, count) / VIEW_W * 100}%` } }, model.labels[position]))) : null);
+            series.map(item => h('div', { key: item.key, className: 'su-tip-row' }, h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', null, item.label), h('b', null, metric.format(item.values[hovered])))),
+            h('div', { className: 'su-tip-row su-tip-total' }, h('span'), h('span', null, 'Total'), h('b', null, metric.format(series.reduce((sum, item) => sum + item.values[hovered], 0)))))))),
+    // Every chart has its own x axis and period control, as on the Limits page; the period is one page-wide preference.
+    h('div', { className: 'su-axis-row' }, h(AxisRangeControl, { side: 'past', stops: USAGE_RANGE_STOPS, ...range }),
+      h('div', { className: 'su-xaxis', 'aria-hidden': true }, model.labelIndexes.map((index, position) => h('span', { key: index, 'data-edge': index === 0 ? 'start' : index === count - 1 ? 'end' : undefined,
+        style: { left: `${bucketX(index, count) / VIEW_W * 100}%` } }, model.labels[position])))));
 }
 const rateNumber = rate => rate < 10 ? rate.toFixed(1) : String(Math.round(rate));
 function resetTime(seconds, now) {
@@ -2992,7 +3051,7 @@ function MeasureRow({ nowPct, average, empty, lookback, setLookback }) {
     empty ? h('div', { className: 'su-measure', 'data-kind': 'empty', role: 'note', 'aria-label': empty.text },
       h(MeasureSpan, { fromPct: empty.fromPct, toPct: empty.toPct }), label(empty, 'right', nowPct, 100)) : null);
 }
-const rateShort = rate => rate === null ? 'no drain data' : `~${rateNumber(rate)} units/h`;
+const rateShort = rate => rate === null ? 'no drain data' : `~${rateNumber(rate)} units / h`;
 // Verdict glyphs chosen by Virgile, shared by the Limits page and the sidebar footer: an arrow hitting the floor for a pool that runs dry within the week, Tabler clock-x for quota that expires unused.
 const VERDICT_ICONS = { short: ['ArrowBarToDownTouching', '⤓'], waste: ['ClockX', '⌛'] };
 // The glyph carries the severity colour (muted, orange or red); the verdict text stays neutral.
@@ -3396,8 +3455,12 @@ const USAGE_CSS = `
 .su-state{padding:18px;border:1px dashed var(--ui-stroke-secondary);border-radius:6px;color:var(--ui-text-secondary);text-align:center}.su-state[role=alert]{color:var(--ui-red,var(--ui-text-primary))}
 .su-link{padding:0;border:0;background:transparent;color:var(--ui-accent);text-decoration:underline;cursor:pointer}
 .su-chart{display:flex;flex-direction:column;gap:6px;min-width:0}
-.su-chart-head{display:flex;align-items:baseline;gap:8px}.su-chart-head h3{margin:0;font-size:13px;font-weight:600}
-.su-sub{font-size:11px;color:var(--ui-text-tertiary)}.su-total{margin-left:auto;font-size:13px;font-weight:500;font-variant-numeric:tabular-nums}
+.su-chart-head{display:flex;align-items:baseline;gap:8px}.su-chart-head h3{margin:0;font-size:16px;font-weight:600}
+/* The usage charts sit in a display:contents wrapper (the glide's root), so the body's gap still spaces them; each title gets extra room above it to separate it from the plot of the chart before. */
+.su-charts{display:contents}.su-chart[data-metric]+.su-chart[data-metric]{margin-top:14px}
+/* Unit on the left, legend packed to the right, on one line under the title. */
+.su-chart-sub{display:flex;align-items:baseline;gap:4px 16px}.su-chart-sub .su-yunit{flex:none;font-size:11px;color:var(--ui-text-tertiary);white-space:nowrap}.su-chart-sub .su-legend{flex:1 1 auto;justify-content:flex-end}
+.su-sub{font-size:11px;color:var(--ui-text-tertiary)}.su-total{margin-left:auto;font-size:16px;font-weight:500;font-variant-numeric:tabular-nums}
 .su-legend{display:flex;flex-wrap:wrap;align-items:center;gap:4px 14px;min-height:18px;font-size:11px;color:var(--ui-text-secondary)}
 .su-legend-item{display:inline-flex;align-items:center;gap:5px;min-width:0}.su-legend-item b{font-weight:500;color:var(--ui-text-primary);font-variant-numeric:tabular-nums}
 .su-swatch{display:inline-block;width:8px;height:8px;border-radius:2px;flex-shrink:0}
@@ -3419,13 +3482,13 @@ const USAGE_CSS = `
 .su-tip-head{margin-bottom:3px;color:var(--ui-text-secondary)}
 .su-tip-row{display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:6px}.su-tip-row>span:nth-child(2){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.su-tip-row b{font-weight:500;font-variant-numeric:tabular-nums}
 .su-tip-total{margin-top:3px;padding-top:3px;border-top:1px solid var(--ui-stroke-secondary)}
-.su-plot-row-unit{margin-top:20px}
-.su-yaxis .su-yunit{top:-19px;bottom:auto;left:0;right:auto;transform:none;color:var(--ui-text-tertiary)}
 .su-day-grid{stroke:var(--ui-stroke-secondary);stroke-opacity:.6;stroke-width:1;stroke-dasharray:2 3;vector-effect:non-scaling-stroke}
-.su-total-label{font-size:11px;font-weight:400;color:var(--ui-text-tertiary)}
-.su-tip-raw{font-weight:400;color:var(--ui-text-tertiary)}
+.su-total-label{font-size:12px;font-weight:400;color:var(--ui-text-tertiary)}
 .su-xaxis{position:relative;height:16px;margin-left:56px;font-size:10px;color:var(--ui-text-quaternary)}
 .su-xaxis span{position:absolute;top:2px;transform:translateX(-50%);white-space:nowrap}.su-xaxis span[data-edge=start]{transform:none}.su-xaxis span[data-edge=end]{transform:translateX(-100%)}
+/* Each usage chart's x axis with the period control in the y-axis column, as on the Limits charts. */
+.su-axis-row{display:grid;grid-template-columns:56px minmax(0,1fr);grid-template-rows:16px}.su-axis-row>.su-axis-range{grid-area:1/1;justify-self:end}.su-axis-row>.su-xaxis{grid-area:1/2;margin:0}
+.su-chart[data-gliding] .su-plot,.su-chart[data-gliding] .su-xaxis{overflow-x:clip;overflow-y:visible}
 .su-footnote{margin:0;font-size:11px;line-height:1.5;color:var(--ui-text-tertiary)}.su-error{color:var(--ui-red,var(--ui-text-primary))}
 .su-limits-controls{--su-color:var(--ui-accent)}
 /* Overview: one section per provider, divided by a hairline; the shared footnotes close the page. */

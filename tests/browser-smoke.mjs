@@ -1688,11 +1688,30 @@ try {
       const axis7 = await axisState('.su-chart[data-metric="user_messages"]');
       const buckets = await usage.evaluate(() => window.hermesT3SidebarHarness.syntheticUsageHistory(7, 'Europe/Paris').buckets);
       const midnights = (await Promise.all(buckets.map(t => pageMidnights(t, t)))).reduce((sum, count) => sum + count, 0);
-      const points = await usage.evaluate(() => document.querySelector('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')?.getAttribute('d').split('L').length);
+      const points = await usage.evaluate(() => document.querySelector('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')?.getAttribute('d').split(' C').length);
+      // Curves never dip below the zero line or rise above the plot: every line's box stays inside the 1000x100 viewBox.
+      const inside = await usage.evaluate(() => [...document.querySelectorAll('.su-chart[data-metric] svg .su-line')].every(path => { const box = path.getBBox(); return box.y >= -0.01 && box.y + box.height <= 100.01; }));
       console.log(`USAGE 7D AXIS: ${JSON.stringify({ ...axis7, midnights, points, buckets: buckets.length })}`);
-      check('Usage charts label the vertical axis per day for all three metrics', axis7.units.join() === 'tokens/day,$/day,messages/day');
-      check('Usage 7d draws one point per 20-minute bucket, roughly 500 points', points === buckets.length && points > 6 * 72);
+      check('Usage 7d charts count per hour: the unit under each title is the bucket size', axis7.units.join() === 'tokens / h,$ / h,messages / h');
+      check('Usage 7d draws one curve point per hourly bucket and every curve stays between the zero line and the top of the plot', points === buckets.length && points > 6 * 24 && points <= 7 * 24 && inside);
       check('Usage 7d day gridlines match the local midnights and labels name the month only once', axis7.dayLines === midnights && midnights === 7 && axis7.labels.length === 7 && monthsOnChange(axis7.labels) && !axis7.overlap);
+    }
+    {
+      // Titles and totals at 16px with extra room above each following chart; the per-day unit opens the line under the title with the legend right-aligned on it; no 0 tick label; every chart has its own period control in its y-axis column beside its x axis, and the header has no period selector.
+      const heads = await usage.evaluate(() => {
+        const r = el => el.getBoundingClientRect(), charts = [...document.querySelectorAll('.su-chart[data-metric]')], mid = box => (box.top + box.bottom) / 2;
+        return { sizes: charts.map(chart => `${getComputedStyle(chart.querySelector('h3')).fontSize}|${getComputedStyle(chart.querySelector('.su-total')).fontSize}`), gaps: charts.slice(1).map((chart, index) => Math.round(r(chart.querySelector('h3')).top - r(charts[index].querySelector('.su-xaxis')).bottom)),
+          lines: charts.map(chart => { const unit = r(chart.querySelector('.su-chart-sub .su-yunit')), items = [...chart.querySelectorAll('.su-legend-item')].map(r), head = r(chart.querySelector('h3')), section = r(chart);
+            return { below: unit.top >= head.bottom - 0.5, sameLine: items.every(item => Math.abs(mid(item) - mid(unit)) <= 3), left: Math.abs(unit.left - section.left) <= 0.5, right: Math.abs(Math.max(...items.map(item => item.right)) - section.right) <= 1 }; }),
+          zeros: [...document.querySelectorAll('.su-yaxis span')].filter(span => /^\$?0(\.00)?$/.test(span.textContent)).length,
+          controls: document.querySelectorAll('.su-axis-range').length, beside: charts.every(chart => { const control = r(chart.querySelector('.su-axis-range')), xaxis = r(chart.querySelector('.su-xaxis')), plot = r(chart.querySelector('.su-plot')); return control.right <= plot.left + 0.5 && Math.abs(mid(control) - mid(xaxis)) <= 3; }),
+          totals: charts.map(chart => chart.querySelector('.su-total-label').textContent), periodButtons: [...document.querySelectorAll('.su-header button')].filter(button => /^(24h|7d|30d|90d)$/.test(button.textContent)).length };
+      });
+      console.log(`USAGE CHART HEADS: ${JSON.stringify(heads)}`);
+      check('Usage chart titles and totals are 16px with at least 30px between a chart\'s x axis and the next title', heads.sizes.every(size => size === '16px|16px') && heads.gaps.every(gap => gap >= 30));
+      check('Usage totals name the period shown (/ 7 days)', heads.totals.every(text => text === '/ 7 days'));
+      check('Usage per-day units sit under each title with the legend right-aligned on the same line', heads.lines.every(line => line.below && line.sameLine && line.left && line.right));
+      check('Usage charts have no 0 tick label, and every chart has the unfold period control beside its x axis instead of a header selector', heads.zeros === 0 && heads.controls === 3 && heads.beside && heads.periodButtons === 0);
     }
     const tokensPlot = usage.locator('.su-chart[data-metric="tokens"] .su-plot');
     const plotBox = await tokensPlot.boundingBox();
@@ -1702,19 +1721,20 @@ try {
       const tips = [...document.querySelectorAll('.su-tip')], page = document.querySelector('.su').getBoundingClientRect();
       return { crosses, tips: tips.length, rows: tips.map(tip => tip.querySelectorAll('.su-tip-row').length), inside: tips.every(tip => { const box = tip.getBoundingClientRect(); return box.left >= page.left && box.right <= page.right; }), flipped: tips.every(tip => tip.dataset.side === 'left') };
     });
-    check('hovering one chart moves a synchronized crosshair and tooltip on all three', hover.crosses.length === 3 && new Set(hover.crosses).size === 1 && hover.tips === 3 && hover.rows.every(rows => rows >= 3) && hover.inside && hover.flipped);
+    check('hovering one chart moves a synchronized crosshair and tooltip on all three', hover.crosses.length === 3 && new Set(hover.crosses).size === 1 && hover.tips === 3 && hover.rows.join() === '3,3,3' && hover.inside && hover.flipped);
     await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-stacked.png') });
     await usage.getByRole('button', { name: 'Independent', exact: true }).click();
     await usage.getByRole('button', { name: 'Model', exact: true }).click();
-    await usage.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="tokens"] svg g[data-series]').length === 5);
+    await usage.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="tokens"] svg g[data-series]').length === 4);
     layout = await usageLayout();
-    check('Model split with Independent mode redraws one line per model without overflow', layout.series.join() === '5,4,5' && layout.drawn && layout.overflowX <= 0 && layout.inside);
+    check('Model split with Independent mode redraws one line per model without overflow', layout.series.join() === '4,4,4' && layout.drawn && layout.overflowX <= 0 && layout.inside);
     await usage.mouse.move(plotBox.x + plotBox.width * 0.2, plotBox.y + plotBox.height / 2);
     await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-independent.png') });
     await usage.mouse.move(5, 5);
-    // 24h: 3-minute buckets plotted per day, with the date only on the first label and at midnight.
-    await usage.getByRole('button', { name: '24h', exact: true }).click();
-    await usage.waitForFunction(() => document.querySelector('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')?.getAttribute('d').split('L').length === 480);
+    // 24h: 10-minute buckets, with the date only on the first label and at midnight.
+    const period = direction => usage.locator(`.su-axis-range[data-side=past] [data-direction=${direction}]`).first().click();
+    await period('right');
+    await usage.waitForFunction(() => document.querySelector('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')?.getAttribute('d').split(' C').length === 144);
     {
       const axis = await axisState('.su-chart[data-metric="user_messages"]');
       const buckets = await usage.evaluate(() => window.hermesT3SidebarHarness.syntheticUsageHistory(1, 'Europe/Paris').buckets);
@@ -1722,16 +1742,20 @@ try {
       const hourLabels = axis.labels.slice(1).every(label => /^\d{1,2} (AM|PM)$/.test(label) || /^[A-Z][a-z]{2} \d{1,2}$/.test(label));
       const dated = axis.labels.filter(label => /[A-Z][a-z]{2}/.test(label));
       console.log(`USAGE 24H AXIS: ${JSON.stringify({ ...axis, midnights })}`);
-      check('Usage 24h view draws one gridline per local midnight and dates only the first label and midnight', axis.dayLines === midnights && midnights === 1 && /^[A-Z][a-z]{2} \d{1,2}, \d{1,2} (AM|PM)$/.test(axis.labels[0]) && hourLabels && dated.length === 2 && !axis.overlap);
+      // The first label may be the midnight itself (a day starting just before midnight); either way only the first label and the midnight carry a date.
+      const midnightLabel = axis.labels.findIndex(label => /^[A-Z][a-z]{2} \d{1,2}$/.test(label));
+      check('Usage 24h view draws one gridline per local midnight and dates only the first label and midnight', axis.dayLines === midnights && midnights === 1 && /^[A-Z][a-z]{2} \d{1,2}(, \d{1,2} (AM|PM))?$/.test(axis.labels[0]) && hourLabels && midnightLabel >= 0 && dated.length === new Set([0, midnightLabel]).size && !axis.overlap);
       const box = await usage.locator('.su-chart[data-metric="user_messages"] .su-plot').boundingBox();
       await usage.mouse.move(box.x + box.width * 0.6, box.y + box.height / 2);
       const tip = await usage.locator('.su-chart[data-metric="user_messages"] .su-tip-total b').textContent();
-      const [, perDay, raw] = tip.match(/^([\d,]+)\/day · ([\d,]+) in 3 min$/) || [];
-      check('Usage 24h tooltip shows the per-day rate with the raw 3-minute value', perDay !== undefined && Number(perDay.replace(/,/g, '')) === 480 * Number(raw.replace(/,/g, '')));
+      const units = await usage.evaluate(() => [...document.querySelectorAll('.su-yunit')].map(el => el.textContent).join());
+      check('Usage 24h counts per 10 minutes: the unit says so and the tooltip total is a plain bucket amount', units === 'tokens / 10 min,$ / 10 min,messages / 10 min' && /^[\d,]+$/.test(tip));
       await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-usage-24h.png') });
       await usage.mouse.move(5, 5);
     }
-    await usage.getByRole('button', { name: '30d', exact: true }).click();
+    await period('left');
+    await usage.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="user_messages"] .su-day-grid').length === 7);
+    await period('left');
     await usage.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="user_messages"] .su-day-grid').length === 30);
     {
       const axis = await axisState('.su-chart[data-metric="user_messages"]');
@@ -1740,7 +1764,7 @@ try {
       check('Usage 30d labels name each month once, do not overlap and keep one gridline per day', monthsOnChange(axis.labels) && !axis.overlap && axis.dayLines === 30 && layout.overflowX <= 0 && layout.inside);
       await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-usage-30d.png') });
     }
-    await usage.getByRole('button', { name: '7d', exact: true }).click();
+    await period('right');
     // Let the 7-day history land (its request starts a tick after the click) so it is not counted against the Limits page.
     await usage.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="user_messages"] .su-day-grid').length === 7 && !document.querySelector('.su-header [role=status]'));
     const usageRequests = await usage.evaluate(() => window.hermesT3SidebarHarness.calls.filter(call => call[0] === 'rest').length);
@@ -1879,11 +1903,11 @@ try {
         && empty.arrows === 'end,start' && empty.ticks === 'end,start' && empty.arrowsAtEnds && empty.ticksAtEnds && empty.top > geometry.plotBottom);
       check('Limits time-to-empty text is unclipped and dated', empty && /^Empty in (\d+d \d+h|\d+h \d+m) · \w{3} \d{1,2}:\d{2} (AM|PM)$/.test(empty.text));
       check('Limits 12h averaging measurement spans Now − 12h to Now on the same row, with arrowheads and ticks at both ends', averageOk(geometry) && geometry.lookbackX > geometry.plotLeft
-        && Math.abs(geometry.average.top - empty.top) <= 0.5 && /^Average over 12h · ~\d+(\.\d)? units\/h$/.test(geometry.average.text));
+        && Math.abs(geometry.average.top - empty.top) <= 0.5 && /^Average over 12h · ~\d+(\.\d)? units \/ h$/.test(geometry.average.text));
       check('Limits measurement labels stay on their side of Now, apart, inside the plot and above the notes', labelsOk(geometry));
       const trendOk = item => !!item.trend && item.trend.dashed && item.trend.inside && Math.abs(item.trend.right - item.nowX) <= 1 && Math.abs(item.trend.left - item.average.left) <= 1;
       check('A dashed trendline, unlike the projection\'s dash, runs back from the units left at Now over the averaging arrow\'s span on both charts', trendOk(geometry) && trendOk(other));
-      check('The Anthropic chart measures its own averaging span and labels independently (it never empties)', averageOk(other) && other.empty === null && labelsOk(other) && /^Average over 12h · ~\d+(\.\d)? units\/h$/.test(other.average.text));
+      check('The Anthropic chart measures its own averaging span and labels independently (it never empties)', averageOk(other) && other.empty === null && labelsOk(other) && /^Average over 12h · ~\d+(\.\d)? units \/ h$/.test(other.average.text));
       check('Limits draws one gridline per local midnight and names each month once on every chart', axis.dayLines === midnights && otherAxis.dayLines === midnights && midnights >= 9 && monthsOnChange(axis.labels) && !axis.overlap && monthsOnChange(otherAxis.labels) && !otherAxis.overlap);
     }
     // Waste measurements: vertical dimension lines at projected resets that discard quota, at the reset's x and spanning from the pool's level just before the step-up down by the expiring units. Colors are read back through a canvas: color-mix in oklab computes to an oklab() string, not rgb().
@@ -2059,7 +2083,7 @@ try {
       await settle(usage);
       const after = { rates: await rates(), paths: await usage.evaluate(() => [...document.querySelectorAll('.su-line.su-projected')].map(path => path.getAttribute('d'))), geometry: await measure(), other: await measureIn(ANTHROPIC) };
       console.log(`USAGE LIMITS 1D: ${JSON.stringify({ before, after })}`);
-      check('The shared lookback slider changes every provider\'s drain rate text and projection', after.rates.length === 2 && after.rates.every((text, index) => text !== before.rates[index] && /^~\d+(\.\d)? units\/h$/.test(text))
+      check('The shared lookback slider changes every provider\'s drain rate text and projection', after.rates.length === 2 && after.rates.every((text, index) => text !== before.rates[index] && /^~\d+(\.\d)? units \/ h$/.test(text))
         && after.paths.every((path, index) => path !== before.paths[index]) && after.geometry.empty && Math.abs(after.geometry.empty.right - before.empty) > 1);
       check('Limits arrows still span Now to the moved zero crossing and Now − 1d to Now after the slider change, on both charts', Math.abs(after.geometry.empty.left - after.geometry.nowX) <= 1 && Math.abs(after.geometry.empty.right - after.geometry.emptyX) <= 1
         && averageOk(after.geometry) && labelsOk(after.geometry) && averageOk(after.other) && labelsOk(after.other) && /^Average over 1d/.test(after.other.average.text));
@@ -2078,7 +2102,7 @@ try {
       // A trendline rising back over seven days can reach the pool's capacity first; it is cut there, at the top of the plot.
       check('The 15d trendline starts at the plot edge like its clipped arrow, or where it reaches the top of the plot', [clipped, otherClipped].every(item => item.trend && (Math.abs(item.trend.left - item.plotLeft) <= 1 || item.trend.atTop) && Math.abs(item.trend.right - item.nowX) <= 1));
       check('Limits 15d averaging lines are clipped at the plot edge with no left arrowhead or tick, on both charts', [clipped, otherClipped].every(geometry => geometry.lookbackX < geometry.plotLeft && averageOk(geometry) && geometry.average.arrows === 'end'
-        && /^Average over \d+d · ~\d+(\.\d)? units\/h$/.test(geometry.average.text) && labelsOk(geometry)));
+        && /^Average over \d+d · ~\d+(\.\d)? units \/ h$/.test(geometry.average.text) && labelsOk(geometry)));
       // fill() leaves the slider focused; its focus ring is not part of the resting design.
       await usage.locator('.su-lookback input[type=range]').blur();
       await usage.locator('.su-lookback input[type=range]').fill('6');
@@ -2170,6 +2194,47 @@ try {
       check('During the glide the Now line stays on the SVG\'s time mapping within 1.5px, with the plot clipped at its sides', result.samples.every(item => item.offset <= 1.5 && item.clip === 'clip'));
       check('During the glide the time-to-empty arrow keeps starting on the Now line within 1.5px', result.samples.some(item => item.measure !== null) && result.samples.every(item => item.measure === null || item.measure <= 1.5));
       check('After the glide the SVG viewBox, translates and clipping are back to the instant-change state', result.viewBox === '0 0 1000 100' && result.translates === 0 && result.nowAt <= 0.5 && result.clip === 'visible');
+      await glide.close();
+    }
+    {
+      // Usage period glide, on its own page without reduced motion: all three charts share one window per frame, the x-axis labels stay on the SVG's time mapping, a longer period widens from the old span and a shorter one zooms in on the old drawing before it is redrawn.
+      const glide = await browser.newPage({ viewport: { width: 1300, height: 1000 }, deviceScaleFactor: 1, timezoneId: 'Europe/Paris' });
+      glide.on('pageerror', error => errors.push(error.message));
+      await glide.clock.install({ time: new Date('2026-10-28T15:00:00+01:00') });
+      await glide.goto(`http://127.0.0.1:${server.address().port}/?route=/t3sidebar-usage`);
+      await glide.waitForSelector('.su-chart[data-metric="user_messages"] svg g[data-series]');
+      const record = () => glide.evaluate(() => {
+        const samples = window.__usageGlide = [];
+        const loop = () => {
+          const charts = [...document.querySelectorAll('.su-chart[data-metric]')];
+          if (charts[0]?.dataset.gliding) {
+            const bottom = charts.at(-1), plot = bottom.querySelector('.su-plot').getBoundingClientRect(), boxes = charts.map(chart => chart.querySelector('.su-plot > svg').getAttribute('viewBox'));
+            const [x0, , width] = boxes[0].split(' ').map(Number);
+            const offsets = [...bottom.querySelectorAll('.su-xaxis > span:not([data-edge])')].map(span => { const box = span.getBoundingClientRect(), share = parseFloat(span.style.left) / 100; return Math.abs((box.left + box.right) / 2 - (plot.left + (share * 1000 - x0) / width * plot.width)); });
+            samples.push({ width, shared: new Set(boxes).size === 1, offset: Math.max(0, ...offsets), days: bottom.querySelectorAll('.su-day-grid').length, clip: getComputedStyle(bottom.querySelector('.su-plot')).overflowX });
+          }
+          if (samples.length < 60) requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
+      });
+      const state = () => glide.evaluate(() => { const charts = [...document.querySelectorAll('.su-chart[data-metric]')];
+        return { samples: window.__usageGlide, boxes: charts.map(chart => chart.querySelector('.su-plot > svg').getAttribute('viewBox')).join(), translates: document.querySelectorAll('.su-xaxis > span[style*="translate"]').length, days: charts.at(-1).querySelectorAll('.su-day-grid').length, gliding: charts.some(chart => chart.dataset.gliding) }; });
+      const settled = Array(3).fill('0 0 1000 100').join();
+      await record();
+      await glide.locator('.su-axis-range [data-direction=left]').first().click();
+      await glide.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="user_messages"] .su-day-grid').length === 30 && !document.querySelector('.su-chart[data-gliding]'), null, { timeout: 3000 });
+      const grow = await state();
+      console.log(`USAGE PERIOD GLIDE 7D→30D: ${JSON.stringify({ frames: grow.samples.length, widths: grow.samples.map(item => Math.round(item.width)), maxOffset: Math.max(...grow.samples.map(item => item.offset)), boxes: grow.boxes, translates: grow.translates })}`);
+      check('Usage 7d → 30d glides all three charts through one window, widening from the old seven days', grow.samples.length >= 5 && grow.samples.every(item => item.shared && item.days === 30 && item.clip === 'clip') && grow.samples[0].width < 300 && grow.samples.every((item, index, all) => index === 0 || item.width >= all[index - 1].width - 1e-6));
+      check('During the usage glide the x-axis labels stay on the SVG\'s time mapping within 1.5px', grow.samples.every(item => item.offset <= 1.5));
+      check('After the usage glide every viewBox and translate is back to the instant-change state', grow.boxes === settled && grow.translates === 0 && !grow.gliding);
+      await record();
+      await glide.locator('.su-axis-range [data-direction=right]').last().click();
+      await glide.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="user_messages"] .su-day-grid').length === 7 && !document.querySelector('.su-chart[data-gliding]'), null, { timeout: 3000 });
+      const shrink = await state();
+      console.log(`USAGE PERIOD GLIDE 30D→7D: ${JSON.stringify({ frames: shrink.samples.length, widths: shrink.samples.map(item => Math.round(item.width)), days: shrink.samples.map(item => item.days), boxes: shrink.boxes })}`);
+      check('Usage 30d → 7d zooms in on the 30-day drawing, then draws the seven days once', shrink.samples.length >= 5 && shrink.samples.every(item => item.shared && item.days === 30) && shrink.samples.every((item, index, all) => index === 0 || item.width <= all[index - 1].width + 1e-6) && shrink.samples.at(-1).width < 300
+        && shrink.boxes === settled && shrink.translates === 0 && shrink.days === 7);
       await glide.close();
     }
     {

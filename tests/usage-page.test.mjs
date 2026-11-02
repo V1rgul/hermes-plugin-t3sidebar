@@ -431,32 +431,50 @@ test('stacked layers accumulate while independent layers start from zero', () =>
   assert.deepEqual(usage.usageSeries(history, 'model', 'tokens').map(item => item.total), [5, 1, 6]);
 });
 
-test('usage charts plot per-day rates with a unit while totals stay actual amounts', () => {
+test('usage charts plot the amount in each bucket, the bucket size being the unit', () => {
   const hourly = usage.buildUsageCharts({ ...history, resolution: '60m', bucket_minutes: 60, tz: 'UTC', buckets: [0, H, 2 * H], window_end: 3 * H }, 'provider', 'stacked');
   const daily = usage.buildUsageCharts({ ...history, buckets: [0, D, 2 * D] }, 'provider', 'stacked');
   const legacy = usage.buildUsageCharts({ ...history, resolution: 'hour', tz: 'UTC', buckets: [0, H, 2 * H] }, 'provider', 'stacked');
-  assert.deepEqual([hourly.factors, daily.factors, legacy.factors], [[24, 24, 24], [1, 1, 1], [24, 24, 24]], 'backends without bucket_minutes still scale hour buckets');
-  assert.deepEqual(hourly.charts[0].layers.map(layer => layer.upper), [[120, 24, 0], [144, 72, 72]], 'hourly buckets are scaled to a day');
-  assert.deepEqual(daily.charts[0].layers.map(layer => layer.upper), [[5, 1, 0], [6, 3, 3]], 'daily buckets already are per day');
-  assert.deepEqual(hourly.charts[0].scale.ticks, [0, 50, 100, 150]);
-  assert.deepEqual([hourly.charts[0].total, daily.charts[0].total], [12, 12], 'totals stay the period amounts');
-  assert.deepEqual(hourly.charts.map(chart => chart.metric.unit), ['tokens/day', '$/day', 'messages/day']);
+  assert.deepEqual([hourly.unit, daily.unit, legacy.unit], ['h', 'day', 'h'], 'backends without bucket_minutes still read as hour or day buckets');
+  assert.deepEqual([10, 60, 360, 1440, 2880].map(usage.bucketUnit), ['10 min', 'h', '6 h', 'day', '2 days']);
+  assert.deepEqual(hourly.charts[0].layers.map(layer => layer.upper), [[5, 1, 0], [6, 3, 3]], 'no per-day scaling');
+  assert.deepEqual(hourly.charts[0].scale.ticks, [0, 2, 4, 6]);
+  assert.deepEqual([hourly.charts[0].total, daily.charts[0].total], [12, 12]);
+  assert.deepEqual(hourly.charts.map(chart => chart.metric.unit), ['tokens', '$', 'messages']);
   assert.deepEqual([hourly.dayLines, hourly.labelIndexes, hourly.labels], [[0], [0], ['Jan 1']], 'the hourly midnight gets a day line and a date label');
   assert.deepEqual([daily.dayLines, daily.labels], [[0, 1, 2], ['Jan 1', '2', '3']]);
 });
 
-test('sub-day buckets over several days scale by their own length and are labelled by day', () => {
+test('sub-day buckets over several days keep their own length and are labelled by day', () => {
   // Paris, 24-26 October 2026 in 6-hour steps: the 00:00 bucket of the 25th lasts 7 hours (the clocks go back at 03:00).
   const at = text => Date.parse(text) / 1000;
   const buckets = ['2026-10-24T00:00:00+02:00', '2026-10-24T06:00:00+02:00', '2026-10-24T12:00:00+02:00', '2026-10-24T18:00:00+02:00', '2026-10-25T00:00:00+02:00', '2026-10-25T06:00:00+01:00', '2026-10-25T12:00:00+01:00', '2026-10-25T18:00:00+01:00', '2026-10-26T00:00:00+01:00'].map(at);
   const steps = { ...history, resolution: '360m', bucket_minutes: 360, tz: 'Europe/Paris', buckets, window_end: at('2026-10-26T06:00:00+01:00'),
     by_provider: [{ key: 'p', label: 'p', tokens: [6, 6, 6, 6, 7, 6, 6, 6, 3], cost_usd: [], user_messages: [] }], by_model: [] };
   const model = usage.buildUsageCharts(steps, 'provider', 'stacked');
-  assert.deepEqual(model.factors, [4, 4, 4, 4, 24 / 7, 4, 4, 4, 4]);
-  assert.deepEqual(model.charts[0].layers[0].upper, [24, 24, 24, 24, 24, 24, 24, 24, 12], 'the 7-hour bucket reads at the same rate as its neighbours');
+  assert.deepEqual(model.lengths.map(seconds => seconds / H), [6, 6, 6, 6, 7, 6, 6, 6, 6]);
+  assert.deepEqual([model.unit, model.charts[0].layers[0].upper], ['6 h', [6, 6, 6, 6, 7, 6, 6, 6, 3]], 'the 7-hour bucket shows its real amount');
   assert.equal(model.charts[0].total, 52);
   assert.deepEqual([model.dayLines, model.labelIndexes, model.labels], [[0, 4, 8], [0, 4, 8], ['Oct 24', '25', '26']], 'day lines and labels sit on the local midnights only');
-  assert.deepEqual(usage.perDayFactors([0, 3 * H], undefined, 180), [8, 8], 'a missing window end falls back to the nominal length');
+  assert.deepEqual(usage.bucketLengths([0, 3 * H], undefined, 180), [3 * H, 3 * H], 'a missing window end falls back to the nominal length');
+});
+
+test('curve slopes pass through every value without overshooting, and stacked boundaries add their bands\' slopes', () => {
+  // Ends, peaks, troughs and the edges of flat runs are flat; on a slope the centred slope is capped at three times either side.
+  assert.deepEqual(usage.curveSlopes([0, 2, 4, 1, 1, 0, 0, 3, 9]), [0, 2, 0, 0, 0, 0, 0, 4.5, 0]);
+  assert.deepEqual(usage.curveSlopes([0, 1, 10, 10]), [0, 3, 0, 0], 'a steep centred slope is capped at three times the gentler side, and a plateau edge is flat');
+  assert.deepEqual(usage.curveSlopes([0, 1, 10, 20]), [0, 3, 9.5, 0]);
+  const series = usage.usageSeries(history, 'provider', 'tokens'), stacked = usage.chartLayers(series, 'stacked'), independent = usage.chartLayers(series, 'independent');
+  const own = series.map(item => usage.curveSlopes(item.values));
+  assert.deepEqual(stacked.layers.map(layer => [layer.lowerSlope, layer.upperSlope]), [[[0, 0, 0], own[0]], [own[0], own[0].map((slope, index) => slope + own[1][index])]]);
+  assert.deepEqual(independent.layers.map(layer => [layer.lowerSlope, layer.upperSlope]), [[[0, 0, 0], own[0]], [[0, 0, 0], own[1]]]);
+  // A Hermite segment with these slopes stays inside its two end values, so a band of non-negative values never turns negative.
+  const values = [0, 3, 9, 4, 4, 0, 1, 7, 7, 2], slopes = usage.curveSlopes(values);
+  for (let index = 0; index < values.length - 1; index++) for (let step = 0; step <= 20; step++) {
+    const t = step / 20, a = values[index], b = values[index + 1];
+    const v = (2 * t ** 3 - 3 * t ** 2 + 1) * a + (t ** 3 - 2 * t ** 2 + t) * slopes[index] + (-2 * t ** 3 + 3 * t ** 2) * b + (t ** 3 - t ** 2) * slopes[index + 1];
+    assert.ok(v >= Math.min(a, b) - 1e-9 && v <= Math.max(a, b) + 1e-9, `segment ${index} at ${t}: ${v} outside [${a}, ${b}]`);
+  }
 });
 
 test('model labels name the provider only when two series share a model', () => {
@@ -546,25 +564,84 @@ test('the Usage page draws three charts from /usage/history only and toggles spl
   assert.deepEqual([$('.su').dataset.view, button('Usage') === undefined, button('Limits') === undefined, $('.su-pooled') === null], ['usage', true, true, true]);
   assert.deepEqual($$('.su-chart').map(node => node.dataset.metric), ['tokens', 'cost_usd', 'user_messages']);
   assert.equal($('.su-chart[data-metric="cost_usd"] .su-sub').textContent, 'API-equivalent');
-  assert.deepEqual([seriesCount('tokens'), seriesCount('cost_usd'), seriesCount('user_messages')], [3, 2, 3]);
-  assert.equal($$('.su-xaxis').length, 1, 'only the bottom chart repeats the shared time axis');
-  assert.match($('.su-chart[data-metric="tokens"] .su-total').textContent, /^[\d.]+[KMB]? total$/);
-  assert.match($('.su-footnote').textContent, /approximate/); assert.match($('.su-footnote').textContent, /copilot\/gpt-5\.5/);
-  const stackedArea = $('.su-chart[data-metric="tokens"] g[data-series="anthropic"] .su-area').getAttribute('d');
+  assert.deepEqual([seriesCount('tokens'), seriesCount('cost_usd'), seriesCount('user_messages')], [2, 2, 2]);
+  // Largest first in the legend, largest band stacked last (on top): openai-codex leads tokens, anthropic (priced higher) leads cost.
+  const order = (metric, selector) => $$(`.su-chart[data-metric="${metric}"] ${selector}`).map(node => node.dataset.series).join();
+  assert.deepEqual([order('tokens', '.su-legend-item'), order('tokens', 'svg g[data-series]'), order('cost_usd', '.su-legend-item'), order('cost_usd', 'svg g[data-series]')],
+    ['openai-codex,anthropic', 'anthropic,openai-codex', 'anthropic,openai-codex', 'openai-codex,anthropic']);
+  assert.equal($$('.su-xaxis').length, 3, 'every chart has its own time axis, as on the Limits page');
+  assert.match($('.su-chart[data-metric="tokens"] .su-total').textContent, /^[\d.]+[KMB]? \/ 7 days$/, 'the total names the period shown');
+  assert.match($('.su-footnote').textContent, /approximate/); assert.doesNotMatch($('.su-footnote').textContent, /No price available/, 'every fixture model is priced');
+  const stackedArea = $('.su-chart[data-metric="tokens"] g[data-series="openai-codex"] .su-area').getAttribute('d');
   await click(button('Model'));
-  assert.equal(seriesCount('tokens'), 5); assert.equal(seriesCount('cost_usd'), 4);
+  assert.equal(seriesCount('tokens'), 4); assert.equal(seriesCount('cost_usd'), 4);
   await click(button('Provider'));
   await click(button('Independent'));
-  assert.equal(seriesCount('tokens'), 3);
-  assert.notEqual($('.su-chart[data-metric="tokens"] g[data-series="anthropic"] .su-area').getAttribute('d'), stackedArea, 'independent bands no longer sit on the series below');
+  assert.equal(seriesCount('tokens'), 2);
+  assert.notEqual($('.su-chart[data-metric="tokens"] g[data-series="openai-codex"] .su-area').getAttribute('d'), stackedArea, 'independent bands no longer sit on the series below');
   assert.deepEqual(mock.ctx.storage.get('usage-preferences'), { ...usage.USAGE_DEFAULTS, mode: 'independent' });
-  await click(button('24h'));
+  // The period is an unfold control beside every chart's x axis, not a header selector; it is one page-wide preference.
+  assert.deepEqual(['24h', '7d', '30d', '90d'].map(label => button(label) === undefined), [true, true, true, true]);
+  assert.deepEqual($$('.su-axis-range').map(node => `${node.closest('.su-chart')?.dataset.metric}:${node.dataset.side}:${node.dataset.hours}`), ['tokens:past:168', 'cost_usd:past:168', 'user_messages:past:168']);
+  const arrows = () => $$('.su-chart[data-metric="cost_usd"] .su-axis-range [data-direction]').map(node => `${node.dataset.direction}:${node.getAttribute('aria-label')}:${node.disabled}`);
+  assert.deepEqual(arrows(), ['left:Show 30d before Now:false', 'right:Show 1d before Now:false']);
+  // The unit opens the line under each title and the legend follows on the same line; no 0 tick label on any chart.
+  assert.deepEqual($$('.su-chart').map(chart => [...chart.querySelector('.su-chart-sub').children].map(node => node.className).join()), ['su-yunit,su-legend', 'su-yunit,su-legend', 'su-yunit,su-legend']);
+  assert.deepEqual($$('.su-yaxis span').filter(node => /^\$?0(\.00)?$/.test(node.textContent)).length, 0);
+  await click($('.su-chart[data-metric="cost_usd"] .su-axis-range [data-direction=right]'));
+  assert.deepEqual($$('.su-axis-range').map(node => node.dataset.hours), ['24', '24', '24'], 'a change on one chart applies to all three');
   assert.equal(restPaths().at(-1), `/usage/history?days=1&tz=${encodeURIComponent(tz)}`);
-  assert.equal($$('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')[0].getAttribute('d').split('L').length, 480, 'the day view has 480 three-minute buckets');
-  assert.deepEqual($$('.su-yunit').map(node => node.textContent), ['tokens/day', '$/day', 'messages/day']);
+  assert.equal(mock.ctx.storage.get('usage-preferences').days, 1);
+  assert.deepEqual($$('.su-total-label').map(node => node.textContent), Array(3).fill('/ day'));
+  assert.deepEqual(arrows(), ['left:Show 7d before Now:false', 'right:Shortest past shown:true']);
+  // A curve through the 144 ten-minute buckets: one cubic segment between each pair, its anchors on the buckets' x positions.
+  const line = $$('.su-chart[data-metric="tokens"] svg g[data-series] .su-line')[0].getAttribute('d');
+  const anchors = [...line.matchAll(/(?:^M| )(-?[\d.]+),(-?[\d.]+)(?= C|$)/g)].map(match => Number(match[1]));
+  assert.deepEqual([line.split(' C').length, anchors.length, anchors.every((x, index) => Math.abs(x - index / 143 * 1000) < 0.01)], [144, 144, true], 'the day view has 144 ten-minute buckets');
+  assert.deepEqual($$('.su-yunit').map(node => node.textContent), ['tokens / 10 min', '$ / 10 min', 'messages / 10 min']);
   await key($('.su-chart[data-metric="user_messages"] .su-plot'), 'End');
-  const rawValue = Number($('.su-chart[data-metric="user_messages"] .su-tip-total b .su-tip-raw').textContent.match(/ · ([\d,]+) in 3 min/)[1].replace(/,/g, ''));
-  assert.equal($('.su-chart[data-metric="user_messages"] .su-tip-total b').textContent, `${(rawValue * 480).toLocaleString('en')}/day · ${rawValue.toLocaleString('en')} in 3 min`);
+  // The tooltip gives each bucket's real amount, no per-day rate.
+  const tipValues = $$('.su-chart[data-metric="user_messages"] .su-tip-row b').map(node => Number(node.textContent.replace(/,/g, '')));
+  assert.deepEqual([tipValues.length, tipValues.at(-1), $$('.su-tip-raw').length], [3, tipValues[0] + tipValues[1], 0]);
+});
+
+test('a usage period change glides all three charts: a longer period widens once it arrives, a shorter one zooms in on the old drawing first', async t => {
+  // A manual frame queue stands in for requestAnimationFrame, so the test steps the glide at chosen timestamps.
+  const queue = [], saved = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame, media: globalThis.matchMedia };
+  let reduce = false;
+  Object.assign(globalThis, { requestAnimationFrame: callback => queue.push(callback), cancelAnimationFrame: handle => { queue[handle - 1] = null; }, matchMedia: () => ({ matches: reduce }) });
+  t.after(() => Object.assign(globalThis, { requestAnimationFrame: saved.raf, cancelAnimationFrame: saved.caf, matchMedia: saved.media }));
+  const run = async time => act(async () => { for (const callback of queue.splice(0)) callback?.(time); });
+  plugin.register(mock.ctx); await render(page());
+  const charts = () => $$('.su-chart[data-metric]'), gliding = () => charts().map(chart => chart.dataset.gliding ?? '').join();
+  const boxes = () => charts().map(chart => chart.querySelector('.su-plot > svg').getAttribute('viewBox')), box = () => boxes()[0].split(' ').map(Number);
+  const days = () => $$('.su-chart[data-metric="user_messages"] .su-day-grid').length, translated = () => $$('.su-xaxis > span').filter(node => node.style.translate !== '').length;
+  const settled = Array(3).fill('0 0 1000 100').join();
+  const step = direction => click($(`.su-axis-range [data-direction=${direction}]`));
+  assert.deepEqual([gliding(), boxes().join(), days()], [',,', settled, 7], 'nothing glides on the first render');
+  // 7d → 30d: the 30-day payload is drawn when it arrives, and the glide opens on the old seven days at its right end.
+  await step('left');
+  let [left, , width] = box();
+  assert.deepEqual([gliding(), days(), new Set(boxes()).size], ['true,true,true', 30, 1], 'all three charts glide on the 30-day drawing, through one window');
+  // The 7-day span ends with the hour in progress, a few hours after the last 6-hour bucket starts, so it reaches just past the 30-day drawing's right edge.
+  assert.ok(left > 22 / 30 * 1000 && left < 24 / 30 * 1000 && left + width > 995 && left + width < 1010 && translated() > 0, `the glide opens on the last seven days (${boxes()[0]})`);
+  await run(1000); await run(1110);
+  [left, , width] = box();
+  assert.ok(left > 0 && left < 22 / 30 * 1000 && width > 7 / 30 * 1000 && width < 1000, `half way the window is between the periods (${boxes()[0]})`);
+  await run(1300);
+  assert.deepEqual([gliding(), boxes().join(), translated(), queue.length], [',,', settled, 0, 0], 'settled: the React viewBox is back and every translate is cleared');
+  // 30d → 7d: the 30-day drawing stays while the glide zooms in on the last seven days, then the 7-day payload is drawn once, at the end.
+  await step('right');
+  assert.deepEqual([gliding(), days(), boxes()[0]], ['true,true,true', 30, '0.000 0 1000.000 100'], 'the click keeps the wide drawing');
+  await run(1500); await run(1610);
+  [left, , width] = box();
+  assert.ok(left > 0 && left < 22 / 30 * 1000 && days() === 30, `half way it zooms inside the same drawing (${boxes()[0]})`);
+  await run(1800);
+  assert.deepEqual([gliding(), boxes().join(), translated(), days()], [',,', settled, 0, 7], 'the 7-day period is drawn once, at the end');
+  // Reduced motion: the period changes instantly.
+  reduce = true;
+  await step('left');
+  assert.deepEqual([gliding(), boxes().join(), days(), queue.length], [',,', settled, 30, 0]);
 });
 
 test('hovering a bucket synchronizes the crosshair and tooltip across all three charts', async () => {
@@ -574,8 +651,7 @@ test('hovering a bucket synchronizes the crosshair and tooltip across all three 
   const tips = $$('.su-tip');
   assert.equal(tips.length, 3);
   const rows = tips[0].querySelectorAll('.su-tip-row');
-  assert.equal(rows.length, 4, 'three providers plus the total');
-  assert.equal(rows[3].querySelector('span:nth-child(2)').textContent, 'Total');
+  assert.deepEqual([...rows].map(row => row.querySelector('span:nth-child(2)').textContent), ['openai-codex', 'anthropic', 'Total'], 'two providers, largest first, then the total');
   await key($('.su-chart[data-metric="tokens"] .su-plot'), 'Escape');
   assert.equal($$('.su-tip').length, 0);
 });
@@ -583,18 +659,19 @@ test('hovering a bucket synchronizes the crosshair and tooltip across all three 
 test('preferences persist through a remount and the page shows empty and error states', async () => {
   // Saved before the pages were split: the old tab key must not matter.
   mock.ctx.storage.set('usage-preferences', { tab: 'limits', days: 30, split: 'model', mode: 'independent', horizon: 7 });
-  mock.control.usageHistory = { generated_at: 1, days: 30, tz: 'UTC', resolution: 'day', buckets: [1, 2], by_provider: [], by_model: [], totals: { tokens: 0, cost_usd: 0, user_messages: 0 }, pricing_missing: [] };
+  mock.control.usageHistory = { generated_at: 1, days: 30, tz: 'UTC', resolution: 'day', buckets: [1, 2], by_provider: [], by_model: [], totals: { tokens: 0, cost_usd: 0, user_messages: 0 }, pricing_missing: ['mystery/model-x'] };
   plugin.register(mock.ctx); await render(page());
   assert.match(restPaths()[0], /^\/usage\/history\?days=30&/);
   assert.equal(button('Model').getAttribute('aria-pressed'), 'true'); assert.equal(button('Independent').getAttribute('aria-pressed'), 'true');
   assert.equal($('.su-state').textContent, 'No usage recorded in this period.');
+  assert.match($('.su-footnote').textContent, / No price available for: mystery\/model-x \(counted as \$0\)\.$/);
   await act(async () => root.unmount()); root = null; mock.queryClient.clear();
   mock.control.usageHistory = undefined; mock.control.usageError = '404 backend not enabled';
   await render(page());
   assert.equal($('.su-state[role=alert]').textContent, 'Usage history unavailable: 404 backend not enabled Retry');
   mock.control.usageError = null;
   await click(button('Retry'));
-  assert.equal(seriesCount('tokens'), 5);
+  assert.equal(seriesCount('tokens'), 4);
 });
 
 async function slide(node, value) {
@@ -623,7 +700,7 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.equal($$('.su-composition').length, 0, 'the plan list stays in the Accounts fold, not the headline');
   assert.equal($$('.su-pool').every(node => /^\d+(\.\d)?$/.test(node.textContent)), true);
   // The drain rate is only in each chart's averaging label under the plot, not repeated in the headline.
-  assert.deepEqual([$$('.su-rate').length, $$('.su-measure[data-kind="average"]').every(node => / · ~\d+(\.\d)? units\/h$/.test(node.textContent))], [0, true]);
+  assert.deepEqual([$$('.su-rate').length, $$('.su-measure[data-kind="average"]').every(node => / · ~\d+(\.\d)? units \/ h$/.test(node.textContent))], [0, true]);
   assert.deepEqual($$('.su-pooled').map(chart => [...chart.querySelectorAll('.su-yaxis span')].map(node => node.textContent).join()), ['25,50,75,100,120', '50,100,150,200'], 'no unit caption and no 0 label beside the past range control');
   assert.deepEqual($$('.su-verdict').map(node => node.closest('.su-provider-limits').dataset.provider), ['openai-codex', 'anthropic']);
   assert.equal($$('.su-pooled .su-line.su-past').length + $$('.su-pooled .su-line.su-projected').length + $$('.su-now').length, 6);
@@ -685,7 +762,7 @@ test('the shared lookback and the page-wide axis ranges change every chart at on
     await slide(await lookbackSlider(), 1);
     assert.equal($('.su-lookback input[type=range]').getAttribute('aria-valuetext'), '15d');
     const after = rates();
-    assert.deepEqual(after.map((text, index) => text !== before[index] && /^(~\d+(\.\d)? units\/h|no drain data)$/.test(text)), [true, true], `every provider's rate follows the slider (${before} → ${after})`);
+    assert.deepEqual(after.map((text, index) => text !== before[index] && /^(~\d+(\.\d)? units \/ h|no drain data)$/.test(text)), [true, true], `every provider's rate follows the slider (${before} → ${after})`);
     // The fixtures hold ten days of history, so a 15d lookback averages over those ten days.
     assert.deepEqual($$('.su-measure[data-kind="average"]').map(node => node.textContent.split(' · ')[0]), ['Average over 10d', 'Average over 10d']);
     const spans = () => $$('.su-pooled .su-plot').map(node => Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100);
@@ -898,10 +975,10 @@ test('the lookback slider moves between stops, changes the drain rate and widens
   const slider = await lookbackSlider();
   // Reversed: position 0 is 30d on the left, 9 is 1h on the right, so 2h sits at position 8.
   assert.deepEqual([slider.min, slider.max, slider.step, slider.value, slider.getAttribute('aria-valuetext'), slider.style.getPropertyValue('--su-share')], ['0', '9', '1', '8', '2h', String(8 / 9)]);
-  assert.equal($('.su-measure[data-kind="average"]').textContent.split(' · ')[1], '~4.0 units/h', 'a Pro 100 account: one percent is one plan unit');
+  assert.equal($('.su-measure[data-kind="average"]').textContent.split(' · ')[1], '~4.0 units / h', 'a Pro 100 account: one percent is one plan unit');
   assert.equal(document.querySelectorAll('.su-coverage').length, 0, 'the headline never carries a coverage note');
   assert.match($('.su-measure[data-kind="empty"]').textContent, /^Empty in 18h \d+m · /, '74 points at about 4 per hour');
-  assert.equal($('.su-measure[data-kind="average"]').textContent, 'Average over 2h · ~4.0 units/h');
+  assert.equal($('.su-measure[data-kind="average"]').textContent, 'Average over 2h · ~4.0 units / h');
   // The trendline, read back in chart time and units: it ends on the units left at Now and rises backwards at the averaged rate over the averaged span.
   const trend = () => {
     const plot = $('.su-pooled .su-plot'), path = $('.su-pooled .su-trend').getAttribute('d'), [x0, y0, x1, y1] = path.match(/-?\d+(\.\d+)?/g).map(Number);
@@ -915,7 +992,7 @@ test('the lookback slider moves between stops, changes the drain rate and widens
   assert.deepEqual([$('.su-lookback input[type=range]').getAttribute('aria-valuetext'), $('.su-lookback-value').textContent, document.querySelectorAll('.su-coverage').length], ['12h', '12h', 0], 'the slider shows the chosen 12h while the label names the 10h it covers');
   // Only ten of the requested twelve hours are covered: the arrow and its label span those ten hours, and the title names the requested lookback.
   const averaged = $('.su-measure[data-kind="average"]');
-  assert.deepEqual([averaged.textContent, averaged.getAttribute('aria-label'), averaged.dataset.seconds], ['Average over 10h · ~1.6 units/h', 'Average over 10h · ~1.6 units/h (all the data in the last 12h)', String(10 * H - 60)]);
+  assert.deepEqual([averaged.textContent, averaged.getAttribute('aria-label'), averaged.dataset.seconds], ['Average over 10h · ~1.6 units / h', 'Average over 10h · ~1.6 units / h (all the data in the last 12h)', String(10 * H - 60)]);
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 12);
   line = trend();
   assert.ok(Math.abs(line.hours - (10 - 1 / 60)) < 0.02 && line.toNow < 60 && Math.abs(line.left - 74) < 0.2 && Math.abs(line.rate - 16 / (10 - 1 / 60)) < 0.05, `the trendline follows the lookback over the ten covered hours (${JSON.stringify(line)})`);
@@ -1056,7 +1133,7 @@ test('the averaging period is measured left of Now and cut at the plot edge with
   await slide(await lookbackSlider(), 1);
   geometry = shape();
   assert.deepEqual([geometry.cap, geometry.startArrows, geometry.endArrows, geometry.left, near(geometry.right, nowPct())], ['false', 0, 1, 0, true], '15d reaches past the plot: cut at the edge, no left arrowhead or tick');
-  assert.match($('.su-measure[data-kind="average"]').textContent, /^Average over 10d · (~\d+(\.\d)? units\/h|no drain data)$/, 'ten days of history: the span and label cover those, still past the plot edge');
+  assert.match($('.su-measure[data-kind="average"]').textContent, /^Average over 10d · (~\d+(\.\d)? units \/ h|no drain data)$/, 'ten days of history: the span and label cover those, still past the plot edge');
   await click($('.su-axis-range[data-side=past] [data-direction=right]'));
   assert.equal(shape().cap, 'false', 'one day of past still starts after 15 days back');
   await slide(await lookbackSlider(), 6);
