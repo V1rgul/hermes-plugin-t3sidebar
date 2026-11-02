@@ -2078,15 +2078,15 @@ try {
       const banked = await usage.evaluate(() => {
         const rgb = el => { const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1; const paint = canvas.getContext('2d'); paint.fillStyle = getComputedStyle(el).color; paint.fillRect(0, 0, 1, 1); return [...paint.getImageData(0, 0, 1, 1).data.slice(0, 3)]; };
         return Object.fromEntries(['acct-team', 'acct-prolite'].map(id => { const account = document.querySelector(`.su-account[data-account="${id}"]`), bars = account.querySelector('.su-windows').getBoundingClientRect();
-          return [id, [...account.querySelectorAll('.su-banked-credit')].map(line => ({ text: line.textContent, soon: line.dataset.soon, color: rgb(line), muted: line.querySelector('.su-banked-unusable') ? rgb(line.querySelector('.su-banked-unusable')) : null, below: line.getBoundingClientRect().top >= bars.bottom }))]; }));
+          return [id, [...account.querySelectorAll('.su-banked-credit')].map(line => ({ text: line.textContent, soon: line.dataset.soon, color: rgb(line), below: line.getBoundingClientRect().top >= bars.bottom }))]; }));
       });
       console.log(`USAGE LIMITS BANKED: ${JSON.stringify(banked)}`);
       const [teamSoon, teamLater] = banked['acct-team'], [proSoon, proLater] = banked['acct-prolite'];
       // The page clock runs on from the fixed start while the test works, so the countdowns may have lost a minute.
-      check('Each Codex account lists its banked resets under its bars, soonest first: the one expiring within a day in orange, chatgpt1\'s marked not usable now in muted text', banked['acct-team'].length === 2 && banked['acct-prolite'].length === 2
+      check('Each Codex account lists its banked resets under its bars, soonest first: the one expiring within a day in orange, with no per-credit usability note', banked['acct-team'].length === 2 && banked['acct-prolite'].length === 2
         && [teamSoon, teamLater, proSoon, proLater].every(line => line.below) && /^Banked reset · expires \w{3} \d{1,2}:\d{2} (AM|PM) \(in (4h 5\dm|5h 0m)\)$/.test(teamSoon.text) && /\(in (8d 23h|9d 0h)\)$/.test(teamLater.text)
-        && /\(in 5h \d+m\) · not usable now$/.test(proSoon.text) && /\(in (9d 0h|8d 23h)\) · not usable now$/.test(proLater.text) && teamSoon.soon === 'true' && teamLater.soon === 'false'
-        && teamSoon.color[0] > teamSoon.color[2] + 60 && teamLater.color.join() !== teamSoon.color.join() && proSoon.muted && proSoon.muted.join() !== proSoon.color.join() && teamSoon.muted === null);
+        && /\(in 5h \d+m\)$/.test(proSoon.text) && /\(in (9d 0h|8d 23h)\)$/.test(proLater.text) && teamSoon.soon === 'true' && teamLater.soon === 'false'
+        && teamSoon.color[0] > teamSoon.color[2] + 60 && teamLater.color.join() !== teamSoon.color.join());
       await usage.reload();
       await usage.waitForSelector('.sf-footer .sf-limit');
       await usage.locator('.sf-footer .sf-limits').click();

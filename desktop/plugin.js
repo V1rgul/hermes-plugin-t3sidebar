@@ -3120,6 +3120,10 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
     notes.length ? h('div', { className: 'su-chart-foot' }, h('div', { className: 'su-chart-notes' }, notes)) : null);
 }
 function Badge({ tone, title, children }) { return h('span', { className: 'su-badge', 'data-tone': tone, title }, children); }
+// One pill split in two: the subject keeps the plain badge look and the detail half carries the colour.
+function SplitBadge({ tone, title, subject, detail }) {
+  return h('span', { className: 'su-badge su-badge-split', title }, h('span', null, subject), h('span', { className: 'su-badge-half', 'data-tone': tone }, detail));
+}
 function LimitAccount({ provider, account, selected, now }) {
   const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
   // The plan label and the capacity this account adds to the pool in the selected window; T3 Code's names, not the raw enum.
@@ -3127,10 +3131,10 @@ function LimitAccount({ provider, account, selected, now }) {
   return h('div', { className: 'su-account', 'data-account': account.id },
     h('div', { className: 'su-account-head' },
       h('strong', null, account.label || account.id),
-      h(Badge, { title: PLAN_UNITS_NOTE }, `${label || 'Unknown plan'} · ${unitsText(units)} units`),
-      assumed ? h('span', { className: 'su-muted su-assumed' }, `capacity unknown, counted as ${BASE_PLAN_UNITS}*`) : null,
       Number.isFinite(account.priority) ? h('span', { className: 'su-muted' }, `priority ${account.priority}`) : null,
-      Number.isFinite(account.banked_resets) ? h(Badge, null, `${account.banked_resets} banked reset${account.banked_resets === 1 ? '' : 's'}`) : null,
+      h(SplitBadge, { title: PLAN_UNITS_NOTE, tone: 'primary', subject: label || 'Unknown plan', detail: `${unitsText(units)} units` }),
+      assumed ? h('span', { className: 'su-muted su-assumed' }, `capacity unknown, counted as ${BASE_PLAN_UNITS}*`) : null,
+      Number.isFinite(account.banked_resets) ? h(BankedBadge, { count: account.banked_resets, windows }) : null,
       account.stale ? h(Badge, { tone: 'warn', title: 'The latest reading is older than the cache freshness limit.' }, 'Stale') : null,
       account.error ? h(Badge, { tone: 'error', title: String(account.error) }, 'Error') : null,
       h('span', { className: 'su-spacer' }),
@@ -3140,14 +3144,25 @@ function LimitAccount({ provider, account, selected, now }) {
       : h('div', { className: 'su-muted' }, 'No limit windows reported.'),
     h(BankedCredits, { banked: account.banked_credits, now }));
 }
-// One line per banked reset credit under the account's bars, soonest expiry first; a credit expiring within a day turns orange, and when Codex says none can be redeemed right now (limits not reached, for example) each line says so.
+// OpenAI lets a banked reset be redeemed manually once any allowance it covers has less than 80% left (help.openai.com/en/articles/20001498). The account-wide windows shown are exactly the covered ones (weekly on Pro, 5-hour and weekly on Plus/Business), so the rule applies to the whole account. Codex's own applicable_available_count follows the assistant's stricter 10% rule and would call a manually redeemable reset unusable.
+const BANKED_REDEEM_BELOW_PERCENT = 80;
+export function bankedRedeemable(windows) {
+  const remaining = windows.filter(win => win.scope !== 'model' && Number.isFinite(win.remaining_percent)).map(win => win.remaining_percent);
+  return remaining.length ? remaining.some(value => value < BANKED_REDEEM_BELOW_PERCENT) : null;
+}
+function BankedBadge({ count, windows }) {
+  const redeemable = count > 0 ? bankedRedeemable(windows) : null;
+  const text = `${count} banked reset${count === 1 ? '' : 's'}`;
+  if (redeemable === null) return h(Badge, null, text);
+  return h(SplitBadge, { tone: redeemable ? 'success' : 'warn', subject: text, detail: redeemable ? 'usable now' : `not usable now (all ≥${BANKED_REDEEM_BELOW_PERCENT}%)`,
+    title: redeemable ? `An allowance has less than ${BANKED_REDEEM_BELOW_PERCENT}% left, so a reset can be redeemed now.` : `Every allowance has ${BANKED_REDEEM_BELOW_PERCENT}% or more left; Codex refuses a reset until one drops below.` });
+}
+// One line per banked reset credit under the account's bars, soonest expiry first; a credit expiring within a day turns orange.
 function BankedCredits({ banked, now }) {
   const credits = (banked?.credits || []).filter(credit => credit.expires_at === null || credit.expires_at > now);
   if (!credits.length) return null;
-  const unusable = banked.applicable_count === 0;
   return h('ul', { className: 'su-banked', 'aria-label': 'Banked resets' }, credits.map((credit, index) => h('li', { key: `${credit.expires_at}:${index}`, className: 'su-banked-credit', 'data-soon': credit.expires_at !== null && credit.expires_at - now < DAY_S },
-    h('span', null, credit.expires_at === null ? 'Banked reset · no expiry reported' : `Banked reset · expires ${resetTime(credit.expires_at, now)} (in ${formatDurationShort(credit.expires_at - now)})`),
-    unusable ? h('span', { className: 'su-banked-unusable' }, ' · not usable now') : null)));
+    credit.expires_at === null ? 'Banked reset · no expiry reported' : `Banked reset · expires ${resetTime(credit.expires_at, now)} (in ${formatDurationShort(credit.expires_at - now)})`)));
 }
 function LimitWindowRow({ win, now, selected }) {
   const remaining = Number.isFinite(win.remaining_percent) ? clamp(win.remaining_percent, 0, 100) : null;
@@ -3263,6 +3278,12 @@ const USAGE_CSS = `
 .su-account{padding:10px 12px;border:1px solid var(--ui-stroke-secondary);border-radius:6px}
 .su-account-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin-bottom:8px}.su-account-head strong{font-weight:600}
 .su-badge{padding:1px 6px;border-radius:8px;background:var(--ui-bg-quaternary);font-size:10px;color:var(--ui-text-secondary)}
+.su-badge-split{display:inline-flex;padding:0;overflow:hidden}.su-badge-split>span{padding:1px 6px}
+/* The theme's primary (--ui-accent-secondary, #0053fd by default) mixed toward the base text as the sidebar's --sf-blue: the raw blue is about 3.3:1 on dark backgrounds. */
+.su{--su-primary:color-mix(in srgb,var(--ui-accent-secondary,#0053fd) 66%,var(--ui-base,var(--ui-text-primary)));--su-primary:oklch(from color-mix(in oklab,var(--ui-accent-secondary,#0053fd) 62%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.6) h)}
+.su-badge-half[data-tone=primary]{background:color-mix(in srgb,var(--su-primary) 14%,transparent);color:var(--su-primary)}
+.su-badge-half[data-tone=success]{background:color-mix(in srgb,var(--ui-green,#1f8a65) 16%,transparent);color:var(--ui-green,#1f8a65)}
+.su-badge-half[data-tone=warn]{background:color-mix(in srgb,var(--ui-orange,#db704b) 16%,transparent);color:var(--ui-orange,#db704b)}
 .su-badge[data-tone=warn]{background:color-mix(in srgb,var(--ui-orange,#db704b) 16%,transparent);color:var(--ui-orange,#db704b)}
 .su-badge[data-tone=error]{background:color-mix(in srgb,var(--ui-red,#e5534b) 16%,transparent);color:var(--ui-red,#e5534b)}
 .su-account-error{margin-bottom:6px;font-size:11px;color:var(--ui-red,var(--ui-text-primary))}
@@ -3308,7 +3329,7 @@ const USAGE_CSS = `
 .su-flag svg{width:14px;height:14px;flex-shrink:0}
 /* Banked reset credits listed under an account's bars. */
 .su-banked{display:flex;flex-direction:column;gap:2px;margin:8px 0 0;padding:0;list-style:none;font-size:11px;color:var(--ui-text-secondary)}
-.su-banked-credit[data-soon=true]{color:var(--ui-orange,#db704b)}.su-banked-unusable{color:var(--ui-text-tertiary)}
+.su-banked-credit[data-soon=true]{color:var(--ui-orange,#db704b)}
 @media(max-width:640px){.su{padding:12px}.su-window{grid-template-columns:minmax(60px,7rem) minmax(40px,1fr) 4rem;}.su-window-reset{display:none}}
 `;
 export default {
