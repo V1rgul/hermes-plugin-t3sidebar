@@ -2841,7 +2841,6 @@ function UsageChart({ chart, model, mode, hover, setHover, axis }) {
       style: { left: `${bucketX(index, count) / VIEW_W * 100}%` } }, model.labels[position]))) : null);
 }
 const rateNumber = rate => rate < 10 ? rate.toFixed(1) : String(Math.round(rate));
-const rateText = rate => rate === null ? 'no drain data' : `~${rateNumber(rate)} units per hour`;
 function resetTime(seconds, now) {
   return formatAt(seconds, seconds - now < 6 * DAY_S ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
@@ -2916,8 +2915,9 @@ export const lookbackPosition = hours => { const index = LOOKBACK_STOPS.indexOf(
 export const lookbackAtPosition = position => LOOKBACK_STOPS[LOOKBACK_STOPS.length - 1 - clamp(Math.round(Number(position)) || 0, 0, LOOKBACK_STOPS.length - 1)];
 function LookbackSlider({ hours, onChange }) {
   const last = LOOKBACK_STOPS.length - 1, position = lookbackPosition(hours);
-  // No label or value beside the track: the "Average over …" text and arrow it edits stay visible above and show the period.
+  // The chosen period sits left of the track: the "Average over …" label above names the period actually averaged, which is shorter when there is less history than chosen, so the label alone made the slider look stuck.
   return h('div', { className: 'su-lookback' },
+    h('output', { className: 'su-lookback-value', 'aria-hidden': true }, lookbackLabel(hours)),
     h('input', { type: 'range', className: 'su-range', min: 0, max: last, step: 1, value: position, 'aria-label': 'Averaging period', 'aria-valuetext': lookbackLabel(hours),
       // The track is filled from the thumb to the right end (the averaged period reaching back from now); Chromium has no themeable progress pseudo-element, so the gradient stop is computed from the thumb position.
       style: { '--su-share': position / last },
@@ -3276,8 +3276,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
     h('div', { className: 'su-headline' },
       // Without any account reading the pool is unknown, not empty.
       h('span', { className: 'su-pool' }, projection.capacity ? unitsText(projection.current) : '—'),
-      h('span', { className: 'su-capacity', title: PLAN_UNITS_NOTE }, projection.capacity ? `/ ${unitsText(projection.capacity)} units` : 'no account readings yet'),
-      h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate))),
+      h('span', { className: 'su-capacity', title: PLAN_UNITS_NOTE }, projection.capacity ? `/ ${unitsText(projection.capacity)} units` : 'no account readings yet')),
     verdict ? h(VerdictLine, { verdict, now, windowKey }) : null,
     h('div', { className: 'su-limits-grid', ref: grid },
       // No unit caption (the headline already says units) and no 0 label, which would sit on the past range control under it; the 0 gridline stays.
@@ -3448,8 +3447,10 @@ const USAGE_CSS = `
 @media(prefers-reduced-motion:reduce){.su-disclosure-chevron{transition:none}}
 .su-footnotes{display:flex;flex-direction:column;gap:4px}
 .su-headline{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}.su-pool{font-size:24px;font-weight:600;color:var(--su-color);font-variant-numeric:tabular-nums}
-.su-capacity{font-size:13px;color:var(--ui-text-secondary)}.su-rate{margin-left:10px;font-size:12px;color:var(--ui-text-tertiary)}
-.su-lookback{display:flex;align-items:center}
+.su-capacity{font-size:13px;color:var(--ui-text-secondary)}
+.su-lookback{display:flex;align-items:center;gap:8px}
+/* A fixed width keeps the track from shifting as the value changes; right-aligned so it reads against the track. */
+.su-lookback-value{min-width:2.4em;text-align:right;font-size:11px;color:var(--ui-text-primary);font-variant-numeric:tabular-nums;white-space:nowrap}
 .su-range{-webkit-appearance:none;appearance:none;width:132px;height:16px;margin:0;padding:0;background:transparent;cursor:pointer}
 .su-range{--su-thumb:12px;--su-stop:calc(var(--su-thumb) / 2 + (100% - var(--su-thumb)) * var(--su-share,0));--su-track:linear-gradient(to right,color-mix(in srgb,var(--ui-text-primary) 14%,transparent) var(--su-stop),var(--su-color) var(--su-stop))}
 .su-range::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--su-track)}
