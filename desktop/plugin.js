@@ -912,8 +912,10 @@ const CSS = `
 .sf *{box-sizing:border-box}.sf button,.sf input,.sf select{font:inherit}.sf button{cursor:pointer}.sf button:disabled{cursor:default;opacity:.4}
 .sf button:focus-visible,.sf input:focus-visible,.sf select:focus-visible{outline:2px solid var(--ui-accent);outline-offset:-2px}
 .sf-header{padding:6px 12px;display:flex;align-items:center;gap:5px;height:40px;flex-shrink:0}.sf-icon{display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;width:27px;height:27px;padding:4px;border:0;border-radius:4px;color:var(--ui-text-tertiary);background:transparent}
+/* Toolbar and footer icons share one prominence: the tertiary tone at full opacity, a 16px box and a 1.33px line (Tabler stroke 2 at 16px). Desktop's Button otherwise shrinks unsized icons to 12px (a 0.8px line at stroke 1.6) while Usage drew 16px in the darker secondary tone, so controls of equal rank read at different strengths. */
+.sf-header .sf-icon>svg,.sf-search>svg{width:16px;height:16px;stroke-width:2}
 .sf-icon:hover,.sf-icon[aria-expanded=true],.sf-row:hover,.sf-row:focus-within,.sf-row[data-menu-open=true],.sf-section-toggle:hover{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
-.sf-search{display:flex;align-items:center;gap:8px;flex:1;min-width:0;height:27px;margin-left:-6px;padding:0 6px;border-radius:4px;color:var(--ui-text-tertiary)}.sf-search:focus-within{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ui-accent) 70%,transparent)}.sf .sf-search input:focus-visible{outline:none}.sf-search svg{flex-shrink:0;width:18px;height:18px}
+.sf-search{display:flex;align-items:center;gap:8px;flex:1;min-width:0;height:27px;margin-left:-6px;padding:0 6px;border-radius:4px;color:var(--ui-text-tertiary)}.sf-search:focus-within{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ui-accent) 70%,transparent)}.sf .sf-search input:focus-visible{outline:none}.sf-search svg{flex-shrink:0}
 .sf-search input{width:100%;min-width:0;padding:0;border:0;background:transparent;color:var(--ui-text-primary);outline:none}
 .sf-search input::-webkit-search-cancel-button{-webkit-appearance:none}.sf-search .sf-clear{width:20px;height:20px;padding:2px;visibility:visible;opacity:1}
 .sf-header input{font-size:14px}.sf-menu select{max-width:260px;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary)}
@@ -968,19 +970,20 @@ const CSS = `
 /* Empty-state text waits for leaving cards to collapse instead of appearing under them (visibility only, no fade). */
 @keyframes sf-after-exit{from{visibility:hidden}}.sf-empty{animation:sf-after-exit .22s step-end}
 /* T3's sidebar utility row: fixed height below the list, so shelves keep their flex allocation within a shorter column. */
-.sf-footer{display:flex;align-items:center;gap:2px;flex-shrink:0;min-width:0;height:36px;padding:4px 6px}.sf .sf-footer .sf-utility{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-secondary)}.sf .sf-footer .sf-utility:hover,.sf .sf-footer .sf-utility:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-footer .sf-utility svg{width:16px;height:16px;flex-shrink:0}
+.sf-footer{display:flex;align-items:center;gap:2px;flex-shrink:0;min-width:0;height:36px;padding:4px 6px}.sf .sf-footer .sf-utility{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary)}.sf .sf-footer .sf-utility:hover,.sf .sf-footer .sf-utility:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-footer .sf-utility svg{width:16px;height:16px;flex-shrink:0}
 /* The single Limits button after Usage, sized to its content but free to shrink: its item strip wraps and clips its second line, so a pane too narrow for every provider drops whole items instead of squeezing or overflowing; clip (not hidden) keeps focus from scrolling it. Without data it is a 28px icon button like Usage. */
 .sf-footer-end{display:inline-flex;flex-shrink:0;margin-left:auto}.sf .sf-footer .sf-limits{display:inline-flex;align-items:center;justify-content:flex-start;flex:0 1 auto;gap:0;min-width:0;max-width:100%;height:28px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);font:inherit;font-size:11px;font-weight:400;line-height:1;white-space:nowrap;overflow:clip;cursor:pointer}
-.sf .sf-footer .sf-limits[data-empty=true]{flex-shrink:0;justify-content:center;width:28px;padding:0;color:var(--ui-text-secondary)}.sf-footer .sf-limits[data-empty=true] svg{width:16px;height:16px;flex-shrink:0}
+.sf .sf-footer .sf-limits[data-empty=true]{flex-shrink:0;justify-content:center;width:28px;padding:0}.sf-footer .sf-limits[data-empty=true] svg{width:16px;height:16px;flex-shrink:0}
 .sf .sf-footer .sf-limits:hover,.sf .sf-footer .sf-limits:focus-visible{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
 /* The footer button of the page in front of the user carries the selected-card background, since no card is selected then. */.sf .sf-footer :is(.sf-utility,.sf-limits)[aria-current=page]{background:var(--ui-bg-quaternary);color:var(--ui-text-primary)}
 .sf-limits-items{display:flex;flex-wrap:wrap;align-items:center;column-gap:10px;min-width:0;height:28px;overflow:clip}
 .sf-limit{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;height:28px}
-.sf-limit svg[data-provider-mark]{width:13px;height:13px;flex-shrink:0;opacity:.7}
+.sf-limit svg[data-provider-mark]{width:13px;height:13px;flex-shrink:0}
 .sf-limit-value{font-variant-numeric:tabular-nums;white-space:nowrap}.sf-limit-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sf-limit .su-verdict-icon{display:inline-flex;flex-shrink:0}.sf-limit .su-verdict-icon svg{width:14px;height:14px}
+.sf-limit .su-verdict-icon{display:inline-flex;flex-shrink:0}/* Stroke 2.29 keeps the toolbar's 1.33px line in the 14px verdict box. */.sf-limit .su-verdict-icon svg{width:14px;height:14px;stroke-width:2.29}
 /* Verdict glyph colour follows severity (missing or lost units against the pool's capacity), the same rule as the Limits page: muted below a third, orange from a third, red from two thirds. */
 .sf-limit .su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.sf-limit .su-verdict-icon[data-severity=high]{color:var(--ui-red,#cf2d56)}
+/* Saturated hues read stronger than the neutral icons beside them at equal lightness contrast; 0.75 opacity brings the orange and red glyphs to the same visual weight in light and dark themes. */.sf-limit .su-verdict-icon:is([data-severity=medium],[data-severity=high]){opacity:.75}
 @media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
 // Monochrome 24x24 provider marks: LobeHub Icons, @lobehub/icons-static-svg 1.95.1 (MIT, Copyright (c) 2023 LobeHub; notice in
@@ -1055,9 +1058,10 @@ function statusIcon(status, glyph = status) {
   return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
     STATUS_ICONS[glyph].map(d => h('path', { key: d, d })));
 }
-// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge, chart-histogram, clock-x and flag glyphs, plus one derived arrow.
+// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge, clock-x and flag glyphs, plus one derived arrow.
 const BUNDLED_ICONS = {
-  ChartHistogram: ['M3 3v18h18', 'M20 18v3', 'M16 16v5', 'M12 13v8', 'M8 16v5', 'M3 11c6 0 5 -5 9 -5s3 5 9 5'],
+  // Lucide v1.59.0 chart-no-axes-column (ISC), the status glyphs' family: three separate bars, where Tabler's chart-histogram overlaps its curve, bars and axis.
+  ChartNoAxesColumn: ['M5 21v-6', 'M12 21V3', 'M19 21V9'],
   Gauge: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M13.41 10.59l2.59 -2.59', 'M7 12a5 5 0 0 1 5 -5'],
   ClockX: ['M20.926 13.15a9 9 0 1 0 -7.835 7.784', 'M12 7v5l2 2', 'M22 22l-5 -5', 'M17 22l5 -5'],
   // Derived from Tabler v3.44.0 arrow-bar-to-down (MIT) with the tip moved down to meet the bar's top edge, because Virgile wants the arrow to touch the floor.
@@ -2055,7 +2059,7 @@ export function writeUsagePreferences(storage, value) {
   try { storage.set(USAGE_PREFERENCES_KEY, validUsagePreferences(value)); return true; } catch (_) { return false; }
 }
 // T3 Code's SidebarUtilityItem: icon-only ghost buttons with a tooltip, in one fixed-height footer row below the shelves, so the flex shelf allocation only sees a shorter list.
-const USAGE_LINK = { route: USAGE_ROUTE, label: 'Usage', tip: 'Token usage', icon: 'ChartHistogram', glyph: '▥' };
+const USAGE_LINK = { route: USAGE_ROUTE, label: 'Usage', tip: 'Token usage', icon: 'ChartNoAxesColumn', glyph: '▥' };
 const openRoute = route => { try { host.navigate(route); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ } };
 function UtilityLink({ link }) {
   const tip = typeof sdk.Tip === 'function', current = useShownPage() === link.route;
