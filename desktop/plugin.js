@@ -2840,8 +2840,9 @@ function LimitsView({ query, prefs, update, toolbar }) {
   // Merged into the stored ranges, so a change on one chart never resets another group or side chosen elsewhere.
   const setRange = useCallback((group, side, hours) => update(previous => ({ range: { ...previous.range, [group]: { ...previous.range[group], [side]: hours } } })), [update]);
   // The controls stay put above the scrolling sections, so they remain reachable however far down the page is read.
+  // The lookback is edited from each chart's averaging label rather than this bar; it is still one shared preference.
+  const setLookback = useCallback(lookback => update({ lookback }), [update]);
   const controls = h('div', { className: 'su-top' }, h('header', { className: 'su-header su-limits-controls' },
-    h(LookbackSlider, { hours: prefs.lookback, onChange: lookback => update({ lookback }) }),
     windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windows.map(item => ({ id: item.key, label: item.label })), value: selected.key, onChange: value => update({ window: value }) }) : null,
     toolbar));
   if (!data) return h(Fragment, null, controls, h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…'))));
@@ -2850,7 +2851,7 @@ function LimitsView({ query, prefs, update, toolbar }) {
       query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
       providers.length ? null : h(UsageState, null, 'No subscription limits recorded yet.'),
       providers.map(provider => provider.auth === 'logged_out' ? h(LoggedOutProvider, { key: provider.provider, provider })
-        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange })),
+        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange, setLookback })),
       h(LimitsFootnotes, { providers: active, sampler: data.sampler, now }))));
 }
 // Hermes knows the provider but has no usable credential, so there is nothing to sample or project: one muted row instead of a chart.
@@ -2861,13 +2862,13 @@ function LoggedOutProvider({ provider }) {
       provider.auth_reason ? h('span', { className: 'su-muted su-logged-out-reason' }, provider.auth_reason) : null));
 }
 // Memoized: its props only change with the data, the clock, the preferences or the window, so a page render for anything else (the toolbar's fetching state, the preference echo) skips the charts.
-const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange }) {
+const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange, setLookback }) {
   const name = provider.label || provider.provider;
   // The verdict always looks a week ahead whatever range the chart shows, so it reads the same as the sidebar footer.
   const verdict = useMemo(() => limitsVerdict(provider, { lookback: prefs.lookback, window: prefs.window }, now), [provider, prefs.lookback, prefs.window, now]);
   return h('section', { className: 'su-provider-limits', 'data-provider': provider.provider, style: { '--su-color': providerHueColor(provider.provider) } },
     h('h2', { className: 'su-provider-head' }, providerMark(provider.provider), h('span', null, name)),
-    windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, range: prefs.range[rangeGroup(windowKey)], lookback: prefs.lookback, onRange: (side, hours) => setRange(rangeGroup(windowKey), side, hours) })
+    windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, range: prefs.range[rangeGroup(windowKey)], lookback: prefs.lookback, setLookback, onRange: (side, hours) => setRange(rangeGroup(windowKey), side, hours) })
       : h(UsageState, null, 'No limit windows reported for this provider.'),
     h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open) }));
 });
@@ -2896,14 +2897,33 @@ export const lookbackPosition = hours => { const index = LOOKBACK_STOPS.indexOf(
 export const lookbackAtPosition = position => LOOKBACK_STOPS[LOOKBACK_STOPS.length - 1 - clamp(Math.round(Number(position)) || 0, 0, LOOKBACK_STOPS.length - 1)];
 function LookbackSlider({ hours, onChange }) {
   const last = LOOKBACK_STOPS.length - 1, position = lookbackPosition(hours);
+  // No label or value beside the track: the "Average over …" text and arrow it edits stay visible above and show the period.
   return h('div', { className: 'su-lookback' },
-    h('span', { className: 'su-lookback-label', 'aria-hidden': true }, 'Projections based on'),
-    h('input', { type: 'range', className: 'su-range', min: 0, max: last, step: 1, value: position, 'aria-label': 'Projections based on', 'aria-valuetext': lookbackLabel(hours),
+    h('input', { type: 'range', className: 'su-range', min: 0, max: last, step: 1, value: position, 'aria-label': 'Averaging period', 'aria-valuetext': lookbackLabel(hours),
       // The track is filled from the thumb to the right end (the averaged period reaching back from now); Chromium has no themeable progress pseudo-element, so the gradient stop is computed from the thumb position.
       style: { '--su-share': position / last },
-      onChange: event => onChange(lookbackAtPosition(event.target.value)) }),
-    // A fixed-width value keeps the row from shifting while the thumb is dragged.
-    h('output', { className: 'su-lookback-value', 'aria-hidden': true }, lookbackLabel(hours)));
+      onChange: event => onChange(lookbackAtPosition(event.target.value)) }));
+}
+// The lookback slider pops up under the averaging arrow so the arrow and its label stay visible while they follow the thumb. The popover is anchored at the arrow's Now end, which does not move with the lookback (the label re-centres on every change), and the pencil after the label only toggles it.
+// Radix's end alignment puts the content's outer right edge on the anchor; shifting it right by the padding and border puts the track's right end there instead.
+const LOOKBACK_POPOVER_PAD_PX = 12, LOOKBACK_POPOVER_BORDER_PX = 1;
+function AverageLookback({ toPct, hours, onChange, children }) {
+  const [open, setOpen] = useState(false), pencil = useRef(null), escaped = useRef(false);
+  // Desktop's soft-fill secondary button, restated in the plugin CSS at a size that fits the label row (icon-xs alone is 24px).
+  const edit = h(sdk.Button, { ref: pencil, type: 'button', variant: 'secondary', size: 'icon-xs', className: 'su-lookback-edit', 'aria-label': 'Edit averaging period', title: 'Edit averaging period', 'aria-haspopup': 'dialog', 'aria-expanded': open,
+    onClick: () => setOpen(value => !value) }, sdk.icons?.Pencil ? h(sdk.icons.Pencil, { size: 12, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, '✎'));
+  return h(sdk.Popover, { open, onOpenChange: setOpen },
+    children(edit),
+    h(sdk.PopoverTrigger, { asChild: true }, h('span', { className: 'su-lookback-anchor', 'aria-hidden': true, tabIndex: -1, style: { left: `${toPct}%` } })),
+    // Portalled outside the page and its sections, so the content sets the slider colour itself (the accent, as in the old controls bar); inline style also beats the SDK's default popover width and padding.
+    h(sdk.PopoverContent, { side: 'bottom', align: 'end', sideOffset: 2, alignOffset: -(LOOKBACK_POPOVER_PAD_PX + LOOKBACK_POPOVER_BORDER_PX), className: 'su-lookback-popover', 'aria-label': 'Averaging period',
+      style: { '--su-color': 'var(--ui-accent)', width: 'auto', padding: `6px ${LOOKBACK_POPOVER_PAD_PX}px` },
+      // The pencil sits outside the content: a press on it must toggle rather than dismiss and immediately reopen.
+      onInteractOutside: event => { if (pencil.current?.contains(event.target)) event.preventDefault(); },
+      onEscapeKeyDown: () => { escaped.current = true; },
+      // The anchor is not focusable, so focus returns to the pencil after Escape; an outside click keeps focus where it landed.
+      onCloseAutoFocus: event => { event.preventDefault(); if (escaped.current) pencil.current?.focus(); escaped.current = false; } },
+      h(LookbackSlider, { hours, onChange })));
 }
 // One dimension line under the plot, with arrowheads and end ticks drawn at fixed pixel size. A capped end (`startCap`/`endCap` false) has neither: the line simply runs out at the plot edge.
 function MeasureSpan({ fromPct, toPct, startCap = true, endCap = true }) {
@@ -2920,16 +2940,18 @@ function placeMeasureLabels(row) {
   const width = row.getBoundingClientRect().width;
   if (!(width > 0)) return;
   for (const span of row.querySelectorAll('.su-measure-span')) span.dataset.tight = String(span.getBoundingClientRect().width < TIGHT_SPAN_PX);
-  for (const label of row.querySelectorAll('.su-measure-text')) {
+  for (const label of row.querySelectorAll('.su-measure-label')) {
+    // An end-aligned label (the averaging one, whose edit button ends on the arrow's Now end) sits flush against Now instead of keeping the gap; the label on the other side still keeps its own.
+    const end = label.dataset.align === 'end';
     const low = Number(label.dataset.low) / 100 * width + (label.dataset.side === 'right' ? MEASURE_GAP_PX : 0);
-    const high = Number(label.dataset.high) / 100 * width - (label.dataset.side === 'left' ? MEASURE_GAP_PX : 0);
+    const high = Number(label.dataset.high) / 100 * width - (label.dataset.side === 'left' && !end ? MEASURE_GAP_PX : 0);
     label.style.maxWidth = `${Math.max(0, high - low)}px`;
     const own = label.getBoundingClientRect().width, center = Number(label.dataset.center) / 100 * width;
-    label.style.left = `${clamp(center - own / 2, low, Math.max(low, high - own))}px`;
+    label.style.left = `${end ? Math.max(low, high - own) : clamp(center - own / 2, low, Math.max(low, high - own))}px`;
     label.style.transform = 'none';
   }
 }
-function MeasureRow({ nowPct, average, empty }) {
+function MeasureRow({ nowPct, average, empty, lookback, setLookback }) {
   const row = useRef(null);
   useLayoutEffect(() => {
     const node = row.current;
@@ -2940,12 +2962,14 @@ function MeasureRow({ nowPct, average, empty }) {
     observer.observe(node);
     return () => observer.disconnect();
   }, [nowPct, average?.fromPct, average?.text, empty?.toPct, empty?.text]);
-  const label = (item, side, low, high) => h('span', { className: 'su-measure-text', 'data-side': side, 'data-low': low, 'data-high': high, 'data-center': (item.fromPct + item.toPct) / 2,
+  // The label box is what gets positioned and clamped; only its text ellipsizes, so a trailing control stays whole.
+  const label = (item, side, low, high, control = null) => h('span', { className: 'su-measure-label', 'data-side': side, 'data-low': low, 'data-high': high, 'data-center': (item.fromPct + item.toPct) / 2, 'data-align': control ? 'end' : undefined, style: { left: `${(item.fromPct + item.toPct) / 2}%` } },
     // The title restores the full text when a narrow plot ellipsizes it.
-    title: item.title || item.text, style: { left: `${(item.fromPct + item.toPct) / 2}%` } }, item.text);
+    h('span', { className: 'su-measure-text', title: item.title || item.text }, item.text), control);
+  const averaged = edit => h('div', { className: 'su-measure', 'data-kind': 'average', 'data-seconds': Math.round(average.seconds), role: 'note', 'aria-label': average.title || average.text },
+    h(MeasureSpan, { fromPct: average.fromPct, toPct: average.toPct, startCap: !average.clipped }), label(average, 'left', 0, nowPct, edit));
   return h('div', { className: 'su-measures', ref: row },
-    average ? h('div', { className: 'su-measure', 'data-kind': 'average', 'data-seconds': Math.round(average.seconds), role: 'note', 'aria-label': average.title || average.text },
-      h(MeasureSpan, { fromPct: average.fromPct, toPct: average.toPct, startCap: !average.clipped }), label(average, 'left', 0, nowPct)) : null,
+    !average ? null : setLookback ? h(AverageLookback, { toPct: average.toPct, hours: lookback, onChange: setLookback }, averaged) : averaged(null),
     empty ? h('div', { className: 'su-measure', 'data-kind': 'empty', role: 'note', 'aria-label': empty.text },
       h(MeasureSpan, { fromPct: empty.fromPct, toPct: empty.toPct }), label(empty, 'right', nowPct, 100)) : null);
 }
@@ -3073,14 +3097,18 @@ function glideRange(grid, from, to, drawn, onEnd) {
   if (!svg || typeof frame !== 'function' || !(span > 0) || !(from.end > from.start) || !(to.end > to.start)) return null;
   const width = plot.getBoundingClientRect().width;
   // Every glider is positioned by a left percentage of the plot width, so its time follows from it.
-  const gliders = [...grid.querySelectorAll('.su-plot > .su-now, .su-plot > .su-empty-dot, .su-marks > *, .su-xaxis > span')]
+  const gliders = [...grid.querySelectorAll('.su-plot > .su-now, .su-plot > .su-empty-dot, .su-marks > *, .su-xaxis > span, .su-measures > .su-lookback-anchor')]
     .map(node => ({ node, share: parseFloat(node.style.left) / 100 })).filter(item => Number.isFinite(item.share));
   // Screen share of the plot where a share of the drawn range lands in the window being shown.
   const at = (share, start, end) => (drawn.start + share * span - start) / (end - start);
   // The measurement row glides too: each span's ends follow the time mapping, which also changes its width, so span boxes are set per frame (a handful of small boxes); each label keeps placeMeasureLabels' rule, centred on its span and clamped to its side of Now, with its full text width measured once. Bounds at 0 or 100% are the plot's edges, not times.
   const row = grid.querySelector('.su-measures');
   const spans = row ? [...row.querySelectorAll('.su-measure-span')].map(node => ({ node, left: node.style.left, size: node.style.width, tight: node.dataset.tight, from: parseFloat(node.style.left) / 100, to: (parseFloat(node.style.left) + parseFloat(node.style.width)) / 100 })) : [];
-  const labels = row ? [...row.querySelectorAll('.su-measure-text')].map(node => ({ node, side: node.dataset.side, low: Number(node.dataset.low) / 100, high: Number(node.dataset.high) / 100, center: Number(node.dataset.center) / 100, full: node.scrollWidth })) : [];
+  // The label wrapper is what placeMeasureLabels positions (its text ellipsizes inside, a trailing edit button stays whole); its unclamped width is the text's full width plus the rest of the wrapper.
+  const labels = row ? [...row.querySelectorAll('.su-measure-label')].map(node => {
+    const text = node.querySelector('.su-measure-text'), box = node.getBoundingClientRect().width;
+    return { node, side: node.dataset.side, end: node.dataset.align === 'end', low: Number(node.dataset.low) / 100, high: Number(node.dataset.high) / 100, center: Number(node.dataset.center) / 100, full: box + (text ? Math.max(0, text.scrollWidth - text.clientWidth) : 0) };
+  }) : [];
   // Should the window ever show past the drawn range's ends, the horizontal gridlines, which hold no data, still stretch over it.
   const gridlines = [...svg.querySelectorAll(':scope > line.su-grid')];
   let shown = { ...from }, handle = 0, started = null, done = false;
@@ -3096,9 +3124,9 @@ function glideRange(grid, from, to, drawn, onEnd) {
     }
     const bound = share => clamp(share <= 0 || share >= 1 ? share : at(share, start, end), 0, 1) * width;
     for (const item of labels) {
-      const low = bound(item.low) + (item.side === 'right' ? MEASURE_GAP_PX : 0), high = bound(item.high) - (item.side === 'left' ? MEASURE_GAP_PX : 0);
+      const low = bound(item.low) + (item.side === 'right' ? MEASURE_GAP_PX : 0), high = bound(item.high) - (item.side === 'left' && !item.end ? MEASURE_GAP_PX : 0);
       const room = Math.max(0, high - low), own = Math.min(item.full, room), center = at(item.center, start, end) * width;
-      item.node.style.maxWidth = `${room}px`; item.node.style.left = `${clamp(center - own / 2, low, Math.max(low, high - own))}px`;
+      item.node.style.maxWidth = `${room}px`; item.node.style.left = `${item.end ? Math.max(low, high - own) : clamp(center - own / 2, low, Math.max(low, high - own))}px`;
     }
   };
   // Runs once, after React has drawn the new range when it was not drawn yet. The measurement row remounts whenever the drawn range changes, so a span still in the page has the props it had when captured and gets them back (React only writes styles whose props change); both label layers are then placed again for the final geometry.
@@ -3129,7 +3157,7 @@ function glideRange(grid, from, to, drawn, onEnd) {
   return { shown: () => shown, cancel: () => { if (handle) cancelFrame?.(handle); settle(); } };
 }
 // "Business: 20, Pro 100: 100": what each account adds to the pool's capacity, an asterisk marking a guessed one.
-function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, onRange }) {
+function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, setLookback, onRange }) {
   const lookbackS = lookback * HOUR_S, providerId = provider.provider, stops = LIMITS_RANGE_STOPS[rangeGroup(windowKey)];
   const target = { past: range.past * HOUR_S, future: range.future * HOUR_S }, targetKey = `${windowKey}|${range.past}|${range.future}`;
   const grid = useRef(null), glide = useRef({ last: null, run: null });
@@ -3203,6 +3231,15 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
   const averageText = `Average over ${projection.partial ? coverageText(averageS) : lookbackLabel(lookback)} · ${rateShort(projection.rate)}`;
   const average = nowPct - averagePct > 0.05 ? { fromPct: averagePct, toPct: nowPct, clipped: averageClipped, text: averageText, seconds: averageS,
     title: projection.partial ? `${averageText} (all the data in the last ${lookbackLabel(lookback)})` : averageText } : null;
+  // The averaged drain drawn backwards: from the units left at Now, rising at the average rate over the averaged period, so the slope the label quotes can be read against the past curve. Cut at the plot edge and at the axis bounds.
+  let trendLine = null;
+  if (average && projection.capacity > 0 && Number.isFinite(projection.rate)) {
+    const perS = projection.rate / HOUR_S, valueAt = t => projection.current + perS * (now - t);
+    let from = Math.max(start, now - averageS);
+    const bound = perS > 0 ? cap : perS < 0 ? 0 : null;
+    if (bound !== null && (valueAt(from) - bound) * Math.sign(perS) > 0) from = now - (bound - projection.current) / perS;
+    if (from < now) trendLine = `M${x(from).toFixed(2)},${y(valueAt(from)).toFixed(2)} L${x(now).toFixed(2)},${y(projection.current).toFixed(2)}`;
+  }
   const hoverT = hover === null ? null : start + hover * (end - start);
   const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
   // Over a mark its own tooltip speaks, so the crosshair and its inline tooltip step aside.
@@ -3234,6 +3271,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
           ticks.map(tick => h('line', { key: tick, className: 'su-grid', x1: 0, x2: VIEW_W, y1: y(tick), y2: y(tick) })),
           pastArea ? h('path', { className: 'su-area su-past', d: pastArea }) : null,
           pastLine ? h('path', { className: 'su-line su-past', d: pastLine }) : null,
+          trendLine ? h('path', { className: 'su-trend', d: trendLine }) : null,
           h('path', { className: 'su-area su-projected', d: projectedArea }),
           h('path', { className: 'su-line su-projected', d: projectedLine })),
         h('div', { className: 'su-now', style: { left: `${nowPct}%` } }, h('span', null, 'Now')),
@@ -3250,7 +3288,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
       })),
       h(AxisRangeControl, { side: 'future', hours: range.future, stops, onChange: hours => onRange('future', hours) }),
       // Keyed by the drawn range, so a redraw at the end of a glide gets fresh nodes rather than ones the glide restyled.
-      h(MeasureRow, { key: `${view.past}|${view.future}`, nowPct, average, empty: emptyMeasured ? { fromPct: nowPct, toPct: emptyPct, text: emptyText } : null })),
+      h(MeasureRow, { key: `${view.past}|${view.future}`, nowPct, average, empty: emptyMeasured ? { fromPct: nowPct, toPct: emptyPct, text: emptyText } : null, lookback, setLookback })),
     notes.length ? h('div', { className: 'su-chart-foot' }, h('div', { className: 'su-chart-notes' }, notes)) : null);
 }
 function Badge({ tone, title, children }) { return h('span', { className: 'su-badge', 'data-tone': tone, title }, children); }
@@ -3353,6 +3391,8 @@ const USAGE_CSS = `
 .su-line{fill:none;stroke-width:1.5;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .su-past.su-area{fill:var(--su-color);fill-opacity:.22}.su-past.su-line{stroke:var(--su-color)}
 .su-projected.su-area{fill:var(--su-color);fill-opacity:.06}.su-projected.su-line{stroke:var(--su-color);stroke-dasharray:5 4}
+/* The averaging trendline takes the measurement arrow's neutral colour, which ties it to the "Average over" label, and a finer dash than the projection so the two never read as one curve. */
+.su-trend{fill:none;stroke:var(--ui-text-secondary);stroke-width:1;stroke-dasharray:3 3;vector-effect:non-scaling-stroke}
 .su-cross{position:absolute;top:0;bottom:0;width:0;border-left:1px dashed var(--ui-text-tertiary);pointer-events:none}
 .su-now{position:absolute;top:-2px;bottom:0;width:0;border-left:1px dashed var(--ui-text-secondary);pointer-events:none}.su-now span{position:absolute;top:0;left:4px;font-size:10px;color:var(--ui-text-tertiary)}
 .su-dot{position:absolute;width:7px;height:7px;margin:0 0 -3.5px -3.5px;border-radius:50%;box-shadow:0 0 0 1.5px var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:none}
@@ -3390,8 +3430,7 @@ const USAGE_CSS = `
 .su-footnotes{display:flex;flex-direction:column;gap:4px}
 .su-headline{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}.su-pool{font-size:24px;font-weight:600;color:var(--su-color);font-variant-numeric:tabular-nums}
 .su-capacity{font-size:13px;color:var(--ui-text-secondary)}.su-rate{margin-left:10px;font-size:12px;color:var(--ui-text-tertiary)}
-.su-lookback{display:inline-flex;align-items:center;gap:8px;font-size:11px;color:var(--ui-text-secondary)}
-.su-lookback-label{white-space:nowrap}.su-lookback-value{min-width:2.6em;color:var(--ui-text-primary);font-variant-numeric:tabular-nums;white-space:nowrap}
+.su-lookback{display:flex;align-items:center}
 .su-range{-webkit-appearance:none;appearance:none;width:132px;height:16px;margin:0;padding:0;background:transparent;cursor:pointer}
 .su-range{--su-thumb:12px;--su-stop:calc(var(--su-thumb) / 2 + (100% - var(--su-thumb)) * var(--su-share,0));--su-track:linear-gradient(to right,color-mix(in srgb,var(--ui-text-primary) 14%,transparent) var(--su-stop),var(--su-color) var(--su-stop))}
 .su-range::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--su-track)}
@@ -3421,7 +3460,14 @@ const USAGE_CSS = `
 .su-arrow{position:absolute;top:-4px;width:6px;height:8px;fill:currentColor;overflow:visible}.su-arrow[data-end=start]{left:0}.su-arrow[data-end=end]{right:0}
 .su-measure-span[data-tight=true] .su-arrow{transform:scaleX(-1)}.su-measure-span[data-tight=true] .su-arrow[data-end=start]{left:-6px}.su-measure-span[data-tight=true] .su-arrow[data-end=end]{right:-6px}
 .su-measure-span[data-tight=true] .su-measure-line{left:-10px;right:-10px}
-.su-measure-text{position:absolute;top:2px;transform:translateX(-50%);overflow:hidden;text-overflow:ellipsis;font-size:11px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.su-measure-label{position:absolute;top:1px;transform:translateX(-50%);display:flex;align-items:center;gap:4px;font-size:11px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.su-measure-text{min-width:0;overflow:hidden;text-overflow:ellipsis}
+/* Zero-size popover anchor under the arrowheads and end ticks at the averaging arrow's Now end. */
+.su-lookback-anchor{position:absolute;top:27px;width:0;height:0;pointer-events:none}
+/* Two classes so the compact size wins over the SDK button's size utilities. A 16px box (the label row's 14px line plus 1px each way, hence top:1px above) stays clear of the arrowheads at 18px. The fill and hairline ring make it read as a button, matching Desktop's secondary variant in the harness too. Inter's capitals sit about 1px above the middle of their 14px line, so the box is raised 1px to centre on them rather than on the line box. */
+.su-measure-label .su-lookback-edit{flex:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:16px;height:16px;min-width:16px;position:relative;top:-1px;margin:0;padding:0;border:0;border-radius:4px;background:var(--ui-bg-quaternary);box-shadow:inset 0 0 0 1px var(--ui-stroke-secondary);color:var(--ui-text-secondary);cursor:pointer}
+.su-measure-label .su-lookback-edit svg{width:12px;height:12px}
+.su-measure-label .su-lookback-edit:hover,.su-measure-label .su-lookback-edit[aria-expanded=true]{background:var(--chrome-action-hover,color-mix(in srgb,var(--ui-text-primary) 12%,var(--ui-bg-quaternary)));color:var(--ui-text-primary)}
 .su-empty-note{color:var(--ui-text-tertiary)}
 .su-chart-foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px 24px;font-size:11px;color:var(--ui-text-tertiary)}
 .su-chart-notes{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px 16px}

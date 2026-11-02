@@ -1765,14 +1765,19 @@ try {
       // Overview: the shared controls bar first, then one section per provider with data, each with its logo heading, chart and folded accounts.
       const overview = await usage.evaluate(() => {
         const r = el => el.getBoundingClientRect(), bar = document.querySelector('.su-limits-controls'), sections = [...document.querySelectorAll('.su-provider-limits')], mid = box => (box.top + box.bottom) / 2;
-        const lookback = bar?.querySelector('.su-lookback'), label = r(lookback.querySelector('.su-lookback-label')), range = r(lookback.querySelector('input[type=range]')), value = r(lookback.querySelector('.su-lookback-value'));
-        const parts = [lookback, bar.querySelector('[aria-label=Window]'), bar.querySelector('[aria-label=Refresh]')];
+        const parts = [bar.querySelector('[aria-label=Window]'), bar.querySelector('[aria-label=Refresh]')];
         return { tabs: document.querySelectorAll('.su-provider-tabs, button.su-provider').length, sections: sections.map(node => node.dataset.provider), headings: sections.map(node => node.querySelector('.su-provider-head')?.textContent),
           marks: sections.map(node => !!node.querySelector('.su-provider-head svg[data-provider-mark]')), charts: sections.map(node => node.querySelectorAll('.su-pooled').length),
           barFirst: bar.parentElement.classList.contains('su-top') && bar.parentElement.parentElement.classList.contains('su') && !bar.closest('.su-scroll') && r(bar).bottom <= r(sections[0]).top, parts: parts.map(Boolean), ordered: parts.every((node, index) => index === 0 || r(node).left >= r(parts[index - 1]).right),
-          oneRow: parts.every(node => Math.abs(mid(r(node)) - mid(r(parts[0]))) <= 2), once: ['.su-lookback', '[aria-label=Window]', '[aria-label=Refresh]'].map(selector => document.querySelectorAll(`.su ${selector}`).length), barRanges: bar.querySelectorAll('.su-axis-range, .su-horizon').length,
-          sliderRow: label.right <= range.left && range.right <= value.left && Math.abs(mid(label) - mid(range)) <= 1.5 && Math.abs(mid(value) - mid(range)) <= 1.5,
-          sliderText: [lookback.querySelector('.su-lookback-label').textContent, lookback.querySelector('.su-lookback-value').textContent], accounts: document.querySelectorAll('.su-account').length,
+          oneRow: parts.every(node => Math.abs(mid(r(node)) - mid(r(parts[0]))) <= 2), once: ['[aria-label=Window]', '[aria-label=Refresh]'].map(selector => document.querySelectorAll(`.su ${selector}`).length), barRanges: bar.querySelectorAll('.su-axis-range, .su-horizon').length,
+          // The lookback slider left the bar: it only exists in the popover behind the pencil after each chart's "Average over" label.
+          slidersShown: document.querySelectorAll('.su-lookback').length,
+          edits: sections.map(node => { const label = node.querySelector('.su-measure[data-kind="average"] .su-measure-label'), text = label?.querySelector('.su-measure-text'), edit = label?.querySelector('.su-lookback-edit');
+            const span = r(node.querySelector('.su-measure[data-kind="average"] .su-measure-span')), arrows = [...node.querySelectorAll('.su-measure[data-kind="average"] .su-arrow')].map(r), box = r(edit), glyph = r(edit.querySelector('svg')), style = getComputedStyle(edit);
+            return { inLabel: label.lastElementChild === edit, afterText: r(text).right + 3 <= box.left, capCentred: Math.abs(mid(r(text)) - mid(box) - 1) <= 0.25, name: edit.getAttribute('aria-label'), size: `${box.width}x${box.height}`, glyph: `${glyph.width}x${glyph.height}`,
+              centered: Math.abs(glyph.left + glyph.width / 2 - (box.left + box.width / 2)) <= 0.5 && Math.abs(mid(glyph) - mid(box)) <= 0.5, rightGap: box.right - span.right, clearOfArrows: arrows.every(arrow => box.bottom <= arrow.top),
+              filled: style.backgroundColor !== 'rgba(0, 0, 0, 0)' && style.boxShadow.includes('inset') }; }),
+          accounts: document.querySelectorAll('.su-account').length,
           disclosures: [...document.querySelectorAll('.su-disclosure')].map(node => `${node.getAttribute('aria-label')}|${node.getAttribute('aria-expanded')}`),
           cards: [...document.querySelectorAll('.su-accounts-group')].map(group => { const toggle = group.querySelector('.su-disclosure'), names = toggle.querySelector('.su-disclosure-names');
             return Math.abs(r(group).width - r(group.closest('.su-provider-limits')).width) <= 1 && Math.abs(r(toggle).width - group.clientWidth) <= 1 && getComputedStyle(group).borderTopStyle === 'solid' && !!names?.textContent && r(names).right <= r(toggle).right; }), footnotes: document.querySelectorAll('.su-footnote').length,
@@ -1781,8 +1786,13 @@ try {
       console.log(`USAGE LIMITS OVERVIEW: ${JSON.stringify(overview)}`);
       check('Limits page is one overview without provider tabs: a Codex then an Anthropic section, each with its logo heading and one chart', overview.tabs === 0 && overview.sections.join() === 'openai-codex,anthropic'
         && overview.headings.join() === 'OpenAI Codex,Anthropic' && overview.marks.every(Boolean) && overview.charts.join() === '1,1');
-      check('One shared controls bar heads the page: Projections based on [slider] value, Window, Refresh, in one row and only once, with no range control', overview.barFirst && overview.parts.every(Boolean) && overview.ordered && overview.oneRow
-        && overview.once.join() === '1,1,1' && overview.barRanges === 0 && overview.sliderRow && overview.sliderText.join() === 'Projections based on,12h');
+      check('One shared controls bar heads the page: Window, Refresh, in one row and only once, without the lookback slider or a range control', overview.barFirst && overview.parts.every(Boolean) && overview.ordered && overview.oneRow
+        && overview.once.join() === '1,1' && overview.barRanges === 0 && overview.slidersShown === 0);
+      check('Each chart\'s "Average over" label ends with a pencil icon button on the same line, after a gap', overview.edits.length === 2 && overview.edits.every(edit => edit.inLabel && edit.afterText && edit.name === 'Edit averaging period'));
+      // Inter's capitals sit 1px above the middle of the text's line box, so the button centres 1px higher to line up with them.
+      check('The pencil button is centred on the label\'s capitals, 1px above its line box centre', overview.edits.every(edit => edit.capCentred));
+      check('The pencil button\'s right edge is on the averaging arrow\'s right end, above its arrowheads', overview.edits.every(edit => Math.abs(edit.rightGap) <= 1 && edit.clearOfArrows));
+      check('The pencil reads as a button: a 16px filled box with a hairline ring and a centred 12px glyph', overview.edits.every(edit => edit.size === '16x16' && edit.glyph === '12x12' && edit.centered && edit.filled));
       check('Accounts are folded under every chart by default and the footnote appears once at the bottom', overview.accounts === 0 && overview.disclosures.join() === 'Accounts (2)|false,Accounts (1)|false' && overview.footnotes === 1 && overview.footnoteLast);
       check('Each folded Accounts disclosure is a full-width bordered card whose whole header row toggles it and previews the account names', overview.cards.length === 2 && overview.cards.every(Boolean));
     }
@@ -1804,7 +1814,7 @@ try {
       const part = kind => {
         const node = chart.querySelector(`.su-measure[data-kind="${kind}"]`);
         if (!node) return null;
-        const span = node.querySelector('.su-measure-span'), box = r(span), text = node.querySelector('.su-measure-text'), label = r(text);
+        const span = node.querySelector('.su-measure-span'), box = r(span), text = node.querySelector('.su-measure-text'), label = r(node.querySelector('.su-measure-label'));
         const arrows = Object.fromEntries([...span.querySelectorAll('.su-arrow')].map(el => [el.dataset.end, r(el)])), ticks = Object.fromEntries([...span.querySelectorAll('.su-measure-tick')].map(el => [el.dataset.end, r(el)]));
         // A span narrower than its arrowheads draws them outside, their tips still on the span ends.
         const tight = span.dataset.tight === 'true', tip = (end, arrow) => end === 'start' ? (tight ? arrow.right : arrow.left) : (tight ? arrow.left : arrow.right);
@@ -1819,6 +1829,9 @@ try {
       // The notes row under a chart exists only when there is a note; without it nothing sits below the measurements.
       const footNode = chart.querySelector('.su-chart-foot'), foot = footNode ? r(footNode) : { top: Infinity }, row = r(chart.querySelector('.su-measures'));
       return { plotLeft: plot.left, plotRight: plot.right, plotBottom: plot.bottom, nowX, lookbackX: xAt(nowT - lookback), emptyX: mark ? mark.left + mark.width / 2 : null, emptyOnFloor: mark ? Math.abs(mark.top + mark.height / 2 - plot.bottom) <= 1 : null,
+        // The backward trendline from the units left at Now; its box spans the same times as the averaging arrow.
+        trend: (() => { const node = chart.querySelector('.su-trend'); if (!node) return null; const box = r(node), style = getComputedStyle(node);
+          return { left: box.left, right: box.right, atTop: Math.abs(box.top - plot.top) <= 1, dashed: style.strokeDasharray !== 'none' && style.strokeDasharray !== getComputedStyle(chart.querySelector('.su-line.su-projected')).strokeDasharray, inside: box.top >= plot.top - 1 && box.bottom <= plot.bottom + 1 }; })(),
         average: part('average'), empty: part('empty'), rowTop: row.top, rowBottom: row.bottom, footTop: foot.top };
     }, section);
     const measure = () => measureIn(CODEX);
@@ -1838,7 +1851,22 @@ try {
         && (!average || average.label.right <= geometry.nowX) && (!empty || empty.label.left >= geometry.nowX) && geometry.footTop >= geometry.rowBottom - 0.5;
     };
     const rates = () => usage.evaluate(() => [...document.querySelectorAll('.su-rate')].map(node => node.textContent));
-    const lookbackValue = () => usage.locator('.su-lookback-value').textContent();
+    // The lookback slider lives in a popover opened by the pencil after the Codex chart's "Average over" label.
+    const openLookback = async () => {
+      await usage.locator(`${CODEX} .su-measure[data-kind="average"] .su-lookback-edit`).click();
+      await usage.waitForSelector('.su-lookback input[type=range]');
+    };
+    // Where the open popover sits against the Codex averaging arrow it edits.
+    const lookbackPlacement = () => usage.evaluate(selector => {
+      const r = el => el.getBoundingClientRect(), lookback = document.querySelector('.su-lookback'), dialog = lookback.closest('[role=dialog]'), measure = document.querySelector(`${selector} .su-measure[data-kind="average"]`);
+      const span = r(measure.querySelector('.su-measure-span')), marks = [...measure.querySelectorAll('.su-arrow, .su-measure-tick')].map(r), label = r(measure.querySelector('.su-measure-label')), box = r(dialog), range = r(lookback.querySelector('input[type=range]'));
+      return { inPopover: !lookback.closest('.su') && !!dialog, expanded: measure.querySelector('.su-lookback-edit').getAttribute('aria-expanded'), count: document.querySelectorAll('.su-lookback').length, text: dialog.textContent.trim(),
+        belowArrow: marks.every(mark => mark.bottom <= box.top), labelClear: label.bottom <= box.top, rightGap: range.right - span.right, top: box.top, left: box.left };
+    }, CODEX);
+    const closeLookback = async () => {
+      await usage.keyboard.press('Escape');
+      await usage.waitForFunction(() => !document.querySelector('.su-lookback'));
+    };
     {
       const geometry = await measure(), other = await measureIn(ANTHROPIC);
       const plot = await usage.evaluate(selector => { const node = document.querySelector(`${selector} .su-pooled .su-plot`); return [Number(node.dataset.start), Number(node.dataset.end)]; }, CODEX);
@@ -1852,6 +1880,8 @@ try {
       check('Limits 12h averaging measurement spans Now − 12h to Now on the same row, with arrowheads and ticks at both ends', averageOk(geometry) && geometry.lookbackX > geometry.plotLeft
         && Math.abs(geometry.average.top - empty.top) <= 0.5 && /^Average over 12h · ~\d+(\.\d)? units\/h$/.test(geometry.average.text));
       check('Limits measurement labels stay on their side of Now, apart, inside the plot and above the notes', labelsOk(geometry));
+      const trendOk = item => !!item.trend && item.trend.dashed && item.trend.inside && Math.abs(item.trend.right - item.nowX) <= 1 && Math.abs(item.trend.left - item.average.left) <= 1;
+      check('A dashed trendline, unlike the projection\'s dash, runs back from the units left at Now over the averaging arrow\'s span on both charts', trendOk(geometry) && trendOk(other));
       check('The Anthropic chart measures its own averaging span and labels independently (it never empties)', averageOk(other) && other.empty === null && labelsOk(other) && /^Average over 12h · ~\d+(\.\d)? units\/h$/.test(other.average.text));
       check('Limits draws one gridline per local midnight and names each month once on every chart', axis.dayLines === midnights && otherAxis.dayLines === midnights && midnights >= 9 && monthsOnChange(axis.labels) && !axis.overlap && monthsOnChange(otherAxis.labels) && !otherAxis.overlap);
     }
@@ -1976,19 +2006,26 @@ try {
       }, [png, box.width, box.height, Number(await slider.evaluate(el => el.style.getPropertyValue('--su-share')))]);
     };
     {
+      await openLookback();
+      const popover = await lookbackPlacement();
+      console.log(`USAGE LOOKBACK POPOVER: ${JSON.stringify(popover)}`);
+      check('The pencil opens one text-free slider popover outside the page', popover.inPopover && popover.expanded === 'true' && popover.count === 1 && popover.text === '');
+      check('The lookback popover sits below the averaging arrow, leaving the arrow and its label visible, with the track\'s right end on the arrow\'s right end', popover.belowArrow && popover.labelClear && Math.abs(popover.rightGap) <= 1);
+      await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-lookback-popover.png') });
       const fill = await sliderFill();
       console.log(`USAGE SLIDER FILL: ${JSON.stringify(fill)}`);
       check('Limits lookback slider runs longest-first and fills the track to the right of the thumb', await usage.locator('.su-lookback input[type=range]').inputValue() === '6' && fill.rightFilled === true && fill.leftFilled === false);
       const range = usage.locator('.su-lookback input[type=range]');
       await range.focus(); await usage.keyboard.press('ArrowRight');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '5h');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback input[type=range]')?.getAttribute('aria-valuetext') === '5h');
       const right = await range.getAttribute('aria-valuetext');
       await usage.keyboard.press('ArrowLeft'); await usage.keyboard.press('ArrowLeft');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '1d');
-      check('Limits lookback arrow keys follow the visual direction (Right = shorter) with the stop as aria-valuetext', right === '5h' && await range.getAttribute('aria-valuetext') === '1d' && await range.getAttribute('aria-label') === 'Projections based on');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback input[type=range]')?.getAttribute('aria-valuetext') === '1d');
+      check('Limits lookback arrow keys follow the visual direction (Right = shorter) with the stop as aria-valuetext', right === '5h' && await range.getAttribute('aria-valuetext') === '1d' && await range.getAttribute('aria-label') === 'Averaging period');
       await usage.keyboard.press('ArrowRight');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '12h');
-      await range.blur();
+      await usage.waitForFunction(() => document.querySelector('.su-lookback input[type=range]')?.getAttribute('aria-valuetext') === '12h');
+      await closeLookback();
+      check('Escape closes the lookback popover and the pencil reports it collapsed', await usage.locator(`${CODEX} .su-lookback-edit`).getAttribute('aria-expanded') === 'false');
     }
     const pooledPlot = await usage.locator(`${CODEX} .su-pooled .su-plot`).boundingBox();
     await usage.mouse.move(pooledPlot.x + pooledPlot.width * 0.55, pooledPlot.y + pooledPlot.height / 2);
@@ -2014,8 +2051,9 @@ try {
     {
       const before = { rates: await rates(), paths: await usage.evaluate(() => [...document.querySelectorAll('.su-line.su-projected')].map(path => path.getAttribute('d'))), empty: (await measure()).empty?.right };
       // Reversed slider: position 5 from the left is 1d (30d, 15d, 7d, 3d, 2d, 1d, …, 1h). A day still includes today's burst, so the Codex pool still runs dry, just later.
+      await openLookback();
       await usage.locator('.su-lookback input[type=range]').fill('5');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '1d');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback input[type=range]')?.getAttribute('aria-valuetext') === '1d');
       await settle(usage);
       const after = { rates: await rates(), paths: await usage.evaluate(() => [...document.querySelectorAll('.su-line.su-projected')].map(path => path.getAttribute('d'))), geometry: await measure(), other: await measureIn(ANTHROPIC) };
       console.log(`USAGE LIMITS 1D: ${JSON.stringify({ before, after })}`);
@@ -2023,23 +2061,27 @@ try {
         && after.paths.every((path, index) => path !== before.paths[index]) && after.geometry.empty && Math.abs(after.geometry.empty.right - before.empty) > 1);
       check('Limits arrows still span Now to the moved zero crossing and Now − 1d to Now after the slider change, on both charts', Math.abs(after.geometry.empty.left - after.geometry.nowX) <= 1 && Math.abs(after.geometry.empty.right - after.geometry.emptyX) <= 1
         && averageOk(after.geometry) && labelsOk(after.geometry) && averageOk(after.other) && labelsOk(after.other) && /^Average over 1d/.test(after.other.average.text));
+      const moved = await lookbackPlacement();
+      check('The lookback popover stays below the arrow and aligned with its Now end after the averaging period changes', moved.belowArrow && moved.labelClear && Math.abs(moved.rightGap) <= 1);
       check('Limits lookback persists in the usage preferences as hours, not the slider position', await usage.evaluate(() => JSON.parse(localStorage.getItem('hermes.plugin.hermes-t3sidebar.usage-preferences')).lookback) === 24);
       const fill1d = await sliderFill();
       check('Limits lookback fill still starts at the moved thumb and runs to the right end', fill1d.rightFilled === true && fill1d.leftFilled === false);
-      // 15 days reach back past the 2.1 days of past on the chart: every averaging line is cut at the plot edge, without a left arrowhead.
+      // 15 days reach back past the 7 days of past on the chart: every averaging line is cut at the plot edge, without a left arrowhead.
       await usage.locator('.su-lookback input[type=range]').fill('1');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '15d');
+      await usage.waitForFunction(() => document.querySelector('.su-lookback input[type=range]')?.getAttribute('aria-valuetext') === '15d');
       await settle(usage);
       check('Limits lookback beyond the history requests more and says how much data it used', await usage.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'rest' && call[1] === '/usage/limits?hours=360')));
       const clipped = await measure(), otherClipped = await measureIn(ANTHROPIC);
       console.log(`USAGE LIMITS 15D: ${JSON.stringify({ clipped, otherClipped })}`);
+      // A trendline rising back over seven days can reach the pool's capacity first; it is cut there, at the top of the plot.
+      check('The 15d trendline starts at the plot edge like its clipped arrow, or where it reaches the top of the plot', [clipped, otherClipped].every(item => item.trend && (Math.abs(item.trend.left - item.plotLeft) <= 1 || item.trend.atTop) && Math.abs(item.trend.right - item.nowX) <= 1));
       check('Limits 15d averaging lines are clipped at the plot edge with no left arrowhead or tick, on both charts', [clipped, otherClipped].every(geometry => geometry.lookbackX < geometry.plotLeft && averageOk(geometry) && geometry.average.arrows === 'end'
         && /^Average over \d+d · ~\d+(\.\d)? units\/h$/.test(geometry.average.text) && labelsOk(geometry)));
       // fill() leaves the slider focused; its focus ring is not part of the resting design.
       await usage.locator('.su-lookback input[type=range]').blur();
       await usage.locator('.su-lookback input[type=range]').fill('6');
-      await usage.waitForFunction(() => document.querySelector('.su-lookback-value')?.textContent === '12h');
-      await usage.locator('.su-lookback input[type=range]').blur();
+      await usage.waitForFunction(() => document.querySelector('.su-lookback input[type=range]')?.getAttribute('aria-valuetext') === '12h');
+      await closeLookback();
     }
     {
       // Axis ranges: an unfold control (← ┆ →) at each end of every chart's x axis; the weekly defaults are a week either side of Now, and each choice applies page-wide.
@@ -2220,8 +2262,9 @@ try {
     await usage.waitForSelector('.su-pooled .su-measures');
     // Labels are re-clamped by a ResizeObserver; a fixed number of frames raced its delivery, so wait until every label's width budget matches its row's current width.
     await usage.waitForFunction(() => [...document.querySelectorAll('.su-measures')].every(row => {
-      const width = row.getBoundingClientRect().width, gap = side => side === 'left' || side === 'right' ? 1 : 0;
-      return [...row.querySelectorAll('.su-measure-text')].every(label => Math.abs(parseFloat(label.style.maxWidth) - Math.max(0, (Number(label.dataset.high) - Number(label.dataset.low)) / 100 * width - gap(label.dataset.side) * 12)) < 1);
+      // The end-aligned averaging label sits flush against Now, so it gives up no gap.
+      const width = row.getBoundingClientRect().width, gap = label => label.dataset.align !== 'end' && (label.dataset.side === 'left' || label.dataset.side === 'right') ? 1 : 0;
+      return [...row.querySelectorAll('.su-measure-label')].every(label => Math.abs(parseFloat(label.style.maxWidth) - Math.max(0, (Number(label.dataset.high) - Number(label.dataset.low)) / 100 * width - gap(label) * 12)) < 1);
     }), null, { timeout: 5000 });
     await settle(usage);
     {

@@ -554,6 +554,11 @@ async function slide(node, value) {
   await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(node, String(value)); node.dispatchEvent(new window.Event('input', { bubbles: true })); });
   await tick(); await tick();
 }
+// The lookback slider lives in a popover behind the pencil after the first chart's "Average over" label; open it once and reuse it.
+async function lookbackSlider() {
+  if (!$('.su-lookback')) await click($('.su-measure[data-kind="average"] .su-lookback-edit'));
+  return $('.su-lookback input[type=range]');
+}
 
 test('the Limits page is one overview of every provider under a shared controls bar', async () => {
   plugin.register(mock.ctx); await render(limitsPage());
@@ -577,15 +582,25 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.equal($('.su-legend'), null, 'the Remaining/Projected legend is gone');
   // Reset times are markers in the charts now, never a Next reset line; no wording anywhere still says plan units.
   assert.deepEqual([/Next reset/.test(document.body.textContent), /plan units/i.test(document.body.textContent), $$('[title]').some(node => /plan units/i.test(node.title))], [false, false, false]);
-  // One controls bar at the top: lookback, window and refresh, none of them repeated per chart; the past and future ranges sit beside each chart's x axis instead.
+  // One controls bar at the top: window and refresh, none of them repeated per chart; the past and future ranges sit beside each chart's x axis and the lookback is edited from each averaging label.
   const bar = $('.su-limits-controls');
   // The bar sits in its own fixed strip above the scrolling pane, so it stays visible whatever is scrolled.
   assert.deepEqual([bar.parentElement.className, bar.parentElement.parentElement.className, bar.closest('.su-scroll') === null, $('.su-scroll').contains($('.su-overview'))], ['su-top', 'su', true, true], 'the controls head the page outside the scrolling pane');
   assert.equal(bar.compareDocumentPosition($('.su-provider-limits')) & 4, 4, 'the controls come before the first section');
-  assert.deepEqual([$$('.su-lookback').length, $$('.su-horizon').length, $$('.su [role=group][aria-label=Window]').length, $$('.su [role=group][aria-label=Horizon]').length], [1, 0, 1, 0]);
-  assert.deepEqual([bar.querySelector('.su-lookback') !== null, bar.querySelector('.su-axis-range') === null, bar.querySelector('[aria-label=Window]') !== null, bar.querySelector('[aria-label=Refresh]') !== null], [true, true, true, true]);
+  assert.deepEqual([$$('.su-lookback').length, $$('.su-horizon').length, $$('.su [role=group][aria-label=Window]').length, $$('.su [role=group][aria-label=Horizon]').length], [0, 0, 1, 0], 'the lookback slider is not shown until asked for');
+  assert.deepEqual([bar.querySelector('.su-axis-range') === null, bar.querySelector('[aria-label=Window]') !== null, bar.querySelector('[aria-label=Refresh]') !== null], [true, true, true]);
   assert.deepEqual($$('.su-pooled').map(chart => [...chart.querySelectorAll('.su-limits-grid > .su-axis-range')].map(node => node.dataset.side).join()), ['past,future', 'past,future'], 'every chart has its own past and future range controls');
-  assert.deepEqual([$('.su-lookback-label').textContent, $('.su-lookback-value').textContent], ['Projections based on', '12h']);
+  // Each chart's averaging label ends with a pencil that opens the shared lookback slider in a popover.
+  const edits = $$('.su-measure[data-kind="average"] .su-measure-label').map(label => { const edit = label.lastElementChild;
+    return [edit.classList.contains('su-lookback-edit'), edit.getAttribute('aria-label'), edit.getAttribute('aria-expanded'), edit.querySelector('svg') !== null]; });
+  assert.deepEqual(edits, [[true, 'Edit averaging period', 'false', true], [true, 'Edit averaging period', 'false', true]]);
+  await lookbackSlider();
+  assert.deepEqual([$$('.su-lookback').length, $('.su-lookback').closest('.su') === null, $('.su-lookback-edit').getAttribute('aria-expanded')], [1, true, 'true'], 'one slider, in a popover outside the page');
+  const range = $('.su-lookback input[type=range]');
+  assert.deepEqual([$('.su-lookback').textContent, range.getAttribute('aria-label'), range.getAttribute('aria-valuetext')], ['', 'Averaging period', '12h'], 'the slider carries no text; the label above it names the period');
+  // The popover hangs from a zero-size anchor at the averaging arrow's Now end, right-aligned to it.
+  const anchor = $('.su-measures .su-lookback-anchor'), arrowEnd = $('.su-measure[data-kind="average"] .su-measure-span');
+  assert.ok(Math.abs(parseFloat(anchor.style.left) - (parseFloat(arrowEnd.style.left) + parseFloat(arrowEnd.style.width))) < 1e-6, 'the anchor sits on the arrow\'s right end');
   assert.deepEqual([...bar.querySelectorAll('[aria-label=Window] button')].map(node => node.textContent), ['5-hour', 'Weekly']);
   // Account details are folded under each chart; the shared footnote appears once at the bottom.
   assert.equal($$('.su-account').length, 0, 'accounts are folded by default');
@@ -613,8 +628,8 @@ test('the shared lookback and the page-wide axis ranges change every chart at on
     plugin.register(mock.ctx); await render(limitsPage());
     const rates = () => $$('.su-rate').map(node => node.textContent);
     const before = rates();
-    await slide($('.su-lookback input[type=range]'), 1);
-    assert.equal($('.su-lookback-value').textContent, '15d');
+    await slide(await lookbackSlider(), 1);
+    assert.equal($('.su-lookback input[type=range]').getAttribute('aria-valuetext'), '15d');
     const after = rates();
     assert.deepEqual(after.map((text, index) => text !== before[index] && /^(~\d+(\.\d)? units per hour|no drain data)$/.test(text)), [true, true], `every provider's rate follows the slider (${before} → ${after})`);
     // The fixtures hold ten days of history, so a 15d lookback averages over those ten days.
@@ -826,27 +841,37 @@ test('the lookback slider moves between stops, changes the drain rate and widens
     accounts: [{ id: 'a', label: 'a', priority: 0, plan: 'prolite', fetched_at: now - 60, windows: [{ key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: 74, resets_at: now + 5 * D }] }] }] };
   mock.ctx.storage.set('usage-preferences', { lookback: 2 });
   plugin.register(mock.ctx); await render(limitsPage());
-  const slider = $('.su-lookback input[type=range]');
+  const slider = await lookbackSlider();
   // Reversed: position 0 is 30d on the left, 9 is 1h on the right, so 2h sits at position 8.
   assert.deepEqual([slider.min, slider.max, slider.step, slider.value, slider.getAttribute('aria-valuetext'), slider.style.getPropertyValue('--su-share')], ['0', '9', '1', '8', '2h', String(8 / 9)]);
   assert.equal($('.su-rate').textContent, '~4.0 units per hour', 'a Pro 100 account: one percent is one plan unit');
   assert.equal(document.querySelectorAll('.su-coverage').length, 0, 'the headline never carries a coverage note');
   assert.match($('.su-measure[data-kind="empty"]').textContent, /^Empty in 18h \d+m · /, '74 points at about 4 per hour');
   assert.equal($('.su-measure[data-kind="average"]').textContent, 'Average over 2h · ~4.0 units/h');
+  // The trendline, read back in chart time and units: it ends on the units left at Now and rises backwards at the averaged rate over the averaged span.
+  const trend = () => {
+    const plot = $('.su-pooled .su-plot'), path = $('.su-pooled .su-trend').getAttribute('d'), [x0, y0, x1, y1] = path.match(/-?\d+(\.\d+)?/g).map(Number);
+    const start = Number(plot.dataset.start), end = Number(plot.dataset.end), cap = Number(plot.dataset.cap), at = xv => start + xv / 1000 * (end - start), value = yv => (100 - yv) / 100 * cap;
+    return { hours: (at(x1) - at(x0)) / H, toNow: Math.abs(at(x1) - now), left: value(y1), rate: (value(y0) - value(y1)) / ((at(x1) - at(x0)) / H) };
+  };
+  let line = trend();
+  assert.ok(Math.abs(line.hours - 2) < 0.02 && line.toNow < 60 && Math.abs(line.left - 74) < 0.2 && Math.abs(line.rate - 4.03) < 0.05, `the 2h trendline rises ~4 units/h back from 74 units at Now (${JSON.stringify(line)})`);
   await slide(slider, 6);
   assert.equal($('.su-lookback input[type=range]').getAttribute('aria-valuetext'), '12h');
-  assert.deepEqual([$('.su-lookback-value').textContent, $('.su-rate').textContent, document.querySelectorAll('.su-coverage').length], ['12h', '~1.6 units per hour', 0]);
+  assert.deepEqual([$('.su-lookback input[type=range]').getAttribute('aria-valuetext'), $('.su-rate').textContent, document.querySelectorAll('.su-coverage').length], ['12h', '~1.6 units per hour', 0]);
   // Only ten of the requested twelve hours are covered: the arrow and its label span those ten hours, and the title names the requested lookback.
   const averaged = $('.su-measure[data-kind="average"]');
   assert.deepEqual([averaged.textContent, averaged.getAttribute('aria-label'), averaged.dataset.seconds], ['Average over 10h · ~1.6 units/h', 'Average over 10h · ~1.6 units/h (all the data in the last 12h)', String(10 * H - 60)]);
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 12);
+  line = trend();
+  assert.ok(Math.abs(line.hours - (10 - 1 / 60)) < 0.02 && line.toNow < 60 && Math.abs(line.left - 74) < 0.2 && Math.abs(line.rate - 16 / (10 - 1 / 60)) < 0.05, `the trendline follows the lookback over the ten covered hours (${JSON.stringify(line)})`);
   assert.equal(restPaths().at(-1), '/usage/limits?hours=168');
-  await slide($('.su-lookback input[type=range]'), 1);
-  assert.equal($('.su-lookback-value').textContent, '15d');
+  await slide(await lookbackSlider(), 1);
+  assert.equal($('.su-lookback input[type=range]').getAttribute('aria-valuetext'), '15d');
   assert.equal(restPaths().at(-1), '/usage/limits?hours=360', 'a lookback beyond a week asks for that much history');
-  await slide($('.su-lookback input[type=range]'), 9);
+  await slide(await lookbackSlider(), 9);
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 1, 'the rightmost stop is the shortest lookback');
-  await slide($('.su-lookback input[type=range]'), 0);
+  await slide(await lookbackSlider(), 0);
   assert.equal(mock.ctx.storage.get('usage-preferences').lookback, 720, 'the leftmost stop is the longest lookback');
 });
 
@@ -972,15 +997,15 @@ test('the averaging period is measured left of Now and cut at the plot edge with
   let geometry = shape();
   assert.deepEqual([geometry.cap, geometry.startArrows, geometry.endArrows, geometry.endTicks], ['true', 2, 1, 1], 'inside the plot both ends get an arrowhead and a tick');
   assert.ok(near(geometry.left, 156 / 336 * 100) && near(geometry.right, nowPct()), `12h spans its lookback up to Now (${JSON.stringify(geometry)})`);
-  const label = $('.su-measure[data-kind="average"] .su-measure-text');
+  const label = $('.su-measure[data-kind="average"] .su-measure-label');
   assert.deepEqual([label.dataset.side, Number(label.dataset.low), near(Number(label.dataset.high), nowPct())], ['left', 0, true], 'the averaging label stays left of Now');
-  await slide($('.su-lookback input[type=range]'), 1);
+  await slide(await lookbackSlider(), 1);
   geometry = shape();
   assert.deepEqual([geometry.cap, geometry.startArrows, geometry.endArrows, geometry.left, near(geometry.right, nowPct())], ['false', 0, 1, 0, true], '15d reaches past the plot: cut at the edge, no left arrowhead or tick');
   assert.match($('.su-measure[data-kind="average"]').textContent, /^Average over 10d · (~\d+(\.\d)? units\/h|no drain data)$/, 'ten days of history: the span and label cover those, still past the plot edge');
   await click($('.su-axis-range[data-side=past] [data-direction=right]'));
   assert.equal(shape().cap, 'false', 'one day of past still starts after 15 days back');
-  await slide($('.su-lookback input[type=range]'), 6);
+  await slide(await lookbackSlider(), 6);
   geometry = shape();
   assert.ok(geometry.cap === 'true' && near(geometry.left, (24 - 12) / 192 * 100), '12h sits inside one day of past too');
 });
