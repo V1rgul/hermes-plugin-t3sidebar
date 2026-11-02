@@ -622,7 +622,8 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.deepEqual($$('.su-capacity').map(node => node.textContent), ['/ 120 units', '/ 200 units']);
   assert.equal($$('.su-composition').length, 0, 'the plan list stays in the Accounts fold, not the headline');
   assert.equal($$('.su-pool').every(node => /^\d+(\.\d)?$/.test(node.textContent)), true);
-  assert.equal($$('.su-rate').every(node => /^~\d+(\.\d)? units per hour$/.test(node.textContent)), true);
+  // The drain rate is only in each chart's averaging label under the plot, not repeated in the headline.
+  assert.deepEqual([$$('.su-rate').length, $$('.su-measure[data-kind="average"]').every(node => / · ~\d+(\.\d)? units\/h$/.test(node.textContent))], [0, true]);
   assert.deepEqual($$('.su-pooled').map(chart => [...chart.querySelectorAll('.su-yaxis span')].map(node => node.textContent).join()), ['25,50,75,100,120', '50,100,150,200'], 'no unit caption and no 0 label beside the past range control');
   assert.deepEqual($$('.su-verdict').map(node => node.closest('.su-provider-limits').dataset.provider), ['openai-codex', 'anthropic']);
   assert.equal($$('.su-pooled .su-line.su-past').length + $$('.su-pooled .su-line.su-projected').length + $$('.su-now').length, 6);
@@ -645,7 +646,12 @@ test('the Limits page is one overview of every provider under a shared controls 
   await lookbackSlider();
   assert.deepEqual([$$('.su-lookback').length, $('.su-lookback').closest('.su') === null, $('.su-lookback-edit').getAttribute('aria-expanded')], [1, true, 'true'], 'one slider, in a popover outside the page');
   const range = $('.su-lookback input[type=range]');
-  assert.deepEqual([$('.su-lookback').textContent, range.getAttribute('aria-label'), range.getAttribute('aria-valuetext')], ['', 'Averaging period', '12h'], 'the slider carries no text; the label above it names the period');
+  // The chosen period sits left of the track, since the label above names the period actually averaged, which is shorter with less history.
+  const value = $('.su-lookback-value');
+  assert.deepEqual([$('.su-lookback').textContent, value.parentElement.firstElementChild === value, value.getAttribute('aria-hidden'), range.getAttribute('aria-label'), range.getAttribute('aria-valuetext')], ['12h', true, 'true', 'Averaging period', '12h']);
+  await slide(range, 1);
+  assert.equal($('.su-lookback-value').textContent, '15d', 'the value follows the thumb');
+  await slide($('.su-lookback input[type=range]'), 6);
   // The popover hangs from a zero-size anchor at the averaging arrow's Now end, right-aligned to it.
   const anchor = $('.su-measures .su-lookback-anchor'), arrowEnd = $('.su-measure[data-kind="average"] .su-measure-span');
   assert.ok(Math.abs(parseFloat(anchor.style.left) - (parseFloat(arrowEnd.style.left) + parseFloat(arrowEnd.style.width))) < 1e-6, 'the anchor sits on the arrow\'s right end');
@@ -674,12 +680,12 @@ test('the shared lookback and the page-wide axis ranges change every chart at on
   Date.now = () => fixed;
   try {
     plugin.register(mock.ctx); await render(limitsPage());
-    const rates = () => $$('.su-rate').map(node => node.textContent);
+    const rates = () => $$('.su-measure[data-kind="average"]').map(node => node.textContent.split(' · ')[1]);
     const before = rates();
     await slide(await lookbackSlider(), 1);
     assert.equal($('.su-lookback input[type=range]').getAttribute('aria-valuetext'), '15d');
     const after = rates();
-    assert.deepEqual(after.map((text, index) => text !== before[index] && /^(~\d+(\.\d)? units per hour|no drain data)$/.test(text)), [true, true], `every provider's rate follows the slider (${before} → ${after})`);
+    assert.deepEqual(after.map((text, index) => text !== before[index] && /^(~\d+(\.\d)? units\/h|no drain data)$/.test(text)), [true, true], `every provider's rate follows the slider (${before} → ${after})`);
     // The fixtures hold ten days of history, so a 15d lookback averages over those ten days.
     assert.deepEqual($$('.su-measure[data-kind="average"]').map(node => node.textContent.split(' · ')[0]), ['Average over 10d', 'Average over 10d']);
     const spans = () => $$('.su-pooled .su-plot').map(node => Math.round((Number(node.dataset.end) - Number(node.dataset.start)) / D * 100) / 100);
@@ -892,7 +898,7 @@ test('the lookback slider moves between stops, changes the drain rate and widens
   const slider = await lookbackSlider();
   // Reversed: position 0 is 30d on the left, 9 is 1h on the right, so 2h sits at position 8.
   assert.deepEqual([slider.min, slider.max, slider.step, slider.value, slider.getAttribute('aria-valuetext'), slider.style.getPropertyValue('--su-share')], ['0', '9', '1', '8', '2h', String(8 / 9)]);
-  assert.equal($('.su-rate').textContent, '~4.0 units per hour', 'a Pro 100 account: one percent is one plan unit');
+  assert.equal($('.su-measure[data-kind="average"]').textContent.split(' · ')[1], '~4.0 units/h', 'a Pro 100 account: one percent is one plan unit');
   assert.equal(document.querySelectorAll('.su-coverage').length, 0, 'the headline never carries a coverage note');
   assert.match($('.su-measure[data-kind="empty"]').textContent, /^Empty in 18h \d+m · /, '74 points at about 4 per hour');
   assert.equal($('.su-measure[data-kind="average"]').textContent, 'Average over 2h · ~4.0 units/h');
@@ -906,7 +912,7 @@ test('the lookback slider moves between stops, changes the drain rate and widens
   assert.ok(Math.abs(line.hours - 2) < 0.02 && line.toNow < 60 && Math.abs(line.left - 74) < 0.2 && Math.abs(line.rate - 4.03) < 0.05, `the 2h trendline rises ~4 units/h back from 74 units at Now (${JSON.stringify(line)})`);
   await slide(slider, 6);
   assert.equal($('.su-lookback input[type=range]').getAttribute('aria-valuetext'), '12h');
-  assert.deepEqual([$('.su-lookback input[type=range]').getAttribute('aria-valuetext'), $('.su-rate').textContent, document.querySelectorAll('.su-coverage').length], ['12h', '~1.6 units per hour', 0]);
+  assert.deepEqual([$('.su-lookback input[type=range]').getAttribute('aria-valuetext'), $('.su-lookback-value').textContent, document.querySelectorAll('.su-coverage').length], ['12h', '12h', 0], 'the slider shows the chosen 12h while the label names the 10h it covers');
   // Only ten of the requested twelve hours are covered: the arrow and its label span those ten hours, and the title names the requested lookback.
   const averaged = $('.su-measure[data-kind="average"]');
   assert.deepEqual([averaged.textContent, averaged.getAttribute('aria-label'), averaged.dataset.seconds], ['Average over 10h · ~1.6 units/h', 'Average over 10h · ~1.6 units/h (all the data in the last 12h)', String(10 * H - 60)]);
@@ -1072,7 +1078,8 @@ test('stale, failing and unread accounts keep the normal view', async () => {
   assert.match($('.su-assumption').textContent, /^\* Capacity unknown for claude-max \(max\), claude-team \(no plan reported\): counted as 20 units, one \$20 plan\.$/);
   assert.equal($('.su-verdict').dataset.status, 'unknown', 'a stale pool without drain data gets no verdict');
   assert.match($('.su-chart-notes').textContent, /1 account without a reading left out of the pool/);
-  assert.equal($('.su-rate').textContent, 'no drain data');
+  // Compare text, never a DOM node: a failing assertion on a jsdom element tries to diff the whole DOM.
+  assert.match($('.su-measure[data-kind="average"]')?.textContent ?? '', /· no drain data$/, 'the averaging label says there is no drain data');
   assert.equal($('.su-measure[data-kind="empty"]'), null, 'a flat projection never empties');
   const unknown = $('.su-account[data-account="acct-b2"]');
   assert.equal(unknown.querySelector('.su-window-value').textContent, '—', 'unknown stays a dash, never 0%');

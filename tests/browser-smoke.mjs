@@ -1850,7 +1850,7 @@ try {
       return separate && [average, empty].filter(Boolean).every(part => (part.full || !full) && part.aboveLine && part.label.left >= geometry.plotLeft - 0.5 && part.label.right <= geometry.plotRight + 0.5 && part.label.bottom <= geometry.footTop)
         && (!average || average.label.right <= geometry.nowX) && (!empty || empty.label.left >= geometry.nowX) && geometry.footTop >= geometry.rowBottom - 0.5;
     };
-    const rates = () => usage.evaluate(() => [...document.querySelectorAll('.su-rate')].map(node => node.textContent));
+    const rates = () => usage.evaluate(() => [...document.querySelectorAll('.su-measure[data-kind="average"] .su-measure-text')].map(node => node.textContent.split(' · ')[1]));
     // The lookback slider lives in a popover opened by the pencil after the Codex chart's "Average over" label.
     const openLookback = async () => {
       await usage.locator(`${CODEX} .su-measure[data-kind="average"] .su-lookback-edit`).click();
@@ -1861,7 +1861,8 @@ try {
       const r = el => el.getBoundingClientRect(), lookback = document.querySelector('.su-lookback'), dialog = lookback.closest('[role=dialog]'), measure = document.querySelector(`${selector} .su-measure[data-kind="average"]`);
       const span = r(measure.querySelector('.su-measure-span')), marks = [...measure.querySelectorAll('.su-arrow, .su-measure-tick')].map(r), label = r(measure.querySelector('.su-measure-label')), box = r(dialog), range = r(lookback.querySelector('input[type=range]'));
       return { inPopover: !lookback.closest('.su') && !!dialog, expanded: measure.querySelector('.su-lookback-edit').getAttribute('aria-expanded'), count: document.querySelectorAll('.su-lookback').length, text: dialog.textContent.trim(),
-        belowArrow: marks.every(mark => mark.bottom <= box.top), labelClear: label.bottom <= box.top, rightGap: range.right - span.right, top: box.top, left: box.left };
+        belowArrow: marks.every(mark => mark.bottom <= box.top), labelClear: label.bottom <= box.top, rightGap: range.right - span.right, top: box.top, left: box.left,
+        valueLeft: (() => { const value = lookback.querySelector('.su-lookback-value'); if (!value) return null; const v = r(value); return { text: value.textContent, left: v.right <= range.left, inside: v.left >= box.left, middle: Math.abs((v.top + v.bottom) / 2 - (range.top + range.bottom) / 2) <= 1.5 }; })() };
     }, CODEX);
     const closeLookback = async () => {
       await usage.keyboard.press('Escape');
@@ -2009,7 +2010,8 @@ try {
       await openLookback();
       const popover = await lookbackPlacement();
       console.log(`USAGE LOOKBACK POPOVER: ${JSON.stringify(popover)}`);
-      check('The pencil opens one text-free slider popover outside the page', popover.inPopover && popover.expanded === 'true' && popover.count === 1 && popover.text === '');
+      check('The pencil opens one slider popover outside the page, showing the chosen period left of the track', popover.inPopover && popover.expanded === 'true' && popover.count === 1 && popover.text === '12h'
+        && popover.valueLeft?.text === '12h' && popover.valueLeft.left && popover.valueLeft.inside && popover.valueLeft.middle);
       check('The lookback popover sits below the averaging arrow, leaving the arrow and its label visible, with the track\'s right end on the arrow\'s right end', popover.belowArrow && popover.labelClear && Math.abs(popover.rightGap) <= 1);
       await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-lookback-popover.png') });
       const fill = await sliderFill();
@@ -2057,7 +2059,7 @@ try {
       await settle(usage);
       const after = { rates: await rates(), paths: await usage.evaluate(() => [...document.querySelectorAll('.su-line.su-projected')].map(path => path.getAttribute('d'))), geometry: await measure(), other: await measureIn(ANTHROPIC) };
       console.log(`USAGE LIMITS 1D: ${JSON.stringify({ before, after })}`);
-      check('The shared lookback slider changes every provider\'s drain rate text and projection', after.rates.length === 2 && after.rates.every((text, index) => text !== before.rates[index] && /^~\d+(\.\d)? units per hour$/.test(text))
+      check('The shared lookback slider changes every provider\'s drain rate text and projection', after.rates.length === 2 && after.rates.every((text, index) => text !== before.rates[index] && /^~\d+(\.\d)? units\/h$/.test(text))
         && after.paths.every((path, index) => path !== before.paths[index]) && after.geometry.empty && Math.abs(after.geometry.empty.right - before.empty) > 1);
       check('Limits arrows still span Now to the moved zero crossing and Now − 1d to Now after the slider change, on both charts', Math.abs(after.geometry.empty.left - after.geometry.nowX) <= 1 && Math.abs(after.geometry.empty.right - after.geometry.emptyX) <= 1
         && averageOk(after.geometry) && labelsOk(after.geometry) && averageOk(after.other) && labelsOk(after.other) && /^Average over 1d/.test(after.other.average.text));
