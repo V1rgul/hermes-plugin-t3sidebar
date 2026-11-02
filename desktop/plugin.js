@@ -983,7 +983,8 @@ const CSS = `
 .sf-limit .su-verdict-icon{display:inline-flex;flex-shrink:0}/* Stroke 2.29 keeps the toolbar's 1.33px line in the 14px verdict box. */.sf-limit .su-verdict-icon svg{width:14px;height:14px;stroke-width:2.29}
 /* Verdict glyph colour follows severity (missing or lost units against the pool's capacity), the same rule as the Limits page: muted below a third, orange from a third, red from two thirds. */
 .sf-limit .su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.sf-limit .su-verdict-icon[data-severity=high]{color:var(--ui-red,#cf2d56)}
-/* Saturated hues read stronger than the neutral icons beside them at equal lightness contrast; 0.75 opacity brings the orange and red glyphs to the same visual weight in light and dark themes. */.sf-limit .su-verdict-icon:is([data-severity=medium],[data-severity=high]){opacity:.75}
+/* Saturated hues read stronger than the neutral icons beside them at equal lightness contrast; 0.75 opacity brings the orange and red glyphs to the same visual weight in light and dark themes. */.sf-limit .su-verdict-icon:is([data-severity=medium],[data-severity=high]){opacity:.75;transition:opacity .1s}
+/* Hover, focus and the open page lift the neutral items to the primary text colour; the coloured glyphs rise with them to full opacity, over the Button's own 100ms colour transition. */.sf .sf-footer .sf-limits:is(:hover,:focus-visible,[aria-current=page]) .su-verdict-icon{opacity:1}
 @media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
 // Monochrome 24x24 provider marks: LobeHub Icons, @lobehub/icons-static-svg 1.95.1 (MIT, Copyright (c) 2023 LobeHub; notice in
