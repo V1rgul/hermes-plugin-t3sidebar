@@ -1076,6 +1076,10 @@ const BUNDLED_ICONS = {
   Alarm: ['M5 13a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M12 10l0 3l2 0', 'M7 4l-2.75 2', 'M17 4l2.75 2'],
   AlarmOff: ['M7.587 7.566a7 7 0 1 0 9.833 9.864m1.35 -2.645a7 7 0 0 0 -8.536 -8.56', 'M12 12v1h1', 'M5.261 5.265l-1.011 .735', 'M17 4l2.75 2', 'M3 3l18 18'],
   AlarmSnooze: ['M5 13a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M10 11h4l-4 4h4', 'M7 4l-2.75 2', 'M17 4l2.75 2'],
+  // Lucide v1.59.0 unfold-horizontal (ISC) split into its two arrows, shafts lengthened and recentred, and its dashed crease, so the Limits chart's axis-range control reads as one unfold glyph across two buttons.
+  UnfoldLeft: ['M19 12H7', 'm10 9-3 3 3 3'],
+  UnfoldRight: ['M5 12h12', 'm14 15 3-3-3-3'],
+  UnfoldCrease: ['M12 2v2', 'M12 8v2', 'M12 14v2', 'M12 20v2'],
   // pencil-ai first shipped in Tabler v3.48.0.
   PencilAi: ['M17.013 10.987l1.487 -1.487a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4h4l2 -2', 'M13.5 6.5l4 4', 'M14 21v-4a2 2 0 1 1 4 0v4', 'M14 19h4', 'M21 15v6'],
 };
@@ -2026,22 +2030,33 @@ const HOUR_S = 3600, DAY_S = 86400;
 // Lookback stops (hours) for the projection's drain average; the slider moves between these discrete stops.
 export const LOOKBACK_STOPS = Object.freeze([1, 2, 5, 12, 24, 48, 72, 168, 360, 720]);
 export const lookbackLabel = hours => hours % 24 === 0 ? `${hours / 24}d` : `${hours}h`;
-// Projection horizons in days. Every provider window lasts at least a week, so a shorter horizon would never show a reset.
-export const HORIZON_DAYS = Object.freeze([7, 30]);
-// The Limits chart shows some past before Now: 30% of the horizon, at least six hours.
-export const limitsPastSeconds = horizonS => Math.max(6 * HOUR_S, horizonS * 0.3);
-// The Limits history must cover the chart's past (at least a week) and the drain lookback, within the backend's 840-hour cap.
-export function limitsHistoryHours(lookback, horizonDays = HORIZON_DAYS[0]) {
-  const past = Math.ceil(limitsPastSeconds((Number.isFinite(horizonDays) ? horizonDays : 0) * DAY_S) / HOUR_S);
+// How far the Limits chart reaches before Now (past) and after it (future), in hours, chosen per window group from these stops: the session (five-hour) window resets several times a day, so its stops are shorter than the weekly ones.
+export const LIMITS_RANGE_STOPS = Object.freeze({ weekly: Object.freeze([24, 168, 720]), session: Object.freeze([5, 24, 168]) });
+const LIMITS_RANGE_DEFAULTS = Object.freeze({ weekly: Object.freeze({ past: 168, future: 168 }), session: Object.freeze({ past: 5, future: 24 }) });
+// Five-hour windows (model-scoped ones included) use the session ranges; every other window is at least a week long and uses the weekly ones.
+export const rangeGroup = windowKey => String(windowKey ?? '').split(':')[0] === 'five_hour' ? 'session' : 'weekly';
+export function validLimitsRange(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const result = {};
+  for (const [group, stops] of Object.entries(LIMITS_RANGE_STOPS)) {
+    const saved = source[group] && typeof source[group] === 'object' ? source[group] : {};
+    result[group] = Object.fromEntries(['past', 'future'].map(side => [side, stops.includes(saved[side]) ? saved[side] : LIMITS_RANGE_DEFAULTS[group][side]]));
+  }
+  return result;
+}
+// The Limits history must cover the longest past either window group shows (at least a week) and the drain lookback, within the backend's 840-hour cap. Both groups count so switching the window never waits for a refetch.
+export function limitsHistoryHours(lookback, range = LIMITS_RANGE_DEFAULTS) {
+  const valid = validLimitsRange(range), past = Math.max(...Object.values(valid).map(item => item.past));
   return Math.min(840, Math.max(168, past, Number.isFinite(lookback) ? lookback : 0));
 }
-export const USAGE_DEFAULTS = Object.freeze({ days: 7, split: 'provider', mode: 'stacked', horizon: 7, lookback: 12, window: 'weekly', accounts: Object.freeze({}) });
-// Unknown keys (the former Usage|Limits `tab`, the provider picked by the retired Limits tabs) are dropped, and retired horizons (1d, 3d) fall back to the 7-day default.
-const USAGE_CHOICES = { days: [1, 7, 30, 90], split: ['provider', 'model'], mode: ['stacked', 'independent'], horizon: HORIZON_DAYS, lookback: LOOKBACK_STOPS };
+export const USAGE_DEFAULTS = Object.freeze({ days: 7, split: 'provider', mode: 'stacked', lookback: 12, window: 'weekly', range: LIMITS_RANGE_DEFAULTS, accounts: Object.freeze({}) });
+// Unknown keys (the former Usage|Limits `tab`, the provider picked by the retired Limits tabs, the retired 7d | 30d `horizon`) are dropped.
+const USAGE_CHOICES = { days: [1, 7, 30, 90], split: ['provider', 'model'], mode: ['stacked', 'independent'], lookback: LOOKBACK_STOPS };
 export function validUsagePreferences(value) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const result = { ...USAGE_DEFAULTS };
   for (const [key, choices] of Object.entries(USAGE_CHOICES)) if (choices.includes(source[key])) result[key] = source[key];
+  result.range = validLimitsRange(source.range);
   // Window keys come from the backend, so only their shape is checked; the page falls back when one disappears.
   const chosen = source.window;
   if (typeof chosen === 'string' && chosen.length > 0 && chosen.length <= 200) result.window = chosen;
@@ -2078,7 +2093,7 @@ function UsageFooter({ ctx, scope, companion = false }) {
 function LimitsFooterStatus({ ctx, scope, enabled }) {
   const prefs = useUsagePreferences(ctx);
   // Same key as the Limits page with the same preferences, so both read one cache entry.
-  const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHistoryHours(prefs.lookback, prefs.horizon)), enabled });
+  const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHistoryHours(prefs.lookback, prefs.range)), enabled });
   const now = useMemo(() => Date.now() / 1000, [limits.dataUpdatedAt]);
   const items = useMemo(() => limitsProviderOrder(limits.data?.providers || []).filter(item => item.auth !== 'logged_out')
     .map(item => ({ provider: item, verdict: limitsVerdict(item, prefs, now) })).filter(item => item.verdict.capacity > 0), [limits.data, prefs.lookback, prefs.window, now]);
@@ -2707,8 +2722,8 @@ function ScopedUsagePage({ ctx, scope, view }) {
     // Keep the previous period on screen while another one loads.
     placeholderData: previous => previous,
     queryFn: () => readUsage(ctx, scope, `/usage/history?days=${prefs.days}&tz=${encodeURIComponent(tz)}`, validUsageHistory) });
-  const limitsHours = limitsHistoryHours(prefs.lookback, prefs.horizon);
-  // A longer lookback or horizon refetches more history; the shorter one stays drawn meanwhile.
+  const limitsHours = limitsHistoryHours(prefs.lookback, prefs.range);
+  // A longer lookback or past range refetches more history; the shorter one stays drawn meanwhile.
   const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHours), enabled: view === 'limits', placeholderData: previous => previous });
   const active = view === 'limits' ? limits : history;
   const toolbar = h(Fragment, null,
@@ -2810,7 +2825,7 @@ const rateText = rate => rate === null ? 'no drain data' : `~${rateNumber(rate)}
 function resetTime(seconds, now) {
   return formatAt(seconds, seconds - now < 6 * DAY_S ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
-// Overview of every provider on one scrollable page: one controls bar applies the lookback, window and horizon to all charts, then one section per provider, logged-out ones last as a compact row, and the shared footnotes once at the bottom.
+// Overview of every provider on one scrollable page: one controls bar applies the lookback and window to all charts, then one section per provider, logged-out ones last as a compact row, and the shared footnotes once at the bottom. The past and future ranges are set beside each chart's x axis but are page-wide too: a change applies to every chart of the same window group.
 function LimitsView({ query, prefs, update, toolbar }) {
   const data = query.data;
   // Countdowns and the Now line follow successful polls rather than a separate timer.
@@ -2821,12 +2836,12 @@ function LimitsView({ query, prefs, update, toolbar }) {
   const selected = chartWindow(windows, prefs.window);
   // Stable per provider id, so a section's toggle callback survives polls.
   const setExpanded = useCallback((id, open) => update(previous => ({ accounts: { ...previous.accounts, [id]: open } })), [update]);
+  // Merged into the stored ranges, so a change on one chart never resets another group or side chosen elsewhere.
+  const setRange = useCallback((group, side, hours) => update(previous => ({ range: { ...previous.range, [group]: { ...previous.range[group], [side]: hours } } })), [update]);
   // The controls stay put above the scrolling sections, so they remain reachable however far down the page is read.
   const controls = h('div', { className: 'su-top' }, h('header', { className: 'su-header su-limits-controls' },
     h(LookbackSlider, { hours: prefs.lookback, onChange: lookback => update({ lookback }) }),
     windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windows.map(item => ({ id: item.key, label: item.label })), value: selected.key, onChange: value => update({ window: value }) }) : null,
-    // An explicit 7d | 30d choice rather than an icon toggle: both horizons stay visible, and the pressed one is the chart's.
-    h(Segmented, { label: 'Horizon', className: 'su-horizon', options: HORIZON_DAYS.map(days => ({ id: days, label: `${days}d` })), value: prefs.horizon, onChange: horizon => update({ horizon }) }),
     toolbar));
   if (!data) return h(Fragment, null, controls, h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…'))));
   return h(Fragment, null, controls, h('div', { className: 'su-scroll' },
@@ -2834,7 +2849,7 @@ function LimitsView({ query, prefs, update, toolbar }) {
       query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
       providers.length ? null : h(UsageState, null, 'No subscription limits recorded yet.'),
       providers.map(provider => provider.auth === 'logged_out' ? h(LoggedOutProvider, { key: provider.provider, provider })
-        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded })),
+        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange })),
       h(LimitsFootnotes, { providers: active, sampler: data.sampler, now }))));
 }
 // Hermes knows the provider but has no usable credential, so there is nothing to sample or project: one muted row instead of a chart.
@@ -2844,13 +2859,13 @@ function LoggedOutProvider({ provider }) {
       h('span', { className: 'su-logged-out-text' }, `${provider.label || provider.provider} · logged out in Hermes — sign in to track limits`),
       provider.auth_reason ? h('span', { className: 'su-muted su-logged-out-reason' }, provider.auth_reason) : null));
 }
-function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded }) {
+function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange }) {
   const name = provider.label || provider.provider;
-  // The verdict always looks a week ahead whatever horizon the chart shows, so it reads the same as the sidebar footer.
+  // The verdict always looks a week ahead whatever range the chart shows, so it reads the same as the sidebar footer.
   const verdict = useMemo(() => limitsVerdict(provider, { lookback: prefs.lookback, window: prefs.window }, now), [provider, prefs.lookback, prefs.window, now]);
   return h('section', { className: 'su-provider-limits', 'data-provider': provider.provider, style: { '--su-color': providerHueColor(provider.provider) } },
     h('h2', { className: 'su-provider-head' }, providerMark(provider.provider), h('span', null, name)),
-    windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, horizonDays: prefs.horizon, lookback: prefs.lookback })
+    windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, range: prefs.range[rangeGroup(windowKey)], lookback: prefs.lookback, onRange: (side, hours) => setRange(rangeGroup(windowKey), side, hours) })
       : h(UsageState, null, 'No limit windows reported for this provider.'),
     h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open) }));
 }
@@ -3032,13 +3047,27 @@ function ChartMarks({ waste, resets, past, flags, xPct, cap, now }) {
     }),
     flags.map(flag => h(BankedFlag, { key: Math.floor(flag.t / 60), flag, xPct, now })));
 }
+// One end of the x axis: an arrow button either side of a dashed crease, together reading as an unfold glyph. Each arrow moves that end of the axis its own way, so on the past side ← reaches further back and on the future side → projects further ahead; the arrow past the last stop is disabled.
+function AxisRangeControl({ side, hours, stops, onChange }) {
+  const index = Math.max(0, stops.indexOf(hours)), past = side === 'past';
+  const step = delta => stops[index + delta] ?? null;
+  const label = target => target === null ? null : past ? `Show ${lookbackLabel(target)} before Now` : `Project ${lookbackLabel(target)} ahead`;
+  const arrow = (direction, delta, fallback) => {
+    const target = step(delta), text = label(target) || fallback;
+    return h('button', { type: 'button', className: 'su-axis-step', 'data-direction': direction, 'aria-label': text, title: text, disabled: target === null, onClick: () => { if (target !== null) onChange(target); } }, icon(direction === 'left' ? 'UnfoldLeft' : 'UnfoldRight', direction === 'left' ? '←' : '→'));
+  };
+  return h('div', { className: 'su-axis-range', 'data-side': side, 'data-hours': hours, role: 'group', 'aria-label': past ? `Past shown: ${lookbackLabel(hours)}` : `Projection: ${lookbackLabel(hours)}` },
+    past ? arrow('left', 1, 'Longest past shown') : arrow('left', -1, 'Shortest projection shown'),
+    h('span', { className: 'su-axis-crease', 'aria-hidden': true }, icon('UnfoldCrease', '┆')),
+    past ? arrow('right', -1, 'Shortest past shown') : arrow('right', 1, 'Longest projection shown'));
+}
 // "Business: 20, Pro 100: 100": what each account adds to the pool's capacity, an asterisk marking a guessed one.
-function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, lookback }) {
-  const horizonS = horizonDays * DAY_S, lookbackS = lookback * HOUR_S, providerId = provider.provider;
+function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, onRange }) {
+  const horizonS = range.future * HOUR_S, lookbackS = lookback * HOUR_S, providerId = provider.provider, stops = LIMITS_RANGE_STOPS[rangeGroup(windowKey)];
   const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey, providerId), [provider, windowKey, providerId]);
   const past = useMemo(() => pooledHistory(samples), [samples]);
   const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS, { lookbackS, provider: providerId }), [provider, windowKey, now, horizonS, lookbackS, providerId]);
-  const start = now - limitsPastSeconds(horizonS), end = now + horizonS;
+  const start = now - range.past * HOUR_S, end = now + horizonS;
   const waste = useMemo(() => wasteMarks(projection).filter(mark => mark.t > now && mark.t < end), [projection, now, end]);
   const resets = useMemo(() => resetMarkers(projection, now, end), [projection, now, end]);
   const pastResets = useMemo(() => pastResetMarkers(provider.accounts, samples, start, now, providerId), [provider, samples, start, now, providerId]);
@@ -3093,7 +3122,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
     projection.nextReset ? null : h('span', { key: 'none' }, 'No reset time reported'),
     emptyText && !emptyMeasured ? h('span', { key: 'empty', className: 'su-empty-note' }, emptyText) : null,
     projection.unknownAccounts.length ? h('span', { key: 'unknown' }, `${projection.unknownAccounts.length} account${projection.unknownAccounts.length === 1 ? '' : 's'} without a reading left out of the pool`) : null].filter(Boolean);
-  return h('div', { className: 'su-chart su-pooled', 'data-window': windowKey, 'data-horizon': horizonDays, 'data-capacity': projection.capacity, role: 'group', 'aria-label': `${provider.label || providerId} pooled remaining quota` },
+  return h('div', { className: 'su-chart su-pooled', 'data-window': windowKey, 'data-past': range.past, 'data-future': range.future, 'data-capacity': projection.capacity, role: 'group', 'aria-label': `${provider.label || providerId} pooled remaining quota` },
     h('div', { className: 'su-headline' },
       // Without any account reading the pool is unknown, not empty.
       h('span', { className: 'su-pool' }, projection.capacity ? unitsText(projection.current) : '—'),
@@ -3101,8 +3130,8 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
       h('span', { className: 'su-rate', 'data-unknown': projection.unknown }, rateText(projection.rate))),
     verdict ? h(VerdictLine, { verdict, now, windowKey }) : null,
     h('div', { className: 'su-limits-grid' },
-      h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, h('span', { className: 'su-yunit', title: PLAN_UNITS_NOTE }, 'units'),
-        ticks.map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, unitsText(tick)))),
+      // No unit caption (the headline already says units) and no 0 label, which would sit on the past range control under it; the 0 gridline stays.
+      h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, ticks.filter(tick => tick > 0).map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, unitsText(tick)))),
       h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota in units over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end), 'data-cap': cap,
         onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null),
         onKeyDown: event => { const step = { ArrowLeft: -0.02, ArrowRight: 0.02 }[event.key]; if (step) { event.preventDefault(); setHover(clamp((hover ?? nowPct / 100) + step, 0, 1)); } if (event.key === 'Escape') setHover(null); } },
@@ -3120,10 +3149,12 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
           h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
           h('div', { className: 'su-tip su-tip-inline', style: hover > 0.6 ? { right: `calc(${100 - hover * 100}% + 10px)` } : { left: `calc(${hover * 100}% + 10px)` } },
             `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${unitsText(hoverValue)} units left${hoverT > now ? ' (projected)' : ''}`))),
+      h(AxisRangeControl, { side: 'past', hours: range.past, stops, onChange: hours => onRange('past', hours) }),
       h('div', { className: 'su-xaxis' }, axis.times.map((t, index) => {
         const share = x(t) / VIEW_W * 100;
         return h('span', { key: t, 'data-edge': share < 3 ? 'start' : share > 97 ? 'end' : undefined, style: { left: `${share}%` } }, axis.labels[index]);
       })),
+      h(AxisRangeControl, { side: 'future', hours: range.future, stops, onChange: hours => onRange('future', hours) }),
       h(MeasureRow, { nowPct, average, empty: emptyMeasured ? { fromPct: nowPct, toPct: emptyPct, text: emptyText } : null })),
     notes.length ? h('div', { className: 'su-chart-foot' }, h('div', { className: 'su-chart-notes' }, notes)) : null);
 }
@@ -3274,9 +3305,18 @@ const USAGE_CSS = `
 .su-range::-moz-range-thumb{width:10px;height:10px;border:2px solid var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:50%;background:var(--su-color)}
 .su-range:focus-visible{outline:2px solid var(--ui-accent);outline-offset:2px;border-radius:4px}
 .su-empty-dot{position:absolute;bottom:0;width:9px;height:9px;margin:0 0 -4.5px -4.5px;border:2px solid var(--ui-red,var(--su-color));border-radius:50%;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:none}
-/* Pooled chart grid: y-axis | plot, then the x-axis and the measurement row under the plot column. */
-.su-limits-grid{display:grid;grid-template-columns:56px minmax(0,1fr);grid-template-rows:auto 16px 30px;margin-top:6px}
+/* Pooled chart grid: y-axis | plot | a column as wide as the y-axis, then the x-axis between its two range controls and the measurement row under the plot column. */
+.su-limits-grid{display:grid;grid-template-columns:56px minmax(0,1fr) 56px;grid-template-rows:auto 16px 30px;margin-top:6px}
 .su-limits-grid>.su-yaxis{grid-area:1/1}.su-limits-grid>.su-plot{grid-area:1/2}.su-limits-grid>.su-xaxis{grid-area:2/2;margin:0}
+/* Each range control sits against its end of the x axis, vertically centred on the axis labels. */
+.su-axis-range{display:inline-flex;align-items:center;margin-top:-1px;height:18px}
+.su-limits-grid>.su-axis-range[data-side=past]{grid-area:2/1;justify-self:end}.su-limits-grid>.su-axis-range[data-side=future]{grid-area:2/3;justify-self:start}
+.su-axis-step{display:inline-flex;align-items:center;justify-content:center;padding:1px;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);cursor:pointer;transition:color 100ms,background-color 100ms}
+.su-axis-step:hover:not(:disabled),.su-axis-step:focus-visible{color:var(--ui-text-primary);background:color-mix(in srgb,var(--ui-text-primary) 10%,transparent)}
+.su-axis-step:focus-visible{outline:2px solid var(--ui-accent);outline-offset:0}
+.su-axis-step:disabled{opacity:.35;cursor:default}
+.su-axis-step svg,.su-axis-crease svg{width:16px;height:16px}
+.su-axis-crease{display:inline-flex;margin:0 -3px;color:var(--ui-text-quaternary)}
 .su-measures{grid-area:3/2;position:relative;color:var(--ui-text-secondary)}
 .su-measure-span{position:absolute;top:22px;height:0}
 .su-measure-line{position:absolute;left:0;right:0;top:-0.5px;border-top:1px solid currentColor}
