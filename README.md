@@ -53,7 +53,7 @@
 - Per-account bars with reset times.
 - Backend sampler every 5 minutes, 35 days of history, read-only: never refreshes tokens, clears cooldowns or redeems resets.
 
-![Limits page: OpenAI Codex pool running out Sunday with reset markers and lost units, Anthropic pool with units expiring unused, averaging and time-to-empty measurements](docs/images/limits.png)
+![Limits page: OpenAI Codex pool running out Sunday with reset markers and lost units, its two accounts unfolded with 5-hour and weekly bars and banked resets, Anthropic pool with units expiring unused, averaging and time-to-empty measurements](docs/images/limits.png)
 
 ### Projects
 
