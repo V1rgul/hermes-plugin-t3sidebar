@@ -1525,8 +1525,8 @@ try {
     });
     console.log(`USAGE FOOTER: ${JSON.stringify(footer)}`);
     check('Footer is a fixed 36px row at the bottom of the pane, below the shelves', footer?.last && footer.height === 36 && footer.bottomGap < 1 && footer.belowList);
-    check('Footer has exactly two controls: the single Limits button, then the 28px icon-only Usage button (Tabler chart-histogram) with a tooltip', footer?.controls.join() === 'sf-limits,sf-utility' && footer.buttons.length === 1
-      && [footer.buttons[0].label, footer.buttons[0].text, footer.buttons[0].title, footer.buttons[0].icon].join('|') === 'Usage||Token usage|ChartHistogram'
+    check('Footer has exactly two controls: the single Limits button, then the 28px icon-only Usage button (Lucide chart-no-axes-column) with a tooltip', footer?.controls.join() === 'sf-limits,sf-utility' && footer.buttons.length === 1
+      && [footer.buttons[0].label, footer.buttons[0].text, footer.buttons[0].title, footer.buttons[0].icon].join('|') === 'Usage||Token usage|ChartNoAxesColumn'
       && footer.buttons[0].width === 28 && footer.buttons[0].height === 28 && footer.buttons[0].glyph === 16 && footer.buttons[0].centered);
     const usageButton = usage.locator('.sf-footer').getByRole('button', { name: 'Usage', exact: true });
     const limitsButton = usage.locator('.sf-footer .sf-limits');
@@ -1580,6 +1580,15 @@ try {
         && status.label === `Limits. ${tip.lines.join('. ')}.` && !ADVICE.test(status.label) && tip.above && tip.inside);
       check('Limits button hover shows the ghost background', await limitsButton.evaluate(el => getComputedStyle(el).backgroundColor) !== idle);
       await usage.mouse.move(5, 5);
+      const toolbarIcons = await usage.evaluate(() => [...document.querySelectorAll('.sf-header svg, .sf-footer svg')].map(svg => {
+        const box = svg.getBoundingClientRect(), path = svg.querySelector('path'), mark = !!svg.dataset.providerMark, verdict = svg.closest('[data-verdict-icon]');
+        return { icon: svg.dataset.icon || svg.dataset.providerMark, size: box.width, line: mark ? null : Math.round(parseFloat(getComputedStyle(path).strokeWidth) * box.width / 24 * 100) / 100,
+          color: verdict?.dataset.severity && verdict.dataset.severity !== 'low' ? null : getComputedStyle(svg).color, opacity: verdict?.dataset.severity && verdict.dataset.severity !== 'low' ? getComputedStyle(verdict).opacity : getComputedStyle(svg).opacity, coloured: !!verdict?.dataset.severity && verdict.dataset.severity !== 'low', mark, verdict: !!verdict };
+      }));
+      console.log(`TOOLBAR AND FOOTER ICONS: ${JSON.stringify(toolbarIcons)}`);
+      const neutralIconColors = new Set(toolbarIcons.filter(item => item.color).map(item => item.color));
+      check('Toolbar and footer icons share one prominence: one neutral colour at full opacity, severity colours at 0.75 to offset their saturation, 16px controls and a 1.33px line', toolbarIcons.length >= 8 && neutralIconColors.size === 1 && toolbarIcons.every(item => item.opacity === (item.coloured ? '0.75' : '1')) && toolbarIcons.some(item => item.coloured)
+        && toolbarIcons.filter(item => !item.mark).every(item => Math.abs(item.line - 1.33) <= 0.02) && toolbarIcons.filter(item => !item.mark && !item.verdict).every(item => item.size === 16));
     }
     {
       // Close-up of the footer with the Limits tooltip showing: the same harness at 3x, cropped to the sidebar's bottom edge.
