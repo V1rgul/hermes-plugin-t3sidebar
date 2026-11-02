@@ -1055,8 +1055,9 @@ function statusIcon(status, glyph = status) {
   return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
     STATUS_ICONS[glyph].map(d => h('path', { key: d, d })));
 }
-// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge, clock-x and flag glyphs, plus one derived arrow.
+// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge, chart-histogram, clock-x and flag glyphs, plus one derived arrow.
 const BUNDLED_ICONS = {
+  ChartHistogram: ['M3 3v18h18', 'M20 18v3', 'M16 16v5', 'M12 13v8', 'M8 16v5', 'M3 11c6 0 5 -5 9 -5s3 5 9 5'],
   Gauge: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M13.41 10.59l2.59 -2.59', 'M7 12a5 5 0 0 1 5 -5'],
   ClockX: ['M20.926 13.15a9 9 0 1 0 -7.835 7.784', 'M12 7v5l2 2', 'M22 22l-5 -5', 'M17 22l5 -5'],
   // Derived from Tabler v3.44.0 arrow-bar-to-down (MIT) with the tip moved down to meet the bar's top edge, because Virgile wants the arrow to touch the floor.
@@ -2054,7 +2055,7 @@ export function writeUsagePreferences(storage, value) {
   try { storage.set(USAGE_PREFERENCES_KEY, validUsagePreferences(value)); return true; } catch (_) { return false; }
 }
 // T3 Code's SidebarUtilityItem: icon-only ghost buttons with a tooltip, in one fixed-height footer row below the shelves, so the flex shelf allocation only sees a shorter list.
-const USAGE_LINK = { route: USAGE_ROUTE, label: 'Usage', tip: 'Token usage', icon: 'BarChart3', glyph: '▥' };
+const USAGE_LINK = { route: USAGE_ROUTE, label: 'Usage', tip: 'Token usage', icon: 'ChartHistogram', glyph: '▥' };
 const openRoute = route => { try { host.navigate(route); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ } };
 function UtilityLink({ link }) {
   const tip = typeof sdk.Tip === 'function', current = useShownPage() === link.route;
@@ -3086,7 +3087,6 @@ function PooledLimitChart({ provider, windowKey, now, verdict, horizonDays, look
   const notes = [
     projection.nextReset ? null : h('span', { key: 'none' }, 'No reset time reported'),
     emptyText && !emptyMeasured ? h('span', { key: 'empty', className: 'su-empty-note' }, emptyText) : null,
-    emptyAt === null && projection.rate > 0 ? h('span', { key: 'full', className: 'su-empty-note' }, `Not empty within ${horizonDays}d`) : null,
     projection.unknownAccounts.length ? h('span', { key: 'unknown' }, `${projection.unknownAccounts.length} account${projection.unknownAccounts.length === 1 ? '' : 's'} without a reading left out of the pool`) : null].filter(Boolean);
   return h('div', { className: 'su-chart su-pooled', 'data-window': windowKey, 'data-horizon': horizonDays, 'data-capacity': projection.capacity, role: 'group', 'aria-label': `${provider.label || providerId} pooled remaining quota` },
     h('div', { className: 'su-headline' },

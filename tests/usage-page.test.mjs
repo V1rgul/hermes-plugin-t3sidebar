@@ -472,7 +472,7 @@ test('Usage and Limits register as two routes and the sidebar footer has the Usa
   const buttons = [...footer.querySelectorAll('button')];
   // Icon-only Usage: the name comes from aria-label and the tooltip, never from visible text.
   assert.deepEqual(buttons.map(node => node.className), ['sf-limits', 'sf-utility'], 'exactly two controls: the single Limits button on the left, then Usage on the right');
-  assert.deepEqual([buttons[1].getAttribute('aria-label'), buttons[1].textContent, buttons[1].getAttribute('title'), buttons[1].querySelector('svg')?.getAttribute('data-icon')], ['Usage', '', 'Token usage', 'BarChart3']);
+  assert.deepEqual([buttons[1].getAttribute('aria-label'), buttons[1].textContent, buttons[1].getAttribute('title'), buttons[1].querySelector('svg')?.getAttribute('data-icon')], ['Usage', '', 'Token usage', 'ChartHistogram']);
   assert.deepEqual($$('.sf-footer .sf-limit').map(node => node.dataset.provider), ['openai-codex', 'anthropic'], 'the default fixture has two logged-in providers');
   await click(buttons[1]); await click(buttons[0]);
   assert.deepEqual(mock.calls.filter(call => call[0] === 'navigate').map(call => call[1]), ['/t3sidebar-usage', '/t3sidebar-limits']);
