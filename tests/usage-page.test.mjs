@@ -561,7 +561,7 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.deepEqual($$('.su-pooled').map(node => [node.dataset.window, node.getAttribute('aria-label')]), [['weekly', 'OpenAI Codex pooled remaining quota'], ['weekly', 'Anthropic pooled remaining quota']], 'weekly is the default window');
   // Business (20 units) plus Pro 100 (100 units), and one Max 20x (200 weekly units): pools count capacity in plan units, not percent.
   assert.deepEqual($$('.su-capacity').map(node => node.textContent), ['/ 120 units', '/ 200 units']);
-  assert.deepEqual($$('.su-composition').map(node => node.textContent), ['(Business: 20, Pro 100: 100)', '(Max 20x: 200)']);
+  assert.equal($$('.su-composition').length, 0, 'the plan list stays in the Accounts fold, not the headline');
   assert.equal($$('.su-pool').every(node => /^\d+(\.\d)?$/.test(node.textContent)), true);
   assert.equal($$('.su-rate').every(node => /^~\d+(\.\d)? units per hour$/.test(node.textContent)), true);
   assert.deepEqual($$('.su-pooled').map(chart => [...chart.querySelectorAll('.su-yaxis span')].map(node => node.textContent).join()), ['units,0,25,50,75,100,120', 'units,0,50,100,150,200']);
