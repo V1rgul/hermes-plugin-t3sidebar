@@ -651,10 +651,10 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
     const codexSection = $('.su-provider-limits[data-provider="openai-codex"]');
     const stacked = [...codexSection.querySelectorAll('.su-reset[data-kind=projected]')].find(node => node.querySelectorAll('.su-reset-mark').length === 2);
     assert.equal(stacked !== undefined, true, 'both Codex accounts reset at the same time');
-    const marks = [...stacked.querySelectorAll('.su-reset-mark')].map(node => ({ id: node.dataset.account, base: Number(node.dataset.base), top: Number(node.dataset.top), gain: Number(node.dataset.gain), label: node.querySelector('.su-reset-text').textContent }));
+    const marks = [...stacked.querySelectorAll('.su-reset-mark')].map(node => ({ id: node.dataset.account, base: Number(node.dataset.base), top: Number(node.dataset.top), weight: Number(node.dataset.weight), gain: Number(node.dataset.gain), label: node.querySelector('.su-reset-text').textContent }));
     assert.deepEqual(marks.map(item => item.id), ['acct-team', 'acct-prolite'], 'stacked in pool priority order');
     assert.deepEqual([Math.abs(marks[1].base - marks[0].top) < 1e-9, Math.abs(marks[1].top - 120) < 1e-9], [true, true], 'the Pro 100 segment starts where the Business one ends and refills the pool');
-    assert.deepEqual(marks.map(item => item.label), marks.map(item => `+${usage.unitsText(item.gain)}`));
+    assert.deepEqual(marks.map(item => item.label), marks.map(item => `⟳${usage.unitsText(item.weight)} +${usage.unitsText(item.gain)}`), 'each label reads the account\'s full plan units, then what the reset adds');
     assert.equal(codexSection.querySelector('.su-reset-seg'), null, 'only the normal curve connects reset discs');
     for (const node of stacked.querySelectorAll('.su-reset-mark')) {
       assert.ok(Math.abs(parseFloat(node.style.bottom) - Number(node.dataset.top) / 120 * 100) < 1e-9, 'each disc is anchored directly at its cumulative level');
@@ -720,7 +720,7 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
   assert.match(mark.getAttribute('title'), /^chatgpt1 · Pro 100 · 48 units unused at reset [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
   // Each reset is a marker on its step: Pro 100 rises from the 48 units left by the 52 it restores; three days of half a unit an hour later the Business seat rises from 64 by its 20.
   const resets = $$('.su-pooled .su-reset[data-kind=projected] .su-reset-mark').map(node => [node.dataset.account, Math.round(Number(node.dataset.base)), Math.round(Number(node.dataset.top)), node.querySelector('.su-reset-text')?.textContent]);
-  assert.deepEqual(resets, [['second', 48, 100, '+52'], ['first', 64, 84, '+20']]);
+  assert.deepEqual(resets, [['second', 48, 100, '⟳100 +52'], ['first', 64, 84, '⟳20 +20']]);
   const dot = $('.su-reset-mark[data-account=second] .su-reset-dot');
   assert.deepEqual([dot.getAttribute('role'), dot.getAttribute('aria-label').replace(/Resets \w{3} \d{1,2}:\d{2} (AM|PM)/, 'Resets <time>')], ['img', 'chatgpt1 · Pro 100. Resets <time>. +52 units restored. 48 units lost at this reset']);
   assert.equal($('.su-reset-mark[data-account=first] .su-reset-dot').getAttribute('aria-label').endsWith('+20 units restored'), true, 'an empty account loses nothing at its reset');
