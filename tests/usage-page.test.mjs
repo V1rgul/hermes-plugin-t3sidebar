@@ -322,6 +322,8 @@ test('banked reset credits are validated defensively and flagged by expiry', () 
   assert.deepEqual([credits.fetched_at, credits.applicable_count], [5, 2]);
   assert.deepEqual([-1, 1.5, '2', null].map(count => usage.validBankedCredits({ applicable_count: count, credits: 'none' })).map(item => [item.applicable_count, item.credits.length]), [[null, 0], [null, 0], [null, 0], [null, 0]]);
   assert.equal(usage.validBankedCredits({ applicable_count: 0, credits: [] }).applicable_count, 0, 'zero is a real answer: the credits exist but cannot be used now');
+  const win = (remaining_percent, scope = 'account') => ({ key: 'w', scope, remaining_percent });
+  assert.deepEqual([[win(79.9)], [win(80), win(85)], [win(100), win(57)], [win(80), win(10, 'model')], [win(null)], []].map(usage.bankedRedeemable), [true, false, true, false, null, null], 'a reset is redeemable once any account allowance has less than 80% left; model windows and unknown readings do not count');
   const parsed = usage.validUsageLimits({ providers: [{ provider: 'openai-codex', accounts: [{ id: 'a', banked_credits: { credits: [{ status: 'available', expires_at: 10 }] } }, { id: 'b', banked_credits: 'broken' }] }] });
   assert.deepEqual(parsed.providers[0].accounts.map(account => account.banked_credits?.credits.length ?? null), [1, null]);
   const now = 1000, accounts = [{ id: 'a', label: 'chatgpt1', banked_credits: { credits: [{ expires_at: now + 5 * H }, { expires_at: now + 9 * D }] } }, { id: 'b', label: 'chatgptvitibot', banked_credits: { credits: [{ expires_at: now + 5 * H + 600 }, { expires_at: null }] } }];
@@ -626,8 +628,9 @@ test('account details are folded by default and each provider remembers its own 
   assert.deepEqual([section('openai-codex').querySelectorAll('.su-account').length, section('anthropic').querySelectorAll('.su-account').length], [2, 0]);
   assert.deepEqual(mock.ctx.storage.get('usage-preferences').accounts, { 'openai-codex': true });
   const first = $('.su-account[data-account="acct-team"]');
-  assert.match(first.querySelector('.su-account-head').textContent, /^chatgptvitibotBusiness · 20 unitspriority 0.*2 banked resets/);
-  assert.equal($('.su-account[data-account="acct-prolite"] .su-badge').textContent, 'Pro 100 · 100 units');
+  assert.match(first.querySelector('.su-account-head').textContent, /^chatgptvitibotpriority 0Business20 units2 banked resets/);
+  const plan = (id, part = '.su-badge') => [...$(`.su-account[data-account="${id}"] ${part}`).children].map(half => `${half.dataset.tone ?? ''}|${half.textContent}`).join(' ');
+  assert.equal(plan('acct-prolite'), '|Pro 100 primary|100 units', 'the plan pill splits, units in the primary colour');
   assert.equal($('.su-assumed'), null, 'every plan is in the capacity table');
   assert.equal(first.querySelectorAll('.su-window').length, 2);
   assert.equal(first.querySelectorAll('.su-pace').length, 2, 'every window with a length and reset time has a pace tick');
@@ -637,7 +640,7 @@ test('account details are folded by default and each provider remembers its own 
   await render(limitsPage());
   assert.deepEqual([toggle('openai-codex').getAttribute('aria-expanded'), toggle('anthropic').getAttribute('aria-expanded'), $$('.su-account').length], ['true', 'false', 2], 'the fold survives a remount');
   await click(toggle('anthropic'));
-  assert.equal($('.su-account[data-account="acct-claude"] .su-badge').textContent, 'Max 20x · 200 units');
+  assert.equal(plan('acct-claude'), '|Max 20x primary|200 units');
   await click(toggle('openai-codex'));
   assert.deepEqual(mock.ctx.storage.get('usage-preferences').accounts, { 'openai-codex': false, anthropic: true });
   assert.deepEqual($$('.su-account').map(node => node.dataset.account), ['acct-claude']);
@@ -678,9 +681,10 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
     assert.equal(team.length, 2); assert.equal(prolite.length, 2);
     assert.match(team[0], /^true\|Banked reset · expires [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM) \(in 5h 0m\)$/, 'within a day: orange');
     assert.match(team[1], /^false\|Banked reset · expires [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} (AM|PM) \(in 9d 0h\)$/);
-    assert.match(prolite[0], /^true\|Banked reset · expires .* \(in 5h 10m\) · not usable now$/, 'applicable 0: the credits exist but cannot be used now');
-    assert.match(prolite[1], /^false\|Banked reset · expires .* \(in 9d 0h\) · not usable now$/);
-    assert.equal($$('.su-account[data-account="acct-team"] .su-banked-unusable').length, 0);
+    assert.match(prolite[0], /^true\|Banked reset · expires .* \(in 5h 10m\)$/, 'usability is an account badge, not repeated on each credit');
+    assert.match(prolite[1], /^false\|Banked reset · expires .* \(in 9d 0h\)$/);
+    const badge = id => $$(`.su-account[data-account="${id}"] .su-badge-split`).filter(node => node.textContent.includes('banked')).map(node => [...node.children].map(half => `${half.dataset.tone ?? ''}|${half.textContent}`));
+    assert.deepEqual([badge('acct-team'), badge('acct-prolite')], [[['|2 banked resets', 'success|usable now']], [['|2 banked resets', 'success|usable now']]], 'chatgpt1 is redeemable below 80% left even though Codex\'s applicable count is 0');
   } finally { Date.now = realNow; }
 });
 
@@ -885,7 +889,7 @@ test('stale, failing and unread accounts keep the normal view', async () => {
   await click($('.su-disclosure'));
   assert.equal($('.su-capacity').textContent, '/ 20 units', 'the account without a reading is left out of the pool');
   // "max" alone does not say 5x or 20x: counted as one base plan, flagged on the row and in a footnote.
-  assert.deepEqual([$('.su-account[data-account="acct-b1"] .su-badge').textContent, $('.su-account[data-account="acct-b1"] .su-assumed').textContent], ['max · 20 units', 'capacity unknown, counted as 20*']);
+  assert.deepEqual([$('.su-account[data-account="acct-b1"] .su-badge').textContent, $('.su-account[data-account="acct-b1"] .su-assumed').textContent], ['max20 units', 'capacity unknown, counted as 20*']);
   assert.match($('.su-assumption').textContent, /^\* Capacity unknown for claude-max \(max\), claude-team \(no plan reported\): counted as 20 units, one \$20 plan\.$/);
   assert.equal($('.su-verdict').dataset.status, 'unknown', 'a stale pool without drain data gets no verdict');
   assert.match($('.su-chart-notes').textContent, /1 account without a reading left out of the pool/);
