@@ -126,12 +126,12 @@ class UsageHistoryTests(unittest.TestCase):
 		self.assertAlmostEqual(daily(payload, entry["cost_usd"])[5], 100e-3 + 200e-4 + 310 * 4e-3, places=6)
 		self.assertAlmostEqual(daily(payload, entry["cost_usd"])[6], 1000e-3 + 2000e-4 + 100 * 4e-3, places=6)
 		self.assertEqual(payload["totals"]["tokens"], 3710)
-		# Six whole days in 20-minute steps, then today's steps up to the one in progress (12:20-12:40).
-		self.assertEqual((payload["resolution"], payload["bucket_minutes"], len(payload["buckets"])), ("20m", 20, 6 * 72 + 38))
-		self.assertEqual(payload["window_end"], int(local(PARIS, 2026, 10, 14, 12, 40)))
+		# Six whole days in hourly steps, then today's steps up to the one in progress (12:00-13:00).
+		self.assertEqual((payload["resolution"], payload["bucket_minutes"], len(payload["buckets"])), ("60m", 60, 6 * 24 + 13))
+		self.assertEqual(payload["window_end"], int(local(PARIS, 2026, 10, 14, 13)))
 		self.assertTrue(payload["approximate"])
 		for name in ("tokens", "input", "output", "cache_read", "cache_write", "reasoning", "cost_usd", "user_messages"):
-			self.assertEqual(len(entry[name]), 6 * 72 + 38)
+			self.assertEqual(len(entry[name]), 6 * 24 + 13)
 
 	def test_compaction_copies_are_counted_once(self):
 		call = self.day[6] + 60
@@ -205,27 +205,28 @@ class UsageHistoryTests(unittest.TestCase):
 		paris_now = local(PARIS, 2026, 10, 27, 9)
 		payload = self.payload(now=paris_now)
 		# Oct 21..26 whole, then Oct 27's steps up to the 09:00 one, which starts exactly now.
-		expected = [int(local(PARIS, 2026, 10, day, minute // 60, minute % 60)) for day in range(21, 27) for minute in range(0, 1440, 20)] + [int(local(PARIS, 2026, 10, 27, minute // 60, minute % 60)) for minute in range(0, 9 * 60 + 1, 20)]
+		expected = [int(local(PARIS, 2026, 10, day, hour)) for day in range(21, 27) for hour in range(24)] + [int(local(PARIS, 2026, 10, 27, hour)) for hour in range(10)]
 		self.assertEqual(payload["buckets"], expected)
-		self.assertEqual(payload["window_end"], int(local(PARIS, 2026, 10, 27, 9, 20)))
+		self.assertEqual(payload["window_end"], int(local(PARIS, 2026, 10, 27, 10)))
 		gaps = [b - a for a, b in zip(payload["buckets"], payload["buckets"][1:])]
-		# Oct 25 2026 is the 25-hour fall-back day in Paris: only its 02:40 step (first pass) stretches over the repeated hour.
-		self.assertEqual(sorted(set(gaps)), [1200, 4800])
-		self.assertEqual(gaps.count(4800), 1)
+		# Oct 25 2026 is the 25-hour fall-back day in Paris: only its 02:00 step (first pass) stretches over the repeated hour.
+		self.assertEqual(sorted(set(gaps)), [3600, 7200])
+		self.assertEqual(gaps.count(7200), 1)
 		ny_now = local(NEW_YORK, 2026, 11, 3, 20)
 		payload = self.payload(tz="America/New_York", now=ny_now)
 		self.assertEqual(payload["buckets"][0], int(local(NEW_YORK, 2026, 10, 28)))
 		self.assertEqual(payload["buckets"][-1], int(local(NEW_YORK, 2026, 11, 3, 20)))
-		self.assertEqual(payload["window_end"], int(local(NEW_YORK, 2026, 11, 3, 20, 20)))
-		self.assertTrue(all(datetime.fromtimestamp(start, NEW_YORK).minute % 20 == 0 for start in payload["buckets"]))
+		self.assertEqual(payload["window_end"], int(local(NEW_YORK, 2026, 11, 3, 21)))
+		self.assertTrue(all(datetime.fromtimestamp(start, NEW_YORK).minute == 0 for start in payload["buckets"]))
 		self.assertEqual(payload["tz"], "America/New_York")
 		spring = self.payload(tz="America/New_York", now=local(NEW_YORK, 2027, 3, 16, 1), days=30)
-		self.assertEqual((spring["resolution"], len(spring["buckets"])), ("90m", 29 * 16 + 1))
-		self.assertEqual(spring["window_end"], int(local(NEW_YORK, 2027, 3, 16, 1, 30)))
-		# Mar 14 2027 loses its 02:00 hour, so its 01:30-03:00 step lasts half an hour.
-		self.assertIn(1800, [b - a for a, b in zip(spring["buckets"], spring["buckets"][1:])])
+		self.assertEqual((spring["resolution"], len(spring["buckets"])), ("360m", 29 * 4 + 1))
+		self.assertEqual(spring["window_end"], int(local(NEW_YORK, 2027, 3, 16, 6)))
+		# Mar 14 2027 loses its 02:00 hour, so its 00:00-06:00 step lasts five hours.
+		self.assertIn(5 * 3600, [b - a for a, b in zip(spring["buckets"], spring["buckets"][1:])])
 		quarter = self.payload(days=90, now=paris_now)
-		self.assertEqual((quarter["resolution"], len(quarter["buckets"])), ("240m", 89 * 6 + 3))
+		self.assertEqual((quarter["resolution"], len(quarter["buckets"])), ("1440m", 90))
+		self.assertEqual(quarter["window_end"], int(local(PARIS, 2026, 10, 28)))
 
 	def test_bucket_edges_assign_to_the_later_bucket_and_drop_outside_points(self):
 		self.db.session("s1")
@@ -239,34 +240,34 @@ class UsageHistoryTests(unittest.TestCase):
 		history.clear_cache()
 		payload = self.payload(now=self.day[7] - 1)
 		self.assertEqual(daily(payload, series(payload, "p/a")["input"]), [0, 0, 0, 10, 0, 0, 0])
-		self.assertEqual(payload["buckets"][3 * 72], int(edge))
-		self.assertEqual(series(payload, "p/a")["input"][3 * 72], 10)
+		self.assertEqual(payload["buckets"][3 * 24], int(edge))
+		self.assertEqual(series(payload, "p/a")["input"][3 * 24], 10)
 		keys = [entry["key"] for entry in payload["by_model"]]
 		self.assertNotIn("p/b", keys)
 		self.assertNotIn("p/c", keys)
 
 	def test_24h_mode_across_spring_forward(self):
-		# 2026-03-29 02:00 Paris jumps to 03:00; buckets stay three real minutes apart.
+		# 2026-03-29 02:00 Paris jumps to 03:00; buckets stay ten real minutes apart.
 		now = local(PARIS, 2026, 3, 29, 12, 40)
 		self.db.session("s1")
 		call = local(PARIS, 2026, 3, 29, 3, 15)
 		self.db.message("s1", "assistant", call, "x")
 		self.db.usage("s1", "m", "p", call, call, calls=1, input=5, output=1)
 		payload = self.payload(days=1, now=now)
-		self.assertEqual((payload["resolution"], payload["bucket_minutes"]), ("3m", 3))
-		self.assertEqual(len(payload["buckets"]), 480)
-		self.assertEqual(payload["window_end"], int(local(PARIS, 2026, 3, 29, 12, 42)))
-		self.assertEqual(payload["buckets"][-1], int(local(PARIS, 2026, 3, 29, 12, 39)))
-		self.assertEqual({b - a for a, b in zip(payload["buckets"], payload["buckets"][1:])}, {180})
+		self.assertEqual((payload["resolution"], payload["bucket_minutes"]), ("10m", 10))
+		self.assertEqual(len(payload["buckets"]), 144)
+		self.assertEqual(payload["window_end"], int(local(PARIS, 2026, 3, 29, 12, 50)))
+		self.assertEqual(payload["buckets"][-1], int(local(PARIS, 2026, 3, 29, 12, 40)))
+		self.assertEqual({b - a for a, b in zip(payload["buckets"], payload["buckets"][1:])}, {600})
 		entry = series(payload, "p/m")
-		index = payload["buckets"].index(int(call))
+		index = payload["buckets"].index(int(local(PARIS, 2026, 3, 29, 3, 10)))
 		self.assertEqual(entry["tokens"][index], 6)
-		# The step before 03:00 summer time is 01:57 winter time.
-		self.assertEqual(payload["buckets"][index - 5], int(local(PARIS, 2026, 3, 29, 3)))
-		previous = datetime.fromtimestamp(payload["buckets"][index - 6], PARIS)
-		self.assertEqual((previous.hour, previous.minute), (1, 57))
+		# The step before 03:00 summer time is 01:50 winter time.
+		self.assertEqual(payload["buckets"][index - 1], int(local(PARIS, 2026, 3, 29, 3)))
+		previous = datetime.fromtimestamp(payload["buckets"][index - 2], PARIS)
+		self.assertEqual((previous.hour, previous.minute), (1, 50))
 		half_hour = history.history_payload(self.db.path, days=1, tz="Asia/Kolkata", now=now, pricing=linear_price)
-		self.assertEqual(datetime.fromtimestamp(half_hour["buckets"][-1], ZoneInfo("Asia/Kolkata")).minute % 3, 0)
+		self.assertEqual(datetime.fromtimestamp(half_hour["buckets"][-1], ZoneInfo("Asia/Kolkata")).minute % 10, 0)
 
 	def test_user_messages_count_only_human_rows(self):
 		call = self.day[6] + 600
@@ -422,8 +423,8 @@ class UsageHistoryTests(unittest.TestCase):
 		payload = history.history_payload(empty, days=30, tz="UTC", now=self.now, pricing=linear_price)
 		self.assertEqual((payload["by_model"], payload["by_provider"], payload["pricing_missing"]), ([], [], []))
 		self.assertEqual(payload["totals"], {"tokens": 0, "cost_usd": 0.0, "user_messages": 0})
-		# 10:30 UTC: 29 whole days in 90-minute steps, then today's steps up to the 10:30 one, which starts exactly now.
-		self.assertEqual(len(payload["buckets"]), 29 * 16 + 8)
+		# 10:30 UTC: 29 whole days in 6-hour steps, then today's 00:00 and 06:00 steps.
+		self.assertEqual(len(payload["buckets"]), 29 * 4 + 2)
 
 	def test_rejects_bad_arguments(self):
 		for days in (0, 2, 365, True, "7", 7.0):

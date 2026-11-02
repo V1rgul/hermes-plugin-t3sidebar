@@ -148,7 +148,8 @@ export const ctx = {
     if (path.startsWith('/usage/')) {
       if (control.usageError) throw new Error(control.usageError);
       const params = new URLSearchParams(path.split('?')[1] || '');
-      if (path.startsWith('/usage/history?')) return clone(control.usageHistory ?? syntheticUsageHistory(Number(params.get('days')), params.get('tz')));
+      // control.usageHistory is one payload for every period, or a function of the requested days (the README capture kit serves real history per period that way).
+      if (path.startsWith('/usage/history?')) return clone(typeof control.usageHistory === 'function' ? control.usageHistory(Number(params.get('days'))) : control.usageHistory ?? syntheticUsageHistory(Number(params.get('days')), params.get('tz')));
       if (path.startsWith('/usage/limits?')) return clone(control.usageLimits ?? syntheticUsageLimits(Math.min(840, Number(params.get('hours')) || 168), control.limitsScenario));
     }
     if (path === '/environment') return { profile: control.homeProfile || host.state.profile.get(), home: control.home || '/home/fixture' };
@@ -333,9 +334,9 @@ function fixtureMidnight(seconds, tz) {
   return t;
 }
 // Synthetic usage fixtures shaped like the frozen /usage/history and /usage/limits contract; deterministic apart from the clock.
-const FIXTURE_MODELS = [['openai-codex', 'gpt-6.1-sol', 1], ['openai-codex', 'gpt-6.1-mini', 0.35], ['anthropic', 'claude-opus-5', 0.6], ['anthropic', 'claude-haiku-5', 0.2], ['copilot', 'gpt-5.5', 0.12]];
+const FIXTURE_MODELS = [['openai-codex', 'gpt-6.1-sol', 1], ['openai-codex', 'gpt-6.1-mini', 0.35], ['anthropic', 'claude-opus-5', 0.6], ['anthropic', 'claude-haiku-5', 0.2]];
 export function syntheticUsageHistory(days = 7, tz = 'UTC') {
-  const bucketMinutes = { 1: 3, 7: 20, 30: 90, 90: 240 }[days] || 1440, step = bucketMinutes * 60, now = Date.now() / 1000;
+  const bucketMinutes = { 1: 10, 7: 60, 30: 360, 90: 1440 }[days] || 1440, step = bucketMinutes * 60, now = Date.now() / 1000;
   // 24h is the last 24 hours in fixed steps; longer periods are whole local days in the requested zone cut into steps from local midnight and ending with the step in progress, like the backend's (the steps after a DST change drift an hour here, which the fixture tolerates).
   const steps = Array.from({ length: days }, (_, index) => fixtureMidnight(now - (days - 1 - index) * 86400, tz)).flatMap(midnight => Array.from({ length: Math.ceil(86400 / step) }, (_, index) => midnight + index * step));
   const end = Math.floor(now / step) * step;
@@ -347,7 +348,7 @@ export function syntheticUsageHistory(days = 7, tz = 'UTC') {
     const tokens = buckets.map(t => Math.round(wave(t, seriesIndex) * weight * 14_000_000 * share));
     const input = tokens.map(value => Math.round(value * 0.2)), output = tokens.map(value => Math.round(value * 0.05)), cache_read = tokens.map((value, index) => value - input[index] - output[index]);
     return { key: `${provider}/${model}`, label: model, provider, model, tokens, input, output, cache_read, cache_write: tokens.map(() => 0), reasoning: output.map(value => Math.round(value / 3)),
-      cost_usd: provider === 'copilot' ? tokens.map(() => 0) : tokens.map(value => Math.round(value * (provider === 'anthropic' ? 2.4 : 1.1)) / 1e6),
+      cost_usd: tokens.map(value => Math.round(value * (provider === 'anthropic' ? 2.4 : 1.1)) / 1e6),
       user_messages: tokens.map(value => Math.round(value / (600_000 * share))) };
   });
   const sum = (list, field) => buckets.map((_, index) => list.reduce((total, item) => total + item[field][index], 0));
@@ -358,7 +359,7 @@ export function syntheticUsageHistory(days = 7, tz = 'UTC') {
   });
   const total = field => by_model.reduce((all, item) => all + item[field].reduce((a, b) => a + b, 0), 0);
   return { generated_at: now, days, tz, resolution: `${bucketMinutes}m`, bucket_minutes: bucketMinutes, buckets, window_end, by_provider, by_model,
-    totals: { tokens: total('tokens'), cost_usd: total('cost_usd'), user_messages: total('user_messages') }, pricing_missing: ['copilot/gpt-5.5'], approximate: true };
+    totals: { tokens: total('tokens'), cost_usd: total('cost_usd'), user_messages: total('user_messages') }, pricing_missing: [], approximate: true };
 }
 // Two Codex accounts on different plans (a 20-unit Business seat drained first, then a 100-unit Pro 100) and one Anthropic Max 20x account (200 units weekly), each pool drained in priority order by an office-hours workload: ten days of 15-minute samples with weekly resets as visible step-ups. Consumption is in plan units, the weekday/hour profile follows the local clock (nights and weekends line up with the charts' midnight gridlines), and Codex's last 12 hours run hotter than the days before, as in a burst of work. Scenarios (control.limitsScenario):
 // - 'mixed' (default): both Codex accounts reset together tomorrow (stacked reset markers on one vertical line); Codex's burst leaves Pro 100 with unused quota at that reset (a waste arrow) yet still empties the pool with no further reset that week (the time-to-empty arrow), so its verdict is short; Anthropic's lighter use leaves quota to expire at its reset (waste).
