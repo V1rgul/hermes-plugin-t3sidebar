@@ -40,7 +40,7 @@ def _load_sibling(name, filename):
 
 
 usage_history = _load_sibling("hermes_t3sidebar_usage_history", "usage_history.py")
-usage_limits = _load_sibling("hermes_t3sidebar_usage_limits", "usage_limits.py")
+usage_limits = _load_sibling("hermes_t3sidebar_shared_modules", "shared_modules.py").load_limits_module()
 
 
 def default_history_db_path(profile) -> Path:
@@ -61,7 +61,7 @@ def ensure_limits_sampler():
 
 	Started from Desktop's routine sidebar polls rather than at import, so the thread inherits the request's profile and secret scope, and test imports of this module never reach live credentials.
 	"""
-	return usage_limits.LimitsSampler(usage_limits.LimitsStore(default_limits_path())).start()
+	return usage_limits.start_limits_sampler(usage_limits.LimitsStore(default_limits_path()))
 
 
 SESSION_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"

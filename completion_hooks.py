@@ -2,8 +2,7 @@
 
 Only the ordinary Agent runtime currently emits both supported hooks. In particular codex_app_server bypasses on_session_end: do not infer its success from usage, child-stop events, or persisted assistant messages.
 
-pre_llm_call also precedes codex_app_server dispatch in the installed runtime.
-It follows native turn persistence/preflight compaction, not session viewing.
+pre_llm_call follows native turn persistence but precedes preflight compaction and codex_app_server dispatch in the installed runtime. A hook veto can therefore end the turn without inference; the receipt proves activity, not that a model ran.
 Skipped/timed-out hooks remain best effort and must never block agent activity.
 """
 
@@ -146,14 +145,10 @@ def awaits_processes(owners):
 def restore_archived_activity(home, session_id, before):
 	"""Use native archival only for a proven, exact human compression lineage.
 
-	The installed set_session_archived selector follows compression-ended parents
-	without excluding explicit forks. Its footprint can exceed the rich listing's
-	lineage; refuse those cases rather than restoring another conversation. This
-	metadata-only preflight mirrors that selector, not prompt/history projection.
-	The public setter has no compare-and-set fence, so concurrent external lineage
-	changes between preflight and commit remain a native API limitation.
+	Read the installed setter's exact lineage selector, since older cores included independent forks. Refuse any footprint beyond the proven rich lineage rather than restoring another conversation. The public setter has no compare-and-set fence, so concurrent external lineage changes between preflight and commit remain a native API limitation.
 	"""
 	from hermes_state import SessionDB
+	from hermes_state_sessions import _LINEAGE_CTE_SQL
 
 	current = native_snapshot(home, session_id)
 	if current is None or current.root != before.root or current.aliases != before.aliases:
@@ -162,21 +157,7 @@ def restore_archived_activity(home, session_id, before):
 		return True
 	path = home / "state.db"
 	with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
-		rows = connection.execute("""
-			WITH RECURSIVE
-			ancestors(id) AS (
-				SELECT ? UNION SELECT parent.id FROM ancestors a
-				JOIN sessions child ON child.id = a.id
-				JOIN sessions parent ON parent.id = child.parent_session_id
-				WHERE parent.end_reason = 'compression'
-			), descendants(id) AS (
-				SELECT ? UNION SELECT child.id FROM descendants d
-				JOIN sessions parent ON parent.id = d.id
-				JOIN sessions child ON child.parent_session_id = parent.id
-				WHERE parent.end_reason = 'compression'
-			)
-			SELECT id FROM ancestors UNION SELECT id FROM descendants
-		""", (current.root, current.root)).fetchall()
+		rows = connection.execute(_LINEAGE_CTE_SQL + " SELECT id FROM lineage", (current.root, current.root)).fetchall()
 	if frozenset(row[0] for row in rows) != current.aliases:
 		return False
 	# Never call recoverable-session helpers: they also clear native end stamps.

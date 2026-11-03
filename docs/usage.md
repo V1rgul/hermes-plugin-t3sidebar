@@ -13,6 +13,8 @@ Three charts on one time axis: tokens, API-equivalent cost and human user messag
 
 ## Limits tab
 
+The sampler belongs to the loaded agent plugin in each profile. Disabling or unloading that plugin stops future sampling, and late polls cannot restart it; re-enabling creates a new owner. Unload waits up to five seconds for a tick already collecting, which may finish afterward. Closing Desktop alone does not unload the backend plugin.
+
 For each provider, a pooled chart sums every pool account's remaining percentage for one window (5-hour, weekly or a model-scoped window). Past samples are drawn as a solid area, then comes a **Now** line and a dashed projection. The projection drains at the pooled rate of the last six hours, uses accounts in pool priority order, and steps up when an account's window resets. Under each chart, a folded **Accounts** card previews the account names; unfolded, it holds one card per account showing its pool priority, plan and each window with a pace tick and its reset time. Anthropic reports no window durations, so its 5-hour and weekly windows (model-scoped ones included) take the durations their names imply, which also places their pace ticks.
 
 On both tabs the controls bar stays fixed at the top while the charts scroll beneath it; its refresh icon spins while a refresh is in flight.

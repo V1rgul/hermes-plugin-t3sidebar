@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
 from hermes_state import SessionDB
 import hermes_state_runtime as runtime
+import hermes_cli.web_server_sessions as native_sessions
 from gateway.session_contract import Principal
 from hermes_cli.web_server_dashboard import _plugin_route_secret_scope
 from test_backend import backend
@@ -48,7 +49,10 @@ class DeleteEndpoint(unittest.TestCase):
         self.start_patch("hermes_constants.profile_name_for_home", side_effect=lambda home: Path(home).name)
         self.start_patch("hermes_cli.web_server_cron._cron_profile_home", side_effect=self.resolve)
         self.start_patch("hermes_cli.web_routers.sessions._cron_profile_home", side_effect=self.resolve)
-        self.owner_forward = self.start_patch("hermes_cli.web_server_sessions._mutate_via_gateway_owner", new=AsyncMock(return_value=None))
+        self.start_patch("hermes_cli.gateway_runtime.discover_gateway_endpoint", return_value=SimpleNamespace(
+            state="absent", endpoint=None, reason_code=None, detail=None))
+        self.owner_forward = self.start_patch("hermes_cli.web_server_sessions._mutate_via_gateway_owner",
+                                             new=AsyncMock(wraps=native_sessions._mutate_via_gateway_owner))
         self.emit = self.start_patch("hermes_state_common.emit_session_deleted")
         self.app = FastAPI()
 

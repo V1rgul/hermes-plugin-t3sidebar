@@ -48,7 +48,7 @@ class CompletionHookTests(unittest.TestCase):
 		self.context = PluginContext(PluginManifest(name="hermes-t3sidebar", path=str(ROOT)), self.manager)
 		plugin.register(self.context)
 		self.observer = getattr(self.manager._hooks["on_session_end"][0], "__self__")
-		self.addCleanup(self.observer.close)
+		self.addCleanup(self.manager.unload, self.context.manifest)
 		# Exercise the actual native timeout worker and its copied home context.
 		self.timeout_patch = patch("hermes_cli.plugins._resolve_hook_callback_timeout", return_value=5)
 		self.timeout_patch.start()
@@ -123,6 +123,38 @@ class CompletionHookTests(unittest.TestCase):
 		self.begin(turn="human:task:turn2")
 		self.end(turn="human:task:turn2")
 		self.assertEqual(self.markers()["human"]["done_token"], "human:task:turn2")
+
+	def test_native_pre_hook_receipt_survives_following_preflight_rotation(self):
+		from agent.turn_context import _collect_pre_llm_call_context
+
+		agent = SimpleNamespace(session_id="human", model="test", platform="cli")
+		with patch("hermes_cli.lifecycle.invoke_hook", self.manager.invoke_hook):
+			_collect_pre_llm_call_context(agent, effective_task_id="task", turn_id="preflight-turn", original_user_message="fixture", messages=[], conversation_history=[])
+		self.assertIsNone(self.runs()["human"]["ended_at"])
+		self.db.end_session("human", "compression")
+		self.db.create_session("preflight-tip", "cli", parent_session_id="human")
+		self.end("preflight-tip", "preflight-turn")
+		self.assertEqual(self.markers()["human"]["done_token"], "preflight-turn")
+
+	def test_native_veto_receipt_does_not_require_inference(self):
+		from agent.conversation_loop import _turn_without_loop
+		from agent.turn_context import _collect_pre_llm_call_context, PRE_LLM_BLOCK_EXIT_REASON
+
+		self.context.register_hook("pre_llm_call", lambda **kwargs: {"action": "block", "message": "Blocked fixture"})
+		agent = SimpleNamespace(session_id="human", model="test", platform="cli", api_mode="codex_app_server")
+		blocks = []
+		with patch("hermes_cli.lifecycle.invoke_hook", self.manager.invoke_hook):
+			context = _collect_pre_llm_call_context(agent, effective_task_id="task", turn_id="veto-turn", original_user_message="fixture", messages=[], conversation_history=[], blocks=blocks)
+		self.assertEqual(context, "")
+		self.assertEqual(blocks, ["Blocked fixture"])
+		self.assertIsNone(self.runs()["human"]["ended_at"])
+		state: Any = SimpleNamespace()
+		with patch("agent.conversation_loop._finalize_from_state", return_value={"completed": True}) as finalize:
+			self.assertEqual(_turn_without_loop(agent, state, blocks[0]), {"completed": True})
+		finalize.assert_called_once_with(agent, state)
+		self.assertEqual(state._turn_exit_reason, PRE_LLM_BLOCK_EXIT_REASON)
+		self.end(turn="veto-turn", turn_exit_reason=PRE_LLM_BLOCK_EXIT_REASON)
+		self.assertEqual(self.markers()["human"]["done_token"], "veto-turn")
 
 	def test_flags_must_be_present_and_exact_booleans(self):
 		cases = [dict(completed=False), dict(completed=1), dict(completed=None), dict(failed=True), dict(failed=0), dict(failed=None), dict(interrupted=True), dict(interrupted=0), dict(interrupted=None)]
@@ -526,20 +558,42 @@ class CompletionHookTests(unittest.TestCase):
 			self.assertEqual(self.native_flags()[sid], int(marker == "_delegate_from"))
 		self.assertNotIn("human", self.markers())
 
-	def test_native_overbroad_compression_selector_is_refused(self):
+	def test_restore_compressed_conversation_keeps_independent_forks_archived(self):
+		self.db.end_session("human", "compression")
+		self.db.create_session("tip", "cli", parent_session_id="human")
+		forks = {"branch": "_branched_from", "reset": "_reset_from", "delegate": "_delegate_from"}
+		for sid, marker in forks.items():
+			self.db.create_session(sid, "cli", parent_session_id="human", model_config={marker: "human"})
+			self.archive(sid)
+		self.archive()
+		self.begin("tip", "tip-activity")
+		self.assertEqual(self.native_flags(), {"human": 0, "tip": 0, **{sid: 1 for sid in forks}})
+		self.end("tip", "tip-activity")
+		self.assertEqual(set(self.markers()), {"human"})
+
+	def test_legacy_overbroad_compression_selector_is_still_refused(self):
 		from hermes_state import SessionDB
 		self.db.end_session("human", "compression")
 		self.db.create_session("tip", "cli", parent_session_id="human")
 		self.db.create_session("branch", "cli", parent_session_id="human", model_config={"_branched_from": "human"})
 		self.archive()
-		# Installed native archival also flags the branch. Do not propagate its
-		# broad selector when the rich projection proves independent ownership.
+		self.archive("branch")
+		# Older native setters walked every child of a compression-ended parent.
+		legacy_selector = """
+			WITH RECURSIVE ancestors(id) AS (
+				SELECT ? UNION SELECT parent.id FROM ancestors a
+				JOIN sessions child ON child.id = a.id JOIN sessions parent ON parent.id = child.parent_session_id
+				WHERE parent.end_reason = 'compression'
+			), descendants(id) AS (
+				SELECT ? UNION SELECT child.id FROM descendants d
+				JOIN sessions parent ON parent.id = d.id JOIN sessions child ON child.parent_session_id = parent.id
+				WHERE parent.end_reason = 'compression'
+			), lineage(id) AS (SELECT id FROM ancestors UNION SELECT id FROM descendants)
+		"""
 		self.assertEqual(hooks.native_snapshot(self.home, "tip").aliases, {"human", "tip"})
-		with patch.object(SessionDB, "set_session_archived", side_effect=AssertionError("overbroad write")):
+		with patch("hermes_state_sessions._LINEAGE_CTE_SQL", legacy_selector), patch.object(SessionDB, "set_session_archived", side_effect=AssertionError("overbroad write")):
 			self.begin("tip", "tip-activity")
 			self.end("tip", "tip-activity")
-			self.begin("branch", "branch-activity")
-			self.end("branch", "branch-activity")
 		self.assertEqual(self.native_flags(), {"human": 1, "tip": 1, "branch": 1})
 		self.assertEqual(self.markers(), {})
 

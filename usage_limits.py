@@ -805,6 +805,55 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 
 _REGISTRY_LOCK = threading.Lock()
 _REGISTRY = {}
+_OWNERS_LOCK = threading.RLock()
+_OWNERS = {}
+
+
+class _SamplerOwner:
+	"""One registration's sampler; serialize starts with unload so late polls cannot restart it."""
+
+	def __init__(self, home):
+		self.home = Path(home).resolve()
+		self.key = (os.getpid(), _home_key(self.home))
+		self.sampler = None
+		self.closed = False
+
+	def start(self, store):
+		with _OWNERS_LOCK:
+			if self.closed or _OWNERS.get(self.key) is not self:
+				return None
+			if self.sampler is None:
+				self.sampler = LimitsSampler(store, home_resolver=lambda: self.home).start()
+			return self.sampler
+
+	def close(self):
+		with _OWNERS_LOCK:
+			if self.closed:
+				return
+			self.closed = True
+			if _OWNERS.get(self.key) is self:
+				del _OWNERS[self.key]
+			# Keep starts fenced until stop releases the process/home sampler slot. A currently collecting tick may finish, but no later tick will run.
+			if self.sampler is not None:
+				self.sampler.stop()
+
+
+def register_limits_sampler(ctx):
+	owner = _SamplerOwner(_default_home())
+	ctx.on_unload(owner.close)
+	with _OWNERS_LOCK:
+		if not owner.closed:
+			previous = _OWNERS.get(owner.key)
+			if previous is not None:
+				previous.close()
+			_OWNERS[owner.key] = owner
+
+
+def start_limits_sampler(store):
+	key = (os.getpid(), _home_key(_default_home()))
+	with _OWNERS_LOCK:
+		owner = _OWNERS.get(key)
+		return owner.start(store) if owner is not None else None
 
 
 def _default_home():

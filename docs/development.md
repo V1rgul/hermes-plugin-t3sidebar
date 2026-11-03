@@ -8,7 +8,7 @@ Frontend tests use Node’s test runner and render the actual React tree. Backen
 npm ci --ignore-scripts --no-audit --no-fund && npm run test:all
 ```
 
-Python test dependencies are listed in `requirements-dev.txt`; Hermes already provides the production FastAPI/Pydantic environment. The browser smoke uses an installed Chromium from the Playwright cache or `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`. If neither exists, install the matching development browser with `npx playwright install chromium`; the tests never silently download one.
+Python test dependencies are listed in `requirements-dev.txt`; Hermes already provides the production FastAPI/Pydantic environment. The backend test entry point initializes Hermes's committed dependency environment before discovery and scratch-profile overrides. Set `HERMES_DISABLE_LAZY_INSTALLS=1` for verification without automatic dependency installation. The browser smoke uses an installed Chromium from the Playwright cache or `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`. If neither exists, install the matching development browser with `npx playwright install chromium`; the tests never silently download one.
 
 To inspect the rendered sidebar with synthetic data:
 
