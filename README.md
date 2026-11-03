@@ -48,7 +48,7 @@
 - Footer button: remaining units and verdict icon per provider → **Limits** page.
 - Providers: OpenAI Codex and Anthropic credential pools; accounts pooled in units weighted by plan.
 - Chart: past quota, **Now**, projection; configurable averaging period and limit window. Unfold arrows at each end of the x axis set how far back and ahead it reaches (weekly 1d/7d/30d, 5-hour 5h/1d/7d), shared by every chart and remembered on the client.
-- Verdicts: when the pool runs out before a reset, or how many units expire unused.
+- Verdicts: when the pool runs out before a reset, or how many units expire unused; the next meaningful event picks the icon. Run-out colour by time blocked in the 7 days (15 min grey, 2 h yellow, 6 h orange, 24 h red), expiry colour by units lost against capacity (5% grey, 15% yellow, 30% orange, 50% red); below that, no icon. A grey warning icon means the verdict cannot be computed (no drain data or stale readings).
 - Markers: reset step-ups, units lost at each reset, Codex banked reset credit expiries.
 - Per-account bars with reset times.
 - Backend sampler every 5 minutes, 35 days of history, read-only: never refreshes tokens, clears cooldowns or redeems resets.

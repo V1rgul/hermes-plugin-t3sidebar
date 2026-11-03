@@ -981,9 +981,9 @@ const CSS = `
 .sf-limit svg[data-provider-mark]{width:13px;height:13px;flex-shrink:0}
 .sf-limit-value{font-variant-numeric:tabular-nums;white-space:nowrap}.sf-limit-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sf-limit .su-verdict-icon{display:inline-flex;flex-shrink:0}/* Stroke 2.29 keeps the toolbar's 1.33px line in the 14px verdict box. */.sf-limit .su-verdict-icon svg{width:14px;height:14px;stroke-width:2.29}
-/* Verdict glyph colour follows severity (missing or lost units against the pool's capacity), the same rule as the Limits page: muted below a third, orange from a third, red from two thirds. */
-.sf-limit .su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.sf-limit .su-verdict-icon[data-severity=high]{color:var(--ui-red,#cf2d56)}
-/* Saturated hues read stronger than the neutral icons beside them at equal lightness contrast; 0.75 opacity brings the orange and red glyphs to the same visual weight in light and dark themes. */.sf-limit .su-verdict-icon:is([data-severity=medium],[data-severity=high]){opacity:.75;transition:opacity .1s}
+/* Verdict glyph colour follows severity (hours blocked or units lost, see BLOCKED_BANDS and LOST_BANDS), the same rule as the Limits page: muted, yellow, orange, red. Red is the theme's destructive colour (Virgile's pick): dark mode's --ui-red is pinkish, and more so at the 0.75 opacity below. */
+.sf-limit .su-verdict-icon[data-severity=caution]{color:var(--ui-yellow,#c08532)}.sf-limit .su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.sf-limit .su-verdict-icon[data-severity=high]{color:var(--dt-destructive,#cf2d56)}
+/* Saturated hues read stronger than the neutral icons beside them at equal lightness contrast; 0.75 opacity brings the coloured glyphs to the same visual weight in light and dark themes. */.sf-limit .su-verdict-icon:is([data-severity=caution],[data-severity=medium],[data-severity=high]){opacity:.75;transition:opacity .1s}
 /* Hover, focus and the open page lift the neutral items to the primary text colour; the coloured glyphs rise with them to full opacity, over the Button's own 100ms colour transition. */.sf .sf-footer .sf-limits:is(:hover,:focus-visible,[aria-current=page]) .su-verdict-icon{opacity:1}
 @media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
@@ -1059,7 +1059,7 @@ function statusIcon(status, glyph = status) {
   return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
     STATUS_ICONS[glyph].map(d => h('path', { key: d, d })));
 }
-// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge, clock-x and flag glyphs, plus one derived arrow.
+// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge, clock-x, alert-triangle and flag glyphs, plus one derived arrow.
 const BUNDLED_ICONS = {
   // Lucide v1.59.0 chart-no-axes-column (ISC), the status glyphs' family: three separate bars, where Tabler's chart-histogram overlaps its curve, bars and axis.
   ChartNoAxesColumn: ['M5 21v-6', 'M12 21V3', 'M19 21V9'],
@@ -1069,6 +1069,7 @@ const BUNDLED_ICONS = {
   ClockX: ['M20.926 13.15a9 9 0 1 0 -7.835 7.784', 'M12 7v5l2 2', 'M22 22l-5 -5', 'M17 22l5 -5'],
   // Derived from Tabler v3.44.0 arrow-bar-to-down (MIT) with the tip moved down to meet the bar's top edge, because Virgile wants the arrow to touch the floor.
   ArrowBarToDownTouching: ['M4 20h16', 'M12 4v14', 'M8 14l4 4l4 -4'],
+  AlertTriangle: ['M12 9v4', 'M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0', 'M12 16h.01'],
   Flag: ['M5 5a5 5 0 0 1 7 0a5 5 0 0 0 7 0v9a5 5 0 0 1 -7 0a5 5 0 0 0 -7 0v-9', 'M5 21v-7'],
   ClockHour1: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 7v5', 'M12 12l2 -3'],
   ClockHour3: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 12h3.5', 'M12 7v5'],
@@ -2092,7 +2093,7 @@ const UsageFooter = memo(function UsageFooter({ ctx, scope, companion = false })
     ctx && scope ? h(LimitsFooterStatus, { ctx, scope, enabled: companion }) : h(LimitsFooterButton, { items: [], now: 0 }),
     h('span', { className: 'sf-footer-end' }, h(UtilityLink, { link: USAGE_LINK })));
 });
-// The Limits entry point is one button whatever the data: every provider's mark, pooled units and a verdict glyph (only when the week runs short or wastes quota, coloured by severity), or the gauge alone while there is nothing to show (loading, failure, no companion, no provider with limits), so the page stays reachable and no placeholder or error ever appears in the row.
+// The Limits entry point is one button whatever the data: every provider's mark, pooled units and a verdict glyph (when the week runs short or wastes quota, coloured by severity, or a muted warning when the verdict cannot be computed), or the gauge alone while there is nothing to show (loading, failure, no companion, no provider with limits), so the page stays reachable and no placeholder or error ever appears in the row.
 function LimitsFooterStatus({ ctx, scope, enabled }) {
   const prefs = useUsagePreferences(ctx);
   // Same key as the Limits page with the same preferences, so both read one cache entry.
@@ -2630,14 +2631,22 @@ export function bankedFlags(accounts, from, to) {
 }
 // The Limits decision in one value: will the pool run short or throw quota away at resets within the next week? Judged on the weekly window (a week ahead of a five-hour window says little, and the 5h merge is postponed), falling back to the saved window choice when a provider has no weekly one; uses the saved lookback and the pooled unit projection.
 export const VERDICT_DAYS = 7;
-export const WASTE_SHARE = 0.05;
-// How bad a short or waste verdict is: the units missing (short) or lost (waste) against the pool's capacity, the sum of every account's weekly weight. From a third it is medium (orange), from two thirds high (red), below that low (muted). Multiplying instead of dividing keeps the exact thresholds exact.
-export function verdictSeverity(amount, capacity) {
-  if (!(capacity > 0) || !Number.isFinite(amount)) return null;
-  return amount * 3 >= capacity * 2 ? 'high' : amount * 3 >= capacity ? 'medium' : 'low';
+// Virgile's severity bands, most severe first; below the last band an event is not meaningful and draws no glyph. Severities map to colours: high red, medium orange, caution yellow, low muted.
+// Blocked: the time the pool sits empty within the 7 days, every hour counted (the averaging window already smooths nights and weekends), because a person feels hours without quota whatever the plan size.
+export const BLOCKED_BANDS = [[24 * HOUR_S, 'high'], [6 * HOUR_S, 'medium'], [2 * HOUR_S, 'caution'], [15 * 60, 'low']];
+// Lost: the units expiring unused at resets against the pool's capacity (the sum of every account's weekly weight), in percent.
+export const LOST_BANDS = [[50, 'high'], [30, 'medium'], [15, 'caution'], [5, 'low']];
+export function blockedSeverity(seconds) {
+  if (!Number.isFinite(seconds)) return null;
+  return BLOCKED_BANDS.find(([floor]) => seconds >= floor)?.[1] ?? null;
+}
+// Multiplying instead of dividing keeps the exact percentages exact.
+export function lostSeverity(lost, capacity) {
+  if (!(capacity > 0) || !Number.isFinite(lost)) return null;
+  return LOST_BANDS.find(([floor]) => lost * 100 >= capacity * floor)?.[1] ?? null;
 }
 export function limitsVerdict(provider, prefs, now) {
-  const result = { status: 'unknown', severity: null, window: null, remaining: null, capacity: null, remaining_pct: null, lost: 0, lost_pct: 0, missing: 0, empty_at: null, next_reset_at: null, last_loss_at: null };
+  const result = { status: 'unknown', severity: null, window: null, remaining: null, capacity: null, remaining_pct: null, lost: 0, lost_pct: 0, missing: 0, blocked_s: 0, empty_at: null, next_reset_at: null, last_loss_at: null };
   if (!provider || provider.auth === 'logged_out') return result;
   const windows = windowCatalog(provider);
   const selected = windows.find(item => item.key === 'weekly') || windows.find(item => item.key === prefs?.window) || windows[0];
@@ -2654,23 +2663,33 @@ export function limitsVerdict(provider, prefs, now) {
   const lost = losses.reduce((sum, item) => sum + item.lost, 0);
   Object.assign(result, { lost, lost_pct: lost / projection.capacity * 100, last_loss_at: losses.length ? losses.at(-1).t : null });
   const end = now + VERDICT_DAYS * DAY_S, spans = emptySpans(projection.points).filter(span => (span.end ?? Infinity) - span.start > 60);
-  if (spans.length) {
-    // What the projected demand cannot get: the drain rate over every stretch the pool sits empty within the week.
-    const emptyS = spans.reduce((sum, span) => sum + Math.max(0, Math.min(span.end ?? end, end) - span.start), 0), missing = projection.rate * emptyS / HOUR_S;
-    return { ...result, status: 'short', empty_at: spans[0].start, next_reset_at: spans[0].end, missing, severity: verdictSeverity(missing, projection.capacity) };
+  // Every stretch the pool sits empty within the week, and what the projected demand cannot get over them at the drain rate.
+  const blockedS = spans.reduce((sum, span) => sum + Math.max(0, Math.min(span.end ?? end, end) - span.start), 0);
+  const blocked = blockedSeverity(blockedS);
+  if (blocked) {
+    const short = { ...result, status: 'short', empty_at: spans[0].start, next_reset_at: spans[0].end, missing: projection.rate * blockedS / HOUR_S, blocked_s: blockedS, severity: blocked };
+    // The glyph signals what to do now, so the next meaningful event decides: units a reset discards before the pool runs dry are only saved by spending them, whatever happens after that reset. A loss below the lost bands is not an event, so the run-out decides.
+    const early = losses.filter(item => item.t < spans[0].start), earlyLost = early.reduce((sum, item) => sum + item.lost, 0), earlySeverity = lostSeverity(earlyLost, projection.capacity);
+    if (!earlySeverity) return short;
+    return { ...short, status: 'waste', lost: earlyLost, lost_pct: earlyLost / projection.capacity * 100, last_loss_at: early.at(-1).t, severity: earlySeverity };
   }
-  const waste = lost >= WASTE_SHARE * projection.capacity;
-  return { ...result, status: waste ? 'waste' : 'ok', severity: waste ? verdictSeverity(lost, projection.capacity) : null };
+  const severity = lostSeverity(lost, projection.capacity);
+  return { ...result, status: severity ? 'waste' : 'ok', severity };
 }
 // One factual sentence for the verdict, shared by the Limits page and the sidebar footer: what happens, when and how much, never what to do about it (Virgile draws the conclusion himself).
 export function verdictText(verdict, now) {
-  if (verdict?.status === 'short') {
+  const shortText = () => {
     const at = verdict.empty_at - now < 60 ? 'Out of quota now' : `Runs out ${resetTime(verdict.empty_at, now)}`;
     // next_reset_at is the first reset after the pool empties; earlier resets can still appear on the chart, so the text must not claim there is none.
     const gap = verdict.next_reset_at === null ? `still empty at the end of the ${VERDICT_DAYS} days` : `${formatDurationShort(verdict.next_reset_at - verdict.empty_at)} before the next reset`;
     return `${at}, ${gap} · missing ~${unitsText(verdict.missing)} units`;
+  };
+  if (verdict?.status === 'short') return shortText();
+  if (verdict?.status === 'waste') {
+    const waste = `${unitsText(verdict.lost)} units will expire unused by ${formatAt(verdict.last_loss_at, { weekday: 'short' })}`;
+    // A pool that wastes first and runs dry later keeps both facts, in the order they happen.
+    return verdict.empty_at === null ? waste : `${waste}, then ${shortText().replace(/^Runs/, 'runs')}`;
   }
-  if (verdict?.status === 'waste') return `${unitsText(verdict.lost)} units will expire unused by ${formatAt(verdict.last_loss_at, { weekday: 'short' })}`;
   if (verdict?.status === 'ok') return `On track for the next ${VERDICT_DAYS} days: nothing runs out and little expires unused`;
   return `Not enough recent readings to judge the next ${VERDICT_DAYS} days`;
 }
@@ -3051,9 +3070,9 @@ function MeasureRow({ nowPct, average, empty, lookback, setLookback }) {
       h(MeasureSpan, { fromPct: empty.fromPct, toPct: empty.toPct }), label(empty, 'right', nowPct, 100)) : null);
 }
 const rateShort = rate => rate === null ? 'no drain data' : `~${rateNumber(rate)} units / h`;
-// Verdict glyphs chosen by Virgile, shared by the Limits page and the sidebar footer: an arrow hitting the floor for a pool that runs dry within the week, Tabler clock-x for quota that expires unused.
-const VERDICT_ICONS = { short: ['ArrowBarToDownTouching', '⤓'], waste: ['ClockX', '⌛'] };
-// The glyph carries the severity colour (muted, orange or red); the verdict text stays neutral.
+// Verdict glyphs chosen by Virgile, shared by the Limits page and the sidebar footer: an arrow hitting the floor for a pool that runs dry within the week, Tabler clock-x for quota that expires unused, and a muted Tabler alert-triangle when the verdict cannot be computed (no drain data or only stale readings), so a missing glyph always means on track.
+const VERDICT_ICONS = { short: ['ArrowBarToDownTouching', '⤓'], waste: ['ClockX', '⌛'], unknown: ['AlertTriangle', '⚠'] };
+// The glyph carries the severity colour (muted, yellow, orange or red); the verdict text stays neutral.
 const verdictIcon = verdict => Object.hasOwn(VERDICT_ICONS, verdict?.status) ? h('span', { className: 'su-verdict-icon', 'aria-hidden': true, 'data-verdict-icon': verdict.status, 'data-severity': verdict.severity ?? undefined }, icon(...VERDICT_ICONS[verdict.status])) : null;
 function VerdictLine({ verdict, now, windowKey }) {
   // The verdict always judges the weekly pool; over another window's chart it says so.
@@ -3584,7 +3603,7 @@ const USAGE_CSS = `
 /* The text of a short or waste verdict stays neutral; only its glyph carries the severity colour, as in the sidebar footer. */
 .su-verdict[data-status=short],.su-verdict[data-status=waste]{color:var(--ui-text-secondary)}
 .su-verdict-icon{display:inline-flex;flex-shrink:0;color:var(--ui-text-tertiary)}.su-verdict .su-verdict-icon svg{width:15px;height:15px}
-.su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.su-verdict-icon[data-severity=high]{color:var(--ui-red,#cf2d56)}
+.su-verdict-icon[data-severity=caution]{color:var(--ui-yellow,#c08532)}.su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.su-verdict-icon[data-severity=high]{color:var(--dt-destructive,#cf2d56)}
 .su-limits-grid{margin-top:22px}
 .su-assumed{font-style:italic}
 .su-marks{position:absolute;inset:0;pointer-events:none}

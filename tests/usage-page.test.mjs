@@ -266,14 +266,14 @@ test('the pool weighs accounts by plan units: a raw point on Pro 100 moves it fi
 // A two-account pool for verdict cases: the priority-0 Business seat is empty and resets in 4 days, while the Pro 100 account (one percent = one unit) has `left` percent, resets in 1 day and has dropped `perHour` points every hour for the last 12 hours.
 // What the backend would serve for a hand-built provider: its per-sample rows as series on the wire.
 const served = provider => ({ ...provider, history: mock.limitSeries(provider.history) });
-function verdictProvider(now, { provider = 'openai-codex', label = 'OpenAI Codex', plans = ['team', 'prolite'], left = 60, perHour = 0.5, stale = false, auth = 'ok' } = {}) {
+function verdictProvider(now, { provider = 'openai-codex', label = 'OpenAI Codex', plans = ['team', 'prolite'], left = 60, perHour = 0.5, stale = false, auth = 'ok', firstReset = 4 * D } = {}) {
   const history = [];
   for (let hour = 12; hour >= 0; hour--) history.push(
     { t: now - hour * H, account: 'second', window: 'weekly', remaining_percent: left + hour * perHour, resets_at: now + D },
-    { t: now - hour * H, account: 'first', window: 'weekly', remaining_percent: 0, resets_at: now + 4 * D });
+    { t: now - hour * H, account: 'first', window: 'weekly', remaining_percent: 0, resets_at: now + firstReset });
   const win = (remaining, resets) => [{ key: 'weekly', label: 'Weekly', window_seconds: 7 * D, remaining_percent: remaining, resets_at: resets }];
   return { provider, label, auth, history, accounts: [
-    { id: 'first', label: 'codex-team', priority: 0, plan: plans[0], fetched_at: now, stale, windows: win(0, now + 4 * D) },
+    { id: 'first', label: 'codex-team', priority: 0, plan: plans[0], fetched_at: now, stale, windows: win(0, now + firstReset) },
     { id: 'second', label: 'codex-pro', priority: 1, plan: plans[1], fetched_at: now, stale, windows: win(left, now + D) }] };
 }
 
@@ -284,7 +284,7 @@ test('the verdict says waste when resets discard at least 5% of capacity and the
   assert.deepEqual([verdict.status, verdict.window, verdict.remaining, verdict.capacity, verdict.remaining_pct, verdict.empty_at, verdict.last_loss_at - now], ['waste', 'weekly', 60, 120, 50, null, D]);
   assert.equal(Math.round(verdict.lost * 1000) / 1000, 48); assert.equal(Math.round(verdict.lost_pct * 10) / 10, 40);
   assert.match(usage.verdictText(verdict, now), /^48 units will expire unused by [A-Z][a-z]{2}$/, 'the fact only, no advice');
-  assert.deepEqual([verdict.severity, verdict.missing], ['medium', 0], '48 of 120 units lost is over a third of the capacity');
+  assert.deepEqual([verdict.severity, verdict.missing], ['medium', 0], '48 of 120 units lost is 40% of the capacity: orange from 30%');
   const marks = usage.wasteMarks(usage.projectPool(verdictProvider(now).accounts, verdictProvider(now).history, 'weekly', now, 7 * D, { lookbackS: 12 * H, provider: 'openai-codex' }));
   assert.deepEqual(marks.map(mark => [mark.t - now, Math.round(mark.before), Math.round(mark.lost), mark.accounts.map(item => `${item.label} ${item.plan_label}`).join()]), [[D, 48, 48, 'codex-pro Pro 100']]);
   // A loss under 5% of capacity is noise: 13% of Pro 100 at 0.5 units an hour leaves 1 unit at the reset.
@@ -293,14 +293,38 @@ test('the verdict says waste when resets discard at least 5% of capacity and the
   assert.match(usage.verdictText(ok, now), /^On track for the next 7 days/);
 });
 
+test('the verdict says waste when a reset discards units before the pool runs dry, keeping the run-out facts', () => {
+  const now = 1_000_000;
+  // Two units an hour: 12 units still expire at Pro 100's reset after a day, then its fresh 100 run out 50 hours later, 22 hours before the Business seat resets. Only spending now saves those 12, so the glyph says waste.
+  const verdict = usage.limitsVerdict(verdictProvider(now, { perHour: 2 }), usage.USAGE_DEFAULTS, now);
+  assert.deepEqual([verdict.status, Math.round(verdict.empty_at - now), verdict.next_reset_at - now, verdict.last_loss_at - now], ['waste', 74 * H, 4 * D, D]);
+  assert.match(usage.verdictText(verdict, now), /^12 units will expire unused by [A-Z][a-z]{2}, then runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset · missing ~168 units$/, 'both facts in the order they happen, no advice');
+  // Severity follows the 12 units lost (10% of capacity), not the 84 hours blocked later.
+  assert.deepEqual([Math.round(verdict.lost), verdict.severity, Math.round(verdict.missing * 1000) / 1000, verdict.blocked_s], [12, 'low', 168, 84 * H]);
+  // A loss under 5% of capacity is not a meaningful event: 2.4 units an hour leaves 2.4 units to expire at Pro 100's reset, so the later run-out decides.
+  const small = usage.limitsVerdict(verdictProvider(now, { perHour: 2.4 }), usage.USAGE_DEFAULTS, now);
+  assert.deepEqual([small.status, small.severity], ['short', 'high']);
+});
+
+test('the verdict skips a reset that discards nothing and judges the next meaningful event', () => {
+  const now = 1_000_000;
+  // The empty Business seat resets first, in six hours, and loses nothing; the next event is Pro 100 discarding 32 units at its reset in a day, before the pool runs dry.
+  const waste = usage.limitsVerdict(verdictProvider(now, { perHour: 2, firstReset: 6 * H }), usage.USAGE_DEFAULTS, now);
+  assert.deepEqual([waste.status, Math.round(waste.lost), waste.severity, waste.last_loss_at - now, Math.round(waste.empty_at - now)], ['waste', 32, 'caution', D, 74 * H]);
+  // From 20 units, the same empty reset is followed by the pool running dry after 20 hours, before Pro 100 resets with nothing left to lose.
+  const short = usage.limitsVerdict(verdictProvider(now, { left: 20, perHour: 2, firstReset: 6 * H }), usage.USAGE_DEFAULTS, now);
+  assert.deepEqual([short.status, short.lost, Math.round(short.empty_at - now)], ['short', 0, 20 * H]);
+});
+
 test('the verdict says short when the projection hits zero before a reset, using the saved lookback', () => {
   const now = 1_000_000;
-  // Two units an hour: 12 units still expire at Pro 100's reset after a day, then its fresh 100 run out 50 hours later, 22 hours before the Business seat resets.
-  const verdict = usage.limitsVerdict(verdictProvider(now, { perHour: 2 }), usage.USAGE_DEFAULTS, now);
-  assert.deepEqual([verdict.status, Math.round(verdict.empty_at - now), verdict.next_reset_at - now], ['short', 74 * H, 4 * D]);
-  assert.match(usage.verdictText(verdict, now), /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset · missing ~168 units$/, 'the facts only, no advice');
-  // Missing units are the drain over every empty stretch in the week: 22 hours until the Business seat refills, then 62 hours from when its 20 units run out to the end of the week, at 2 units an hour.
-  assert.deepEqual([Math.round(verdict.missing * 1000) / 1000, verdict.severity, Math.round(verdict.lost)], [168, 'high', 12]);
+  // Two units an hour from 20: Pro 100 runs dry after 10 hours, 14 hours before its reset, so nothing expires first.
+  const verdict = usage.limitsVerdict(verdictProvider(now, { left: 20, perHour: 2 }), usage.USAGE_DEFAULTS, now);
+  assert.deepEqual([verdict.status, Math.round(verdict.empty_at - now), verdict.next_reset_at - now], ['short', 10 * H, D]);
+  assert.match(usage.verdictText(verdict, now), /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 14h 0m before the next reset · missing ~196 units$/, 'the facts only, no advice');
+  // Missing units are the drain over every empty stretch in the week at 2 units an hour: 14 hours until Pro 100 resets, 22 hours from when its fresh 100 run out until the Business seat refills, then 62 hours from when its 20 units run out to the end of the week.
+  // 98 hours blocked is over a day: red.
+  assert.deepEqual([Math.round(verdict.missing * 1000) / 1000, verdict.blocked_s, verdict.severity, Math.round(verdict.lost)], [196, 98 * H, 'high', 0]);
   // The verdict reads the user's lookback: one hour of the same steady drain gives the same rate, so the same empty time.
   assert.equal(Math.round(usage.limitsVerdict(verdictProvider(now, { perHour: 2 }), { ...usage.USAGE_DEFAULTS, lookback: 1 }, now).empty_at - now), 74 * H);
   const steep = verdictProvider(now, { perHour: 2 });
@@ -320,15 +344,19 @@ test('the verdict is unknown without drain data, with stale readings or for a lo
   assert.match(usage.verdictText({ status: 'unknown' }, now), /^Not enough recent readings/);
 });
 
-test('verdict severity compares missing or lost units with the pool capacity at exactly one and two thirds', () => {
-  assert.deepEqual([[39.99, 120], [40, 120], [79.99, 120], [80, 120], [120, 120], [0, 120]].map(([amount, capacity]) => usage.verdictSeverity(amount, capacity)), ['low', 'medium', 'medium', 'high', 'high', 'low']);
-  assert.deepEqual([usage.verdictSeverity(10, 0), usage.verdictSeverity(NaN, 120)], [null, null]);
-  // Pro 100 holding 52 units at half a unit an hour has exactly 40 of the pool's 120 left at its reset: one third. 92 units leave exactly 80: two thirds.
-  const now = 1_000_000;
-  const third = usage.limitsVerdict(verdictProvider(now, { left: 52 }), usage.USAGE_DEFAULTS, now), twoThirds = usage.limitsVerdict(verdictProvider(now, { left: 92 }), usage.USAGE_DEFAULTS, now), below = usage.limitsVerdict(verdictProvider(now, { left: 51 }), usage.USAGE_DEFAULTS, now);
-  assert.deepEqual([third.status, third.lost, third.severity], ['waste', 40, 'medium']);
-  assert.deepEqual([twoThirds.status, twoThirds.lost, twoThirds.severity], ['waste', 80, 'high']);
-  assert.deepEqual([below.status, below.lost, below.severity], ['waste', 39, 'low']);
+test('verdict severity follows Virgile\'s bands: hours blocked for a run-out, units lost against capacity for waste', () => {
+  // Blocked: from 24h red, 6h orange, 2h yellow, 15 min muted; below that no glyph.
+  assert.deepEqual([24 * H, 24 * H - 1, 6 * H, 6 * H - 1, 2 * H, 2 * H - 1, 900, 899, 0, NaN].map(usage.blockedSeverity), ['high', 'medium', 'medium', 'caution', 'caution', 'low', 'low', null, null, null]);
+  // Lost: from 50% of capacity red, 30% orange, 15% yellow, 5% muted; below that no glyph.
+  assert.deepEqual([[60, 120], [59.99, 120], [36, 120], [35.99, 120], [18, 120], [17.99, 120], [6, 120], [5.99, 120], [0, 120]].map(([lost, capacity]) => usage.lostSeverity(lost, capacity)), ['high', 'medium', 'medium', 'caution', 'caution', 'low', 'low', null, null]);
+  assert.deepEqual([usage.lostSeverity(10, 0), usage.lostSeverity(NaN, 120)], [null, null]);
+  // Pro 100 at half a unit an hour loses its remaining units minus 12 at its reset: 72 units leave exactly 60 of the pool's 120 (50%), 48 leave 36 (30%), 30 leave 18 (15%), 18 leave 6 (5%), 17 leave 5.
+  const now = 1_000_000, at = left => usage.limitsVerdict(verdictProvider(now, { left }), usage.USAGE_DEFAULTS, now);
+  assert.deepEqual([72, 48, 30, 18, 17].map(left => { const verdict = at(left); return [verdict.status, Math.round(verdict.lost * 1000) / 1000, verdict.severity]; }),
+    [['waste', 60, 'high'], ['waste', 36, 'medium'], ['waste', 18, 'caution'], ['waste', 6, 'low'], ['ok', 5, null]]);
+  // A run-out shorter than 15 minutes is not an event either: half a unit an hour from 11.95 units empties Pro 100 6 minutes before its reset, and its fresh 100 units then outlast the week.
+  const brief = usage.limitsVerdict(verdictProvider(now, { left: 11.95, perHour: 0.5 }), usage.USAGE_DEFAULTS, now);
+  assert.deepEqual([brief.status, brief.severity, brief.empty_at], ['ok', null, null]);
 });
 
 test('accounts resetting together stack their markers in pool priority order on one vertical line', () => {
@@ -892,7 +920,7 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
   const verdict = $('.su-verdict');
   assert.equal(verdict.dataset.status, 'waste');
   assert.match(verdict.textContent, /^48 units will expire unused by [A-Z][a-z]{2}$/);
-  // 48 of 120 units is over a third of the capacity: an orange clock-x, the verdict text itself neutral.
+  // 48 of 120 units is 40% of the capacity: an orange clock-x, the verdict text itself neutral.
   assert.deepEqual([verdict.dataset.severity, verdict.querySelector('[data-verdict-icon]')?.dataset.verdictIcon, verdict.querySelector('[data-verdict-icon]')?.dataset.severity, verdict.querySelector('svg')?.getAttribute('data-icon')], ['medium', 'waste', 'medium', 'ClockX']);
   const marks = $$('.su-pooled .su-waste');
   assert.equal(marks.length, 1);
@@ -911,13 +939,13 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
   assert.equal($('.su-measure[data-kind="empty"]'), null, 'this pool never runs dry');
 });
 
-test('a pool that runs dry before its next reset gets the short verdict alongside its waste and time-to-empty measurements', async () => {
+test('a pool that wastes at a reset before running dry gets the waste glyph, both facts and its waste and time-to-empty measurements', async () => {
   const now = Date.now() / 1000;
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [served(verdictProvider(now, { perHour: 2 }))] };
   plugin.register(mock.ctx); await render(limitsPage());
-  assert.equal($('.su-verdict').dataset.status, 'short');
-  assert.match($('.su-verdict').textContent, /^Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset · missing ~168 units$/);
-  assert.deepEqual([$('.su-verdict [data-verdict-icon]').dataset.verdictIcon, $('.su-verdict [data-verdict-icon]').dataset.severity, $('.su-verdict svg')?.getAttribute('data-icon')], ['short', 'high', 'ArrowBarToDownTouching']);
+  assert.equal($('.su-verdict').dataset.status, 'waste');
+  assert.match($('.su-verdict').textContent, /^12 units will expire unused by [A-Z][a-z]{2}, then runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset · missing ~168 units$/);
+  assert.deepEqual([$('.su-verdict [data-verdict-icon]').dataset.verdictIcon, $('.su-verdict [data-verdict-icon]').dataset.severity, $('.su-verdict svg')?.getAttribute('data-icon')], ['waste', 'low', 'ClockX']);
   assert.deepEqual($$('.su-pooled .su-waste .su-waste-text').map(node => node.textContent), ['12 lost']);
   // About 74 hours ahead; the page reads its own clock a moment after the fixture's.
   assert.match($('.su-measure[data-kind="empty"]').textContent, /^Empty in 3d [12]h · /);
@@ -931,28 +959,42 @@ test('the single Limits button shows each provider\'s pooled units with a verdic
   const now = Date.now() / 1000;
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [
     { provider: 'xai', label: 'xAI', auth: 'logged_out', accounts: [], history: [] },
-    served(verdictProvider(now, { perHour: 2 })),
+    served(verdictProvider(now, { left: 20, perHour: 2 })),
     served(verdictProvider(now, { provider: 'anthropic', label: 'Anthropic', plans: ['pro', 'max_5x'] })),
     served(verdictProvider(now, { provider: 'nous', label: 'Nous', plans: [null, null], left: 13 }))] };
   plugin.register(mock.ctx); await render(mock.control.contributions[0]);
   assert.equal(restPaths().filter(path => path.startsWith('/usage/limits?')).length, 1, 'one limits request, keyed like the Limits page');
   assert.equal(restPaths().find(path => path.startsWith('/usage/limits?')), '/usage/limits?hours=168');
   assert.deepEqual(footerItems().map(item => [item.provider, item.status, item.value, item.icon, item.mark]), [
-    ['openai-codex', 'short', '60', 'short', 'openai-codex'], ['anthropic', 'waste', '60', 'waste', 'anthropic'], ['nous', 'ok', '2.6', null, 'nous']], 'the logged-out provider is left out');
-  // Codex misses 168 of 120 units (red), Anthropic loses 48 of 120 (orange); an ok pool has no glyph and no severity.
+    ['openai-codex', 'short', '20', 'short', 'openai-codex'], ['anthropic', 'waste', '60', 'waste', 'anthropic'], ['nous', 'ok', '2.6', null, 'nous']], 'the logged-out provider is left out');
+  // Codex is blocked for 98 hours (red), Anthropic loses 48 of 120 units (40%: orange); an ok pool has no glyph and no severity.
   assert.deepEqual($$('.sf-footer .sf-limit').map(node => [node.dataset.severity ?? null, node.querySelector('[data-verdict-icon]')?.dataset.severity ?? null, node.querySelector('[data-verdict-icon] svg')?.getAttribute('data-icon') ?? null]),
     [['high', 'high', 'ArrowBarToDownTouching'], ['medium', 'medium', 'ClockX'], [null, null, null]]);
   const limits = $('.sf-footer .sf-limits');
   assert.deepEqual([$$('.sf-footer button').length, limits.querySelectorAll('button').length, limits.dataset.empty, limits.getAttribute('title')], [2, 0, 'false', null], 'one button holds every item; its tooltip is the SDK Tip, not a title');
   // The accessible name repeats the tooltip: one factual line per provider, no advice.
   const name = limits.getAttribute('aria-label');
-  assert.match(name, /^Limits\. OpenAI Codex: 60 \/ 120 units · Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), 22h 0m before the next reset · missing ~168 units\. Anthropic: 60 \/ 120 units · 48 units will expire unused by [A-Z][a-z]{2}\. Nous: 2\.6 \/ 40 units · On track for the next 7 days: nothing runs out and little expires unused\.$/);
+  assert.match(name, /^Limits\. OpenAI Codex: 20 \/ 120 units · Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), (14h 0m|13h 59m) before the next reset · missing ~196 units\. Anthropic: 60 \/ 120 units · 48 units will expire unused by [A-Z][a-z]{2}\. Nous: 2\.6 \/ 40 units · On track for the next 7 days: nothing runs out and little expires unused\.$/);
   assert.equal(ADVICE.test(name), false);
   const codex = usage.validUsageLimits(mock.control.usageLimits).providers[1];
-  assert.equal(usage.limitsFooterLine(codex, usage.limitsVerdict(codex, usage.USAGE_DEFAULTS, now), now).startsWith('OpenAI Codex: 60 / 120 units · Runs out '), true);
+  assert.equal(usage.limitsFooterLine(codex, usage.limitsVerdict(codex, usage.USAGE_DEFAULTS, now), now).startsWith('OpenAI Codex: 20 / 120 units · Runs out '), true);
   await click(limits);
   assert.deepEqual(mock.calls.filter(call => call[0] === 'navigate').map(call => call[1]), ['/t3sidebar-limits']);
   assert.equal(mock.ctx.storage.get('usage-preferences', null), null, 'clicking only opens the page');
+});
+
+test('a provider whose verdict cannot be computed shows a muted warning glyph in the footer and on the Limits page', async () => {
+  const now = Date.now() / 1000;
+  const flat = verdictProvider(now, { provider: 'anthropic', label: 'Anthropic' }); flat.history = [];
+  mock.control.usageLimits = { generated_at: now, sampler: null, providers: [served(verdictProvider(now, { stale: true })), served(flat)] };
+  plugin.register(mock.ctx); await render(mock.control.contributions[0]);
+  // Stale readings and no drain data both leave the verdict unknown: a warning instead of no glyph, so no glyph always means on track.
+  assert.deepEqual(footerItems().map(item => [item.provider, item.status, item.icon]), [['openai-codex', 'unknown', 'unknown'], ['anthropic', 'unknown', 'unknown']]);
+  assert.deepEqual($$('.sf-footer .sf-limit [data-verdict-icon]').map(node => [node.dataset.severity ?? null, node.querySelector('svg')?.getAttribute('data-icon')]), [[null, 'AlertTriangle'], [null, 'AlertTriangle']]);
+  await act(async () => { root.unmount(); }); root = null;
+  plugin.register(mock.ctx); await render(limitsPage());
+  assert.deepEqual($$('.su-verdict').map(node => [node.dataset.status, node.querySelector('[data-verdict-icon] svg')?.getAttribute('data-icon'), node.querySelector('[data-verdict-icon]')?.dataset.severity ?? null]),
+    [['unknown', 'AlertTriangle', null], ['unknown', 'AlertTriangle', null]]);
 });
 
 test('the Limits button shares the page cache, follows its preferences and falls back to the gauge without data', async () => {

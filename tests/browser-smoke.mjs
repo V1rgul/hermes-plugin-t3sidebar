@@ -1544,7 +1544,7 @@ try {
         && footerTip.count === 1 && footerTip.text === 'Token usage' && footerTip.above && footerTip.centered && footerTip.inside);
       await usage.mouse.move(5, 5);
     }
-    // The Limits button holds one item per provider with limits: the synthetic Codex pool (Business 20 + Pro 100 100 units) runs short this week, missing more than two thirds of its capacity (red arrow to the floor), and Anthropic's Max 20x (200 units) throws under a third of its capacity away at its reset (muted clock-x).
+    // The Limits button holds one item per provider with limits: the synthetic Codex pool (Business 20 + Pro 100 100 units) throws 17% of its capacity away at tomorrow's reset before running short later in the week (yellow clock-x from 15%: the next event decides), and Anthropic's Max 20x (200 units) throws 17% of its capacity away at its reset (yellow clock-x).
     await usage.waitForSelector('.sf-footer .sf-limit');
     const footerStatus = () => usage.evaluate(() => {
       const r = el => el.getBoundingClientRect(), footer = document.querySelector('.sf-footer'), button = footer.querySelector('.sf-limits'), usageButton = footer.querySelector('.sf-utility');
@@ -1557,19 +1557,21 @@ try {
             icon: glyph?.dataset.verdictIcon ?? null, severity: item.dataset.severity ?? null, iconName: glyph?.querySelector('svg')?.getAttribute('data-icon') ?? null, iconColor: glyph ? rgb(glyph) : null, valueColor: rgb(value), inside: r(item).right <= r(button).right + 0.5 && r(item).bottom <= r(button).bottom + 0.5 }; }) };
     });
     const ADVICE = /cut optional|background work|room for|optional work/i;
-    const codexLine = /^OpenAI Codex: \d+(\.\d)? \/ 120 units · Runs out \w{3} \d{1,2}:\d{2} (AM|PM), ((\d+d \d+h|\d+h \d+m) before the next reset|still empty at the end of the 7 days) · missing ~\d+ units$/;
+    const codexLine = /^OpenAI Codex: \d+(\.\d)? \/ 120 units · \d+(\.\d)? units will expire unused by \w{3}, then runs out \w{3} \d{1,2}:\d{2} (AM|PM), ((\d+d \d+h|\d+h \d+m) before the next reset|still empty at the end of the 7 days) · missing ~\d+ units$/;
     const anthropicLine = /^Anthropic: \d+(\.\d)? \/ 200 units · \d+(\.\d)? units will expire unused by \w{3}$/;
     // A neutral colour has its channels close together; theme orange and red do not.
     const neutral = color => Math.max(...color) - Math.min(...color) < 24;
+    // The harness theme's --ui-yellow, #c08532.
+    const yellow = color => [192, 133, 50].every((value, index) => Math.abs(color[index] - value) <= 2);
     {
       const status = await footerStatus();
       console.log(`USAGE FOOTER STATUS: ${JSON.stringify(status)}`);
       const [codex, anthropic] = status.items;
       check('Limits button is left-aligned and the Usage button right-aligned in the same 36px row, the Limits button one 28px control with one item per provider, without overflow', status.footerHeight === 36 && status.leftAligned && status.rightAligned && status.beforeUsage && status.oneRow && status.buttonHeight === 28 && status.insideFooter
         && status.focusables === 0 && status.items.length === 2 && codex.provider === 'openai-codex' && anthropic.provider === 'anthropic' && status.items.every(item => item.mark && item.inside) && status.overflow <= 0);
-      check('Limits items show pooled units in tabular numerals: a red arrow to the floor for Codex missing over two thirds of its capacity, a muted clock-x for Anthropic losing under a third', status.items.every(item => /^\d+(\.\d)?$/.test(item.value) && item.tabular)
-        && codex.status === 'short' && codex.severity === 'high' && codex.iconName === 'ArrowBarToDownTouching' && codex.iconColor[0] > codex.iconColor[1] + 40
-        && anthropic.status === 'waste' && anthropic.severity === 'low' && anthropic.iconName === 'ClockX' && neutral(anthropic.iconColor) && anthropic.iconColor.join() === anthropic.valueColor.join());
+      check('Limits items show pooled units in tabular numerals: a yellow clock-x for Codex losing 15-30% of its capacity at a reset before it runs dry, and for Anthropic losing 15-30% of its own', status.items.every(item => /^\d+(\.\d)?$/.test(item.value) && item.tabular)
+        && codex.status === 'waste' && codex.severity === 'caution' && codex.iconName === 'ClockX' && yellow(codex.iconColor)
+        && anthropic.status === 'waste' && anthropic.severity === 'caution' && anthropic.iconName === 'ClockX' && yellow(anthropic.iconColor));
       const idle = await limitsButton.evaluate(el => getComputedStyle(el).backgroundColor);
       await limitsButton.hover();
       await usage.waitForSelector('.mock-tip');
@@ -1579,10 +1581,8 @@ try {
       check('Limits button tooltip lists one factual line per provider, matches its accessible name and stays inside the window', tip.count === 1 && tip.lines.length === 2 && codexLine.test(tip.lines[0]) && anthropicLine.test(tip.lines[1])
         && status.label === `Limits. ${tip.lines.join('. ')}.` && !ADVICE.test(status.label) && tip.above && tip.inside);
       check('Limits button hover shows the ghost background', await limitsButton.evaluate(el => getComputedStyle(el).backgroundColor) !== idle);
-      // Past the 100ms opacity transition in both directions.
-      await usage.waitForTimeout(200);
-      check('Limits button hover lifts the coloured verdict glyph to full opacity with the neutral items', await usage.evaluate(() => getComputedStyle(document.querySelector('.sf-limit[data-severity=high] .su-verdict-icon')).opacity) === '1');
       await usage.mouse.move(5, 5);
+      // Past the 100ms opacity transition.
       await usage.waitForTimeout(200);
       const toolbarIcons = await usage.evaluate(() => [...document.querySelectorAll('.sf-header svg, .sf-footer svg')].map(svg => {
         const box = svg.getBoundingClientRect(), path = svg.querySelector('path'), mark = !!svg.dataset.providerMark, verdict = svg.closest('[data-verdict-icon]');
@@ -1939,9 +1939,9 @@ try {
       console.log(`USAGE LIMITS WASTE (mixed): ${JSON.stringify({ waste, claude })}`);
       check('Limits draws a waste measurement at the Pro 100 reset: x within 1px, span = the expiring units within 1px, in the Now line colour, with arrowheads, ticks and a label',
         waste.marks.length === 1 && waste.marks.every(mark => wasteOk(mark, 'codex-pro · Pro 100')) && waste.marks[0].span > 16 && !waste.marks[0].hidden && waste.apart);
-      check('Limits Codex verdict under its headline: neutral factual text (when it runs out, the gap, the missing units) after a red arrow to the floor', waste.verdict?.status === 'short' && waste.verdict.severity === 'high' && waste.verdict.icon === 'ArrowBarToDownTouching'
-        && /^Runs out \w{3} \d{1,2}:\d{2} (AM|PM), ((\d+d \d+h|\d+h \d+m) before the next reset|still empty at the end of the 7 days) · missing ~\d+ units$/.test(waste.verdict.text) && neutral(waste.verdict.color) && waste.verdict.iconColor[0] > waste.verdict.iconColor[1] + 40);
-      check('Limits Anthropic chart has its own waste verdict (muted clock-x: under a third of the capacity) and a waste measurement at the Max 20x reset', claude.verdict?.status === 'waste' && claude.verdict.severity === 'low' && claude.verdict.icon === 'ClockX' && neutral(claude.verdict.iconColor)
+      check('Limits Codex verdict under its headline: neutral factual text (the units expiring first, then when it runs out, the gap, the missing units) after a yellow clock-x', waste.verdict?.status === 'waste' && waste.verdict.severity === 'caution' && waste.verdict.icon === 'ClockX'
+        && /^\d+(\.\d)? units will expire unused by \w{3}, then runs out \w{3} \d{1,2}:\d{2} (AM|PM), ((\d+d \d+h|\d+h \d+m) before the next reset|still empty at the end of the 7 days) · missing ~\d+ units$/.test(waste.verdict.text) && neutral(waste.verdict.color) && yellow(waste.verdict.iconColor));
+      check('Limits Anthropic chart has its own waste verdict (yellow clock-x: 15-30% of the capacity) and a waste measurement at the Max 20x reset', claude.verdict?.status === 'waste' && claude.verdict.severity === 'caution' && claude.verdict.icon === 'ClockX' && yellow(claude.verdict.iconColor)
         && /^\d+(\.\d)? units will expire unused by \w{3}$/.test(claude.verdict.text) && claude.marks.length === 1 && claude.marks.every(mark => wasteOk(mark, 'claude-max · Max 20x')) && claude.apart);
       const headline = await usage.evaluate(() => [...document.querySelectorAll('.su-pooled')].map(chart => ({ pool: chart.querySelector('.su-pool').textContent, capacity: chart.querySelector('.su-capacity').textContent, composition: !!chart.querySelector('.su-composition'),
         ticks: [...chart.querySelectorAll('.su-yaxis span')].map(el => el.textContent).join() })));
@@ -2313,7 +2313,13 @@ try {
       await light.reload();
       await light.waitForSelector('.sf-footer .sf-limit');
       const footer = await light.evaluate(() => { const items = [...document.querySelectorAll('.sf-limit')]; return { items: items.map(item => `${item.dataset.provider}:${item.dataset.status}:${item.querySelector('[data-verdict-icon] svg')?.getAttribute('data-icon')}:${item.dataset.severity}`), label: document.querySelector('.sf-limits').getAttribute('aria-label') }; });
-      check('Footer items show the clock-x for every pool whose quota will expire unused, coloured by severity (Codex over a third: orange; Anthropic under: muted)', footer.items.join() === 'openai-codex:waste:ClockX:medium,anthropic:waste:ClockX:low' && /OpenAI Codex: \d+ \/ 120 units · \d+ units will expire unused by \w{3}\./.test(footer.label));
+      check('Footer items show the clock-x for every pool whose quota will expire unused, coloured by severity (Codex 30-50% of its capacity: orange; Anthropic 15-30%: yellow)', footer.items.join() === 'openai-codex:waste:ClockX:medium,anthropic:waste:ClockX:caution' && /OpenAI Codex: \d+ \/ 120 units · \d+ units will expire unused by \w{3}\./.test(footer.label));
+      // The orange glyph sits at 0.75 opacity at rest and rises to full opacity with the neutral items on hover, past the 100ms transition.
+      const glyphOpacity = () => light.evaluate(() => getComputedStyle(document.querySelector('.sf-limit[data-severity=medium] .su-verdict-icon')).opacity);
+      const restingGlyph = await glyphOpacity();
+      await light.locator('.sf-footer .sf-limits').hover();
+      await light.waitForTimeout(200);
+      check('Limits button hover lifts the coloured verdict glyph from 0.75 to full opacity with the neutral items', restingGlyph === '0.75' && await glyphOpacity() === '1');
       await light.locator('.sf-footer .sf-limits').click();
       // The mark itself is 0px wide (its line and arrows overflow it), so wait for it in the DOM rather than for visibility.
       await light.waitForSelector(`${CODEX} .su-pooled .su-waste`, { state: 'attached' });
@@ -2323,7 +2329,7 @@ try {
       const waste = await wasteGeometry(light, CODEX);
       const empty = await light.locator(`${CODEX} .su-measure[data-kind="empty"]`).count();
       console.log(`USAGE LIMITS WASTE (light): ${JSON.stringify({ waste, empty })}`);
-      check('Limits light week: a factual waste verdict after an orange clock-x (over a third of the capacity) and a waste measurement at the reset, no time-to-empty', waste.verdict?.status === 'waste' && waste.verdict.severity === 'medium' && waste.verdict.icon === 'ClockX'
+      check('Limits light week: a factual waste verdict after an orange clock-x (30-50% of the capacity) and a waste measurement at the reset, no time-to-empty', waste.verdict?.status === 'waste' && waste.verdict.severity === 'medium' && waste.verdict.icon === 'ClockX'
         && waste.verdict.iconColor[0] > waste.verdict.iconColor[2] + 60 && /^\d+(\.\d)? units will expire unused by \w{3}$/.test(waste.verdict.text) && waste.marks.length >= 1 && waste.marks.every(mark => wasteOk(mark, 'codex-pro · Pro 100')) && waste.apart && empty === 0);
       await light.mouse.move(5, 5);
       await light.locator('.harness-page').screenshot({ path: join(usageDir, 'v6-limits-7d-waste.png') });
