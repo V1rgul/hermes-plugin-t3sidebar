@@ -571,16 +571,17 @@ test('menu triggers and their owning card retain open state until dismissal or s
     await act(async () => $('[role=dialog]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
     assert.equal(trigger.getAttribute('aria-expanded'), 'false');
   }
-  const trigger = row('design').querySelector('[aria-label="Snooze session"]');
-  await click(trigger);
-  assert.equal(trigger.getAttribute('aria-expanded'), 'true'); assert.equal(row('design').dataset.menuOpen, 'true');
+  // The card mounts the shared menu around its trigger on the first open, so the button is looked up again rather than held.
+  const trigger = () => row('design').querySelector('[aria-label="Snooze session"]');
+  await click(trigger());
+  assert.equal(trigger().getAttribute('aria-expanded'), 'true'); assert.equal(row('design').dataset.menuOpen, 'true');
   mock.control.dropWrite = true;
   await click(button('In 1 hour'));
   assert.match($('[role=alert]').textContent, /did not confirm/);
-  assert.equal(trigger.getAttribute('aria-expanded'), 'true'); assert.equal(row('design').dataset.menuOpen, 'true');
+  assert.equal(trigger().getAttribute('aria-expanded'), 'true'); assert.equal(row('design').dataset.menuOpen, 'true');
   mock.control.dropWrite = false;
   await dismiss();
-  assert.equal(trigger.getAttribute('aria-expanded'), 'false'); assert.equal(row('design').dataset.menuOpen, 'false');
+  assert.equal(trigger().getAttribute('aria-expanded'), 'false'); assert.equal(row('design').dataset.menuOpen, 'false');
   await click(button('Actions for Sidebar layout'));
   assert.equal(row('design').dataset.menuOpen, 'true');
   await click(button('Pin'));

@@ -662,14 +662,21 @@ class LimitsStore:
 			return None
 		return {"interval_s": row[0], "started_at": row[1], "last_run_at": row[2], "last_error": row[3]}
 
-	def read_rows(self):
+	def read_rows(self, since=None):
+		"""Rows from ``since`` on, extended back to each account's newest window sample (or newest row without any) so the latest windows, label, priority and error stay exact for accounts that stopped sampling; ``None`` reads everything."""
 		with self._reader() as connection:
 			if connection is None:
 				return [], {}
-			rows = connection.execute(
-				"SELECT t, provider, account_id, account_label, priority, plan, banked_resets, window_key, window_label, "
-				"window_seconds, scope, model, used_percent, resets_at, error FROM limit_samples ORDER BY provider, account_id, t, rowid"
-			).fetchall()
+			columns = ("SELECT t, provider, account_id, account_label, priority, plan, banked_resets, window_key, window_label, "
+				"window_seconds, scope, model, used_percent, resets_at, error FROM limit_samples")
+			order = " ORDER BY provider, account_id, t, rowid"
+			if since is None:
+				rows = connection.execute(columns + order).fetchall()
+			else:
+				# Uncorrelated, so the per-account newest times are computed once rather than per row.
+				rows = connection.execute(
+					columns + " WHERE t >= MIN(?, (SELECT MIN(latest) FROM (SELECT COALESCE(MAX(CASE WHEN window_key IS NOT NULL THEN t END), MAX(t)) AS latest "
+					"FROM limit_samples GROUP BY provider, account_id)))" + order, (since,)).fetchall()
 			statuses = {provider: error for provider, error in connection.execute("SELECT provider, error FROM limit_provider_status")}
 		return rows, statuses
 
@@ -736,6 +743,10 @@ def _compact_series(account_id, key, samples):
 	return {"account": account_id, "window": key, "t": [s[0] for s in kept], "remaining_percent": [s[1] for s in kept], "resets_at": [s[2] for s in kept]}
 
 
+def _remaining(used):
+	return None if used is None else max(0.0, min(100.0, 100.0 - used))
+
+
 def limits_payload(store, *, hours, now, sampler_status=None):
 	"""``GET /usage/limits`` body: latest windows per account from its newest sample plus, per account window, the compacted history within ``hours`` (``_compact_series``)."""
 	if type(hours) is not int or not 1 <= hours <= MAX_HOURS:
@@ -743,9 +754,9 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 	now = _finite(now)
 	if now is None:
 		raise ValueError("now must be a finite epoch timestamp")
-	rows, statuses = store.read_rows()
-	credit_rows = store.read_credits()
 	since = now - hours * 3600.0
+	rows, statuses = store.read_rows(since)
+	credit_rows = store.read_credits()
 	providers = {}
 
 	def provider_block(slug):
@@ -767,14 +778,10 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 			continue
 		if account["fetched_at"] != t:
 			account["fetched_at"], account["sample"], account["windows"] = t, (plan, banked), []
-		remaining = None if used is None else max(0.0, min(100.0, 100.0 - used))
-		account["windows"].append({
-			# Samples stored before durations were inferred carry none; window_seconds fills them in the same way.
-			"key": key, "label": window_label, "window_seconds": window_seconds(slug, key, seconds), "scope": scope, "model": model,
-			"used_percent": used, "remaining_percent": remaining, "resets_at": resets_at,
-		})
+		# Only the newest sample's windows survive, so they stay raw until the account is assembled.
+		account["windows"].append((key, window_label, seconds, scope, model, used, resets_at))
 		if since <= t <= now:
-			block["series"].setdefault((account_id, key), []).append((_history_number(t), _history_number(remaining, 1), _history_number(resets_at)))
+			block["series"].setdefault((account_id, key), []).append((_history_number(t), _history_number(_remaining(used), 1), _history_number(resets_at)))
 	result = []
 	for slug in sorted(providers):
 		block = providers[slug]
@@ -788,7 +795,11 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 				"id": account_id, "label": label, "priority": priority, "plan": plan, "banked_resets": banked,
 				"banked_credits": _credits_block(credit_rows.get((slug, account_id)), now),
 				"fetched_at": fetched_at, "stale": age is None or age < 0 or age > STALE_AFTER_S, "error": error,
-				"windows": account["windows"],
+				"windows": [{
+					# Samples stored before durations were inferred carry none; window_seconds fills them in the same way.
+					"key": key, "label": window_label, "window_seconds": window_seconds(slug, key, seconds), "scope": scope, "model": model,
+					"used_percent": used, "remaining_percent": _remaining(used), "resets_at": resets_at,
+				} for key, window_label, seconds, scope, model, used, resets_at in account["windows"]],
 			})
 		accounts.sort(key=lambda a: (a["priority"] is None, a["priority"] or 0, a["label"] or "", a["id"]))
 		history = [_compact_series(account_id, key, samples) for (account_id, key), samples in sorted(block.pop("series").items())]

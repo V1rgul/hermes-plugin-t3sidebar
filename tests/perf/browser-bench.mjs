@@ -207,8 +207,8 @@ const SIDEBAR = ['search-all:type', 'search-all:clear', 'search-narrow:type', 's
   'filter:open', 'filter:close', 'project:side', 'project:all', 'focus', 'focus', 'poll', 'scroll:down', 'scroll:up'];
 const SUITES = [
   { name: 'sidebar', motion: 'reduce', large: true, ops: SIDEBAR },
-  // Ordinary motion keeps the fold transitions; the frame gap over the transition is what a user perceives as jank.
-  { name: 'sidebar-motion', motion: 'no-preference', large: true, ops: ['fold:archived', 'fold:archived', 'fold:working', 'fold:working'], observeMs: 450 },
+  // Ordinary motion keeps the fold transitions; the frame gap over the transition is what a user perceives as jank. Renders during a transition depend on frame timing (identical code measured 21 or 22 cards), so this suite reports its counts without gating them; the reduced-motion suite gates the same folds.
+  { name: 'sidebar-motion', motion: 'no-preference', large: true, ops: ['fold:archived', 'fold:archived', 'fold:working', 'fold:working'], observeMs: 450, countsGated: false },
   { name: 'usage', motion: 'reduce', ops: ['usage:open', 'usage:period-right', 'usage:period-left', 'usage:mode', 'usage:mode', 'usage:split', 'usage:split', 'usage:hover', 'usage:hover', 'page:close'] },
   { name: 'limits', motion: 'reduce', ops: ['limits:open', 'limits:hover', 'limits:hover', 'limits:lookback', 'limits:lookback', 'page:close'] }
 ].filter(suite => !args.only || args.only.split(',').includes(suite.name));
@@ -290,18 +290,19 @@ const budgets = JSON.parse(await readFile(budgetsPath, 'utf8').catch(() => '{"op
 const tolerance = { ratio: 1.25, floorMs: 3, renderRatio: 1.25, ...budgets.tolerance };
 const failures = [], warnings = [], rows = [];
 const summarize = entry => entry && entry.samples.length ? { median: median(entry.samples), p95: quantile(entry.samples, 0.95), maxGap: quantile(entry.gaps, 0.95), longTasks: entry.longTasks / entry.samples.length } : null;
+const countsGated = key => SUITES.find(suite => key.startsWith(`${suite.name}/`))?.countsGated !== false;
 for (const key of Object.keys(results.candidate)) {
-  const cand = results.candidate[key], base = results.baseline?.[key], c = summarize(cand), b = summarize(base), budget = budgets.ops?.[key];
+  const gated = countsGated(key), cand = results.candidate[key], base = results.baseline?.[key], c = summarize(cand), b = summarize(base), budget = budgets.ops?.[key];
   const status = [];
   if (budget) {
     if (budget.ms !== undefined && c.median > budget.ms) status.push(`median ${c.median.toFixed(1)} ms > budget ${budget.ms} ms`);
     if (budget.maxGap !== undefined && c.maxGap > budget.maxGap) status.push(`frame gap p95 ${c.maxGap.toFixed(1)} ms > budget ${budget.maxGap} ms`);
-    for (const metric of ['cardRenders', 'mounted', 'componentRenders']) if (budget[metric] !== undefined && cand.counts?.[metric] > budget[metric]) status.push(`${metric} ${cand.counts[metric]} > budget ${budget[metric]}`);
+    for (const metric of ['cardRenders', 'mounted', 'componentRenders']) if (gated && budget[metric] !== undefined && cand.counts?.[metric] > budget[metric]) status.push(`${metric} ${cand.counts[metric]} > budget ${budget[metric]}`);
   }
   if (b && !base.error) {
     if (c.median > b.median * tolerance.ratio && c.median - b.median > tolerance.floorMs) status.push(`median ${c.median.toFixed(1)} ms vs baseline ${b.median.toFixed(1)} ms`);
-    for (const metric of ['cardRenders', 'mounted']) if (cand.counts?.[metric] > base.counts?.[metric]) status.push(`${metric} ${cand.counts[metric]} vs baseline ${base.counts[metric]}`);
-    if (cand.counts?.componentRenders > base.counts?.componentRenders * tolerance.renderRatio + 2) status.push(`componentRenders ${cand.counts.componentRenders} vs baseline ${base.counts.componentRenders}`);
+    for (const metric of ['cardRenders', 'mounted']) if (gated && cand.counts?.[metric] > base.counts?.[metric]) status.push(`${metric} ${cand.counts[metric]} vs baseline ${base.counts[metric]}`);
+    if (gated && cand.counts?.componentRenders > base.counts?.componentRenders * tolerance.renderRatio + 2) status.push(`componentRenders ${cand.counts.componentRenders} vs baseline ${base.counts.componentRenders}`);
   } else if (base?.error) warnings.push(`${key}: baseline could not run it (${base.error})`);
   if (status.length) failures.push(`${key}: ${status.join('; ')}`);
   rows.push({ key, ...c, base: b?.median, delta: b ? (c.median / b.median - 1) * 100 : null, counts: cand.counts || {}, baseCounts: base?.counts, ok: !status.length });
@@ -332,7 +333,7 @@ if (args['update-budgets']) {
   for (const row of rows) {
     const entry = { ms: Math.ceil(Math.max(row.median * 3, row.median + 15)) };
     if (/^sidebar-motion\//.test(row.key)) entry.maxGap = Math.ceil(Math.max(row.maxGap * 2, 60));
-    for (const metric of ['cardRenders', 'mounted', 'componentRenders']) if (row.counts[metric] !== undefined) entry[metric] = row.counts[metric] + 2 + Math.ceil(row.counts[metric] * 0.1);
+    for (const metric of ['cardRenders', 'mounted', 'componentRenders']) if (countsGated(row.key) && row.counts[metric] !== undefined) entry[metric] = row.counts[metric] + 2 + Math.ceil(row.counts[metric] * 0.1);
     next.ops[row.key] = entry;
   }
   for (const [suite, count] of Object.entries(steady.candidate)) next.steady[suite] = { mountedRows: count + 2 + Math.ceil(count * 0.1) };

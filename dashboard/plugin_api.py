@@ -654,7 +654,7 @@ def authority_runtime_rows(db_path, rows):
 		result = []
 		for row in rows:
 			record = stored.get(row.get("session_key") or row["id"], {})
-			item = {k: v for k, v in row.items() if k in RUNTIME_FIELDS}
+			item = {k: row[k] for k in RUNTIME_FIELDS if k in row}
 			item.update(cwd=None, project=None, provider=card_provider(record.get("model_config")), preview="")
 			if "cwd" in record:
 				item["cwd"] = record["cwd"]
@@ -788,19 +788,18 @@ def card_provider(config):
 
 
 def card_billing_providers(db, session_ids):
-	"""Read main-loop route evidence in bounded batches, never auxiliary model usage."""
+	"""Read main-loop route evidence, never auxiliary model usage."""
 	connection = getattr(db, "_conn", None)
 	if not isinstance(connection, sqlite3.Connection):
 		return {}
-	ids, result = sorted(session_ids), {}
+	result = {}
 	try:
-		for start in range(0, len(ids), 500):
-			batch = ids[start:start + 500]
-			placeholders = ",".join("?" for _ in batch)
-			rows = connection.execute(f"SELECT DISTINCT session_id, billing_provider FROM session_model_usage WHERE task = '' AND session_id IN ({placeholders})", batch)
-			for sid, value in rows:
-				if provider := provider_name(value):
-					result.setdefault(sid, set()).add(provider)
+		# One JSON parameter, as in card_subagent_usage, has no bound-variable limit to batch around.
+		rows = connection.execute("SELECT DISTINCT session_id, billing_provider FROM session_model_usage WHERE task = '' AND session_id IN (SELECT value FROM json_each(?))",
+			(json.dumps(sorted(session_ids)),))
+		for sid, value in rows:
+			if provider := provider_name(value):
+				result.setdefault(sid, set()).add(provider)
 	except sqlite3.Error:
 		# Older stores may have no task-attributed usage table; unknown is safer than a guess.
 		return {}
@@ -865,7 +864,7 @@ def card_rows(db, rows):
 		for index, key in enumerate(("input_tokens", "output_tokens")):
 			values = [segment.get(key) for segment in usage] + [child[index] for child in children.values()]
 			counts[key] = sum(values) if all(type(value) is int and value >= 0 for value in values) else None
-		item = {k: v for k, v in row.items() if k in LIST_FIELDS}
+		item = {k: row[k] for k in LIST_FIELDS if k in row}
 		item["archived"] = bool(row.get("archived", False))
 		item.update(project=card_project(row.get("cwd"), projects), provider=provider,
 			model=tip.get("model"), source=tip.get("source", row.get("source")), **counts)

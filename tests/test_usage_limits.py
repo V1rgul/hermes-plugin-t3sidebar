@@ -159,6 +159,23 @@ class StoreTests(unittest.TestCase):
 		self.assertEqual((dead["error"], dead["label"], dead["windows"], dead["stale"]), ("internal_error", "account dead01", [], True))
 		self.assertEqual(provider["error"], "internal_error")
 
+	def test_windowed_read_matches_a_full_read_for_accounts_that_stopped_sampling(self):
+		# Only rows inside the window are read, extended back to each account's newest sample, so an account that stopped sampling days ago keeps its windows, label and later error.
+		for hour in range(72, 0, -1):
+			self.store.record(codex(account("live01", NOW - hour * 3600, [window("weekly", 72.0 - hour, NOW + 1000), window("five_hour", 1.0, NOW + 100)])), checked_at=NOW - hour * 3600)
+		self.store.record(codex(account("gone01", NOW - 50 * 3600, [window("weekly", 30.0, NOW - 3600)], label="Old seat")), checked_at=NOW - 50 * 3600)
+		self.store.record(codex(account("gone01", NOW - 50 * 3600, [window("weekly", 30.0, NOW - 3600)], label="Old seat", error="refresh_failed")), checked_at=NOW - 26 * 3600)
+		self.store.record(codex(account("dead01", None, [], error="refresh_failed")), checked_at=NOW - 60 * 3600)
+		full = self.store.read_rows
+		for hours in (1, 24, 168):
+			windowed = limits.limits_payload(self.store, hours=hours, now=NOW)
+			with patch.object(self.store, "read_rows", lambda since=None: full(None)):
+				self.assertEqual(windowed, limits.limits_payload(self.store, hours=hours, now=NOW), hours)
+		gone = next(a for a in windowed["providers"][0]["accounts"] if a["id"] == "gone01")
+		self.assertEqual((gone["label"], gone["error"], gone["windows"][0]["used_percent"]), ("Old seat", "refresh_failed", 30.0))
+		# The oldest newest-sample (dead01, 60 hours ago) bounds a one-hour read, so live01's earlier hours are skipped.
+		self.assertLess(len(full(NOW - 3600)[0]), len(full(None)[0]))
+
 	def test_missing_store_reads_empty_without_creating(self):
 		payload = limits.limits_payload(self.store, hours=24, now=NOW)
 		self.assertEqual(payload["providers"], [])

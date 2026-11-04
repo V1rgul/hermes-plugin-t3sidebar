@@ -40,7 +40,7 @@ Each operation records:
 - Three work counts taken from a React DevTools commit hook and a MutationObserver: card (`SessionRow`) renders, mounted cards and total component renders.
 
 Gates, in [`tests/perf/browser-budgets.json`](../tests/perf/browser-budgets.json):
-- **Work counts are the primary gate**, because they do not depend on the machine. Card renders and mounts may not exceed the baseline's or the budget. Component renders get 25% slack against the baseline.
+- **Work counts are the primary gate**, because they do not depend on the machine. Card renders and mounts may not exceed the baseline's or the budget. Component renders get 25% slack against the baseline. The ordinary-motion suite reports its counts without gating them: renders during a transition depend on frame timing, and the reduced-motion suite gates the same folds.
 - **Latency** fails when the candidate's median is more than 25% *and* more than 3 ms slower than the baseline's. It also fails when the median exceeds a generous absolute budget, about three times the recorded median.
 
 After an intentional change of cost, run `npm run perf -- --update-budgets` and commit the new budget file along with the reason. Raw JSON goes to `t3sidebar-perf/` under `TMPDIR`. Add `--cpu 4` to approximate a slower laptop, and `--only sidebar,usage` to select suites. When run against identical code, medians vary by about ±25% and up to ±40% on operations under 10 ms, which the 3 ms floor absorbs. An injected card-memo break and a 15 ms input handler both fail the gate. These are synthetic Linux Chromium measurements; they do not measure the Windows Electron client, IPC or network.
