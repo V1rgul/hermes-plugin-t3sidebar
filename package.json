@@ -7,6 +7,9 @@
     "test:backend": "python -W error::ResourceWarning -c \"import hermes_bootstrap, unittest; unittest.main(module=None)\" discover -s tests -v",
     "test:all": "npm test && npm run test:backend && npm run test:browser",
     "test:browser": "node tests/browser-smoke.mjs",
+    "perf": "node tests/perf/browser-bench.mjs",
+    "perf:backend": "python -W error::ResourceWarning tests/perf/backend_bench.py",
+    "perf:all": "npm run perf && npm run perf:backend",
     "harness:build": "node harness/build.mjs",
     "harness": "node harness/build.mjs && node harness/serve.mjs"
   },
