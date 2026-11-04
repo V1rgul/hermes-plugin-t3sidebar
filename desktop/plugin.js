@@ -1442,9 +1442,17 @@ function statusBadge(badge, row, hidden, details = false) {
     statusIcon(badge),
     { done: 'Done', woke: 'Woke', input: 'Input' }[badge]);
 }
-function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, retain, presetTime, snoozeDetail, workingDetails, showTokens }) {
-  const [menuOpen, setMenuOpen] = useState(false), [snoozeOpen, setSnoozeOpen] = useState(false), trigger = useRef(null);
-  useEffect(() => { retain?.(row.key, menuOpen || snoozeOpen); return () => retain?.(row.key, false); }, [retain, row.key, menuOpen, snoozeOpen]);
+// The sidebar has one menu, { key, kind: 'actions' | 'snooze', open }, held by the card that last opened it. Only that card mounts a popover around its trigger; every other card renders bare buttons, which keeps mounting a card cheap.
+function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, menu, setMenu, presetTime, snoozeDetail, workingDetails, showTokens }) {
+  const menuOpen = menu?.kind === 'actions' && menu.open, snoozeOpen = menu?.kind === 'snooze' && menu.open;
+  const openMenu = kind => setMenu({ key: row.key, kind, open: true });
+  const setOpen = kind => open => setMenu(current => current?.key === row.key && current.kind === kind ? { ...current, open } : current);
+  // A card that leaves (scrolled out of a windowed list while closed, moved to another shelf, removed) drops its menu, as its own state did before.
+  useEffect(() => () => setMenu(current => current?.key === row.key ? null : current), [setMenu, row.key]);
+  // The held popover wraps the trigger, which then toggles it; a bare trigger opens it.
+  const withMenu = (kind, trigger, content) => menu?.kind !== kind ? trigger : h(sdk.Popover, { open: menu.open, onOpenChange: setOpen(kind) },
+    h(sdk.PopoverTrigger, { asChild: true }, trigger), h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': kind === 'snooze' ? 'Snooze session' : 'Session actions' }, content()));
+  const bare = kind => menu?.kind === kind ? {} : { onClick: () => openMenu(kind) };
   const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
   const draft = useSessionDraft({ row, active, hidden: hidden || row.newSession, controller, scope });
   const hasDraft = row.newSession ? draftPresent || row.drafted : draft.data === true && !draft.isError;
@@ -1453,12 +1461,12 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
     if (event.target !== event.currentTarget) return;
-    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); setMenuOpen(true); }
+    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); openMenu('actions'); }
     else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
   return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': hasDraft, 'data-working': isWorking(row), 'data-unread': row.archived !== true && (!!(!active && row.completion?.done_token) || row.unread === true || row.woke) || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
-    onContextMenu: event => { event.preventDefault(); setMenuOpen(true); } },
+    onContextMenu: event => { event.preventDefault(); openMenu('actions'); } },
     h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${sessionTitle(row)}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
       onClick: open, onFocus: () => onFocus(row.key), onBlur: () => onFocus(null), onKeyDown: keyDown,
@@ -1476,15 +1484,12 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
         h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row, hidden, workingDetails) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
       h('span', { className: 'sf-row-title' }, sessionTitle(row))),
     h('div', { className: 'sf-hover' },
-      row.archived !== true ? h(sdk.Popover, { open: snoozeOpen, onOpenChange: setSnoozeOpen },
-        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Snooze session', name: 'Alarm', glyph: '◷', disabled, 'aria-haspopup': 'dialog' })),
-        h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Snooze session' },
-          h(RowActions, { row, scope, controller, mutate, disabled, presetTime, snoozeDetail, snoozeOnly: true, close: () => setSnoozeOpen(false) }))) : null,
+      row.archived !== true ? withMenu('snooze', h(IconButton, { label: 'Snooze session', name: 'Alarm', glyph: '◷', disabled, 'aria-haspopup': 'dialog', 'aria-expanded': snoozeOpen, ...bare('snooze') }),
+        () => h(RowActions, { row, scope, controller, mutate, disabled, presetTime, snoozeDetail, snoozeOnly: true, close: () => setOpen('snooze')(false) })) : null,
       h(sdk.Button, { type: 'button', variant: 'ghost', size: 'xs', className: 'sf-icon sf-archive', 'aria-label': row.archived === true ? 'Unarchive session' : 'Archive session', disabled: disabled || (row.archived !== true && row.status !== 'idle'),
         onClick: () => void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive' }) }, icon(row.archived === true ? 'ArchiveRestore' : 'Archive', '▤'), row.archived === true ? 'Unarchive' : 'Archive')),
-    h(sdk.Popover, { open: menuOpen, onOpenChange: setMenuOpen },
-      h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { ref: trigger, className: 'sf-context-trigger', label: `Actions for ${sessionTitle(row)}`, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog' })),
-      h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': 'Session actions' }, h(RowActions, { row, scope, controller, filterProject, deleteSession, mutate, disabled, close: () => setMenuOpen(false) }))));
+    withMenu('actions', h(IconButton, { className: 'sf-context-trigger', label: `Actions for ${sessionTitle(row)}`, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog', 'aria-expanded': menuOpen, ...bare('actions') }),
+      () => h(RowActions, { row, scope, controller, filterProject, deleteSession, mutate, disabled, close: () => setOpen('actions')(false) })));
 }
 // Query structural sharing preserves nested native/project/metadata values. The
 // derived row and its lineage array can be new without changing a card. Compare
@@ -1499,7 +1504,7 @@ function sameCard(a, b) {
 const MemoSessionRow = memo(SessionRow, (previous, next) => Object.keys(next).every(key =>
   key === 'row' ? sameCard(previous.row, next.row) : Object.is(previous[key], next[key])));
 // Fixed-height windows keep shelves proportional to their viewport, not history.
-// Small lists retain their original DOM; open popovers keep their owner mounted.
+// Small lists retain their original DOM; the card holding the open menu stays mounted.
 // Pin each shelf body to the larger of its start and end height for the duration of the track transitions,
 // so lists never resize mid-animation. Seeking the new transitions to their end measures the final layout.
 function pinShelfBodies(shelves, run, current) {
@@ -1550,12 +1555,12 @@ function exitGhost(element) {
   ghost.style.pointerEvents = 'none';
   return ghost;
 }
-function SessionWindow({ entries, section, renderRow, navigators, rowRefs, animate = false }) {
+function SessionWindow({ entries, section, renderRow, navigators, rowRefs, animate = false, menuKey = null }) {
   const body = useRef(null), pending = useRef(null), viewportHeight = useRef(null), scrollHeight = useRef(0);
   const [stride, setStride] = useState(DEFAULT_CARD_STRIDE), strideRef = useRef(DEFAULT_CARD_STRIDE);
   useLayoutEffect(() => { const next = cardStride(body.current); strideRef.current = next; setStride(next); }, []);
   const [viewport, setViewport] = useState({ top: 0, height: 560 });
-  const [retained, setRetained] = useState(() => new Set()), [focusedKey, setFocusedKey] = useState(null);
+  const [focusedKey, setFocusedKey] = useState(null);
   const windowed = entries.length > 80;
   const windowing = useRef(windowed);
   const positions = useMemo(() => new Map(entries.map((row, index) => [row.key, index])), [entries]);
@@ -1589,10 +1594,6 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs, anima
     }
     for (const key of slots.current.keys()) if (!positions.has(key)) { slots.current.delete(key); slotRefs.current.delete(key); }
   }, [entries, windowed, animate, positions]);
-  const retain = useCallback((key, keep) => setRetained(previous => {
-    if (previous.has(key) === keep) return previous;
-    const next = new Set(previous); if (keep) next.add(key); else next.delete(key); return next;
-  }), []);
   const update = useCallback(() => {
     const element = body.current?.parentElement;
     if (!element) return;
@@ -1650,14 +1651,14 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs, anima
   const end = Math.min(entries.length, viewport.top + Math.ceil(viewport.height / stride) + 3);
   const indexes = windowed ? [...new Set([
     ...Array.from({ length: Math.max(0, end - start) }, (_, offset) => start + offset),
-    ...[...retained, focusedKey].map(key => positions.get(key)).filter(index => index !== undefined)
+    ...[menuKey, focusedKey].map(key => positions.get(key)).filter(index => index !== undefined)
   ])].sort((a, b) => a - b) : entries.map((_, index) => index);
   return h('div', { ref: body, className: 'sf-window', onScroll: update,
     onFocusCapture: event => { const row = event.target.closest('[data-session-id]'); if (row) setFocusedKey(row.dataset.sessionId); },
     onBlurCapture: event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusedKey(null); },
     style: { position: 'relative', height: windowed ? entries.length * stride : undefined } },
     ...indexes.map(index => h('div', { key: entries[index].key, ref: windowed ? undefined : slotRef(entries[index].key), className: 'sf-slot',
-      style: windowed ? { position: 'absolute', top: index * stride, left: 0, right: 0 } : undefined }, renderRow(entries[index], retain))));
+      style: windowed ? { position: 'absolute', top: index * stride, left: 0, right: 0 } : undefined }, renderRow(entries[index]))));
 }
 export function HermesT3Sidebar({ ctx, controller }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
@@ -1769,7 +1770,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const client = useQueryClient();
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false), [deleteTarget, setDeleteTarget] = useState(null);
   const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [actionError, setActionError] = useState('');
-  const [emptyDrafts, setEmptyDrafts] = useState(() => new Set());
+  const [emptyDrafts, setEmptyDrafts] = useState(() => new Set()), [menu, setMenu] = useState(null);
   const onDraftPresence = useCallback((id, present) => setEmptyDrafts(previous => {
     if (previous.has(id) === present) return previous;
     const next = new Set(previous); if (present) next.add(id); else next.delete(id); return next;
@@ -1939,13 +1940,13 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const focusRow = useCallback(id => { focused.current = id; }, []);
   const rowRef = useCallback((id, element) => { if (element) rowRefs.current.set(id, element); else rowRefs.current.delete(id); }, []);
   const disabled = latest.current.disabled;
-  const renderRow = (row, retain) => h(MemoSessionRow, { key: row.key, row, retain, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
+  const renderRow = row => h(MemoSessionRow, { key: row.key, row, menu: menu?.key === row.key ? menu : null, setMenu, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
     draftPresent: row.newSession && emptyDrafts.has(draftIdentity(row)),
     presetTime, workingDetails, showTokens, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
   const renderSection = section => {
     const entries = sections[section], closed = isClosed(section);
-    const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs, animate: settled });
+    const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs, animate: settled, menuKey: menu?.open ? menu.key : null });
     const headerless = section === 'active' || section === 'pinned';
     return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed, style: { '--sf-count': entries.length } },
       !headerless ? h('button', { type: 'button', className: 'sf-section-toggle', 'aria-expanded': !closed, 'aria-label': `${LABELS[section]} (${entries.length})`,
@@ -1963,7 +1964,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // Toolbar/popover/error state is not a list input: retain its element tree,
   // not only the cards, so these interactions never walk thousands of rows.
   const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, settled, activeId, activeOwner,
-    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, workingDetails, showTokens, emptyDrafts,
+    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, workingDetails, showTokens, emptyDrafts, menu,
     archives.isError, archives.error, !archives.data, archives.isLoading, archives.isFetching, archives.data?.has_more]);
   // CSS flex owns every shelf height (see the stylesheet). A pure JavaScript allocator was also built and profiled: pixel heights
   // computed from card counts, exact Ready-first priority even in short panes, and Working/Snoozed capped at 40%. Once fold
