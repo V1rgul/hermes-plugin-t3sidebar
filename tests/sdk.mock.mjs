@@ -525,7 +525,8 @@ export function ContextMenu({ children }) { return h(React.Fragment, null, child
 // Public trigger marks ownership even when an asChild control has its own data-slot.
 export function ContextMenuTrigger({ children }) { return React.cloneElement(children, { 'data-slot': 'context-menu-trigger', 'data-hermes-context-menu-trigger': '' }); }
 export function Popover({ open, onOpenChange, children }) { const anchor = useRef(null); return h(PopoverContext.Provider, { value: { open, onOpenChange, anchor } }, children); }
-export function PopoverTrigger({ children, asChild, ...props }) { const value = useContext(PopoverContext); return React.cloneElement(children, { ...props, ref: node => { value.anchor.current = node; }, onClick: event => { children.props.onClick?.(event); if (!event.defaultPrevented) value.onOpenChange(!value.open); }, 'aria-expanded': value.open }); }
+// Like Radix, a trigger carries data-state, which also marks where a popover is mounted.
+export function PopoverTrigger({ children, asChild, ...props }) { const value = useContext(PopoverContext); return React.cloneElement(children, { ...props, ref: node => { value.anchor.current = node; }, onClick: event => { children.props.onClick?.(event); if (!event.defaultPrevented) value.onOpenChange(!value.open); }, 'aria-expanded': value.open, 'data-state': value.open ? 'open' : 'closed' }); }
 // Like Radix's dismissable layers, Escape anywhere closes only the topmost open popover; there is no visible Close control.
 const openPopovers = [], escapeDocuments = new WeakSet();
 function listenForEscape(doc) {

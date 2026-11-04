@@ -562,6 +562,23 @@ test('fourth snooze option persists next Monday at 09:00 without a toast or open
   assert.equal(mock.calls.some(call => call[0] === 'open'), false);
 });
 
+test('only the card that last opened a menu mounts a popover', async () => {
+  await mount();
+  const holders = () => all('.sf-row').filter(card => card.querySelector('[data-state]')).map(card => card.dataset.sessionId);
+  assert.deepEqual(holders(), [], 'closed cards render bare buttons');
+  await click(row('design').querySelector('[aria-label="Snooze session"]'));
+  assert.deepEqual(holders(), ['design']);
+  assert.equal(row('design').querySelector('[aria-label="Snooze session"]').dataset.state, 'open');
+  await dismiss();
+  // The card keeps its closed popover so focus can return to the trigger; no other card gains one.
+  assert.deepEqual(holders(), ['design']);
+  assert.equal(row('design').querySelector('[aria-label="Snooze session"]').dataset.state, 'closed');
+  await click(button('Actions for Release notes'));
+  assert.deepEqual(holders(), ['readme']);
+  assert.equal($('[role=dialog]').getAttribute('aria-label'), 'Session actions');
+  await dismiss();
+});
+
 test('menu triggers and their owning card retain open state until dismissal or successful action', async () => {
   await mount();
   for (const label of ['Filter sessions', 'New session']) {
