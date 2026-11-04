@@ -115,31 +115,19 @@
     },
     "sidebar-motion/fold:archived:close": {
       "ms": 21,
-      "maxGap": 79,
-      "cardRenders": 8,
-      "mounted": 2,
-      "componentRenders": 73
+      "maxGap": 79
     },
     "sidebar-motion/fold:archived:open": {
       "ms": 21,
-      "maxGap": 216,
-      "cardRenders": 8,
-      "mounted": 2,
-      "componentRenders": 73
+      "maxGap": 216
     },
     "sidebar-motion/fold:working:close": {
       "ms": 33,
-      "maxGap": 454,
-      "cardRenders": 27,
-      "mounted": 4,
-      "componentRenders": 378
+      "maxGap": 454
     },
     "sidebar-motion/fold:working:open": {
       "ms": 44,
-      "maxGap": 146,
-      "cardRenders": 24,
-      "mounted": 2,
-      "componentRenders": 382
+      "maxGap": 146
     },
     "usage/usage:open": {
       "ms": 89,
