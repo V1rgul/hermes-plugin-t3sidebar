@@ -83,6 +83,29 @@ The Opus review identified a focus regression in the small-list optimization: re
 
 After this correction, the complete frontend/integration suite passes 291 tests, and Chromium smoke passes 350 checks, including large archives, ordinary/reduced motion, fold reversals, fixed fold-body geometry, card motion, independent scrolling and custom card stride. These browser checks use the SDK adapter and synthetic fixtures, not the user's Windows Electron client. No CSS, backend, dependency, deployment or service changes are included.
 
+## Repeated-work cleanup and shared card menu
+
+These changes start at `9ab3e6c`. They removed repeated work without adding caches or invalidation. The benchmarks in [development.md](development.md#performance-regression-benchmarks) measured each change against its baseline commit, interleaved, on synthetic fixtures in Linux Chromium. Medians are in milliseconds.
+
+The cleanup, measured against `9ab3e6c`:
+- **Limits:** plan weights are computed once per account rather than once per history row. The chart reuses its samples for the projection. Opening the page went from 10.4 to 9.5 ms and the lookback change from 4.6 to 4.0 ms.
+- **Usage:** chart paths are built with the chart model rather than on every hover. Hovering went from 3.7 to 1.7 ms and period changes from 11.5–12.8 to 9.5–10.4 ms.
+- **Time axis and labels:** one midnight list per axis and one zoned conversion per day. Label placement reads every box before writing.
+- **Sidebar merge and classification:** rows are copied once. An inactive filter no longer clones each row. Alias checks no longer build arrays. A poll went from 12.2 to 10.1 ms.
+- **Backend:** the Limits payload reads only the requested window, plus each account's newest sample. It went from 59.8 to 47.1 ms at 168 h on the benchmark store. A scratch measurement during review, not repeated since, gave 488 to 177 ms on a 131,040-row store of 5-minute samples over 35 days.
+- **Backend statement counts:** usage history reads its table list and schema once per request, and billing providers use one `json_each` query. Each request now issues 1 to 5 fewer statements: the 30-day history went from 35 to 30. Outputs are identical.
+
+Shared card menu, against `7c69e4f`: every card used to mount two closed popovers. Now the sidebar holds one menu, and only its card wraps a trigger. Component renders for a search clear that mounts 74 cards fell from 1026 to 597. The harness's SDK mock popover costs almost nothing, so measured against it, time fell by only 5–12%. A scratch build used Desktop's Radix 1.2 popover instead of the mock, and showed:
+
+| Interaction | Before | After |
+| --- | ---: | ---: |
+| Narrow search clear (74 cards mount) | 36.0 | 23.8 |
+| Project filter clear | 39.0 | 26.0 |
+| Working/Snoozed fold | ~6.0 | ~4.2 |
+| Project filter to the side project | 16.0 | 12.0 |
+
+What remains of a search clear is about 21 ms of React work creating card DOM and about 16 ms of browser layout for those cards. The layout is forced in `SessionWindow`'s windowing layout effect, but it would happen before paint anyway. With `content-visibility: auto` on cards, measured latency fell by about 32%, but the next frame gap rose from about 18 to 31–37 ms. The layout only moved to the next frame, so this was not adopted. Budgets in `tests/perf/*-budgets.json` were recorded again from `443e4c0` on an idle host.
+
 ## Preserved contracts
 
 Optimizations must retain profile/source/activation-epoch fences, native archive/delete/title verification, exact deletion retry identity, rich older-history recovery, native archive membership, Waiting precedence, running-subagent ownership, atomic snooze wake materialization and exact wake acknowledgments. Composer text remains read-only and immediately reduced to boolean presence; draft text must not enter plugin caches, logs, storage or backend requests. Polling remains a recovery mechanism rather than relying on event replay.

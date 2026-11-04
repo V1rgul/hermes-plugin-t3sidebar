@@ -1,8 +1,8 @@
 {
 	"_comment": "Statement counts are exact upper bounds (machine-independent, primary gate). median_ms is 4x the measured median, floor 5 ms, so only catastrophic regressions trip on a noisy machine. Regenerate with tests/perf/backend_bench.py --update-budgets after reviewing a change.",
 	"generated": {
-		"at": "2026-11-04T19:34:00+0100",
-		"git": "f1c8e94-dirty",
+		"at": "2026-11-05T00:22:58+0100",
+		"git": "443e4c0-dirty",
 		"samples": 15,
 		"python": "3.14.9",
 		"sqlite": "3.53.1",
@@ -12,72 +12,72 @@
 		"metadata_state": {
 			"statements": 5,
 			"median_ms": 12.0,
-			"measured_median_ms": 2.902
+			"measured_median_ms": 2.754
 		},
 		"native_archives": {
-			"statements": 107,
-			"median_ms": 250.0,
-			"measured_median_ms": 56.403
+			"statements": 106,
+			"median_ms": 225.0,
+			"measured_median_ms": 50.084
 		},
 		"native_sessions_archived_ids": {
-			"statements": 115,
-			"median_ms": 300.0,
-			"measured_median_ms": 68.961
+			"statements": 114,
+			"median_ms": 250.0,
+			"measured_median_ms": 60.461
 		},
 		"native_sessions_loaded_ids": {
-			"statements": 115,
-			"median_ms": 300.0,
-			"measured_median_ms": 71.09
+			"statements": 114,
+			"median_ms": 250.0,
+			"measured_median_ms": 60.948
 		},
 		"native_sessions_plain": {
-			"statements": 109,
-			"median_ms": 250.0,
-			"measured_median_ms": 56.634
+			"statements": 108,
+			"median_ms": 225.0,
+			"measured_median_ms": 52.447
 		},
 		"usage_history_1d_cached": {
 			"statements": 7,
-			"median_ms": 30.0,
-			"measured_median_ms": 6.369
+			"median_ms": 25.0,
+			"measured_median_ms": 5.91
 		},
 		"usage_history_1d_cold": {
-			"statements": 15,
-			"median_ms": 200.0,
-			"measured_median_ms": 49.853
+			"statements": 14,
+			"median_ms": 185.0,
+			"measured_median_ms": 46.142
 		},
 		"usage_history_30d_cached": {
 			"statements": 7,
-			"median_ms": 30.0,
-			"measured_median_ms": 6.437
+			"median_ms": 25.0,
+			"measured_median_ms": 5.974
 		},
 		"usage_history_30d_cold": {
-			"statements": 35,
-			"median_ms": 1250.0,
-			"measured_median_ms": 308.86
+			"statements": 30,
+			"median_ms": 1050.0,
+			"measured_median_ms": 260.132
 		},
 		"usage_history_7d_cached": {
 			"statements": 7,
-			"median_ms": 30.0,
-			"measured_median_ms": 6.815
+			"median_ms": 25.0,
+			"measured_median_ms": 6.088
 		},
 		"usage_history_7d_cold": {
-			"statements": 20,
-			"median_ms": 525.0,
-			"measured_median_ms": 128.978
+			"statements": 18,
+			"median_ms": 500.0,
+			"measured_median_ms": 121.512
 		},
 		"usage_history_7d_layouts": {
-			"statements": 18,
-			"median_ms": 225.0,
-			"measured_median_ms": 50.491
+			"statements": 16,
+			"median_ms": 180.0,
+			"measured_median_ms": 44.35
 		},
 		"usage_limits_168h": {
 			"statements": 8,
-			"median_ms": 275.0,
-			"measured_median_ms": 64.461
+			"median_ms": 185.0,
+			"measured_median_ms": 45.246
 		},
 		"usage_limits_840h": {
 			"statements": 8,
-			"median_ms": 300.0,
-			"measured_median_ms": 74.039
+			"median_ms": 250.0,
+			"measured_median_ms": 62.394
 		}
 	}
 }
