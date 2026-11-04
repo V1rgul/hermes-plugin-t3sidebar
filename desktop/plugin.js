@@ -64,6 +64,8 @@ export function useShownPage() {
 }
 export const durableId = row => row._lineage_root_id || row.id;
 export const aliases = row => [...new Set([row.id, row.resolved_id, durableId(row), ...(row._lineage_ids || [])].filter(Boolean))];
+// Membership without building the alias array, for checks that run over every row.
+const hasAlias = (row, id) => !!id && (row.id === id || row.resolved_id === id || durableId(row) === id || !!row._lineage_ids?.includes(id));
 export function seconds(value) {
   if (typeof value === 'number') return value > 1e12 ? value / 1000 : value;
   if (!value) return 0;
@@ -200,7 +202,7 @@ export function mergeRows(rich, extra = [], live = [], extraRich = false, archiv
   const rows = new Map(), aliasIndex = new Map(), order = new Map();
   let sequence = 0;
   // Archive feed wins over stale active pages, and remains rich/project-filterable.
-  for (const row of [...extra.map(r => ({ ...r, _limited: !extraRich })), ...rich.map(r => ({ ...r, _limited: false })), ...archives.map(r => ({ ...r, _limited: false }))]) {
+  for (const [list, limited] of [[extra, !extraRich], [rich, false], [archives, false]]) for (const row of list) {
     const key = durableId(row);
     if (!key || !visibleSource(row)) continue;
     const incoming = aliases(row);
@@ -221,7 +223,7 @@ export function mergeRows(rich, extra = [], live = [], extraRich = false, archiv
     if (previousKey && previousKey !== key) { rows.delete(previousKey); order.delete(previousKey); }
     const lineage = [...new Set([...previousAliases, ...incoming])];
     if (!rows.has(key)) order.set(key, sequence++);
-    rows.set(key, { ...previous, ...row, _lineage_ids: lineage });
+    rows.set(key, { ...previous, ...row, _limited: limited, _lineage_ids: lineage });
     for (const alias of lineage) {
       if (!aliasIndex.has(alias)) aliasIndex.set(alias, new Set());
       aliasIndex.get(alias).add(key);
@@ -248,6 +250,11 @@ export function mergeRows(rich, extra = [], live = [], extraRich = false, archiv
     return { ...row, ...fields };
   });
 }
+function projectFromRows(rows, cwd) {
+  const inProject = row => !row._limited && (typeof row.cwd === 'string' ? row.cwd : row.project?.is_home ? '' : null) === cwd;
+  const row = rows.find(row => inProject(row) && row.project?.name) || rows.find(inProject);
+  return row ? { ...row.project, cwd, nativeName: !!row.project?.name, name: row.project?.name || cwd || 'No project' } : { name: cwd || 'No project' };
+}
 export function buildSections(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown = true, runtimeStale = false, query = '', project = '*' } = {}) {
   const result = Object.fromEntries(SECTIONS.map(section => [section, []]));
   const tokens = searchTokens(query);
@@ -261,7 +268,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
   for (const row of rows) {
     if (!visibleSource(row)) continue;
     const meta = metadata.sessions[durableId(row)] || DEFAULT_META;
-    const ids = new Set(aliases(row));
+    const ids = aliases(row);
     // Preserve snapshot order and repeated entries, but do not rescan every runtime per card.
     const positions = new Set();
     for (const id of ids) for (const index of runtimeIndex.get(id) || EMPTY_ROWS) positions.add(index);
@@ -287,7 +294,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
     // Native stores an empty Desktop session's row only once text was typed into it (see controller.persistDraft), so a stored
     // empty Desktop row keeps its card (and tint) until its first message or deletion, even with the composer cleared.
     const drafted = newSession && !row._liveOnly && String(row.source || '').toLowerCase() === 'desktop';
-    if (!matchesFilters({ ...row, newSession }, tokens, project)) continue;
+    if ((tokens.length || project !== '*') && !matchesFilters({ ...row, newSession }, tokens, project)) continue;
     // Runtime last_active is also a resume/reattach clock, not conversation progress.
     const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
     const runtimes = matches.filter(item => typeof item.id === 'string' && item.id && item.id !== item.session_key);
@@ -452,7 +459,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const composer = env.host.composer, id = row.resolved_id || row.id;
       if (typeof composer?.getDraft !== 'function' || !id) return false;
       const ownerMatches = () => {
-        if (!aliases(row).includes(env.host.state?.focusedStoredSessionId?.get())) return true;
+        if (!hasAlias(row, env.host.state?.focusedStoredSessionId?.get())) return true;
         const owner = env.host.state?.focusedSessionOwner?.get();
         return owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile;
       };
@@ -713,7 +720,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         check(scope);
         updateRows(scope, new Set(deletedIds), null);
         const owner = env.host.state?.focusedSessionOwner?.get();
-        if (owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile && aliases(row).includes(env.host.state?.focusedStoredSessionId?.get())) {
+        if (owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile && hasAlias(row, env.host.state?.focusedStoredSessionId?.get())) {
           await fenced(scope, () => env.host.newChat(route));
         }
         deleteRequests.delete(requestKey);
@@ -1619,7 +1626,7 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs, anima
   }, [update]);
   useEffect(() => {
     const reveal = key => {
-      const index = entries.findIndex(row => row.key === key), element = body.current?.parentElement;
+      const index = positions.get(key) ?? -1, element = body.current?.parentElement;
       if (index < 0 || !element) return;
       pending.current = key;
       const top = element.scrollTop, height = viewportHeight.current ?? element.clientHeight;
@@ -1633,7 +1640,7 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs, anima
     };
     navigators.current.set(section, reveal);
     return () => navigators.current.delete(section);
-  }, [entries, section, navigators, update]);
+  }, [positions, section, navigators, update]);
   useEffect(() => {
     if (!pending.current) return;
     const element = rowRefs.current.get(pending.current);
@@ -1857,20 +1864,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const hasMatches = SECTIONS.some(section => sections[section].length > 0);
   const visible = useMemo(() => SECTIONS.flatMap(section => !!collapsed[section] && !(searching && section === 'working')
     && !(section === 'active' && sections.active.some(row => row.status === 'waiting' || row.status === 'unknown')) ? [] : sections[section]), [sections, collapsed, searching]);
-  const projectChoices = useMemo(() => {
-    const choices = new Map();
-    for (const row of rows) {
-      if (row._limited) continue;
-      const cwd = typeof row.cwd === 'string' ? row.cwd : row.project?.is_home ? '' : null;
-      if (cwd === null) continue;
-      const previous = choices.get(cwd);
-      if (!previous || (!previous.nativeName && row.project?.name)) choices.set(cwd, {
-        ...row.project, cwd, nativeName: !!row.project?.name, name: row.project?.name || cwd || 'No project'
-      });
-    }
-    return choices;
-  }, [rows]);
-  const selectedProject = projectCatalog.data?.projects.find(choice => choice.path === project) || projectChoices.get(project) || { name: project || 'No project' };
+  // Only a filtered toolbar names its project; a card with the native project name is preferred over a bare folder.
+  const selectedProject = project === '*' ? null : projectCatalog.data?.projects.find(choice => choice.path === project) || projectFromRows(rows, project);
   const selectProject = useCallback(cwd => { controller.check(scope); setProject(cwd); setFilterOpen(false); }, [controller, scope]);
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
   // A background acknowledgment notice describes one thread's marker; it is stale once a later acknowledgment succeeds or another thread is shown, and must not hide an unrelated action error.
@@ -1882,7 +1877,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   useEffect(clearMarkerNotice, [activeId, clearMarkerNotice]);
   useEffect(() => {
     if (!metadata.data || metadata.isError || mutation.isPending || !activeId || activeOwner?.connectionId !== (scope.connectionId ?? 'local') || activeOwner?.profile !== scope.profile) return;
-    const row = rows.find(item => aliases(item).includes(activeId));
+    const row = rows.find(item => hasAlias(item, activeId));
     const meta = row && metadata.data.sessions[durableId(row)];
     const completion = row && metadata.data.completions?.[durableId(row)];
     if (!row) return;
@@ -1947,7 +1942,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const renderRow = (row, retain) => h(MemoSessionRow, { key: row.key, row, retain, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
     draftPresent: row.newSession && emptyDrafts.has(draftIdentity(row)),
     presetTime, workingDetails, showTokens, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
-    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
+    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
   const renderSection = section => {
     const entries = sections[section], closed = isClosed(section);
     const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs, animate: settled });
@@ -1994,7 +1989,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); search.current?.focus(); }
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
   } }, ...emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
-    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && aliases(row).includes(activeId) })), h('style', null, CSS),
+    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId) })), h('style', null, CSS),
     h('header', { className: 'sf-header' },
       h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) }),
         query ? h(IconButton, { label: 'Clear search', name: 'X', glyph: '×', className: 'sf-clear', onClick: () => { setQuery(''); search.current?.focus(); } }) : null),
@@ -2247,6 +2242,19 @@ const historyBucketMinutes = history => Number.isInteger(history.bucket_minutes)
 const bucketDuration = seconds => seconds < HOUR_S ? `${Math.round(seconds / 60)} min` : `${Math.round(seconds / HOUR_S * 10) / 10} h`;
 // What each plotted point counts: "day", "6 h", "h", "10 min".
 export const bucketUnit = minutes => minutes >= 1440 && minutes % 1440 === 0 ? (minutes === 1440 ? 'day' : `${minutes / 1440} days`) : minutes === 60 ? 'h' : bucketDuration(minutes * 60);
+// The curve passes through every bucket's value; between two buckets it is the cubic Hermite segment with their curve slopes, converted from value per bucket to plot units. Walked backwards it is the same curve, so a stacked band's lower edge matches the band below exactly.
+function usagePath(values, slopes, max, backwards = false) {
+  const count = values.length, y = value => VIEW_H - value / max * VIEW_H;
+  const xs = count === 1 ? [0, VIEW_W] : Array.from({ length: count }, (_, index) => bucketX(index, count));
+  const step = count > 1 ? VIEW_W / (count - 1) : VIEW_W;
+  const order = count === 1 ? [0, 1] : Array.from({ length: count }, (_, index) => index), points = count === 1 ? [values[0], values[0]] : values, turn = count === 1 ? [0, 0] : slopes;
+  if (backwards) order.reverse();
+  const at = index => `${xs[index].toFixed(2)},${y(points[index]).toFixed(2)}`, slope = index => -turn[index] / max * VIEW_H / step;
+  return `${backwards ? 'L' : 'M'}${at(order[0])}` + order.slice(1).map((index, position) => {
+    const from = order[position], third = (xs[index] - xs[from]) / 3;
+    return ` C${(xs[from] + third).toFixed(2)},${(y(points[from]) + slope(from) * third).toFixed(2)} ${(xs[index] - third).toFixed(2)},${(y(points[index]) - slope(index) * third).toFixed(2)} ${at(index)}`;
+  }).join('');
+}
 export function buildUsageCharts(history, split, mode) {
   const bucketMinutes = historyBucketMinutes(history), tz = typeof history.tz === 'string' && history.tz ? history.tz : undefined;
   const lengths = bucketLengths(history.buckets, history.window_end, bucketMinutes);
@@ -2259,8 +2267,10 @@ export function buildUsageCharts(history, split, mode) {
   const colors = seriesColors(all.flatMap(chart => chart.series), split);
   // Each point is the real amount in its bucket; the bucket size, chosen per period, is the chart's unit.
   return { buckets: history.buckets, days: history.days, bucketMinutes, unit: bucketUnit(bucketMinutes), lengths, tz, colors, ...usageAxis(history.buckets, axis, tz), charts: all.map(({ metric, series }) => {
-    const { layers, max } = chartLayers([...series].reverse(), mode);
-    return { metric, series, layers, scale: niceScale(max, 4, metric.integer), total: series.reduce((sum, item) => sum + item.total, 0) };
+    const { layers, max } = chartLayers([...series].reverse(), mode), scale = niceScale(max, 4, metric.integer);
+    // The SVG paths depend only on the model, so they are drawn here once rather than on every hover render. The area closes along the band below it (stacked) or the zero line (independent), walked backwards.
+    const drawn = layers.map(layer => { const line = usagePath(layer.upper, layer.upperSlope, scale.max); return { ...layer, line, area: `${line} ${usagePath(layer.lower, layer.lowerSlope, scale.max, true)} Z` }; });
+    return { metric, series, layers: drawn, scale, total: series.reduce((sum, item) => sum + item.total, 0) };
   }) };
 }
 const formatterCache = new Map();
@@ -2285,10 +2295,10 @@ function zonedParts(seconds, timeZone) {
 const dayKey = parts => parts.year * 10000 + parts.month * 100 + parts.day;
 // Local midnight of the day containing seconds. Subtracting the wall-clock time since midnight can miss by the DST shift of that day, so the result is rechecked and nudged until it reads 00:00:00 on the same date.
 export function startOfLocalDay(seconds, timeZone) {
-  const base = Math.floor(seconds), key = dayKey(zonedParts(base, timeZone));
-  let t = base;
-  for (let guard = 0; guard < 4; guard++) {
-    const parts = zonedParts(t, timeZone), since = parts.hour * 3600 + parts.minute * 60 + parts.second;
+  let t = Math.floor(seconds), parts = zonedParts(t, timeZone);
+  const key = dayKey(parts);
+  for (let guard = 0; guard < 4; guard++, parts = zonedParts(t, timeZone)) {
+    const since = parts.hour * 3600 + parts.minute * 60 + parts.second;
     if (dayKey(parts) === key) { if (!since) break; t -= since; } else t += DAY_S - since;
   }
   return t;
@@ -2327,9 +2337,9 @@ export function usageAxis(buckets, resolution, timeZone) {
   return { dayLines, labelIndexes, labels: axisLabels(labelIndexes.map(index => buckets[index]), timeZone, 'day') };
 }
 // Limits axis: one label per local midnight (thinned to at most maxLabels) for multi-day spans, otherwise every few local hours.
-export function timeAxisTicks(start, end, timeZone, maxLabels = 10) {
+export function timeAxisTicks(start, end, timeZone, maxLabels = 10, midnights = null) {
   if (end - start > 2.5 * DAY_S) {
-    const days = localMidnights(start, end, timeZone), step = Math.max(1, Math.ceil(days.length / maxLabels));
+    const days = midnights ?? localMidnights(start, end, timeZone), step = Math.max(1, Math.ceil(days.length / maxLabels));
     return { resolution: 'day', times: days.filter((_, index) => index % step === 0) };
   }
   // Quarter-hour candidates also catch whole local hours in zones with half-hour offsets.
@@ -2416,20 +2426,24 @@ export function unitTicks(capacity) {
 }
 // Limits ─ samples are { t, account, value, units, resets_at }: value is the remaining percent, units its share of the account's plan capacity in this window; unknown readings never become samples.
 export function limitSamples(accounts, history, windowKey, provider = null) {
-  const plans = new Map();
-  for (const account of accounts || []) if (account && typeof account.id === 'string') plans.set(account.id, account.plan);
-  const sample = (t, account, remaining, resetsAt) => { const value = clamp(remaining, 0, 100); return { t, account, value, units: value * planWeight(provider, plans.get(account), windowKey) / 100, resets_at: finiteOrNull(resetsAt) }; };
-  const samples = [];
+  // An account's plan, and so its weight, is the same for every one of its samples.
+  const weights = new Map();
+  for (const account of accounts || []) if (account && typeof account.id === 'string') weights.set(account.id, planWeight(provider, account.plan, windowKey));
+  const samples = [], latest = new Map();
+  const add = (t, account, remaining, resetsAt) => {
+    const value = clamp(remaining, 0, 100);
+    samples.push({ t, account, value, units: value * (weights.get(account) ?? planWeight(provider, undefined, windowKey)) / 100, resets_at: finiteOrNull(resetsAt) });
+    latest.set(account, Math.max(latest.get(account) ?? -Infinity, t));
+  };
   for (const item of history || []) {
     if (item?.window !== windowKey || typeof item.account !== 'string' || !Number.isFinite(item.t) || !Number.isFinite(item.remaining_percent)) continue;
-    samples.push(sample(item.t, item.account, item.remaining_percent, item.resets_at));
+    add(item.t, item.account, item.remaining_percent, item.resets_at);
   }
   // The latest snapshot can be newer than the sampler's last history row.
   for (const account of accounts || []) {
     const win = account?.windows?.find(entry => entry?.key === windowKey);
     if (!win || !Number.isFinite(win.remaining_percent) || !Number.isFinite(account.fetched_at)) continue;
-    const latest = samples.reduce((max, item) => item.account === account.id ? Math.max(max, item.t) : max, -Infinity);
-    if (account.fetched_at > latest) samples.push(sample(account.fetched_at, account.id, win.remaining_percent, win.resets_at));
+    if (account.fetched_at > (latest.get(account.id) ?? -Infinity)) add(account.fetched_at, account.id, win.remaining_percent, win.resets_at);
   }
   return samples.sort((a, b) => a.t - b.t);
 }
@@ -2513,7 +2527,8 @@ export function coverageText(seconds) {
 // Projects the pooled remaining quota, in units, from now to now + horizonS. Each account holds weight · remaining% / 100 units of its plan's capacity (weight from planWeight for this window). The measured drain is consumed from accounts in pool priority order (lowest number first, the next once one is empty), and each account returns to its full weight at its resets_at, its next reset following one window_seconds later. Whatever an account still holds when it resets expires unused (`lost`). Without drain data the projection stays flat apart from those resets.
 export function projectPool(accounts, history, windowKey, now, horizonS, options = {}) {
   const provider = options.provider ?? null;
-  const samples = limitSamples(accounts, history, windowKey, provider);
+  // A chart that already holds the window's samples passes them rather than having them rebuilt.
+  const samples = options.samples ?? limitSamples(accounts, history, windowKey, provider);
   const latest = new Map();
   for (const sample of samples) if (sample.t <= now) latest.set(sample.account, sample);
   const state = [], unknownAccounts = [];
@@ -2860,19 +2875,6 @@ export const periodTotalLabel = days => days === 1 ? '/ day' : Number.isInteger(
 function UsageChart({ chart, model, mode, hover, setHover, range }) {
   const { metric, series, layers, scale } = chart, count = model.buckets.length;
   const y = value => VIEW_H - value / scale.max * VIEW_H;
-  const xs = count === 1 ? [0, VIEW_W] : Array.from({ length: count }, (_, index) => bucketX(index, count));
-  const widen = values => count === 1 ? [values[0], values[0]] : values;
-  // The curve passes through every bucket's value; between two buckets it is the cubic Hermite segment with their curve slopes, converted from value per bucket to plot units. Walked backwards it is the same curve, so a stacked band's lower edge matches the band below exactly.
-  const step = count > 1 ? VIEW_W / (count - 1) : VIEW_W;
-  const curve = (values, slopes, backwards = false) => {
-    const order = count === 1 ? [0, 1] : Array.from({ length: count }, (_, index) => index), points = widen(values), turn = count === 1 ? [0, 0] : slopes;
-    if (backwards) order.reverse();
-    const at = index => `${xs[index].toFixed(2)},${y(points[index]).toFixed(2)}`, slope = index => -turn[index] / scale.max * VIEW_H / step;
-    return `${backwards ? 'L' : 'M'}${at(order[0])}` + order.slice(1).map((index, position) => {
-      const from = order[position], third = (xs[index] - xs[from]) / 3;
-      return ` C${(xs[from] + third).toFixed(2)},${(y(points[from]) + slope(from) * third).toFixed(2)} ${(xs[index] - third).toFixed(2)},${(y(points[index]) - slope(index) * third).toFixed(2)} ${at(index)}`;
-    }).join('');
-  };
   const hovered = hover !== null && hover < count ? hover : null;
   const pct = hovered === null ? null : bucketX(hovered, count) / VIEW_W * 100;
   const move = event => {
@@ -2898,12 +2900,10 @@ function UsageChart({ chart, model, mode, hover, setHover, range }) {
           model.dayLines.map(index => h('line', { key: `d${index}`, className: 'su-day-grid', x1: bucketX(index, count), x2: bucketX(index, count), y1: 0, y2: VIEW_H })),
           scale.ticks.map(tick => h('line', { key: tick, className: 'su-grid', x1: 0, x2: VIEW_W, y1: y(tick), y2: y(tick) })),
           layers.map(layer => {
-            const color = model.colors.get(layer.key), top = curve(layer.upper, layer.upperSlope);
-            // The area closes along the band below it (stacked) or the zero line (independent), walked backwards.
-            const bottom = curve(layer.lower, layer.lowerSlope, true);
+            const color = model.colors.get(layer.key);
             return h('g', { key: layer.key, 'data-series': layer.key },
-              h('path', { className: 'su-area', d: `${top} ${bottom} Z`, style: { fill: color, fillOpacity: mode === 'stacked' ? 0.3 : 0.06 } }),
-              h('path', { className: 'su-line', d: top, style: { stroke: color } }));
+              h('path', { className: 'su-area', d: layer.area, style: { fill: color, fillOpacity: mode === 'stacked' ? 0.3 : 0.06 } }),
+              h('path', { className: 'su-line', d: layer.line, style: { stroke: color } }));
           })),
         hovered === null ? null : h(Fragment, null,
           h('div', { className: 'su-cross', style: { left: `${pct}%` } }),
@@ -3035,17 +3035,26 @@ const TIGHT_SPAN_PX = 16;
 function placeMeasureLabels(row) {
   const width = row.getBoundingClientRect().width;
   if (!(width > 0)) return;
-  for (const span of row.querySelectorAll('.su-measure-span')) span.dataset.tight = String(span.getBoundingClientRect().width < TIGHT_SPAN_PX);
-  for (const label of row.querySelectorAll('.su-measure-label')) {
+  // Every measurement is read before the writes that depend on it, so the browser lays out once per phase rather than once per element.
+  setTight([...row.querySelectorAll('.su-measure-span')], box => box.width);
+  const labels = [...row.querySelectorAll('.su-measure-label')].map(label => {
     // An end-aligned label (the averaging one, whose edit button ends on the arrow's Now end) sits flush against Now instead of keeping the gap; the label on the other side still keeps its own.
     const end = label.dataset.align === 'end';
     const low = Number(label.dataset.low) / 100 * width + (label.dataset.side === 'right' ? MEASURE_GAP_PX : 0);
     const high = Number(label.dataset.high) / 100 * width - (label.dataset.side === 'left' && !end ? MEASURE_GAP_PX : 0);
     label.style.maxWidth = `${Math.max(0, high - low)}px`;
-    const own = label.getBoundingClientRect().width, center = Number(label.dataset.center) / 100 * width;
+    return { label, end, low, high, center: Number(label.dataset.center) / 100 * width };
+  });
+  for (const item of labels) item.own = item.label.getBoundingClientRect().width;
+  for (const { label, end, low, high, center, own } of labels) {
     label.style.left = `${end ? Math.max(low, high - own) : clamp(center - own / 2, low, Math.max(low, high - own))}px`;
     label.style.transform = 'none';
   }
+}
+// A span or mark too small for its caps or text is flagged tight; all sizes are read before any flag is written.
+function setTight(nodes, size) {
+  const tight = nodes.map(node => size(node.getBoundingClientRect()) < TIGHT_SPAN_PX);
+  nodes.forEach((node, index) => { node.dataset.tight = String(tight[index]); });
 }
 function MeasureRow({ nowPct, average, empty, lookback, setLookback }) {
   const row = useRef(null);
@@ -3092,22 +3101,24 @@ const boxesOverlap = (box, other, gap) => !(box.right + gap <= other.left || box
 // Flags whose icons would overlap go on rows above each other, each keeping its pole on its own expiry; rows depend on pixel width, so this runs with the label placement on every resize.
 const FLAG_ROW_GAP_PX = 2;
 function placeFlagRows(layer) {
-  const rows = [];
-  for (const flag of [...layer.querySelectorAll('.su-flag')].sort((a, b) => Number(a.dataset.t) - Number(b.dataset.t))) {
-    flag.style.setProperty('--su-flag-row', '0');
-    const box = flag.getBoundingClientRect();
+  const flags = [...layer.querySelectorAll('.su-flag')].sort((a, b) => Number(a.dataset.t) - Number(b.dataset.t));
+  // A row only lifts a flag, so every flag is measured on the base row in one layout before rows are assigned.
+  for (const flag of flags) flag.style.setProperty('--su-flag-row', '0');
+  const boxes = flags.map(flag => flag.getBoundingClientRect()), rows = [];
+  flags.forEach((flag, index) => {
+    const box = boxes[index];
     let row = rows.findIndex(right => right + FLAG_ROW_GAP_PX <= box.left);
     if (row < 0) { row = rows.length; rows.push(0); }
     rows[row] = box.right;
     flag.style.setProperty('--su-flag-row', String(row));
     flag.dataset.row = String(row);
-  }
+  });
 }
 function placeMarkLabels(layer) {
   const bounds = layer.getBoundingClientRect();
   if (!(bounds.width > 0)) return;
   placeFlagRows(layer);
-  for (const mark of layer.querySelectorAll('.su-waste')) mark.dataset.tight = String(mark.getBoundingClientRect().height < TIGHT_SPAN_PX);
+  setTight([...layer.querySelectorAll('.su-waste')], box => box.height);
   const obstacles = [...layer.querySelectorAll('.su-reset-dot, .su-flag')].map(node => node.getBoundingClientRect()), placed = [];
   // Waste labels are placed first: what expires matters more than what a reset restores, so it keeps the better spot.
   for (const label of [...layer.querySelectorAll('.su-waste-text'), ...layer.querySelectorAll('.su-reset-text')]) {
@@ -3270,7 +3281,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
   const horizonS = view.future;
   const samples = useMemo(() => limitSamples(provider.accounts, provider.history, windowKey, providerId), [provider, windowKey, providerId]);
   const past = useMemo(() => pooledHistory(samples), [samples]);
-  const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS, { lookbackS, provider: providerId }), [provider, windowKey, now, horizonS, lookbackS, providerId]);
+  const projection = useMemo(() => projectPool(provider.accounts, provider.history, windowKey, now, horizonS, { lookbackS, provider: providerId, samples }), [provider, windowKey, now, horizonS, lookbackS, providerId, samples]);
   const start = now - view.past, end = now + view.future, targetStart = now - target.past, targetEnd = now + target.future;
   // Only a past or future change of the same window glides; a poll moving Now, a window switch or reduced motion redraw at once. An interrupted glide restarts from the window it was showing.
   useLayoutEffect(() => {
@@ -3294,7 +3305,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
   // The axis tops out at the pool's capacity in units (or above it if an older reading held more, e.g. before a plan change).
   const cap = Math.max(projection.capacity || BASE_PLAN_UNITS, ...past.map(point => point.value));
   const ticks = unitTicks(cap);
-  const axis = useMemo(() => { const times = timeAxisTicks(start, end); return { ...times, labels: axisLabels(times.times, undefined, times.resolution), midnights: localMidnights(start, end) }; }, [start, end]);
+  const axis = useMemo(() => { const midnights = localMidnights(start, end), times = timeAxisTicks(start, end, undefined, 10, midnights); return { ...times, labels: axisLabels(times.times, undefined, times.resolution), midnights }; }, [start, end]);
   const x = t => (t - start) / (end - start) * VIEW_W, y = value => VIEW_H - value / cap * VIEW_H;
   const pastAt = t => { let value = null; for (const point of past) { if (point.t > t) break; value = point.value; } return value; };
   const projectedAt = t => {

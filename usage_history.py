@@ -83,7 +83,8 @@ def history_payload(db_path, *, days, tz, now, pricing=None):
 		# One read transaction so the change marker and the data describe the same snapshot.
 		conn.execute("BEGIN")
 		try:
-			marker = _change_marker(conn)
+			tables = _tables(conn)
+			marker = _change_marker(conn, tables)
 			with _cache_lock:
 				hit = _cache.get(key)
 				if hit is not None and hit[0] == marker:
@@ -91,7 +92,7 @@ def history_payload(db_path, *, days, tz, now, pricing=None):
 					payload = copy.deepcopy(hit[1])
 					payload["generated_at"] = now
 					return payload
-			payload = _compute(conn, days, tz, now, buckets, window_end, price, db_key)
+			payload = _compute(conn, tables, days, tz, now, buckets, window_end, price, db_key)
 		finally:
 			conn.rollback()
 	with _cache_lock:
@@ -160,9 +161,8 @@ def _tables(conn):
 	return {name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
-def _change_marker(conn):
+def _change_marker(conn, tables):
 	# PRAGMA data_version is per connection and this connection is new every time, so derive a cheap content marker instead: new or rewritten messages bump max(id), usage updates bump last_seen and the call/token totals, and deletions shrink the counts.
-	tables = _tables(conn)
 	marker = [tuple(sorted(tables & {"messages", "session_model_usage", "sessions"}))]
 	if "messages" in tables:
 		marker.append(conn.execute("SELECT MAX(id), COUNT(*) FROM messages").fetchone())
@@ -336,7 +336,7 @@ def _even_points(row):
 	return [first + step * index for index in range(count)]
 
 
-def _compute(conn, days, tz, now, buckets, window_end, price, db_key):
+def _compute(conn, tables, days, tz, now, buckets, window_end, price, db_key):
 	width = len(buckets)
 	start = buckets[0]
 	series = {}
@@ -384,17 +384,17 @@ def _compute(conn, days, tz, now, buckets, window_end, price, db_key):
 			if identity not in user_owner or delay < user_owner[identity][0]:
 				user_owner[identity] = (delay, bucket, rows[owner])
 
-	if {"session_model_usage", "messages", "sessions"} <= _tables(conn):
+	if {"session_model_usage", "messages", "sessions"} <= tables:
 		# Only sessions with a usage row near the window are read, but each is read whole so context weights and call matching stay exact for rows that straddle the window start.
-		session_ids = sorted({session_id for (session_id,) in conn.execute(
-			"SELECT DISTINCT session_id FROM session_model_usage WHERE first_seen IS NOT NULL AND last_seen IS NOT NULL AND last_seen >= ? AND first_seen <= ?",
+		session_ids = [session_id for (session_id,) in conn.execute(
+			"SELECT DISTINCT session_id FROM session_model_usage WHERE first_seen IS NOT NULL AND last_seen IS NOT NULL AND last_seen >= ? AND first_seen <= ? ORDER BY session_id",
 			(start - MATCH_SLACK_S, now),
-		)})
+		)]
 		non_human = _non_human_sources()
-		message_query = _message_query(conn)
+		message_query, sources_query = _message_query(conn), _sources_query(conn)
 		for offset in range(0, len(session_ids), SESSION_BATCH):
 			batch = session_ids[offset:offset + SESSION_BATCH]
-			for rows, layout in _session_layouts(conn, db_key, batch, non_human, message_query):
+			for rows, layout in _session_layouts(conn, db_key, batch, non_human, message_query, sources_query):
 				for row, (times, in_shares, out_shares) in zip(rows, layout[0]):
 					add_row(row, times, in_shares, out_shares)
 				add_users(layout[1], rows)
@@ -423,16 +423,19 @@ def _message_query(conn):
 	)
 
 
-def _session_layouts(conn, db_key, batch, non_human, message_query):
+def _sources_query(conn):
+	# Delegated subagent runs can carry the parent's interactive source (desktop, tui), so source alone would count the parent agent's prompts and steers as the user's; the native `_delegate_from` marker identifies them, as in the sidebar listing.
+	delegated = "CASE WHEN json_valid(model_config) THEN json_extract(model_config, '$._delegate_from') IS NOT NULL ELSE 0 END" if "model_config" in _columns(conn, "sessions") else "0"
+	return f"SELECT id, source, {delegated} FROM sessions WHERE id IN ({{}})"
+
+
+def _session_layouts(conn, db_key, batch, non_human, message_query, sources_query):
 	"""Yield (usage rows, layout) per session, reusing layouts whose session data has not changed."""
 	placeholders = ",".join("?" * len(batch))
 	rows_by_session = defaultdict(list)
 	for record in conn.execute(f"SELECT {_ROW_COLUMNS} FROM session_model_usage WHERE session_id IN ({placeholders}) AND first_seen IS NOT NULL AND last_seen IS NOT NULL ORDER BY session_id, task, model, billing_provider, billing_base_url, billing_mode", batch):
 		rows_by_session[record[0]].append(_Row(record))
-	# Delegated subagent runs can carry the parent's interactive source (desktop, tui), so source alone would count the parent agent's prompts and steers as the user's; the native `_delegate_from` marker identifies them, as in the sidebar listing.
-	delegated = "CASE WHEN json_valid(model_config) THEN json_extract(model_config, '$._delegate_from') IS NOT NULL ELSE 0 END" if "model_config" in _columns(conn, "sessions") else "0"
-	sources = {session_id: (source, bool(flag)) for session_id, source, flag in conn.execute(
-		f"SELECT id, source, {delegated} FROM sessions WHERE id IN ({placeholders})", batch)}
+	sources = {session_id: (source, bool(flag)) for session_id, source, flag in conn.execute(sources_query.format(placeholders), batch)}
 	markers = {session_id: (top, count) for session_id, top, count in conn.execute(f"SELECT session_id, MAX(id), COUNT(*) FROM messages WHERE session_id IN ({placeholders}) GROUP BY session_id", batch)}
 	signatures = {}
 	layouts = {}
