@@ -30,7 +30,7 @@ SOFTWARE.
 
 ## Tabler Icons
 
-Every `BUNDLED_ICONS` glyph in `desktop/plugin.js` except the Lucide Usage and refresh icons and the Lucide-derived axis-range glyphs (`UnfoldLeft`, `UnfoldRight`, `UnfoldCrease`) is path data from [`@tabler/icons`](https://github.com/tabler/tabler-icons) 3.44.0 (`pencil-ai` from 3.48.0); `ArrowBarToDownTouching` is modified from `arrow-bar-to-down`.
+Every `BUNDLED_ICONS` glyph in `desktop/plugin.js` except the Lucide Usage and refresh icons and the Lucide-derived axis-range glyphs (`UnfoldLeft`, `UnfoldRight`, `UnfoldCrease`) is path data from [`@tabler/icons`](https://github.com/tabler/tabler-icons) 3.44.0 (`pencil-ai` from 3.48.0); `ArrowBarToDownTouching` is modified from `arrow-bar-to-down`, and `TicketLocked` combines a cut `ticket` outline with a reduced `lock`.
 
 ```
 MIT License

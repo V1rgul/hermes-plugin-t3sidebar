@@ -41,6 +41,7 @@ def _load_sibling(name, filename):
 
 usage_history = _load_sibling("hermes_t3sidebar_usage_history", "usage_history.py")
 usage_limits = _load_sibling("hermes_t3sidebar_shared_modules", "shared_modules.py").load_limits_module()
+banked_reset = _load_sibling("hermes_t3sidebar_banked_reset", "banked_reset.py")
 
 
 def default_history_db_path(profile) -> Path:
@@ -121,6 +122,14 @@ class SessionDelete(BaseModel):
 	request_id: str = Field(pattern=SESSION_ID_PATTERN, min_length=1, max_length=256)
 	expected_revision: int = Field(ge=0)
 	expected_generation: int = Field(ge=0)
+
+
+class BankedResetRedeem(BaseModel):
+	model_config = ConfigDict(extra="forbid", strict=True)
+
+	# Only Codex banks resets; the account is a credential-pool entry id as listed by /usage/limits.
+	provider: Literal["openai-codex"]
+	account: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
 class DraftPersist(BaseModel):
@@ -1160,10 +1169,10 @@ async def native_rename(request, profile, session_id, body):
 	return {"ok": True, "profile": profile, "session_id": session_id, "title": title}
 
 
-def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None, history_db_path=None, limits_path=None, limits_sampler=None) -> APIRouter:
+def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None, history_db_path=None, limits_path=None, limits_sampler=None, limits_redeemer=None) -> APIRouter:
 	"""Inject a temporary path and clock for tests; production accepts neither over HTTP.
 
-	``limits_sampler`` is a zero-argument starter returning the running sampler. Only the module-level production router passes one, so routers built by tests never sample live provider limits.
+	``limits_sampler`` is a zero-argument starter returning the running sampler. Only the module-level production router passes one, so routers built by tests never sample live provider limits. ``limits_redeemer`` replaces the banked-reset redemption, so tests never reach Codex.
 	"""
 	api = APIRouter()
 	# Exposed so tests can assert which router samples without starting it.
@@ -1355,6 +1364,28 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise HTTPException(422, str(exc)) from exc
 		except Exception as exc:
 			raise HTTPException(503, "usage_limits_unavailable") from exc
+		return {**value, "profile": profile}
+
+	@api.post("/usage/limits/redeem")
+	async def redeem_banked_reset(body: BankedResetRedeem, request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		profile = listing_profile(request)
+		try:
+			# Hermes's redemption makes two blocking HTTP calls to Codex.
+			value = await asyncio.to_thread(limits_redeemer or (lambda account: banked_reset.redeem(account, limits=usage_limits)), body.account)
+		except LookupError as exc:
+			raise HTTPException(404, "account_not_found") from exc
+		except banked_reset.Busy as exc:
+			raise HTTPException(409, "redeem_in_progress") from exc
+		except Exception as exc:
+			raise HTTPException(503, "redeem_unavailable") from exc
+		running = sampler()
+		if value.get("status") in banked_reset.REDEEMED and running is not None:
+			try:
+				# Record the account's new reading now, so the page's next read shows the reset instead of waiting for the five-minute tick.
+				await asyncio.to_thread(running.run_once)
+			except Exception:
+				pass
 		return {**value, "profile": profile}
 
 	return api

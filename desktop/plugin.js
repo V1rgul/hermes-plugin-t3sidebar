@@ -1083,7 +1083,7 @@ function statusIcon(status, glyph = status) {
   return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-status-icon': status },
     STATUS_ICONS[glyph].map(d => h('path', { key: d, d })));
 }
-// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge, clock-x, alert-triangle and flag glyphs, plus one derived arrow.
+// Tabler v3.44.0 (MIT), the Desktop SDK's own icon family; its export surface omits these alarm, calendar, clock-hour, folder, gauge, clock-x, alert-triangle, flag and ticket glyphs, plus one derived arrow and one derived ticket.
 const BUNDLED_ICONS = {
   // Lucide v1.59.0 chart-no-axes-column (ISC), the status glyphs' family: three separate bars, where Tabler's chart-histogram overlaps its curve, bars and axis.
   ChartNoAxesColumn: ['M5 21v-6', 'M12 21V3', 'M19 21V9'],
@@ -1095,6 +1095,10 @@ const BUNDLED_ICONS = {
   ArrowBarToDownTouching: ['M4 20h16', 'M12 4v14', 'M8 14l4 4l4 -4'],
   AlertTriangle: ['M12 9v4', 'M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0', 'M12 16h.01'],
   Flag: ['M5 5a5 5 0 0 1 7 0a5 5 0 0 0 7 0v9a5 5 0 0 1 -7 0a5 5 0 0 0 -7 0v-9', 'M5 21v-7'],
+  // A banked reset is a ticket, not a circular arrow: the Limits page's refresh button already draws one.
+  Ticket: ['M15 5l0 2', 'M15 11l0 2', 'M15 17l0 2', 'M5 5h14a2 2 0 0 1 2 2v3a2 2 0 0 0 0 4v3a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-3a2 2 0 0 0 0 -4v-3a2 2 0 0 1 2 -2'],
+  // Derived: the ticket's outline cut open at its lower-right corner, which holds Tabler lock's body and shackle at about two thirds size, so a refused reset still reads as the same ticket.
+  TicketLocked: ['M15 5l0 2', 'M11 19h-6a2 2 0 0 1 -2 -2v-3a2 2 0 0 0 0 -4v-3a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v2', 'M14 16h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1', 'M15 16v-2a2.5 2.5 0 0 1 5 0v2'],
   ClockHour1: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 7v5', 'M12 12l2 -3'],
   ClockHour3: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 12h3.5', 'M12 7v5'],
   CalendarTime: ['M11.795 21h-6.795a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v4', 'M14 18a4 4 0 1 0 8 0a4 4 0 1 0 -8 0', 'M15 3v4', 'M7 3v4', 'M3 11h16', 'M18 16.496v1.504l1 1'],
@@ -2821,6 +2825,16 @@ function ScopedUsagePage({ ctx, scope, view }) {
   // A longer lookback or past range refetches more history; the shorter one stays drawn meanwhile.
   const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHours), enabled: view === 'limits', placeholderData: previous => previous });
   const active = view === 'limits' ? limits : history;
+  // Spends one banked reset on one account, then reloads the limits so the page shows the restored allowance; any outcome that did not reset throws, which keeps the confirmation open with the reason.
+  const redeem = useCallback(async (provider, account) => {
+    if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh before using a reset.');
+    let result;
+    try { result = await ctx.rest('/usage/limits/redeem', { method: 'POST', body: { provider, account } }); }
+    catch (error) { throw new Error(`The reset could not be used: ${error?.message || 'request failed'}. Refresh to check whether it was spent.`); }
+    const failure = redeemFailure(result);
+    if (failure) throw new Error(failure);
+    await client.invalidateQueries({ queryKey: [...usageScopeKey(scope), 'limits'] });
+  }, [ctx, scope, client]);
   const toolbar = h(Fragment, null,
     h('span', { className: 'su-spacer' }),
     // A refetch behind data already on screen spins the refresh icon instead of adding text; screen readers hear the busy state.
@@ -2833,7 +2847,7 @@ function ScopedUsagePage({ ctx, scope, view }) {
         toolbar)),
       h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs, setDays: days => update({ days }) }))))
       // The shared projection controls head the Limits page, so its refresh control sits at the end of that row.
-      : h(LimitsView, { query: limits, prefs, update, toolbar }));
+      : h(LimitsView, { query: limits, prefs, update, toolbar, redeem }));
 }
 function UsageState({ error = false, children }) { return h('div', { className: 'su-state', role: error ? 'alert' : 'status' }, children); }
 function QueryProblem({ query, what }) {
@@ -2950,7 +2964,7 @@ function resetTime(seconds, now) {
   return formatAt(seconds, seconds - now < 6 * DAY_S ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 // Overview of every provider on one scrollable page: one controls bar applies the lookback and window to all charts, then one section per provider, logged-out ones last as a compact row, and the shared footnotes once at the bottom. The past and future ranges are set beside each chart's x axis but are page-wide too: a change applies to every chart of the same window group.
-function LimitsView({ query, prefs, update, toolbar }) {
+function LimitsView({ query, prefs, update, toolbar, redeem }) {
   const data = query.data;
   // Countdowns and the Now line follow successful polls rather than a separate timer.
   const now = useMemo(() => Date.now() / 1000, [query.dataUpdatedAt]);
@@ -2974,7 +2988,7 @@ function LimitsView({ query, prefs, update, toolbar }) {
       query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
       providers.length ? null : h(UsageState, null, 'No subscription limits recorded yet.'),
       providers.map(provider => provider.auth === 'logged_out' ? h(LoggedOutProvider, { key: provider.provider, provider })
-        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange, setLookback })),
+        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange, setLookback, redeem })),
       h(LimitsFootnotes, { providers: active, sampler: data.sampler, now }))));
 }
 // Hermes knows the provider but has no usable credential, so there is nothing to sample or project: one muted row instead of a chart.
@@ -2985,7 +2999,7 @@ function LoggedOutProvider({ provider }) {
       provider.auth_reason ? h('span', { className: 'su-muted su-logged-out-reason' }, provider.auth_reason) : null));
 }
 // Memoized: its props only change with the data, the clock, the preferences or the window, so a page render for anything else (the toolbar's fetching state, the preference echo) skips the charts.
-const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange, setLookback }) {
+const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange, setLookback, redeem }) {
   const name = provider.label || provider.provider;
   // The verdict always looks a week ahead whatever range the chart shows, so it reads the same as the sidebar footer.
   const verdict = useMemo(() => limitsVerdict(provider, { lookback: prefs.lookback, window: prefs.window }, now), [provider, prefs.lookback, prefs.window, now]);
@@ -2993,11 +3007,11 @@ const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs
     h('h2', { className: 'su-provider-head' }, providerMark(provider.provider), h('span', null, name)),
     windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, range: prefs.range[rangeGroup(windowKey)], lookback: prefs.lookback, setLookback, onRange: (side, hours) => setRange(rangeGroup(windowKey), side, hours) })
       : h(UsageState, null, 'No limit windows reported for this provider.'),
-    h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open) }));
+    h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open), redeem }));
 });
 // Per-account rows (plan, priority, banked resets, window bars) are detail under each chart, folded until asked for; the fold is remembered per provider.
 // The fold is a card whose whole header row is the toggle and which holds the account cards once open: a bare text toggle was easy to miss under the chart.
-function AccountsDisclosure({ provider, windowKey, now, open, onToggle }) {
+function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem }) {
   const id = `su-accounts-${provider.provider.replace(/[^A-Za-z0-9_-]/g, '_')}`, count = provider.accounts.length;
   // While folded, the account names preview what the card holds; once open, the cards themselves name them.
   const names = open ? '' : provider.accounts.map(account => account.label || account.id).join(' · ');
@@ -3006,7 +3020,7 @@ function AccountsDisclosure({ provider, windowKey, now, open, onToggle }) {
       h('span', { className: 'su-disclosure-chevron', 'aria-hidden': true }, icon('ChevronRight', '›')),
       h('span', { className: 'su-disclosure-label' }, 'Accounts'), h('span', { className: 'su-disclosure-count' }, count),
       names ? h('span', { className: 'su-disclosure-names', title: names }, names) : null),
-    open ? h('div', { className: 'su-accounts', id }, count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now }))
+    open ? h('div', { className: 'su-accounts', id }, count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now, redeem }))
       : h(UsageState, null, 'No accounts in this provider pool.')) : null);
 }
 // Shared notes once under every section: how the samples and projections work, what a unit is, and which capacities are guessed.
@@ -3430,7 +3444,7 @@ function Badge({ tone, title, children }) { return h('span', { className: 'su-ba
 function SplitBadge({ kind, tone, title, subject, detail }) {
   return h('span', { className: 'su-badge su-badge-split', 'data-badge': kind, title }, h('span', null, subject), h('span', { className: 'su-badge-half', 'data-tone': tone }, detail));
 }
-function LimitAccount({ provider, account, selected, now }) {
+function LimitAccount({ provider, account, selected, now, redeem }) {
   const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
   // The plan label and the capacity this account adds to the pool in the selected window; T3 Code's names, not the raw enum.
   const label = planLabel(provider, account.plan), units = planWeight(provider, account.plan, selected || 'weekly'), assumed = planAssumed(provider, account.plan);
@@ -3440,7 +3454,6 @@ function LimitAccount({ provider, account, selected, now }) {
       Number.isFinite(account.priority) ? h(SplitBadge, { kind: 'priority', title: 'Pool priority: the lowest number is used first.', tone: 'primary', subject: 'priority', detail: String(account.priority) }) : null,
       h(SplitBadge, { kind: 'plan', title: PLAN_UNITS_NOTE, tone: 'primary', subject: label || 'Unknown plan', detail: `${unitsText(units)} units` }),
       assumed ? h('span', { className: 'su-muted su-assumed' }, `capacity unknown, counted as ${BASE_PLAN_UNITS}*`) : null,
-      Number.isFinite(account.banked_resets) ? h(BankedBadge, { count: account.banked_resets, windows }) : null,
       account.stale ? h(Badge, { tone: 'warn', title: 'The latest reading is older than the cache freshness limit.' }, 'Stale') : null,
       account.error ? h(Badge, { tone: 'error', title: String(account.error) }, 'Error') : null,
       h('span', { className: 'su-spacer' }),
@@ -3448,7 +3461,7 @@ function LimitAccount({ provider, account, selected, now }) {
     account.error ? h('div', { className: 'su-account-error', role: 'alert' }, String(account.error)) : null,
     windows.length ? h('div', { className: 'su-windows' }, windows.map(win => h(LimitWindowRow, { key: win.key, win, now, selected: win.key === selected })))
       : h('div', { className: 'su-muted' }, 'No limit windows reported.'),
-    h(BankedCredits, { banked: account.banked_credits, now }));
+    h(BankedResets, { provider, account, windows, now, redeem }));
 }
 // OpenAI lets a banked reset be redeemed manually once any allowance it covers has less than 80% left (help.openai.com/en/articles/20001498). The account-wide windows shown are exactly the covered ones (weekly on Pro, 5-hour and weekly on Plus/Business), so the rule applies to the whole account. Codex's own applicable_available_count follows the assistant's stricter 10% rule and would call a manually redeemable reset unusable.
 const BANKED_REDEEM_BELOW_PERCENT = 80;
@@ -3456,19 +3469,64 @@ export function bankedRedeemable(windows) {
   const remaining = windows.filter(win => win.scope !== 'model' && Number.isFinite(win.remaining_percent)).map(win => win.remaining_percent);
   return remaining.length ? remaining.some(value => value < BANKED_REDEEM_BELOW_PERCENT) : null;
 }
-function BankedBadge({ count, windows }) {
-  const redeemable = count > 0 ? bankedRedeemable(windows) : null;
-  const text = `${count} banked reset${count === 1 ? '' : 's'}`;
-  if (redeemable === null) return h(Badge, null, text);
-  return h(SplitBadge, { kind: 'banked', tone: redeemable ? 'success' : 'warn', subject: text, detail: redeemable ? 'usable now' : `not usable now (all ≥${BANKED_REDEEM_BELOW_PERCENT}%)`,
-    title: redeemable ? `An allowance has less than ${BANKED_REDEEM_BELOW_PERCENT}% left, so a reset can be redeemed now.` : `Every allowance has ${BANKED_REDEEM_BELOW_PERCENT}% or more left; Codex refuses a reset until one drops below.` });
+// The window a redeemed reset is judged by: weekly, because once it is empty what is left of the 5-hour window has no value; plans without one fall back to their longest account-wide window instead.
+export function redeemWindow(windows) {
+  const account = (windows || []).filter(win => win.scope !== 'model');
+  return account.find(win => win.key === 'weekly') || [...account].sort((a, b) => (b.window_seconds ?? 0) - (a.window_seconds ?? 0))[0] || null;
 }
-// One line per banked reset credit under the account's bars, soonest expiry first; a credit expiring within a day turns orange.
-function BankedCredits({ banked, now }) {
-  const credits = (banked?.credits || []).filter(credit => credit.expires_at === null || credit.expires_at > now);
-  if (!credits.length) return null;
-  return h('ul', { className: 'su-banked', 'aria-label': 'Banked resets' }, credits.map((credit, index) => h('li', { key: `${credit.expires_at}:${index}`, className: 'su-banked-credit', 'data-soon': credit.expires_at !== null && credit.expires_at - now < DAY_S },
-    credit.expires_at === null ? 'Banked reset · no expiry reported' : `Banked reset · expires ${resetTime(credit.expires_at, now)} (in ${formatDurationShort(credit.expires_at - now)})`)));
+// What one redeemed reset loses: the share of that window still left now, which expires unused like at a normal reset, and the units it stands for on this plan.
+export function redeemLoss(provider, account, windows) {
+  const win = redeemWindow(windows);
+  if (!win || !Number.isFinite(win.remaining_percent)) return win ? { win, percent: null, units: null } : null;
+  const percent = clamp(Math.round(win.remaining_percent), 0, 100);
+  return { win, percent, units: planWeight(provider, account.plan, win.key) * percent / 100 };
+}
+// Statuses from the backend's redeem route (Hermes's own outcome codes): the reasons a confirmed reset did not happen, or null when it did.
+export function redeemFailure(result) {
+  const status = result?.status;
+  if (status === 'reset' || status === 'already_redeemed') return null;
+  if (status === 'nothing_to_reset' || status === 'not_exhausted') return 'Codex refused: no allowance is below 80% left yet. The banked reset was not spent.';
+  if (status === 'no_credit' || status === 'no_credits_banked') return 'Codex reports no banked reset on this account.';
+  return 'Codex could not confirm the reset. Refresh to check whether it was spent.';
+}
+// One line per banked reset credit under the account's bars, soonest expiry first (a credit expiring within a day turns orange, its countdown grey like the bars' reset times), and on their right one button spanning the list: Codex picks the credit, so the action belongs to the account, not to a line.
+function BankedResets({ provider, account, windows, now, redeem }) {
+  const [confirming, setConfirming] = useState(false);
+  const credits = (account.banked_credits?.credits || []).filter(credit => credit.expires_at === null || credit.expires_at > now);
+  const count = credits.length || (Number.isInteger(account.banked_resets) && account.banked_resets > 0 ? account.banked_resets : 0);
+  if (!count) return null;
+  const lines = credits.length ? credits.map((credit, index) => h('li', { key: `${credit.expires_at}:${index}`, className: 'su-banked-credit', 'data-soon': credit.expires_at !== null && credit.expires_at - now < DAY_S },
+    credit.expires_at === null ? 'Banked reset · no expiry reported' : [`Banked reset · expires ${resetTime(credit.expires_at, now)} `, h('span', { key: 'in', className: 'su-banked-in' }, `in ${formatDurationShort(credit.expires_at - now)}`)]))
+    : [h('li', { key: 'count', className: 'su-banked-credit' }, `${count} banked reset${count === 1 ? '' : 's'}`)];
+  const canRedeem = provider === 'openai-codex' && typeof redeem === 'function' && typeof sdk.ConfirmDialog === 'function';
+  const label = account.label || account.id, loss = canRedeem ? redeemLoss(provider, account, windows) : null;
+  return h('div', { className: 'su-banked-row' },
+    h('ul', { className: 'su-banked', 'aria-label': 'Banked resets' }, lines),
+    canRedeem ? h(RedeemButton, { usable: bankedRedeemable(windows), onClick: () => setConfirming(true) }) : null,
+    canRedeem ? h(sdk.ConfirmDialog, { open: confirming, onClose: () => setConfirming(false), title: `Use one banked reset on ${label}?`,
+      confirmLabel: 'Use reset', busyLabel: 'Using reset…', doneLabel: 'Reset used', destructive: !!loss?.percent,
+      onConfirm: () => redeem(provider, account.id) }, h(RedeemLoss, { loss })) : null);
+}
+// Usable: an outline in the success green. Refused: still names the reset, but dashed and padlocked so it reads as unavailable rather than dangerous, with the scope of the refusal (every bar) on a second line.
+function RedeemButton({ usable, onClick }) {
+  if (usable === false) return h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true,
+    title: `Codex only accepts a banked reset once an allowance has less than ${BANKED_REDEEM_BELOW_PERCENT}% left; every one here has ${BANKED_REDEEM_BELOW_PERCENT}% or more.` },
+    h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one'), h('small', null, `all ≥${BANKED_REDEEM_BELOW_PERCENT}% left`));
+  return h('button', { type: 'button', className: 'su-redeem-use', 'data-state': usable ? 'usable' : 'unknown', 'aria-haspopup': 'dialog', title: 'Use one banked reset now. Codex picks which credit is spent.', onClick },
+    h('span', { className: 'su-redeem-use-row' }, icon('Ticket', '◇'), 'Use one'));
+}
+// The confirmation's only content: how much of the weekly allowance the reset throws away, as a figure and as a bar whose hatched part is lost and whose plain part is restored.
+function RedeemLoss({ loss }) {
+  if (!loss) return null;
+  const name = (loss.win.label || loss.win.key).toLowerCase();
+  if (loss.percent === null) return h('p', { className: 'su-redeem-lost' }, h('span', null, `The ${name} allowance left now is unknown.`));
+  const restored = 100 - loss.percent;
+  return h('div', { className: 'su-redeem' },
+    h('p', { className: 'su-redeem-lost' }, h('b', { 'data-zero': loss.percent === 0 }, `${loss.percent}%`),
+      h('span', null, `of the ${name} allowance lost${loss.percent ? ` · ${unitsText(loss.units)} units` : ''}`)),
+    h('div', { className: 'su-redeem-bar', role: 'img', 'aria-label': `${loss.percent}% lost, ${restored}% restored` },
+      h('span', { className: 'su-redeem-lose', style: { width: `${loss.percent}%` } }),
+      restored ? h('span', { className: 'su-redeem-gain' }, `+${restored}%`) : null));
 }
 function LimitWindowRow({ win, now, selected }) {
   const remaining = Number.isFinite(win.remaining_percent) ? clamp(win.remaining_percent, 0, 100) : null;
@@ -3668,8 +3726,21 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-flag{position:absolute;bottom:calc(100% + var(--su-flag-row, 0) * 16px);display:inline-flex;align-items:flex-start;gap:1px;margin:0 0 3px calc(-14px * 5 / 24);color:var(--ui-text-secondary);font-size:10px;line-height:12px;font-variant-numeric:tabular-nums;pointer-events:auto}
 .su-flag svg{width:14px;height:14px;flex-shrink:0}
 /* Banked reset credits listed under an account's bars. */
-.su-banked{display:flex;flex-direction:column;gap:2px;margin:8px 0 0;padding:0;list-style:none;font-size:11px;color:var(--ui-text-secondary)}
-.su-banked-credit[data-soon=true]{color:var(--ui-orange,#db704b)}
+.su-banked-row{display:flex;align-items:stretch;gap:10px;margin-top:8px}
+.su-banked{display:flex;flex:1;flex-direction:column;justify-content:center;gap:2px;min-width:0;margin:0;padding:0;list-style:none;font-size:11px;color:var(--ui-text-secondary)}
+.su-banked-credit[data-soon=true]{color:var(--ui-orange,#db704b)}.su-banked-in{color:var(--ui-text-tertiary);white-space:nowrap;font-variant-numeric:tabular-nums}
+/* The redeem button spans the credit list's height; a refused reset keeps the button's shape but dashed, padlocked and in the destructive red. */
+.su-redeem-use{--su-redeem:var(--ui-green,#1f8a65);display:inline-flex;flex:none;flex-direction:column;align-items:center;justify-content:center;gap:1px;min-width:96px;padding:3px 12px;border:1px solid color-mix(in srgb,var(--su-redeem) 55%,transparent);border-radius:6px;background:transparent;color:var(--su-redeem);font:inherit;font-size:11px;line-height:1.3;white-space:nowrap;cursor:pointer}
+.su-redeem-use:hover:not([aria-disabled=true]){background:color-mix(in srgb,var(--su-redeem) 14%,transparent)}
+.su-redeem-use[data-state=unknown]{--su-redeem:var(--ui-text-secondary)}
+.su-redeem-use[aria-disabled=true]{--su-redeem:var(--dt-destructive,#cf2d56);border-style:dashed;cursor:not-allowed}
+.su-redeem-use-row{display:inline-flex;align-items:center;gap:6px}.su-redeem-use svg{width:13px;height:13px;flex:none}.su-redeem-use small{font-size:10px;opacity:.85}
+/* The confirmation renders in a portal outside .su, so these rules use theme tokens directly. */
+.su-redeem-lost{display:flex;align-items:baseline;gap:8px;margin:0 0 8px;font-size:12px;color:var(--ui-text-secondary)}
+.su-redeem-lost b{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ui-orange,#db704b)}.su-redeem-lost b[data-zero=true]{color:var(--ui-green,#1f8a65)}
+.su-redeem-bar{position:relative;height:14px;overflow:hidden;border-radius:3px;background:color-mix(in srgb,var(--ui-green,#1f8a65) 24%,transparent)}
+.su-redeem-lose{position:absolute;top:0;bottom:0;left:0;background:repeating-linear-gradient(135deg,var(--ui-orange,#db704b) 0 4px,color-mix(in srgb,var(--ui-orange,#db704b) 45%,transparent) 4px 8px)}
+.su-redeem-gain{position:absolute;top:0;right:0;bottom:0;display:flex;align-items:center;padding-right:5px;font-size:10px;font-variant-numeric:tabular-nums;color:var(--ui-green,#1f8a65)}
 @media(max-width:640px){.su{padding:12px}.su-window{grid-template-columns:minmax(60px,7rem) minmax(40px,1fr) 4rem;}.su-window-reset{display:none}}
 `;
 export default {
