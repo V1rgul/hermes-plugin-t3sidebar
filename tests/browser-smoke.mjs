@@ -457,7 +457,7 @@ try {
   await design.hover(); await snooze.click();
   await snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true }).click();
   await page.locator('section[aria-label="Pinned"] [data-session-id="design"]').waitFor();
-  check('restoring a pinned snooze returns to Pinned', await design.locator('.sf-pin').count() === 1);
+  check('restoring a pinned snooze returns to Pinned, marked by the group pin instead of its own', !await design.locator('.sf-pin').count() && await page.locator('section[aria-label="Pinned"] > .sf-pinned-mark').count() === 1);
   await design.click({ button: 'right' });
   await page.getByRole('button', { name: 'Unpin', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
@@ -1109,7 +1109,8 @@ try {
     await page.waitForFunction(count => (document.querySelector('[data-section="pinned"]')?.querySelectorAll('.sf-row').length || 0) === count, count);
     if (count === 1) check('Pinned uses natural flex sizing rather than a calculated grid track', await page.locator('[data-section="pinned"]').evaluate(el => getComputedStyle(el.parentElement).display === 'flex' && getComputedStyle(el).flexGrow === '0' && !el.parentElement.style.gridTemplateRows));
     if (!count) check('empty Pinned reserves no space and Ready starts at the top', await page.locator('[data-section="pinned"]').evaluate(el => el.getBoundingClientRect().height === 0 && !el.querySelector('.sf-row')) && await page.locator('.sf-scroll').evaluate(list => Math.abs(list.getBoundingClientRect().top - list.querySelector('[data-section="active"]').getBoundingClientRect().top) <= 1));
-    else check(`Pinned with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="pinned"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - count * 56) <= 1 && Math.abs(el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().bottom - 1) <= 1, count));
+    // The 6px above the cards hold the group pin straddling the outline; 5px of margin plus the 1px shelf gap separate the group from Ready.
+    else check(`Pinned with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="pinned"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - 6 - count * 56) <= 1 && Math.abs(el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().bottom - 6) <= 1, count));
   }
 
   for (const count of [0, 1, 2]) {
@@ -1196,16 +1197,17 @@ try {
   check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Next Monday at 14:35', exact: true }).count() === 1);
   await page.keyboard.press('Escape');
   await presetSetting.fill('09:00');
-  const detailsSwitch = page.getByRole('switch', { name: 'Detailed Working indicator', exact: true });
+  const detailsGroup = page.getByRole('group', { name: 'Working indicator', exact: true });
+  const detailsMode = () => detailsGroup.locator('button[aria-pressed=true]').textContent();
   const rootBadge = () => page.locator('[data-session-id="root"] .sf-status').evaluate(el => ({ agent: el.dataset.agent ?? null, paths: el.querySelectorAll('svg path').length }));
-  check('Detailed Working indicator defaults off with the plain dashed circle', await detailsSwitch.getAttribute('aria-checked') === 'false' && JSON.stringify(await rootBadge()) === JSON.stringify({ agent: null, paths: 8 }));
-  await detailsSwitch.click();
+  check('Working indicator defaults to Normal with the plain dashed circle', await detailsMode() === 'Normal' && JSON.stringify(await rootBadge()) === JSON.stringify({ agent: null, paths: 8 }));
+  await detailsGroup.getByRole('button', { name: 'Detailed', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[data-session-id="root"] .sf-status')?.dataset.agent === 'true');
   check('turning on the detailed indicator draws the solid agent ring without a reload', JSON.stringify(await rootBadge()) === JSON.stringify({ agent: 'true', paths: 1 }));
   await page.reload();
   await page.getByRole('button', { name: 'Plugin settings', exact: true }).click();
-  check('detailed indicator setting persists across actual browser reload', await detailsSwitch.getAttribute('aria-checked') === 'true' && (await rootBadge()).agent === 'true');
-  await detailsSwitch.click();
+  check('detailed indicator setting persists across actual browser reload', await detailsMode() === 'Detailed' && (await rootBadge()).agent === 'true');
+  await detailsGroup.getByRole('button', { name: 'Normal', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[data-session-id="root"] .sf-status')?.dataset.agent === undefined);
   check('turning it off restores the plain dashed circle', JSON.stringify(await rootBadge()) === JSON.stringify({ agent: null, paths: 8 }));
   await page.setViewportSize({ width: 1200, height: 900 });
@@ -1400,66 +1402,89 @@ try {
     await focus.close();
   }
   {
-    const gap = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
-    gap.on('pageerror', error => errors.push(error.message));
-    await gap.emulateMedia({ reducedMotion: 'reduce' });
-    await gap.goto(`http://127.0.0.1:${server.address().port}`);
-    await gap.locator('[data-session-id="pinned"]').waitFor();
-    const measure = () => gap.locator('[data-section="pinned"]').evaluate(el => ({
-      height: el.getBoundingClientRect().height,
-      space: el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().bottom,
-      margin: parseFloat(getComputedStyle(el).marginBottom),
-      row: el.querySelector('.sf-row')?.getBoundingClientRect().height ?? 0
+    const lines = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+    lines.on('pageerror', error => errors.push(error.message));
+    await lines.emulateMedia({ reducedMotion: 'reduce' });
+    await lines.goto(`http://127.0.0.1:${server.address().port}`);
+    await lines.locator('[data-session-id="pinned"]').waitFor();
+    const measure = () => lines.locator('.sf-scroll').evaluate(list => {
+      const el = list.querySelector('[data-section=pinned]'), rect = el.getBoundingClientRect(), outline = getComputedStyle(el, '::before');
+      const row = el.querySelector('.sf-row'), last = [...el.querySelectorAll('.sf-row')].at(-1).getBoundingClientRect(), ready = list.querySelector('[data-section=active] .sf-row').getBoundingClientRect();
+      const margin = parseFloat(getComputedStyle(row).borderTopWidth);
+      const mark = el.querySelector(':scope > .sf-pinned-mark')?.getBoundingClientRect();
+      const part = selector => { const node = row.querySelector(selector), box = node.getBoundingClientRect(); return { visible: getComputedStyle(node).display !== 'none' && box.height > 0, middle: box.top + box.height / 2 }; };
+      return {
+        height: rect.height, space: el.nextElementSibling.getBoundingClientRect().top - rect.bottom, row: row.getBoundingClientRect().height, rows: el.querySelectorAll('.sf-row').length,
+        // The outline spans exactly the cards' box, the same as a Ready card, and sits under them.
+        outline: outline.content !== 'none' && outline.borderTopWidth === '1px' && outline.zIndex === '-1' && getComputedStyle(el).isolation === 'isolate' && rect.left === ready.left && rect.width === ready.width,
+        // Its top and bottom lines are the first and last cards' outermost background rows, so a hovered or selected card covers them (and the gap behind the pin).
+        underBackgrounds: rect.top + parseFloat(outline.top) === row.getBoundingClientRect().top + margin && rect.bottom - parseFloat(outline.bottom) === last.bottom - margin,
+        markOnBorder: !!mark && Math.abs(mark.top + mark.height / 2 - (rect.top + 7.5)) <= 1,
+        ownPins: el.querySelectorAll('.sf-pin').length, stride: parseFloat(getComputedStyle(el.querySelector('.sf-section-body')).getPropertyValue('--sf-card-content')),
+        name: part('.sf-project-name').visible, title: part('.sf-row-title').middle, time: part('.sf-time').middle, rowMiddle: row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2,
+        lines: list.dataset.pinnedLines
+      };
+    });
+    await lines.getByRole('button', { name: 'Plugin settings', exact: true }).click();
+    const group = lines.getByRole('group', { name: 'Pinned sessions', exact: true });
+    const mode = () => group.locator('button[aria-pressed=true]').textContent();
+    const two = await measure();
+    check('Pinned sessions defaults to 2 lines: ordinary cards, one group pin on an outline as wide as Ready cards', await mode() === '2 lines' && two.lines === '2' && two.row === 56 && two.height === 6 + two.rows * 56 && two.space === 6 && two.outline && two.underBackgrounds && two.markOnBorder && two.ownPins === 0 && two.name);
+    await group.getByRole('button', { name: '1 line', exact: true }).click();
+    await lines.waitForFunction(() => document.querySelector('.sf-scroll')?.dataset.pinnedLines === '1');
+    const one = await measure();
+    check('1 line: 33px pinned cards without the project name, title and status on one centred line', one.row === 33 && one.height === 6 + one.rows * 33 && one.space === 6 && one.outline && one.underBackgrounds && one.markOnBorder && !one.name && one.stride === 19 &&
+      Math.abs(one.title - one.rowMiddle) <= 1 && Math.abs(one.time - one.rowMiddle) <= 1);
+    await lines.locator('[data-session-id="pinned"]').hover();
+    check('1 line: hover actions are centred in the row', await lines.locator('[data-session-id="pinned"]').evaluate(row => {
+      const box = row.getBoundingClientRect(), strip = row.querySelector('.sf-hover').getBoundingClientRect();
+      return getComputedStyle(row.querySelector('.sf-hover')).visibility === 'visible' && Math.abs((strip.top - box.top) - (box.bottom - strip.bottom)) <= 1;
     }));
-    await gap.getByRole('button', { name: 'Plugin settings', exact: true }).click();
-    const toggle = gap.getByRole('switch', { name: 'Pinned session gap', exact: true });
-    check('Pinned session gap defaults off with the original 1px shelf spacing', await toggle.getAttribute('aria-checked') === 'false' && (await measure()).space === 1);
-    await toggle.click();
-    await gap.waitForFunction(() => document.querySelector('.sf-scroll')?.dataset.pinnedGap === 'true');
-    const enabled = await measure();
-    check('Pinned session gap adds exactly a quarter-row outside the unchanged pinned body', enabled.space === 1 + enabled.row / 4 && enabled.margin === enabled.row / 4 && enabled.height === enabled.row);
-    await gap.reload();
-    await gap.locator('[data-session-id="pinned"]').waitFor();
-    check('Pinned session gap persists through a real browser reload', (await measure()).space === enabled.space);
-    await gap.getByRole('button', { name: 'Plugin settings', exact: true }).click();
-    check('Pinned session gap toggle reads its persisted value', await toggle.getAttribute('aria-checked') === 'true');
-    const custom = await gap.addStyleTag({ content: ':root{--sf-card-content:44px;--sf-card-padding:7px;--sf-card-margin:2px}' });
+    await lines.mouse.move(1100, 850);
+    check('Ready cards keep two lines in 1-line mode', await lines.locator('[data-section=active] .sf-row').first().evaluate(el => el.getBoundingClientRect().height === 56));
+    await lines.reload();
+    await lines.locator('[data-session-id="pinned"]').waitFor();
+    check('Pinned sessions line count persists through a real browser reload', (await measure()).row === 33);
+    await lines.getByRole('button', { name: 'Plugin settings', exact: true }).click();
+    check('Pinned sessions setting reads its persisted value', await mode() === '1 line');
+    const custom = await lines.addStyleTag({ content: ':root{--sf-card-content:44px;--sf-card-padding:7px;--sf-card-margin:2px}' });
     const themed = await measure();
-    check('Pinned session gap follows custom card geometry without JavaScript measurements', themed.row === 62 && themed.space === 1 + themed.row / 4);
+    check('1-line cards follow custom card padding and margin, the outline still under their backgrounds', themed.row === 19 + 2 * 7 + 2 * 2 && themed.underBackgrounds && themed.markOnBorder);
     await custom.evaluate(el => el.remove());
-    await gap.getByRole('searchbox', { name: 'Search sessions', exact: true }).fill('Design review');
-    await gap.waitForFunction(() => document.querySelector('[data-section=pinned]')?.dataset.populated === 'false');
-    check('search hiding all pinned cards removes their gap and reserved space', await gap.locator('.sf-scroll').evaluate(el => {
+    await lines.getByRole('searchbox', { name: 'Search sessions', exact: true }).fill('Design review');
+    await lines.waitForFunction(() => document.querySelector('[data-section=pinned]')?.dataset.populated === 'false');
+    check('search hiding all pinned cards removes the outline, pin and reserved space', await lines.locator('.sf-scroll').evaluate(el => {
       const pinned = el.querySelector('[data-section=pinned]'), ready = el.querySelector('[data-section=active]');
-      return pinned.getBoundingClientRect().height === 0 && getComputedStyle(pinned).marginBottom === '-1px' && ready.getBoundingClientRect().top === el.getBoundingClientRect().top;
+      return pinned.getBoundingClientRect().height === 0 && getComputedStyle(pinned, '::before').content === 'none' && !pinned.querySelector('.sf-pinned-mark') && getComputedStyle(pinned).marginBottom === '-1px' && ready.getBoundingClientRect().top === el.getBoundingClientRect().top;
     }));
-    await gap.getByRole('searchbox', { name: 'Search sessions', exact: true }).fill('');
-    await gap.locator('[data-session-id="pinned"]').waitFor();
-    check('clearing search restores the enabled pinned gap', (await measure()).space === enabled.space);
-    await toggle.click();
-    await gap.waitForFunction(() => document.querySelector('.sf-scroll')?.dataset.pinnedGap === 'false');
-    check('disabling Pinned session gap immediately restores the original spacing', (await measure()).space === 1);
-    await toggle.click();
-    await gap.waitForFunction(() => document.querySelector('.sf-scroll')?.dataset.pinnedGap === 'true');
-    await gap.evaluate(async () => {
+    await lines.getByRole('searchbox', { name: 'Search sessions', exact: true }).fill('');
+    await lines.locator('[data-session-id="pinned"]').waitFor();
+    // A windowed Pinned list (over 80 cards) positions its cards from the stride it read; switching the line count must re-read it without a remount.
+    await lines.evaluate(async () => {
       const fixture = window.hermesT3SidebarHarness; fixture.loadDenseFixtures();
+      for (let i = 0; i < 90; i++) fixture.control.metadata.sessions[`synthetic-active-${String(i).padStart(3, '0')}`] = { state: 'active', pinned: true, wake_at: null, settled_at: null, updated_at: Date.now() / 1000 };
+      fixture.switchScope('windowed-pinned');
       await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
     });
-    await gap.locator('[data-session-id="synthetic-pinned-000"]').waitFor();
+    await lines.waitForFunction(() => document.querySelectorAll('[data-section=pinned] .sf-slot').length > 0 && document.querySelector('[data-section=pinned] .sf-window').style.height === `${110 * 33}px`);
+    const slots = () => lines.locator('[data-section=pinned] .sf-window').evaluate(el => ({ height: el.style.height, tops: [...el.querySelectorAll('.sf-slot')].slice(0, 3).map(slot => slot.style.top), row: el.querySelector('.sf-row').getBoundingClientRect().height }));
+    check('windowed 1-line Pinned list stacks its cards at the 33px stride', JSON.stringify(await slots()) === JSON.stringify({ height: `${110 * 33}px`, tops: ['0px', '33px', '66px'], row: 33 }));
+    await group.getByRole('button', { name: '2 lines', exact: true }).click();
+    await lines.waitForFunction(() => document.querySelector('[data-section=pinned] .sf-window')?.style.height === `${110 * 56}px`);
+    check('switching to 2 lines re-reads the stride of the mounted windowed list', JSON.stringify(await slots()) === JSON.stringify({ height: `${110 * 56}px`, tops: ['0px', '56px', '112px'], row: 56 }));
     for (const height of [300, 400, 650]) {
-      await gap.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
-      check(`${height}px with pinned gap: capped pinned scrolling and all secondary headings fit`, await gap.locator('.sf-scroll').evaluate(el => {
+      await lines.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
+      check(`${height}px with the pinned group: capped pinned scrolling and all secondary headings fit`, await lines.locator('.sf-scroll').evaluate(el => {
         const pinned = el.querySelector('[data-section=pinned]'), body = pinned.querySelector('.sf-section-body');
         return el.scrollHeight <= el.clientHeight + 1 && pinned.getBoundingClientRect().height <= el.clientHeight * .18 + 1 && body.scrollHeight > body.clientHeight &&
           [...el.querySelectorAll('.sf-section-toggle')].every(header => header.getBoundingClientRect().bottom <= el.getBoundingClientRect().bottom + 1);
       }));
-      check(`${height}px with pinned gap: spacing stays exactly a quarter-row`, (await measure()).space === 15);
     }
-    await gap.close();
+    await lines.close();
   }
   {
     // Card geometry is themeable: a different content/padding/margin must drive heights, gaps, windowing and shelf minimums alike.
-    // 936px = the former 900px plus the 36px Usage/Limits footer, so the shelves get the list height this case was written for (the 20% minimum already sits 1px under the formula, so a shorter list pushes rounding past the 1px tolerance).
+    // 936px = the former 900px plus the 36px Usage/Limits footer, so the shelves get the list height this case was written for.
     const geometry = await browser.newPage({ viewport: { width: 1200, height: 936 }, deviceScaleFactor: 1 });
     geometry.on('pageerror', error => errors.push(error));
     // Shelf tracks animate when the fixture changes card counts; measure final layout, like the main page.
@@ -1480,7 +1505,8 @@ try {
         step: top('synthetic-active-001') - top('synthetic-active-000'), working: document.querySelector('[data-section="working"]').getBoundingClientRect().height, shelves };
     });
     check('custom card content, padding and margin drive the row height, gap and windowed stride', layout.height === 62 && layout.margin === '2px' && layout.padding === '7px' && layout.step === 62 && layout.spacer === 100 * 62);
-    check('custom card geometry drives the two-card shelf minimum', Math.abs(layout.working - Math.max(layout.shelves * .18, Math.min(30 + 2 * 62, layout.shelves * .2))) <= 1);
+    // The stylesheet's 20% minimum gives up 1px for the shelf gap (calc(20% - 1px)).
+    check('custom card geometry drives the two-card shelf minimum', Math.abs(layout.working - Math.max(layout.shelves * .18, Math.min(30 + 2 * 62, layout.shelves * .2 - 1))) <= 1);
     await geometry.close();
   }
   {

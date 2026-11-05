@@ -33,12 +33,13 @@ function readWorkingDetails(ctx) {
 function useWorkingDetails(ctx) {
   return useQuery({ queryKey: WORKING_DETAILS_KEY, queryFn: () => readWorkingDetails(ctx), initialData: () => readWorkingDetails(ctx), staleTime: Infinity }).data;
 }
-const PINNED_GAP_KEY = ['hermes-t3sidebar-preferences', 'pinned-gap'];
-function readPinnedGap(ctx) {
-  try { return ctx.storage.get('pinned-gap', false) === true; } catch (_) { return false; }
+// Pinned card height in text lines: 2 keeps the ordinary card, 1 puts the title beside its metadata to save vertical space.
+const PINNED_LINES_KEY = ['hermes-t3sidebar-preferences', 'pinned-lines'];
+function readPinnedLines(ctx) {
+  try { return ctx.storage.get('pinned-lines', 2) === 1 ? 1 : 2; } catch (_) { return 2; }
 }
-function usePinnedGap(ctx) {
-  return useQuery({ queryKey: PINNED_GAP_KEY, queryFn: () => readPinnedGap(ctx), initialData: () => readPinnedGap(ctx), staleTime: Infinity }).data;
+function usePinnedLines(ctx) {
+  return useQuery({ queryKey: PINNED_LINES_KEY, queryFn: () => readPinnedLines(ctx), initialData: () => readPinnedLines(ctx), staleTime: Infinity }).data;
 }
 const SHOW_TOKENS_KEY = ['hermes-t3sidebar-preferences', 'show-tokens'];
 function readShowTokens(ctx) {
@@ -930,8 +931,24 @@ const CSS = `
 .sf{interpolate-size:allow-keywords}.sf-shelves{display:flex;flex-direction:column;flex:1;min-height:0;gap:1px}.sf-shelves>.sf-section{flex:1 1 0;transition:flex-grow .22s ease,min-height .22s ease,max-height .22s ease}.sf-shelves>.sf-section[data-section=active]{min-height:min(40%,calc(var(--sf-count) * var(--sf-card-stride)));max-height:max-content;margin-bottom:auto}.sf-shelves>.sf-section:is([data-section=working],[data-section=snoozed],[data-section=archived]){min-height:max(30px,min(calc(30px + min(var(--sf-count),2) * var(--sf-card-stride)),calc(20% - 1px)));max-height:max-content}.sf-shelves>.sf-section[data-section=archived]{max-height:40%;max-height:calc-size(max-content,min(size,40%))}.sf-shelves>.sf-section[data-closed=true]{flex-grow:0;min-height:30px;max-height:30px}
 /* Shelves are a flex column: every section starts from zero and takes an equal share (flex-grow), bounded by its min/max heights, so constrained sections end up the same height. The 20% minima give up 1px each for the gaps, so 40% + 3 × 20% fits exactly. Ready takes up to 40% first (its minimum) and absorbs unused space below its cards (auto margin) so headings stay at the bottom. Working and Snoozed keep up to two cards (20% in short panes) and can grow to all their cards; Archived stops at 40%. Folding transitions flex-grow plus min/max-height (interpolate-size makes max-content animatable), so the edge moves from the first frame whether the section is squeezed or fits its cards. */
 .sf-section{display:flex;flex-direction:column;min-height:0;overflow:hidden}.sf-section[data-section=pinned]{flex:0 1 auto;max-height:18%}
-/* Keep the optional breathing room outside Pinned's scroll body and pane-relative height cap. */
-.sf-scroll[data-pinned-gap=true]>.sf-section[data-section=pinned][data-populated=true]{margin-bottom:calc(var(--sf-card-stride) / 4)}
+/* Pinned cards form one outlined group marked by a single pin on its top border, rather than a pin per card. The outline runs exactly along the cards' backgrounds (inside their transparent margin border, with the same inner corner radii) and under them: cards keep Ready's width, and a hovered or selected card covers its part of the outline, including the gap the outline's mask leaves behind the pin, so the pin needs no background colour of its own. */
+.sf-section[data-section=pinned][data-populated=true]{position:relative;isolation:isolate;padding-top:calc(7px - var(--sf-card-margin,1px));margin-bottom:calc(6px - var(--sf-card-margin,1px))}
+.sf-section[data-section=pinned][data-populated=true]::before{content:'';position:absolute;z-index:-1;inset:7px 0 var(--sf-card-margin,1px);border:1px solid var(--ui-stroke-secondary);border-radius:6px/calc(6px - var(--sf-card-margin,1px));pointer-events:none;-webkit-mask:linear-gradient(#000 0 0) 10px 0/19px 1px no-repeat,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) 10px 0/19px 1px no-repeat,linear-gradient(#000 0 0);mask-composite:exclude}
+/* Centred on the outline's top line; above the first card, whose hover background would otherwise cover the pin's lower half. */
+.sf-pinned-mark{position:absolute;z-index:1;left:10px;top:1px;display:flex;justify-content:center;width:19px;height:13px;color:var(--ui-accent)}.sf-pinned-mark svg{width:13px;height:13px;stroke-width:2}
+/* One-line pinned cards: the project name goes and the title sits between the project icon and the metadata. The content variable becomes one 19px text line, so the row height and the stride lists read from it agree. */
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned]{--sf-card-content:19px;--sf-card-stride:calc(var(--sf-card-content) + 2 * var(--sf-card-padding,6px) + 2 * var(--sf-card-margin,1px))}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-open{flex-direction:row;align-items:center;justify-content:flex-start;gap:8px}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-card-meta{display:contents}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-project{flex:none}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-project-name{display:none}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-row-title{order:1;flex:1;min-width:0;width:auto}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-wait{order:2}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-provider{order:3}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-token{order:4}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-time{order:5}
+/* Centred in the single-line row, as the 4px inset centres it on the metadata line of a two-line card. */
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-hover{top:calc((var(--sf-card-stride) - 2 * var(--sf-card-margin,1px) - 25px) / 2)}
 /* An empty Pinned stays mounted (zero height, gap cancelled) so its last card can animate out. */
 .sf-section[data-section=pinned][data-populated=false]{margin-bottom:-1px}
 .sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--ui-text-primary) 28%,transparent) transparent}
@@ -1138,8 +1155,8 @@ function MenuAction({ name, codicon, className = '', destructive = false, childr
 }
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
 function Settings({ ctx }) {
-  const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedGap = usePinnedGap(ctx), showTokens = useShowTokens(ctx);
-  const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [gapError, setGapError] = useState(''), [tokensError, setTokensError] = useState('');
+  const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
+  const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [linesError, setLinesError] = useState(''), [tokensError, setTokensError] = useState('');
   const save = value => {
     if (!validSnoozeTime(value)) { setError('Choose a valid time.'); return; }
     try {
@@ -1155,12 +1172,12 @@ function Settings({ ctx }) {
       client.setQueryData(WORKING_DETAILS_KEY, on); setDetailsError('');
     } catch (err) { setDetailsError(err.message); }
   };
-  const saveGap = on => {
+  const saveLines = lines => {
     try {
-      ctx.storage.set('pinned-gap', on);
-      if (ctx.storage.get('pinned-gap') !== on) throw new Error('The pinned session gap setting was not saved.');
-      client.setQueryData(PINNED_GAP_KEY, on); setGapError('');
-    } catch (err) { setGapError(err.message); }
+      ctx.storage.set('pinned-lines', lines);
+      if (ctx.storage.get('pinned-lines') !== lines) throw new Error('The pinned session height setting was not saved.');
+      client.setQueryData(PINNED_LINES_KEY, lines); setLinesError('');
+    } catch (err) { setLinesError(err.message); }
   };
   const saveTokens = on => {
     try {
@@ -1175,16 +1192,16 @@ function Settings({ ctx }) {
     description: 'Tomorrow and Next Monday wake at this local time. Existing snoozes keep their time.',
     action: h(sdk.Input, { type: 'time', step: 60, value: presetTime, className: 'sf-snooze-time', 'aria-label': 'Snooze preset time', 'aria-invalid': error ? true : undefined, onChange: event => save(event.target.value) }),
     below: error ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, error) : null
-  }), h(sdk.ToggleRow ?? SettingsToggleRow, {
-    label: 'Detailed Working indicator',
-    description: 'Solid circle while the agent itself works, dashed when only subagents or a background command run, and +N running subagents. Off shows the plain dashed circle.',
-    checked: workingDetails, onChange: saveDetails,
+  }), h(sdk.ListRow ?? SettingsRow, {
+    title: 'Working indicator',
+    description: 'Detailed: solid circle while the agent itself works, dashed when only subagents or a background command run, and +N running subagents. Normal: the plain dashed circle.',
+    action: h(Segmented, { label: 'Working indicator', showLabel: false, options: [{ id: false, label: 'Normal' }, { id: true, label: 'Detailed' }], value: workingDetails, onChange: saveDetails }),
     below: detailsError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, detailsError) : null
-  }), h(sdk.ToggleRow ?? SettingsToggleRow, {
-    label: 'Pinned session gap',
-    description: "Adds a small gap below pinned session, so they're visually separated",
-    checked: pinnedGap, onChange: saveGap,
-    below: gapError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, gapError) : null
+  }), h(sdk.ListRow ?? SettingsRow, {
+    title: 'Pinned sessions',
+    description: 'Height of pinned session cards. One line drops the project name and puts the title beside the provider, tokens and status.',
+    action: h(Segmented, { label: 'Pinned sessions', showLabel: false, options: [{ id: 1, label: '1 line' }, { id: 2, label: '2 lines' }], value: pinnedLines, onChange: saveLines }),
+    below: linesError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, linesError) : null
   }), h(sdk.ToggleRow ?? SettingsToggleRow, {
     label: 'Show token counts',
     description: 'Show total input and output tokens on session cards.',
@@ -1194,7 +1211,12 @@ function Settings({ ctx }) {
 }
 // The settings page renders without the sidebar's stylesheet. Masking the native picker button keeps its click-to-open picker while drawing the same alarm as the hover Snooze control instead of a plain clock.
 const ALARM_MASK = `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>${BUNDLED_ICONS.Alarm.map(d => `<path d='${d}'/>`).join('')}</svg>`)}")`;
-const SETTINGS_CSS = `.sf-snooze-time::-webkit-calendar-picker-indicator{background:currentColor;-webkit-mask:${ALARM_MASK} content-box center/contain no-repeat;mask:${ALARM_MASK} content-box center/contain no-repeat;cursor:pointer}`;
+// Button groups on clients without the SDK SegmentedControl; the usage pages and the settings page each load their own stylesheet.
+const SEGMENTED_FALLBACK_CSS = `.su-seg{display:inline-flex;gap:2px;padding:2px;border-radius:5px;background:var(--ui-bg-quaternary)}
+.su-seg button{border:0;border-radius:3px;padding:2px 10px;font-size:11px;font-weight:500;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
+.su-seg button[aria-pressed=true]{background:var(--ui-bg-elevated,var(--ui-bg-tertiary));color:var(--ui-text-primary)}`;
+const SETTINGS_CSS = `${SEGMENTED_FALLBACK_CSS}
+.sf-snooze-time::-webkit-calendar-picker-indicator{background:currentColor;-webkit-mask:${ALARM_MASK} content-box center/contain no-repeat;mask:${ALARM_MASK} content-box center/contain no-repeat;cursor:pointer}`;
 // Desktop clients older than the ListRow SDK export still get a usable row.
 function SettingsRow({ title, description, action, below }) {
   return h('div', { style: { display: 'grid', gap: 6, padding: '12px 0' } }, h('div', null, title), h('div', { style: { color: 'var(--ui-text-tertiary)' } }, description), h('div', null, action), below);
@@ -1474,7 +1496,8 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
       h('span', { className: 'sf-card-meta' },
         h('span', { className: 'sf-project' },
           h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: row.project?.color || undefined } }, projectMark(row.project)),
-          row.archived !== true && row.meta.pinned ? h('span', { className: 'sf-pin', 'aria-label': 'Pinned' }, icon('Pin', '♧')) : null,
+          // Inside Pinned the group's single pin marks every card; elsewhere (a snoozed pinned card) the card keeps its own.
+          row.archived !== true && row.meta.pinned && row.section !== 'pinned' ? h('span', { className: 'sf-pin', 'aria-label': 'Pinned' }, icon('Pin', '♧')) : null,
           row.project?.name || !row.newSession ? h('span', { className: 'sf-project-name' }, row.project?.name || 'Project unavailable') : null),
         row.status === 'unknown' ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': 'Status unknown' }, '?') : null,
         provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, title: row.provider }, provider) : null,
@@ -1555,10 +1578,11 @@ function exitGhost(element) {
   ghost.style.pointerEvents = 'none';
   return ghost;
 }
-function SessionWindow({ entries, section, renderRow, navigators, rowRefs, animate = false, menuKey = null }) {
+function SessionWindow({ entries, section, renderRow, navigators, rowRefs, animate = false, menuKey = null, strideKey = null }) {
   const body = useRef(null), pending = useRef(null), viewportHeight = useRef(null), scrollHeight = useRef(0);
   const [stride, setStride] = useState(DEFAULT_CARD_STRIDE), strideRef = useRef(DEFAULT_CARD_STRIDE);
-  useLayoutEffect(() => { const next = cardStride(body.current); strideRef.current = next; setStride(next); }, []);
+  // strideKey names a setting that changes this list's card height (Pinned's line count) without remounting it.
+  useLayoutEffect(() => { const next = cardStride(body.current); strideRef.current = next; setStride(next); }, [strideKey]);
   const [viewport, setViewport] = useState({ top: 0, height: 560 });
   const [focusedKey, setFocusedKey] = useState(null);
   const windowed = entries.length > 80;
@@ -1764,7 +1788,7 @@ function ProjectChoice({ choice, selected, scope, controller, filterProject, clo
       onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject, close }) : null));
 }
 function ScopedSidebar({ ctx, controller, scope }) {
-  const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedGap = usePinnedGap(ctx), showTokens = useShowTokens(ctx);
+  const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
   // No session counts as viewed while a plugin page is shown, so the previous chat neither stays highlighted nor gets its Done/Woke markers acknowledged.
   const focusedId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner), activeId = useShownPage() ? null : focusedId;
   const client = useQueryClient();
@@ -1946,7 +1970,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
   const renderSection = section => {
     const entries = sections[section], closed = isClosed(section);
-    const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs, animate: settled, menuKey: menu?.open ? menu.key : null });
+    const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs, animate: settled, menuKey: menu?.open ? menu.key : null, strideKey: section === 'pinned' ? pinnedLines : null });
     const headerless = section === 'active' || section === 'pinned';
     return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed, style: { '--sf-count': entries.length } },
       !headerless ? h('button', { type: 'button', className: 'sf-section-toggle', 'aria-expanded': !closed, 'aria-label': `${LABELS[section]} (${entries.length})`,
@@ -1954,6 +1978,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
         h('span', { className: 'sf-section-label' }, LABELS[section]), h('span', { className: 'sf-count' }, entries.length),
         h('span', { className: 'sf-section-line', 'aria-hidden': true }),
         h('span', { className: 'sf-section-chevron', 'aria-hidden': true }, icon(closed ? 'ChevronRight' : 'ChevronUp', closed ? '›' : '⌃'))) : null,
+      section === 'pinned' && entries.length ? h('span', { className: 'sf-pinned-mark', 'aria-hidden': true }, icon('Pin', '♧')) : null,
       h('div', { className: 'sf-section-body', 'aria-label': `${section === 'active' ? 'Ready' : LABELS[section]} sessions`, 'aria-hidden': closed || undefined, inert: closed || undefined, tabIndex: -1 },
         section === 'archived' && archives.isError ? h('div', { className: 'sf-empty', role: 'alert' }, `Archives unavailable: ${archives.error.message}`) : null,
         section === 'archived' && archives.isError && !archives.data ? null : items,
@@ -1964,7 +1989,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // Toolbar/popover/error state is not a list input: retain its element tree,
   // not only the cards, so these interactions never walk thousands of rows.
   const renderedSections = useMemo(() => SECTIONS.map(renderSection), [sections, collapsed, searching, filtering, settled, activeId, activeOwner,
-    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, workingDetails, showTokens, emptyDrafts, menu,
+    scope, controller, mutate, selectProject, disabled, focusRow, navigate, rowRef, now, presetTime, workingDetails, pinnedLines, showTokens, emptyDrafts, menu,
     archives.isError, archives.error, !archives.data, archives.isLoading, archives.isFetching, archives.data?.has_more]);
   // CSS flex owns every shelf height (see the stylesheet). A pure JavaScript allocator was also built and profiled: pixel heights
   // computed from card counts, exact Ready-first priority even in short panes, and Working/Snoozed capped at 40%. Once fold
@@ -2009,7 +2034,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     metadata.isError ? h(Note, { error: true }, `hermes-t3sidebar backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback. `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
     expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
     actionError ? h(Note, { error: true }, actionError) : null,
-    h('div', { className: 'sf-scroll', 'data-pinned-gap': pinnedGap }, renderedSections[0],
+    h('div', { className: 'sf-scroll', 'data-pinned-lines': pinnedLines }, renderedSections[0],
       h('div', { ref: shelvesRef, className: 'sf-shelves' }, ...renderedSections.slice(1),
         !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null)),
     sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
@@ -3477,9 +3502,7 @@ const USAGE_CSS = `
 .su-header{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding-bottom:10px;border-bottom:1px solid var(--ui-stroke-secondary)}
 .su-body{display:flex;flex-direction:column;gap:20px}
 .su-control{display:inline-flex;align-items:center;gap:6px}.su-control-label{font-size:11px;color:var(--ui-text-tertiary)}
-.su-seg{display:inline-flex;gap:2px;padding:2px;border-radius:5px;background:var(--ui-bg-quaternary)}
-.su-seg button{border:0;border-radius:3px;padding:2px 10px;font-size:11px;font-weight:500;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
-.su-seg button[aria-pressed=true]{background:var(--ui-bg-elevated,var(--ui-bg-tertiary));color:var(--ui-text-primary)}
+${SEGMENTED_FALLBACK_CSS}
 .su-spacer{flex:1}.su-muted{color:var(--ui-text-tertiary);font-size:11px}
 .su-icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
 .su-icon:hover:not(:disabled){background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.su-icon:disabled{opacity:.5;cursor:default}
