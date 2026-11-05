@@ -479,6 +479,16 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 	return providers
 
 
+def forget_credit_read(provider, account_id):
+	"""Make one account's credit list due at the next collection, after something outside the sampler (a redeemed reset) changed it."""
+	try:
+		home = _home_key(_default_home())
+	except Exception:
+		home = ""
+	with _CREDITS_LOCK:
+		_CREDITS_READ.pop((home, provider, account_id), None)
+
+
 # ─── Store ───
 
 

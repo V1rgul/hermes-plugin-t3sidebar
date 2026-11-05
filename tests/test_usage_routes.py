@@ -131,6 +131,45 @@ class UsageRouteTests(unittest.TestCase):
 		# The module-level router is the one Hermes mounts; it must carry the real starter.
 		self.assertIs(backend.router.t3sidebar_limits_sampler, original)
 
+	def test_redeem_passes_the_account_and_records_a_fresh_reading_after_a_reset(self):
+		redeemed, runs = [], []
+		class Sampler(FakeSampler):
+			def run_once(self):
+				runs.append(1)
+		def redeemer(account_id):
+			redeemed.append(account_id)
+			return {"status": "reset", "available_count": 1, "windows_reset": 2}
+		response = self.client(limits_redeemer=redeemer, limits_sampler=Sampler).post(f"{PREFIX}/usage/limits/redeem?profile=default", json={"provider": "openai-codex", "account": "7ad3ca"})
+		self.assertEqual(response.status_code, 200, response.text)
+		self.assertEqual(response.json(), {"status": "reset", "available_count": 1, "windows_reset": 2, "profile": "default"})
+		self.assertEqual(response.headers["cache-control"], "no-store")
+		self.assertEqual((redeemed, runs), (["7ad3ca"], [1]))
+
+	def test_redeem_refusals_record_nothing_and_failures_map_to_codes(self):
+		runs = []
+		class Sampler(FakeSampler):
+			def run_once(self):
+				runs.append(1)
+		def refuse(account_id):
+			return {"status": "nothing_to_reset", "available_count": 2, "windows_reset": 0}
+		body = {"provider": "openai-codex", "account": "7ad3ca"}
+		self.assertEqual(self.client(limits_redeemer=refuse, limits_sampler=Sampler).post(f"{PREFIX}/usage/limits/redeem", json=body).json()["status"], "nothing_to_reset")
+		self.assertEqual(runs, [])
+		for error, code in ((LookupError(), 404), (backend.banked_reset.Busy(), 409), (RuntimeError("boom"), 503)):
+			def failing(account_id, error=error):
+				raise error
+			response = self.client(limits_redeemer=failing).post(f"{PREFIX}/usage/limits/redeem", json=body)
+			self.assertEqual(response.status_code, code, response.text)
+			self.assertNotIn("boom", response.text)
+
+	def test_redeem_validates_its_body_and_profile(self):
+		calls = []
+		client = self.client(limits_redeemer=lambda account_id: calls.append(account_id))
+		for body in ({"provider": "anthropic", "account": "7ad3ca"}, {"provider": "openai-codex", "account": "../x"}, {"provider": "openai-codex"}, {"provider": "openai-codex", "account": "7ad3ca", "force": False}):
+			self.assertEqual(client.post(f"{PREFIX}/usage/limits/redeem", json=body).status_code, 422, body)
+		self.assertEqual(client.post(f"{PREFIX}/usage/limits/redeem?profile=other", json={"provider": "openai-codex", "account": "7ad3ca"}).status_code, 422)
+		self.assertEqual(calls, [])
+
 
 if __name__ == "__main__":
 	unittest.main()

@@ -396,6 +396,20 @@ test('past step-ups stack below the pooled level after the step', () => {
   assert.deepEqual(usage.pastResetMarkers(accounts, samples, 200, 1000), [], 'a step at the range start is outside it');
 });
 
+test('a redeemed reset is judged by the weekly allowance it throws away', () => {
+  const win = (key, remaining, extra = {}) => ({ key, label: key === 'weekly' ? 'Weekly' : key, remaining_percent: remaining, window_seconds: key === 'weekly' ? 604800 : 18000, ...extra });
+  // Business seat: the full 5-hour window does not count, only the empty weekly one.
+  const team = usage.redeemLoss('openai-codex', { plan: 'team' }, [win('five_hour', 100), win('weekly', 0)]);
+  assert.deepEqual([team.win.key, team.percent, team.units], ['weekly', 0, 0]);
+  const pro = usage.redeemLoss('openai-codex', { plan: 'prolite' }, [win('weekly', 59.4), win('weekly:gpt', 10, { scope: 'model' })]);
+  assert.deepEqual([pro.win.key, pro.percent, pro.units], ['weekly', 59, 59], 'Pro 100 weighs 100 units, so 59% left is 59 units lost');
+  assert.equal(usage.redeemWindow([win('five_hour', 50), win('monthly', 30, { window_seconds: 2592000 })]).key, 'monthly', 'without weekly, the longest account-wide window');
+  assert.deepEqual([usage.redeemLoss('openai-codex', { plan: 'plus' }, [win('weekly', null)]).percent, usage.redeemLoss('openai-codex', {}, [])], [null, null]);
+  assert.deepEqual(['reset', 'already_redeemed'].map(status => usage.redeemFailure({ status })), [null, null]);
+  for (const status of ['nothing_to_reset', 'not_exhausted', 'no_credit', 'no_credits_banked', 'unavailable', 'surprise', undefined]) assert.equal(typeof usage.redeemFailure({ status }), 'string', String(status));
+  assert.match(usage.redeemFailure({ status: 'nothing_to_reset' }), /not spent/);
+});
+
 test('banked reset credits are validated defensively and flagged by expiry', () => {
   assert.equal(usage.validBankedCredits(null), null);
   assert.equal(usage.validBankedCredits([]), null);
@@ -842,7 +856,8 @@ test('account details are folded by default and each provider remembers its own 
   // Open, the card holds the account cards and drops the name preview they would repeat.
   assert.deepEqual([section('openai-codex').querySelector('.su-accounts').parentElement.className, toggle('openai-codex').querySelector('.su-disclosure-names') === null, toggle('anthropic').querySelector('.su-disclosure-names') !== null], ['su-accounts-group', true, true]);
   const first = $('.su-account[data-account="acct-team"]');
-  assert.match(first.querySelector('.su-account-head').textContent, /^codex-teampriority0Business20 units2 banked resets/);
+  assert.match(first.querySelector('.su-account-head').textContent, /^codex-teampriority0Business20 units/);
+  assert.equal($$('.su-badge').some(node => /banked|usable/.test(node.textContent)), false, 'banked resets have no header pill: the redeem button carries their state');
   const plan = (id, part = '.su-badge[data-badge=plan]') => [...$(`.su-account[data-account="${id}"] ${part}`).children].map(half => `${half.dataset.tone ?? ''}|${half.textContent}`).join(' ');
   assert.equal(plan('acct-prolite'), '|Pro 100 primary|100 units', 'the plan pill splits, units in the primary colour');
   assert.equal(plan('acct-prolite', '.su-badge[data-badge=priority]'), '|priority primary|1', 'the priority pill splits, its number in the primary colour');
@@ -895,12 +910,14 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
     const lines = id => [...$(`.su-account[data-account="${id}"]`).querySelectorAll('.su-banked-credit')].map(node => `${node.dataset.soon}|${node.textContent}`);
     const team = lines('acct-team'), prolite = lines('acct-prolite');
     assert.equal(team.length, 2); assert.equal(prolite.length, 2);
-    assert.match(team[0], /^true\|Banked reset · expires [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM) \(in 5h 0m\)$/, 'within a day: orange');
-    assert.match(team[1], /^false\|Banked reset · expires [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} (AM|PM) \(in 9d 0h\)$/);
-    assert.match(prolite[0], /^true\|Banked reset · expires .* \(in 5h 10m\)$/, 'usability is an account badge, not repeated on each credit');
-    assert.match(prolite[1], /^false\|Banked reset · expires .* \(in 9d 0h\)$/);
-    const badge = id => $$(`.su-account[data-account="${id}"] .su-badge-split`).filter(node => node.textContent.includes('banked')).map(node => [...node.children].map(half => `${half.dataset.tone ?? ''}|${half.textContent}`));
-    assert.deepEqual([badge('acct-team'), badge('acct-prolite')], [[['|2 banked resets', 'success|usable now']], [['|2 banked resets', 'success|usable now']]], 'codex-pro is redeemable below 80% left even though Codex\'s applicable count is 0');
+    assert.match(team[0], /^true\|Banked reset · expires [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM) in 5h 0m$/, 'within a day: orange');
+    assert.match(team[1], /^false\|Banked reset · expires [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} (AM|PM) in 9d 0h$/);
+    assert.match(prolite[0], /^true\|Banked reset · expires .* in 5h 10m$/, 'usability is the account button\'s state, not repeated on each credit');
+    assert.match(prolite[1], /^false\|Banked reset · expires .* in 9d 0h$/);
+    const countdowns = $$('.su-account .su-banked-credit').map(node => node.querySelector('.su-banked-in')?.textContent ?? null);
+    assert.equal(countdowns.every(text => /^in \d+[dhm] \d+[hm]$/.test(text ?? '')), true, 'each countdown is its own span, without parentheses');
+    const use = id => [...$$(`.su-account[data-account="${id}"] .su-redeem-use`)].map(node => `${node.dataset.state}|${node.getAttribute('aria-disabled') ?? ''}|${node.textContent}`);
+    assert.deepEqual([use('acct-team'), use('acct-prolite')], [['usable||Use one'], ['usable||Use one']], 'one button per account; codex-pro is redeemable below 80% left even though Codex\'s applicable count is 0');
   } finally { Date.now = realNow; }
 });
 
@@ -1249,4 +1266,62 @@ test('the Limits page reports a missing backend and an empty sampler', async () 
   await click(button('Retry'));
   assert.equal($('.su-state').textContent, 'No subscription limits recorded yet.');
   assert.equal($('.su-footnote').textContent, 'The limits sampler has not reported yet.');
+});
+
+// A Codex pool built by hand: one account whose weekly allowance is at `left` percent, holding `credits` banked resets.
+const redeemPool = (now, accounts) => ({ generated_at: now, sampler: null, providers: [{ provider: 'openai-codex', label: 'OpenAI Codex', auth: 'ok', history: [], accounts: accounts.map(({ id, plan = 'prolite', left, five = null, credits = 2 }) => ({
+  id, label: id, priority: 0, plan, fetched_at: now - 60, stale: false, error: null, banked_resets: credits,
+  banked_credits: { fetched_at: now - 60, applicable_count: 0, credits: Array.from({ length: credits }, (_, index) => ({ status: 'available', granted_at: now - 7 * D, expires_at: now + (index + 1) * D })) },
+  windows: [...(five === null ? [] : [{ key: 'five_hour', label: '5-hour', window_seconds: 18000, remaining_percent: five, resets_at: now + H }]), { key: 'weekly', label: 'Weekly', window_seconds: 604800, remaining_percent: left, resets_at: now + 3 * D }] })) }] });
+const openCodexAccounts = async () => { plugin.register(mock.ctx); await render(limitsPage()); await click($('.su-disclosure')); };
+const dialog = () => $('[role=dialog]');
+
+test('a refused reset keeps its button but locks it, naming that every bar is at 80% or more', async () => {
+  const now = Date.now() / 1000;
+  mock.control.usageLimits = redeemPool(now, [{ id: 'spare', plan: 'plus', left: 85, five: 92 }, { id: 'edge', left: 79.9 }]);
+  await openCodexAccounts();
+  const locked = $('.su-account[data-account="spare"] .su-redeem-use');
+  assert.deepEqual([locked.dataset.state, locked.getAttribute('aria-disabled'), locked.querySelector('small').textContent, locked.querySelector('svg')?.dataset.icon], ['locked', 'true', 'all ≥80% left', 'TicketLocked']);
+  assert.match(locked.title, /less than 80% left; every one here has 80% or more/);
+  await click(locked);
+  assert.equal(dialog() === null, true, 'a locked reset opens no confirmation');
+  const usable = $('.su-account[data-account="edge"] .su-redeem-use');
+  assert.deepEqual([usable.dataset.state, usable.getAttribute('aria-disabled'), usable.querySelector('small') === null, usable.querySelector('svg')?.dataset.icon], ['usable', null, true, 'Ticket']);
+  assert.equal(restPaths().includes('/usage/limits/redeem'), false);
+});
+
+test('using a reset confirms the weekly loss, posts the account and reloads the limits', async () => {
+  const now = Date.now() / 1000;
+  mock.control.usageLimits = redeemPool(now, [{ id: 'codex-pro', left: 59 }, { id: 'codex-team', plan: 'team', left: 0, five: 100, credits: 1 }]);
+  await openCodexAccounts();
+  await click($('.su-account[data-account="codex-pro"] .su-redeem-use'));
+  assert.equal(dialog().getAttribute('aria-label'), 'Use one banked reset on codex-pro?');
+  assert.deepEqual([dialog().querySelector('.su-redeem-lost').textContent, dialog().querySelector('.su-redeem-bar').getAttribute('aria-label'), dialog().querySelector('.su-redeem-lose').style.width, dialog().querySelector('.su-redeem-gain').textContent],
+    ['59%of the weekly allowance lost · 59 units', '59% lost, 41% restored', '59%', '+41%']);
+  assert.equal(dialog().querySelector('p:not(.su-redeem-lost)') === null, true, 'no description or explanation besides the loss');
+  const confirm = [...dialog().querySelectorAll('button')].find(node => node.textContent === 'Use reset');
+  assert.equal(confirm.dataset.destructive, 'true', 'a reset that loses weekly allowance confirms in the destructive style');
+  const reads = () => restPaths().filter(path => path.startsWith('/usage/limits?')).length, before = reads();
+  await click(confirm); await tick();
+  assert.deepEqual(mock.calls.filter(call => call[0] === 'rest' && call[1] === '/usage/limits/redeem').map(call => call[2]), [{ method: 'POST', body: { provider: 'openai-codex', account: 'codex-pro' } }]);
+  assert.equal(dialog() === null, true, 'the confirmation closes once the reset is used');
+  assert.ok(reads() > before, 'the limits are read again to show the restored allowance');
+  // Weekly already empty: nothing is lost, whatever the full 5-hour window holds.
+  await click($('.su-account[data-account="codex-team"] .su-redeem-use'));
+  assert.deepEqual([dialog().querySelector('.su-redeem-lost').textContent, dialog().querySelector('.su-redeem-lost b').dataset.zero, dialog().querySelector('.su-redeem-gain').textContent], ['0%of the weekly allowance lost', 'true', '+100%']);
+  assert.equal([...dialog().querySelectorAll('button')].find(node => node.textContent === 'Use reset').dataset.destructive, 'false');
+});
+
+test('a reset Codex refuses or that cannot be confirmed keeps the confirmation open with the reason', async () => {
+  const now = Date.now() / 1000;
+  mock.control.usageLimits = redeemPool(now, [{ id: 'codex-pro', left: 59 }]);
+  await openCodexAccounts();
+  const attempt = async () => { await click([...dialog().querySelectorAll('button')].find(node => node.textContent === 'Use reset')); await tick(); return dialog()?.querySelector('[role=alert]')?.textContent ?? null; };
+  await click($('.su-redeem-use'));
+  mock.control.redeemResult = { status: 'nothing_to_reset', available_count: 2, windows_reset: 0 };
+  assert.equal(await attempt(), 'Codex refused: no allowance is below 80% left yet. The banked reset was not spent.');
+  mock.control.redeemResult = () => { throw new Error('409 redeem_in_progress'); };
+  assert.equal(await attempt(), 'The reset could not be used: 409 redeem_in_progress. Refresh to check whether it was spent.');
+  mock.control.redeemResult = { status: 'unavailable' };
+  assert.match(await attempt(), /^Codex could not confirm the reset\./);
 });

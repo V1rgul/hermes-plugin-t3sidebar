@@ -145,6 +145,8 @@ export const ctx = {
   },
   async rest(path, options) {
     calls.push(['rest', path, options]); if (control.backendMissing) throw new Error('404 backend not enabled');
+    // The redeem route answers control.redeemResult (a value, or a function of the posted body that may throw like a failed request).
+    if (path === '/usage/limits/redeem') return clone(typeof control.redeemResult === 'function' ? await control.redeemResult(options?.body) : control.redeemResult ?? { status: 'reset', available_count: 1, windows_reset: 2, profile: host.state.profile.get() || 'default' });
     if (path.startsWith('/usage/')) {
       if (control.usageError) throw new Error(control.usageError);
       // A pending promise here holds every usage read in flight until the test resolves it.
@@ -500,7 +502,7 @@ export function ColorSwatches({ swatches, value, onChange, clearLabel }) {
 }
 // Public ConfirmDialog contract: cancel is inert, confirm awaits work, errors keep it open.
 // The harness omits only the native component's cosmetic success-close delay.
-export function ConfirmDialog({ open, onClose, onConfirm, title, description, confirmLabel, cancelLabel = 'Cancel', busyLabel, destructive }) {
+export function ConfirmDialog({ open, onClose, onConfirm, title, description, children, confirmLabel, cancelLabel = 'Cancel', busyLabel, destructive }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
   useEffect(() => { if (open) { setBusy(false); setError(''); } }, [open]);
   const run = async () => {
@@ -511,7 +513,7 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, description, co
   return open ? createPortal(h('div', { role: 'dialog', 'aria-modal': true, 'aria-label': title, className: 'mock-popover', style: { position: 'fixed', left: 310, top: 80 }, onKeyDown: event => {
     if (event.key === 'Escape' && !busy) onClose();
     if ((event.key === 'Enter' || event.key === ' ') && !busy) { event.preventDefault(); void run(); }
-  } }, h('h2', null, title), h('p', null, description), error ? h('div', { role: 'alert' }, error) : null,
+  } }, h('h2', null, title), description ? h('p', null, description) : null, children, error ? h('div', { role: 'alert' }, error) : null,
   h('button', { type: 'button', disabled: busy, onClick: onClose }, cancelLabel),
   h('button', { type: 'button', disabled: busy, 'data-destructive': destructive, onClick: () => void run() }, busy ? busyLabel : confirmLabel)), document.body) : null;
 }

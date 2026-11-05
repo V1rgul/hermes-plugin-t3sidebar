@@ -51,6 +51,7 @@
 - Verdicts: when the pool runs out before a reset, or how many units expire unused; the next meaningful event picks the icon. Run-out colour by time blocked in the 7 days (15 min grey, 2 h yellow, 6 h orange, 24 h red), expiry colour by units lost against capacity (5% grey, 15% yellow, 30% orange, 50% red); below that, no icon. A grey warning icon means the verdict cannot be computed (no drain data or stale readings).
 - Markers: reset step-ups, units lost at each reset, Codex banked reset credit expiries.
 - Per-account bars with reset times.
+- Codex banked resets listed per account, with a **Use one** button: green when Codex accepts a reset (an allowance below 80% left), dashed and padlocked otherwise. It confirms with the share of the weekly allowance the reset discards, then redeems through Hermes's own `/usage reset --force` on that account.
 - Backend sampler every 5 minutes, 35 days of history, read-only: never refreshes tokens, clears cooldowns or redeems resets.
 
 ![Limits page: OpenAI Codex pool running out Sunday with reset markers and lost units, its two accounts unfolded with 5-hour and weekly bars and banked resets, Anthropic pool with units expiring unused, averaging and time-to-empty measurements](docs/images/limits.png)

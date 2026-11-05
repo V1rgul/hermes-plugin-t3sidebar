@@ -2285,15 +2285,51 @@ try {
       const banked = await usage.evaluate(() => {
         const rgb = el => { const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1; const paint = canvas.getContext('2d'); paint.fillStyle = getComputedStyle(el).color; paint.fillRect(0, 0, 1, 1); return [...paint.getImageData(0, 0, 1, 1).data.slice(0, 3)]; };
         return Object.fromEntries(['acct-team', 'acct-prolite'].map(id => { const account = document.querySelector(`.su-account[data-account="${id}"]`), bars = account.querySelector('.su-windows').getBoundingClientRect();
-          return [id, [...account.querySelectorAll('.su-banked-credit')].map(line => ({ text: line.textContent, soon: line.dataset.soon, color: rgb(line), below: line.getBoundingClientRect().top >= bars.bottom }))]; }));
+          return [id, [...account.querySelectorAll('.su-banked-credit')].map(line => ({ text: line.textContent, soon: line.dataset.soon, color: rgb(line), countdown: rgb(line.querySelector('.su-banked-in')).join() === rgb(account.querySelector('.su-window-reset')).join(), below: line.getBoundingClientRect().top >= bars.bottom }))]; }));
       });
       console.log(`USAGE LIMITS BANKED: ${JSON.stringify(banked)}`);
       const [teamSoon, teamLater] = banked['acct-team'], [proSoon, proLater] = banked['acct-prolite'];
       // The page clock runs on from the fixed start while the test works, so the countdowns may have lost a minute.
-      check('Each Codex account lists its banked resets under its bars, soonest first: the one expiring within a day in orange, with no per-credit usability note', banked['acct-team'].length === 2 && banked['acct-prolite'].length === 2
-        && [teamSoon, teamLater, proSoon, proLater].every(line => line.below) && /^Banked reset · expires \w{3} \d{1,2}:\d{2} (AM|PM) \(in (4h 5\dm|5h 0m)\)$/.test(teamSoon.text) && /\(in (8d 23h|9d 0h)\)$/.test(teamLater.text)
-        && /\(in 5h \d+m\)$/.test(proSoon.text) && /\(in (9d 0h|8d 23h)\)$/.test(proLater.text) && teamSoon.soon === 'true' && teamLater.soon === 'false'
+      check('Each Codex account lists its banked resets under its bars, soonest first: the one expiring within a day in orange, its countdown without parentheses in the bars\' reset grey, with no per-credit usability note', banked['acct-team'].length === 2 && banked['acct-prolite'].length === 2 && [...banked['acct-team'], ...banked['acct-prolite']].every(line => line.countdown)
+        && [teamSoon, teamLater, proSoon, proLater].every(line => line.below) && /^Banked reset · expires \w{3} \d{1,2}:\d{2} (AM|PM) in (4h 5\dm|5h 0m)$/.test(teamSoon.text) && / in (8d 23h|9d 0h)$/.test(teamLater.text)
+        && / in 5h \d+m$/.test(proSoon.text) && / in (9d 0h|8d 23h)$/.test(proLater.text) && teamSoon.soon === 'true' && teamLater.soon === 'false'
         && teamSoon.color[0] > teamSoon.color[2] + 60 && teamLater.color.join() !== teamSoon.color.join());
+      // Codex picks the credit, so each account has one redeem button: right of its credit list, exactly as tall as the list and flush with the bars' right edge.
+      const redeemBoxes = await usage.evaluate(() => {
+        const rgb = el => { const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1; const paint = canvas.getContext('2d'); paint.fillStyle = getComputedStyle(el).color; paint.fillRect(0, 0, 1, 1); return [...paint.getImageData(0, 0, 1, 1).data.slice(0, 3)]; };
+        return Object.fromEntries(['acct-team', 'acct-prolite'].map(id => { const account = document.querySelector(`.su-account[data-account="${id}"]`), buttons = account.querySelectorAll('.su-redeem-use'), list = account.querySelector('.su-banked').getBoundingClientRect(), box = buttons[0].getBoundingClientRect(), bars = account.querySelector('.su-windows').getBoundingClientRect(), color = rgb(buttons[0]);
+          return [id, { count: buttons.length, state: buttons[0].dataset.state, text: buttons[0].textContent, border: getComputedStyle(buttons[0]).borderTopStyle, spans: Math.abs(box.top - list.top) <= 0.5 && Math.abs(box.bottom - list.bottom) <= 0.5, right: box.left >= list.right, flush: Math.abs(box.right - bars.right) <= 1, green: color[1] > color[0] + 40 }]; }));
+      });
+      console.log(`USAGE LIMITS REDEEM BUTTONS: ${JSON.stringify(redeemBoxes)}`);
+      check('Each Codex account has one solid green Use one button right of its banked resets, spanning the list\'s full height, flush with the bars\' right edge', Object.values(redeemBoxes).every(box => box.count === 1 && box.state === 'usable' && box.text === 'Use one' && box.border === 'solid' && box.spans && box.right && box.flush && box.green));
+      await usage.locator('.su-account[data-account="acct-prolite"] .su-redeem-use').click();
+      await usage.waitForSelector('[role=dialog] .su-redeem-bar');
+      const redeemDialog = await usage.evaluate(() => { const dialog = document.querySelector('[role=dialog]'), bar = dialog.querySelector('.su-redeem-bar').getBoundingClientRect(), lose = dialog.querySelector('.su-redeem-lose').getBoundingClientRect();
+        return { title: dialog.getAttribute('aria-label'), lost: dialog.querySelector('.su-redeem-lost').textContent, share: lose.width / bar.width, gain: dialog.querySelector('.su-redeem-gain')?.textContent ?? null }; });
+      console.log(`USAGE LIMITS REDEEM DIALOG: ${JSON.stringify(redeemDialog)}`);
+      const lostShare = Number(/^(\d+)%/.exec(redeemDialog.lost)?.[1]) / 100;
+      check('Use one asks for confirmation with the weekly share lost, its units and a bar hatched over exactly that share', redeemDialog.title === 'Use one banked reset on codex-pro?' && /^\d+%of the weekly allowance lost · \d+ units$/.test(redeemDialog.lost)
+        && Math.abs(redeemDialog.share - lostShare) < 0.01 && redeemDialog.gain === `+${Math.round((1 - lostShare) * 100)}%`);
+      await usage.locator('[role=dialog]').screenshot({ path: join(usageDir, 'v7-limits-redeem-dialog.png') });
+      await usage.locator('[role=dialog] button', { hasText: 'Cancel' }).click();
+      await usage.waitForSelector('[role=dialog]', { state: 'detached' });
+      check('Cancel closes the confirmation without posting', !(await usage.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'rest' && call[1] === '/usage/limits/redeem'))));
+      // Every bar at 80% or more: the same button, dashed and padlocked, naming that all bars are above the threshold.
+      await usage.evaluate(async () => { const harness = window.hermesT3SidebarHarness, data = harness.syntheticUsageLimits(168, 'mixed');
+        for (const account of data.providers.find(item => item.provider === 'openai-codex').accounts) for (const win of account.windows) if (win.scope !== 'model') win.remaining_percent = Math.max(win.remaining_percent ?? 0, 85);
+        harness.control.usageLimits = data; await harness.queryClient.refetchQueries(); });
+      await usage.waitForSelector('.su-account[data-account="acct-prolite"] .su-redeem-use[data-state=locked]');
+      const locked = await usage.evaluate(() => [...document.querySelectorAll('.su-redeem-use')].map(node => ({ state: node.dataset.state, disabled: node.getAttribute('aria-disabled'), border: getComputedStyle(node).borderTopStyle, icon: node.querySelector('svg')?.dataset.icon, note: node.querySelector('small')?.textContent })));
+      console.log(`USAGE LIMITS REDEEM LOCKED: ${JSON.stringify(locked)}`);
+      check('With every bar at 80% or more the button stays but reads as unavailable by shape: dashed, padlocked ticket, all ≥80% left', locked.length === 2 && locked.every(item => item.state === 'locked' && item.disabled === 'true' && item.border === 'dashed' && item.icon === 'TicketLocked' && item.note === 'all ≥80% left'));
+      // Playwright itself treats aria-disabled as not clickable; force the click to prove the button does nothing.
+      await usage.locator('.su-account[data-account="acct-prolite"] .su-redeem-use').click({ force: true });
+      check('A locked reset opens no confirmation', await usage.locator('[role=dialog]').count() === 0);
+      await usage.evaluate(selector => { const page = document.querySelector('.su-scroll'), toggle = document.querySelector(`${selector} .su-disclosure`); page.scrollTop += toggle.getBoundingClientRect().top - page.getBoundingClientRect().top - 260; }, CODEX);
+      await settle(usage);
+      await usage.locator(`${CODEX} .su-accounts`).screenshot({ path: join(usageDir, 'v7-limits-redeem-locked.png') });
+      await usage.evaluate(async () => { const harness = window.hermesT3SidebarHarness; harness.control.usageLimits = null; await harness.queryClient.refetchQueries(); });
+      await usage.waitForSelector('.su-account[data-account="acct-prolite"] .su-redeem-use[data-state=usable]');
       await usage.reload();
       await usage.waitForSelector('.sf-footer .sf-limit');
       await usage.locator('.sf-footer .sf-limits').click();
