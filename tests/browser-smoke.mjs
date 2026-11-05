@@ -1421,7 +1421,7 @@ try {
         underBackgrounds: rect.top + parseFloat(outline.top) === row.getBoundingClientRect().top + margin && rect.bottom - parseFloat(outline.bottom) === last.bottom - margin,
         markOnBorder: !!mark && Math.abs(mark.top + mark.height / 2 - (rect.top + 7.5)) <= 1,
         ownPins: el.querySelectorAll('.sf-pin').length, stride: parseFloat(getComputedStyle(el.querySelector('.sf-section-body')).getPropertyValue('--sf-card-content')),
-        name: part('.sf-project-name').visible, title: part('.sf-row-title').middle, time: part('.sf-time').middle, rowMiddle: row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2,
+        name: part('.sf-project-name').visible, provider: part('.sf-provider').visible, title: part('.sf-row-title').middle, time: part('.sf-time').middle, rowMiddle: row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2,
         lines: list.dataset.pinnedLines
       };
     });
@@ -1429,11 +1429,11 @@ try {
     const group = lines.getByRole('group', { name: 'Pinned sessions', exact: true });
     const mode = () => group.locator('button[aria-pressed=true]').textContent();
     const two = await measure();
-    check('Pinned sessions defaults to 2 lines: ordinary cards, one group pin on an outline as wide as Ready cards', await mode() === '2 lines' && two.lines === '2' && two.row === 56 && two.height === 6 + two.rows * 56 && two.space === 6 && two.outline && two.underBackgrounds && two.markOnBorder && two.ownPins === 0 && two.name);
+    check('Pinned sessions defaults to 2 lines: ordinary cards, one group pin on an outline as wide as Ready cards', await mode() === '2 lines' && two.lines === '2' && two.row === 56 && two.height === 6 + two.rows * 56 && two.space === 6 && two.outline && two.underBackgrounds && two.markOnBorder && two.ownPins === 0 && two.name && two.provider);
     await group.getByRole('button', { name: '1 line', exact: true }).click();
     await lines.waitForFunction(() => document.querySelector('.sf-scroll')?.dataset.pinnedLines === '1');
     const one = await measure();
-    check('1 line: 33px pinned cards without the project name, title and status on one centred line', one.row === 33 && one.height === 6 + one.rows * 33 && one.space === 6 && one.outline && one.underBackgrounds && one.markOnBorder && !one.name && one.stride === 19 &&
+    check('1 line: 33px pinned cards without the project name or provider, title and status on one centred line', one.row === 33 && one.height === 6 + one.rows * 33 && one.space === 6 && one.outline && one.underBackgrounds && one.markOnBorder && !one.name && !one.provider && one.stride === 19 &&
       Math.abs(one.title - one.rowMiddle) <= 1 && Math.abs(one.time - one.rowMiddle) <= 1);
     await lines.locator('[data-session-id="pinned"]').hover();
     check('1 line: hover actions are centred in the row', await lines.locator('[data-session-id="pinned"]').evaluate(row => {

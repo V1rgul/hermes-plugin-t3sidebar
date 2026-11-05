@@ -936,17 +936,16 @@ const CSS = `
 .sf-section[data-section=pinned][data-populated=true]::before{content:'';position:absolute;z-index:-1;inset:7px 0 var(--sf-card-margin,1px);border:1px solid var(--ui-stroke-secondary);border-radius:6px/calc(6px - var(--sf-card-margin,1px));pointer-events:none;-webkit-mask:linear-gradient(#000 0 0) 10px 0/19px 1px no-repeat,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) 10px 0/19px 1px no-repeat,linear-gradient(#000 0 0);mask-composite:exclude}
 /* Centred on the outline's top line; above the first card, whose hover background would otherwise cover the pin's lower half. */
 .sf-pinned-mark{position:absolute;z-index:1;left:10px;top:1px;display:flex;justify-content:center;width:19px;height:13px;color:var(--ui-accent)}.sf-pinned-mark svg{width:13px;height:13px;stroke-width:2}
-/* One-line pinned cards: the project name goes and the title sits between the project icon and the metadata. The content variable becomes one 19px text line, so the row height and the stride lists read from it agree. */
+/* One-line pinned cards: the project name and provider go and the title sits between the project icon and the metadata. The content variable becomes one 19px text line, so the row height and the stride lists read from it agree. */
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned]{--sf-card-content:19px;--sf-card-stride:calc(var(--sf-card-content) + 2 * var(--sf-card-padding,6px) + 2 * var(--sf-card-margin,1px))}
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-open{flex-direction:row;align-items:center;justify-content:flex-start;gap:8px}
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-card-meta{display:contents}
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-project{flex:none}
-.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-project-name{display:none}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] :is(.sf-project-name,.sf-provider){display:none}
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-row-title{order:1;flex:1;min-width:0;width:auto}
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-wait{order:2}
-.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-provider{order:3}
-.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-token{order:4}
-.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-time{order:5}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-token{order:3}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-time{order:4}
 /* Centred in the single-line row, as the 4px inset centres it on the metadata line of a two-line card. */
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-hover{top:calc((var(--sf-card-stride) - 2 * var(--sf-card-margin,1px) - 25px) / 2)}
 /* An empty Pinned stays mounted (zero height, gap cancelled) so its last card can animate out. */
@@ -1203,7 +1202,7 @@ function Settings({ ctx }) {
     below: detailsError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, detailsError) : null
   }), h(sdk.ListRow ?? SettingsRow, {
     title: 'Pinned sessions',
-    description: 'Height of pinned session cards. One line drops the project name and puts the title beside the provider, tokens and status.',
+    description: 'Height of pinned session cards. One line drops the project name and provider and puts the title beside the tokens and status.',
     action: h(Segmented, { label: 'Pinned sessions', showLabel: false, options: [{ id: 1, label: '1 line' }, { id: 2, label: '2 lines' }], value: pinnedLines, onChange: saveLines }),
     below: linesError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, linesError) : null
   }), h(sdk.ToggleRow ?? SettingsToggleRow, {
