@@ -146,6 +146,14 @@ test('drain rate pools consumption over the lookback and ignores reset jumps', (
   assert.equal(usage.drainRate([{ t: now, account: 'a', value: 50, resets_at: null }], now), null, 'a single reading has no rate');
 });
 
+test('drain rate ignores readings at 0% remaining (Hermes reports Anthropic 1% used as 100%)', () => {
+  const now = 100 * H, reading = (t, value) => ({ t, account: 'claude-code', value, resets_at: null });
+  // A fresh window as stored: 0% used, then 1% misread as 100%, then 2%.
+  const stats = usage.drainStats([reading(now - 2 * H, 100), reading(now - H, 0), reading(now, 98)], now, 2 * H);
+  assert.deepEqual([stats.rate, stats.coveredS, stats.consumed], [1, 2 * H, 2], 'only the real 100 → 98 delta counts, over the full covered time');
+  assert.equal(usage.drainRate([{ t: now - H, account: 'a', value: 0, resets_at: null }, { t: now, account: 'a', value: 0, resets_at: null }], now), null, 'an account seen only at zero has no rate');
+});
+
 test('pooled history carries each account forward and sums only accounts seen so far', () => {
   const points = usage.pooledHistory([{ t: 10, account: 'a', value: 50 }, { t: 20, account: 'b', value: 80 }, { t: 30, account: 'a', value: 40 }, { t: 30, account: 'b', value: 70 }]);
   assert.deepEqual(points, [{ t: 10, value: 50, count: 1 }, { t: 20, value: 130, count: 2 }, { t: 30, value: 110, count: 2 }]);
