@@ -2,8 +2,14 @@
 import React, { createElement as h, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClientProvider } from '@tanstack/react-query';
-import plugin, { captureScope, scopeKey } from '../desktop/plugin.js';
+import plugin, { captureScope, scopeKey, PROJECT_PALETTE } from '../desktop/plugin.js';
 import * as mock from '../tests/sdk.mock.mjs';
+// Give each fixture project a distinct native glyph and palette colour, so cards, the picker and the filter show real project appearance rather than the shared test fixtures' neutral defaults.
+const color = name => PROJECT_PALETTE.find(item => item.name === name).value;
+const appearance = { '/projects/hermes-t3sidebar': { icon: 'extensions', color: color('Iris') }, '/projects/docs': { icon: 'book', color: color('Amber') }, '/projects/hydraulics': { icon: 'symbol-ruler', color: color('Turquoise') } };
+for (const row of mock.control.rows) if (appearance[row.cwd]) Object.assign(row.project, appearance[row.cwd]);
+for (const project of mock.control.projectCatalog) if (appearance[project.cwd]) Object.assign(project, appearance[project.cwd]);
+for (const project of mock.control.projects) if (appearance[project.path]) Object.assign(project, appearance[project.path]);
 // Model the public SDK's namespaced JSON storage across real browser reloads.
 mock.ctx.storage = {
   get(key, fallback) { try { const value = localStorage.getItem(`hermes.plugin.hermes-t3sidebar.${key}`); return value === null ? fallback : JSON.parse(value); } catch (_) { return fallback; } },

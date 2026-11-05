@@ -16,7 +16,7 @@ To inspect the rendered sidebar with synthetic data:
 npm run harness
 ```
 
-Open `http://127.0.0.1:4173`. The right-hand panel is a labeled test workspace, not an alternative chat implementation. Browser tests write screenshots to `t3-sidebar-ui-verification/` under `TMPDIR` (or the Hermes scratch directory when unset). The README's maintained screenshots live in `docs/images/`.
+Open `http://127.0.0.1:4173`. The right-hand panel is a labeled test workspace, not an alternative chat implementation. The harness renders Codicons with Desktop's pinned `@vscode/codicons` font (unit tests keep the SVG test adapter), and gives each synthetic project its own native icon and palette color. Browser tests write screenshots to `t3-sidebar-ui-verification/` under `TMPDIR` (or the Hermes scratch directory when unset). The README's maintained screenshots live in `docs/images/`.
 
 README screenshots render the current plugin with sample sessions and a development SDK adapter, using the Midnight dark palette and native Codicon font. Usage captures use the maintainer's real usage history (per-model totals for each period, read from a Hermes `state.db` on Mon 2026-11-02 23:48 Paris, no session content), kept outside the repository and served through `control.usageHistory`; tests use the synthetic `syntheticUsageHistory`. Limits captures use the synthetic `syntheticUsageLimits` fixture. The clock is fixed on Wed 2026-11-04 15:00 Paris. They are not captures of a live Desktop connection.
 

@@ -5,6 +5,7 @@ node_modules/
 playwright-report/
 test-results/
 harness/app.bundle.js
+harness/app.bundle.css
 artifacts/*.zip
 *.sqlite3*
 .scratch/

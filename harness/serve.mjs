@@ -10,7 +10,7 @@ export async function serveHarness(port = 0) {
       const path = resolve(root, '.' + new URL(request.url, 'http://localhost').pathname.replace(/\/$/, '/index.html'));
       if (!path.startsWith(root.endsWith(sep) ? root : root + sep)) throw new Error('Invalid path');
       const body = await readFile(path);
-      response.writeHead(200, { 'Content-Type': extname(path) === '.html' ? 'text/html' : 'text/javascript', 'Cache-Control': 'no-store' }); response.end(body);
+      response.writeHead(200, { 'Content-Type': { '.html': 'text/html', '.css': 'text/css' }[extname(path)] || 'text/javascript', 'Cache-Control': 'no-store' }); response.end(body);
     } catch (_) { response.writeHead(404); response.end('Not found'); }
   });
   await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));

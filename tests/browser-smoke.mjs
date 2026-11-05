@@ -532,7 +532,7 @@ try {
   await context.getByRole('button', { name: 'Project', exact: true }).click();
   await projectMenu.getByRole('button', { name: 'Filter for', exact: true }).click();
   check('row project shortcut filters without grouping or changing native workspace', !await page.locator('[data-session-id="readme"]').count() && await page.locator('[data-session-id="design"]').count() === 1 && !await page.locator('.sf-group').count());
-  check('active project filter replaces toolbar filter glyph with project icon', await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'true' && await page.getByRole('button', { name: 'Filter sessions', exact: true }).innerText() === '◇');
+  check('active project filter replaces toolbar filter glyph with project icon', await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'true' && await page.getByRole('button', { name: 'Filter sessions', exact: true }).locator('[data-codicon="extensions"]').count() === 1);
   await checkPersistentTrigger('Filter sessions', 'Session filters');
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   const filters = page.getByRole('dialog', { name: 'Session filters', exact: true });
@@ -572,8 +572,8 @@ try {
   check('all 64 selectable icons follow project color without tinting the action icons', await projectMenu.locator('.sf-project-submenu').evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = el.style.getPropertyValue('--sf-project-color'); el.append(probe);
     const color = getComputedStyle(probe).color; probe.remove();
-    const glyphs = [...el.querySelectorAll('.sf-project-icons svg')];
-    return glyphs.length === 64 && glyphs.every(icon => getComputedStyle(icon).color === color) && [...el.querySelectorAll('.sf-menu-icon svg')].every(icon => getComputedStyle(icon).color !== color);
+    const glyphs = [...el.querySelectorAll('.sf-project-icons [data-codicon]')];
+    return glyphs.length === 64 && glyphs.every(icon => getComputedStyle(icon).color === color) && [...el.querySelectorAll('.sf-menu-icon > *')].every(icon => getComputedStyle(icon).color !== color);
   }));
   await projectMenu.getByRole('button', { name: 'Project icon: chip', exact: true }).hover();
   check('project glyph hover retains the chosen color', await projectMenu.getByRole('button', { name: 'Project icon: chip', exact: true }).evaluate(el => getComputedStyle(el).color === 'rgb(120, 195, 24)'));

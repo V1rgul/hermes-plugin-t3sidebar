@@ -15,6 +15,7 @@
   },
   "devDependencies": {
     "@tanstack/react-query": "5.90.5",
+    "@vscode/codicons": "0.0.45",
     "esbuild": "0.25.10",
     "jsdom": "26.1.0",
     "playwright": "1.56.1",
