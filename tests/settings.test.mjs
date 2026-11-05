@@ -14,6 +14,9 @@ let root;
 const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
 const $ = selector => document.querySelector(selector);
 const button = label => [...document.querySelectorAll('button')].find(node => node.textContent === label || node.getAttribute('aria-label') === label);
+// Button-group settings: the pressed option's label, and an option by label.
+const pressed = group => $(`[role=group][aria-label="${group}"] button[aria-pressed=true]`)?.textContent ?? null;
+const option = (group, label) => [...document.querySelectorAll(`[role=group][aria-label="${group}"] button`)].find(node => node.textContent === label);
 async function click(node) { assert.ok(node); await act(async () => node.click()); await tick(); }
 async function input(node, value) {
 	await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(node, value); node.dispatchEvent(new Event('input', { bubbles: true })); });
@@ -87,49 +90,47 @@ test('settings rejects empty input and failed storage writes without publishing 
 	assert.ok(button('Tomorrow at 9:00')); assert.ok(button('Next Monday at 9:00'));
 });
 
-test('Pinned session gap defaults off, updates the mounted sidebar immediately and persists across remounts and sources', async () => {
+test('Pinned sessions defaults to two lines, switches the mounted sidebar immediately and persists across remounts and sources', async () => {
 	plugin.register(mock.ctx); await render();
-	const toggle = () => $('[role=switch][aria-label="Pinned session gap"]');
-	assert.equal(toggle().getAttribute('aria-checked'), 'false');
-	assert.equal($('.sf-scroll').dataset.pinnedGap, 'false');
-	await click(toggle());
-	assert.equal(storage.get('pinned-gap'), true);
-	assert.equal(toggle().getAttribute('aria-checked'), 'true');
-	assert.equal($('.sf-scroll').dataset.pinnedGap, 'true');
+	assert.equal(pressed('Pinned sessions'), '2 lines');
+	assert.equal($('.sf-scroll').dataset.pinnedLines, '2');
+	await click(option('Pinned sessions', '1 line'));
+	assert.equal(storage.get('pinned-lines'), 1);
+	assert.equal(pressed('Pinned sessions'), '1 line');
+	assert.equal($('.sf-scroll').dataset.pinnedLines, '1');
 	await act(async () => root.unmount()); root = null;
 	mock.queryClient.clear(); await render();
-	assert.equal(toggle().getAttribute('aria-checked'), 'true');
-	assert.equal($('.sf-scroll').dataset.pinnedGap, 'true');
+	assert.equal(pressed('Pinned sessions'), '1 line');
+	assert.equal($('.sf-scroll').dataset.pinnedLines, '1');
 	await act(async () => mock.switchScope('source-b', 'other')); await tick(); await tick();
-	assert.equal($('.sf-scroll').dataset.pinnedGap, 'true');
-	await click(toggle());
-	assert.equal(storage.get('pinned-gap'), false);
-	assert.equal($('.sf-scroll').dataset.pinnedGap, 'false');
+	assert.equal($('.sf-scroll').dataset.pinnedLines, '1');
+	await click(option('Pinned sessions', '2 lines'));
+	assert.equal(storage.get('pinned-lines'), 2);
+	assert.equal($('.sf-scroll').dataset.pinnedLines, '2');
 });
 
-for (const saved of ['true', 1, null, {}]) test(`invalid stored pinned gap ${JSON.stringify(saved)} stays off`, async () => {
-	storage.set('pinned-gap', saved); plugin.register(mock.ctx); await render();
-	assert.equal($('[role=switch][aria-label="Pinned session gap"]').getAttribute('aria-checked'), 'false');
-	assert.equal($('.sf-scroll').dataset.pinnedGap, 'false');
+for (const saved of ['1', 3, 0, true, null, {}]) test(`invalid stored pinned line count ${JSON.stringify(saved)} keeps two lines`, async () => {
+	storage.set('pinned-lines', saved); plugin.register(mock.ctx); await render();
+	assert.equal(pressed('Pinned sessions'), '2 lines');
+	assert.equal($('.sf-scroll').dataset.pinnedLines, '2');
 });
 
-test('Pinned session gap rejects failed and unverified saves without changing the mounted sidebar', async () => {
+test('Pinned sessions rejects failed and unverified saves without changing the mounted sidebar', async () => {
 	plugin.register(mock.ctx); await render();
-	const toggle = () => $('[role=switch][aria-label="Pinned session gap"]');
 	mock.ctx.storage = { ...storage, set() { throw new Error('fixture storage unavailable'); } };
-	await click(toggle());
+	await click(option('Pinned sessions', '1 line'));
 	assert.match($('[role=alert]').textContent, /storage unavailable/);
-	assert.equal(toggle().getAttribute('aria-checked'), 'false');
-	assert.equal($('.sf-scroll').dataset.pinnedGap, 'false');
+	assert.equal(pressed('Pinned sessions'), '2 lines');
+	assert.equal($('.sf-scroll').dataset.pinnedLines, '2');
 	mock.ctx.storage = { ...storage, set() {} };
-	await click(toggle());
+	await click(option('Pinned sessions', '1 line'));
 	assert.match($('[role=alert]').textContent, /not saved/);
-	assert.equal(toggle().getAttribute('aria-checked'), 'false');
-	assert.equal($('.sf-scroll').dataset.pinnedGap, 'false');
+	assert.equal(pressed('Pinned sessions'), '2 lines');
+	assert.equal($('.sf-scroll').dataset.pinnedLines, '2');
 	mock.ctx.storage = storage;
-	await click(toggle());
+	await click(option('Pinned sessions', '1 line'));
 	assert.equal(document.querySelectorAll('[role=alert]').length, 0);
-	assert.equal($('.sf-scroll').dataset.pinnedGap, 'true');
+	assert.equal($('.sf-scroll').dataset.pinnedLines, '1');
 });
 
 test('unavailable storage reads leave settings and default presets usable', async () => {
@@ -203,37 +204,36 @@ test('Show token counts rejects failed and unverified saves without changing car
 	assert.equal(document.querySelectorAll('[role=alert], .sf-token').length, 0);
 });
 
-test('the Detailed Working indicator setting defaults off, persists, switches every card without a reload and rejects failed saves', async () => {
+test('the Working indicator setting defaults to Normal, persists, switches every card without a reload and rejects failed saves', async () => {
 	mock.control.live.find(item => item.id === 'runtime-worker').running_subagents = 2;
 	mock.control.live.push({ id: 'runtime-design', session_key: 'design', status: 'idle', running_subagents: null, awaiting_processes: true });
 	plugin.register(mock.ctx); await render();
-	const toggle = () => $('[role=switch][aria-label="Detailed Working indicator"]');
 	const badge = id => {
 		const status = $(`[data-session-id="${id}"] .sf-status`);
 		return { agent: status.dataset.agent ?? null, glyph: status.querySelector('svg')?.querySelectorAll('path').length ?? 0, count: status.querySelector('.sf-subagents')?.textContent ?? null, label: status.querySelector('.sf-sr').textContent };
 	};
 	const plain = { agent: null, glyph: 8, count: null, label: 'Working' };
 	// Default: the plain dashed circle everywhere, even when the count is unknown, and no details in the hover title.
-	assert.equal(toggle().getAttribute('aria-checked'), 'false');
+	assert.equal(pressed('Working indicator'), 'Normal');
 	assert.deepEqual(badge('root'), plain);
 	assert.deepEqual(badge('design'), plain);
 	assert.equal($('[data-session-id="root"] .sf-open').title.split('\n').at(-1), 'working');
-	await click(toggle());
+	await click(option('Working indicator', 'Detailed'));
 	assert.equal(storage.get('working-details'), true);
-	assert.equal(toggle().getAttribute('aria-checked'), 'true');
+	assert.equal(pressed('Working indicator'), 'Detailed');
 	assert.deepEqual(badge('root'), { agent: 'true', glyph: 1, count: '+2', label: 'Working: Agent working · 2 subagents running' });
 	assert.deepEqual(badge('design'), { agent: null, glyph: 0, count: null, label: 'Working' });
 	assert.equal($('[data-session-id="root"] .sf-open').title.split('\n').at(-1), 'Agent working · 2 subagents running');
 	// Persisted: a fresh mount reads it back.
 	await act(async () => root.unmount()); mock.queryClient.removeQueries({ queryKey: ['hermes-t3sidebar-preferences'] }); await render();
-	assert.equal(toggle().getAttribute('aria-checked'), 'true');
+	assert.equal(pressed('Working indicator'), 'Detailed');
 	assert.deepEqual(badge('root'), { agent: 'true', glyph: 1, count: '+2', label: 'Working: Agent working · 2 subagents running' });
-	await click(toggle());
+	await click(option('Working indicator', 'Normal'));
 	assert.equal(storage.get('working-details'), false);
 	assert.deepEqual(badge('root'), plain);
 	mock.ctx.storage = { ...storage, set() { throw new Error('fixture storage unavailable'); } };
-	await click(toggle());
+	await click(option('Working indicator', 'Detailed'));
 	assert.match($('[role=alert]').textContent, /storage unavailable/);
-	assert.equal(toggle().getAttribute('aria-checked'), 'false');
+	assert.equal(pressed('Working indicator'), 'Normal');
 	assert.deepEqual(badge('root'), plain);
 });

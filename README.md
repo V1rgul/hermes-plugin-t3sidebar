@@ -10,7 +10,7 @@
 ### Session shelves
 
 - **Input**, **Done**, **Woke** badges: question or approval waiting, finished turn, expired snooze.
-- Shelves: **Pinned**, **Working** (elapsed time), **Snoozed**, **Archived** (history kept).
+- Shelves: **Pinned** (one outlined group under a single pin, optionally one line per session), **Working** (elapsed time), **Snoozed**, **Archived** (history kept).
 - Orange background: unsent draft in a session you are not viewing.
 - Cards: project, provider icon, token count including subagents.
 - Pins, snoozes and completion markers shared between Desktop clients through the backend companion.
@@ -26,7 +26,7 @@
 
 ### Detailed Working indicator
 
-- Optional setting.
+- Optional setting: **Working indicator** → **Detailed**.
 - Solid circle: the agent's own turn is running.
 - Dashed circle: only subagents or a background command keep the session busy.
 - `+N`: running subagents.
@@ -79,8 +79,8 @@
 ### Settings
 
 - Snooze preset time
-- Detailed Working indicator
-- Pinned session gap
+- Working indicator: Normal or Detailed
+- Pinned sessions: 1 or 2 lines
 - Show token counts
 
 ## Install

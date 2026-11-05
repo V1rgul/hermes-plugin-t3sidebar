@@ -913,7 +913,9 @@ test('card metadata uses native project, provider and token totals without model
   assert.equal(card.querySelector('.sf-project-name').textContent, 'hermes-t3sidebar');
   assert.equal(card.querySelector('.sf-token').textContent, '2K');
   assert.ok(card.querySelector('[data-provider-mark="openai-codex"]'));
-  assert.deepEqual([...row('pinned').querySelector('.sf-project').children].map(el => el.className), ['sf-project-icon', 'sf-pin', 'sf-project-name']);
+  // Pinned cards carry no pin of their own: the group shows one.
+  assert.deepEqual([...row('pinned').querySelector('.sf-project').children].map(el => el.className), ['sf-project-icon', 'sf-project-name']);
+  assert.equal(shelf('Pinned').querySelectorAll(':scope > .sf-pinned-mark').length, 1);
   assert.equal(flow.compactTokens({ input_tokens: 1000, output_tokens: 250 }), '1K');
   assert.equal(flow.compactTokens({ total_tokens: 0 }), '0');
   assert.equal(flow.compactTokens({ total_tokens: null, input_tokens: null, output_tokens: null }), '—');
@@ -923,11 +925,14 @@ test('native project icon identifiers render as Codicons while emoji and pin ord
   mock.control.rows[1].project.icon = 'tools';
   mock.control.rows[1].project.color = '#123456';
   mock.control.rows[2].project = { name: 'Home', is_home: true, icon: null };
+  // A pinned card outside Pinned (snoozed) keeps its own pin, after the project icon.
+  mock.control.metadata.sessions.snoozed.pinned = true;
   await mount();
   assert.ok(row('design').querySelector('.sf-project-icon [data-codicon="tools"]'));
   assert.equal(row('design').querySelector('.sf-project-icon').textContent, '');
   assert.ok(row('readme').querySelector('.sf-project-icon [data-codicon="home"]'));
-  assert.deepEqual([...row('pinned').querySelector('.sf-project').children].map(el => el.className), ['sf-project-icon', 'sf-pin', 'sf-project-name']);
+  assert.equal(row('snoozed').closest('section').getAttribute('aria-label'), 'Snoozed');
+  assert.deepEqual([...row('snoozed').querySelector('.sf-project').children].map(el => el.className), ['sf-project-icon', 'sf-pin', 'sf-project-name']);
 });
 
 test('Working, Snoozed and Archived share dimming but Ready attention does not', async () => {
