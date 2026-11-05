@@ -27,7 +27,7 @@
       "ms": 67,
       "cardRenders": 85,
       "mounted": 84,
-      "componentRenders": 659
+      "componentRenders": 638
     },
     "sidebar/fold:archived:close": {
       "ms": 17,
@@ -87,7 +87,7 @@
       "ms": 73,
       "cardRenders": 84,
       "mounted": 84,
-      "componentRenders": 653
+      "componentRenders": 633
     },
     "sidebar/focus": {
       "ms": 21,
@@ -199,7 +199,7 @@
       "ms": 19,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 70
+      "componentRenders": 68
     },
     "limits/page:close": {
       "ms": 18,
