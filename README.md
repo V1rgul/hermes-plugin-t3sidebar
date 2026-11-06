@@ -84,6 +84,8 @@
 - Pinned sessions: 1 or 2 lines
 - Show token counts
 
+![Plugin settings page: Snooze preset time field with alarm-clock picker, Working indicator Normal or Detailed, Pinned sessions 1 or 2 lines, Show token counts switch](docs/images/settings.png)
+
 ## Install
 
 1. Open **Capabilities → Plugins → Install from Git** in Hermes Desktop.

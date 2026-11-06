@@ -20,6 +20,8 @@ Open `http://127.0.0.1:4173`. The right-hand panel is a labeled test workspace, 
 
 README screenshots render the current plugin with sample sessions and a development SDK adapter, using the Midnight dark palette and native Codicon font. Usage captures use the maintainer's real usage history (per-model totals for each period, read from a Hermes `state.db` on Mon 2026-11-02 23:48 Paris, no session content), kept outside the repository and served through `control.usageHistory`; tests use the synthetic `syntheticUsageHistory`. Limits captures use the synthetic `syntheticUsageLimits` fixture. The clock is fixed on Wed 2026-11-04 15:00 Paris. They are not captures of a live Desktop connection.
 
+The settings screenshot renders the plugin's registered settings page with Hermes Desktop's own settings primitives (`ListRow`, `ToggleRow`, `Input`, `SegmentedControl`, breadcrumb and `SettingsContent`) and Tailwind build, Midnight dark, default preferences, in Chromium with an en-GB locale. The Settings left rail is omitted; it is a browser preview, not a live Desktop capture.
+
 ## Performance regression benchmarks
 
 Run these before merging a feature, so it cannot silently undo the optimizations recorded in [`performance.md`](performance.md) and [`large-history-performance.md`](large-history-performance.md). The deterministic work-bound tests in `npm test` and `npm run test:backend` already catch specific regressions. The benchmarks also measure interactions end to end.
