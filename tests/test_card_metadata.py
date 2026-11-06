@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 from hermes_state import SessionDB
 from hermes_cli import projects_db
-from gateway.session_contract import Principal
+from gateway.session_contract import SessionActor
 
 from test_backend import backend
 
@@ -342,7 +342,7 @@ class CardMetadata(unittest.TestCase):
 			db.create_session("human", "cli")
 		token = set_hermes_home_override(str(self.root))
 		self.addCleanup(reset_hermes_home_override, token)
-		actor = Principal("owner", str(self.root), frozenset({"session:read"}), "http")
+		actor = SessionActor("owner", str(self.root), frozenset({"session:read"}), "http")
 		authority = SimpleNamespace(profile_id=str(self.root), db=SimpleNamespace(db_path=self.db_path))
 		async def active(*args):
 			return {"sessions": [{"id": "human", "source": "cli"}, {"id": "job", "source": "cron"}]}

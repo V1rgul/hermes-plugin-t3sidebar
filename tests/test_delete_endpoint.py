@@ -18,7 +18,7 @@ from hermes_constants import get_hermes_home, reset_hermes_home_override, set_he
 from hermes_state import SessionDB
 import hermes_state_runtime as runtime
 import hermes_cli.web_server_sessions as native_sessions
-from gateway.session_contract import Principal
+from gateway.session_contract import SessionActor
 from hermes_cli.web_server_dashboard import _plugin_route_secret_scope
 from test_backend import backend
 
@@ -253,8 +253,8 @@ class DeleteEndpoint(unittest.TestCase):
         self.assertTrue(self.exists("target"))
 
     def test_foreign_actor_and_readonly_actor_refuse_before_native_delegate(self):
-        for actor in (Principal("fixture", str(self.homes["other-profile"]), frozenset({"session:control"}), "http"),
-                      Principal("fixture", str(self.home), frozenset({"session:read"}), "http")):
+        for actor in (SessionActor("fixture", str(self.homes["other-profile"]), frozenset({"session:control"}), "http"),
+                      SessionActor("fixture", str(self.home), frozenset({"session:read"}), "http")):
             with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(None, actor)):
                 self.assertEqual(self.post().status_code, 403)
         self.owner_forward.assert_not_called()
@@ -300,8 +300,8 @@ class DeleteEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"], "native_rename_context_unavailable")
         self.hosted = None
-        for actor in (Principal("fixture", str(self.homes["other-profile"]), frozenset({"session:control"}), "http"),
-                      Principal("fixture", str(self.home), frozenset({"session:read"}), "http")):
+        for actor in (SessionActor("fixture", str(self.homes["other-profile"]), frozenset({"session:control"}), "http"),
+                      SessionActor("fixture", str(self.home), frozenset({"session:read"}), "http")):
             with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(None, actor)):
                 self.assertEqual(self.rename().status_code, 403)
         self.owner_forward.assert_not_called()
@@ -338,7 +338,7 @@ class DeleteEndpoint(unittest.TestCase):
 
     def test_cancelled_delegate_propagates_without_fallback(self):
         request = SimpleNamespace(state=SimpleNamespace(), app=self.app)
-        actor = Principal("fixture", str(self.home), frozenset({"session:control"}), "http")
+        actor = SessionActor("fixture", str(self.home), frozenset({"session:control"}), "http")
         with self.scope(self.profile), patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(None, actor)), patch(
                 "hermes_cli.web_routers.sessions.delete_session_endpoint", new=AsyncMock(side_effect=asyncio.CancelledError)):
             with self.assertRaises(asyncio.CancelledError):

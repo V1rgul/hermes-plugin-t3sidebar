@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from hermes_state import SessionDB
-from gateway.session_contract import Principal, SessionHandle, SessionRef
+from gateway.session_contract import SessionActor, SessionHandle, SessionRef
 from gateway.session_live_listing import LiveEntry
 
 import gateway.session_live_listing as listing_module
@@ -76,7 +76,7 @@ class NativeContracts(unittest.TestCase):
 		with closing(SessionDB(db_path)) as db:
 			db.create_session("collision", "cli")
 		authority = SimpleNamespace(profile_id=str(self.path), db=SimpleNamespace(db_path=db_path))
-		actor = Principal("authenticated-subject", str(self.path), frozenset({"session:read", "session:control"}), "http")
+		actor = SessionActor("authenticated-subject", str(self.path), frozenset({"session:read", "session:control"}), "http")
 		setattr(fake, "_session_mutation_context", lambda request, profile: (authority, actor))
 		controls = SimpleNamespace(snapshot=lambda sid, generation: [{"kind": "approval"}])
 		entry = LiveEntry("collision", SimpleNamespace(controls=controls), SessionHandle(SessionRef(str(self.path), "collision"), "instance", 1, 0, 1, "running"), {"source": "cli", "title": "Owned", "started_at": 1}, [], False)

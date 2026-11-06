@@ -5,6 +5,7 @@ This module is self-contained because Hermes loads it directly via importlib.
 """
 
 import asyncio
+import dataclasses
 import importlib.util
 import json
 import math
@@ -686,7 +687,7 @@ async def native_runtime(request, profile):
 		raise HTTPException(503, "session_authority_unavailable")
 	from hermes_cli.web_server_sessions import _session_mutation_context
 	from gateway.session_active_list import active_list
-	from gateway.session_contract import Principal, SessionRef
+	from gateway.session_contract import SessionRef
 
 	authority, actor = _session_mutation_context(request, profile)
 	if authority is None:
@@ -706,7 +707,8 @@ async def native_runtime(request, profile):
 		raise HTTPException(403, "profile_mismatch")
 	if "session:read" not in actor.capabilities:
 		raise HTTPException(403, "permission_denied")
-	reader = Principal(actor.subject, actor.profile_id, frozenset({"session:read"}), actor.transport_id)
+	# Narrow the native actor instead of naming its class, which Hermes renamed (Principal -> SessionActor) without an alias.
+	reader = dataclasses.replace(actor, capabilities=frozenset({"session:read"}))
 	connection = SimpleNamespace(authority=authority, actor=reader)
 	value = await active_list(connection, None, {})
 	value["sessions"] = await asyncio.to_thread(authority_runtime_rows, db_path, value["sessions"])

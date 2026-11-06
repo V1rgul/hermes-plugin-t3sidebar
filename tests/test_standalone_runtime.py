@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from gateway.session_contract import Principal
+from gateway.session_contract import SessionActor
 from hermes_constants import get_hermes_home, set_hermes_home_override, reset_hermes_home_override
 from hermes_state import SessionDB
 from hermes_state_sessions import INTERNAL_LISTING_SOURCES
@@ -552,7 +552,7 @@ class StandaloneRuntime(unittest.TestCase):
 		draft = {**self.session("draft", self.current), "source": "desktop", "history": [], "agent": None, "running": False,
 			"cwd": "/chosen", "explicit_cwd": True, "model_override": {"model": "selected", "provider": "provider"}}
 		self.registry["draft"] = draft
-		actor = Principal("owner", str(self.current), frozenset({"session:read"}), "http")
+		actor = SessionActor("owner", str(self.current), frozenset({"session:read"}), "http")
 		request = SimpleNamespace(state=SimpleNamespace())
 		for seam in ("mapper", "catalog", "provider", "retirement", "stored"):
 			with self.subTest(seam=seam):
@@ -604,7 +604,7 @@ class StandaloneRuntime(unittest.TestCase):
 		read.assert_not_called()
 
 	def test_foreign_actor_is_refused_before_native_snapshot(self):
-		actor = Principal("synthetic-owner", str(self.homes["other-profile"]), frozenset({"session:read"}), "http")
+		actor = SessionActor("synthetic-owner", str(self.homes["other-profile"]), frozenset({"session:read"}), "http")
 		with patch.object(native_sessions, "_session_mutation_context", return_value=(None, actor)), patch.object(legacy, "_own_profile_read") as read:
 			response = self.client.get("/runtime")
 		self.assertEqual(response.status_code, 403, response.text)
@@ -620,7 +620,7 @@ class StandaloneRuntime(unittest.TestCase):
 		read.assert_not_called()
 
 	def test_native_read_capability_is_required_before_snapshot(self):
-		actor = Principal("synthetic-owner", str(self.current), frozenset(), "http")
+		actor = SessionActor("synthetic-owner", str(self.current), frozenset(), "http")
 		with patch.object(native_sessions, "_session_mutation_context", return_value=(None, actor)), patch.object(legacy, "_own_profile_read") as read:
 			response = self.client.get("/runtime")
 		self.assertEqual(response.status_code, 403, response.text)

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from gateway.config import Platform
-from gateway.session_contract import Principal, SessionRef
+from gateway.session_contract import SessionActor, SessionRef
 from hermes_state import SessionDB
 from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 from hermes_state_runtime import RuntimeStoreError
@@ -31,7 +31,7 @@ class AuthoritySubagents(unittest.TestCase):
 		self.db = SessionDB(self.home / "native.sqlite3", read_only=True)
 		self.addCleanup(self.db.close)
 		self.parent = SimpleNamespace(session_id="durable", _session_db=self.db)
-		self.actor = Principal("owner", str(self.home), frozenset({"session:read", "session:control"}), "http")
+		self.actor = SessionActor("owner", str(self.home), frozenset({"session:read", "session:control"}), "http")
 		self.live = SimpleNamespace(route="runtime-route", source=SimpleNamespace(platform=Platform.TELEGRAM),
 			event_stream=SimpleNamespace(lock=RLock()))
 		self.entry = SimpleNamespace(session_id="durable")
@@ -187,7 +187,7 @@ class AuthoritySubagents(unittest.TestCase):
 				authority = SimpleNamespace(**vars(self.authority))
 				request = SimpleNamespace(state=SimpleNamespace())
 				if mismatch == "actor":
-					actor = Principal("owner", foreign, frozenset({"session:read"}), "http")
+					actor = SessionActor("owner", foreign, frozenset({"session:read"}), "http")
 				elif mismatch == "authority":
 					authority.profile_id = foreign
 				elif mismatch == "store":
@@ -195,7 +195,7 @@ class AuthoritySubagents(unittest.TestCase):
 				elif mismatch == "grant":
 					request.state.native_http_principal = {"profile_id": foreign}
 				else:
-					actor = Principal("owner", str(self.home), frozenset({"session:control"}), "http")
+					actor = SessionActor("owner", str(self.home), frozenset({"session:control"}), "http")
 				with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(authority, actor)), patch("gateway.session_active_list.active_list", AsyncMock()) as read:
 					with self.assertRaises(backend.HTTPException) as exc:
 						asyncio.run(backend.native_runtime(request, "exact-profile"))

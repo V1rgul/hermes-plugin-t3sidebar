@@ -392,7 +392,7 @@ class BackendTests(unittest.TestCase):
 				imports.update(alias.name for alias in node.names)
 			elif isinstance(node, ast.ImportFrom):
 				imports.add(node.module)
-		self.assertEqual(imports, {"asyncio", "importlib.util", "json", "math", "pathlib", "re", "sqlite3", "sys", "threading", "time", "typing", "types", "uuid", "fastapi", "pydantic", "hermes_constants", "hermes_state", "hermes_state_mutation_retirement", "agent.voice_turn_route", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "hermes_cli.web_models", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.session_notifications", "tui_gateway.ws_legacy_fallback"})
+		self.assertEqual(imports, {"asyncio", "dataclasses", "importlib.util", "json", "math", "pathlib", "re", "sqlite3", "sys", "threading", "time", "typing", "types", "uuid", "fastapi", "pydantic", "hermes_constants", "hermes_state", "hermes_state_mutation_retirement", "agent.voice_turn_route", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "hermes_cli.web_models", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.session_notifications", "tui_gateway.ws_legacy_fallback"})
 		# Native reads remain read-only; deletion and stored rename delegate to the sanctioned HTTP endpoints, and an unsent draft's row is written only by the native first-prompt writer.
 		self.assertNotIn("import tui_gateway.server", source)
 		self.assertEqual(source.count("_ensure_session_db_row"), 1)

@@ -357,9 +357,9 @@ class RuntimeLoopPerformance(unittest.TestCase):
 	def test_standalone_worker_yields_event_loop_and_keeps_context(self):
 		from types import SimpleNamespace
 		from hermes_constants import get_hermes_home, set_hermes_home_override, reset_hermes_home_override
-		from gateway.session_contract import Principal
+		from gateway.session_contract import SessionActor
 		home = Path(tempfile.gettempdir()) / "flow-synthetic-profile"
-		actor = Principal("owner", str(home), frozenset({"session:read"}), "http")
+		actor = SessionActor("owner", str(home), frozenset({"session:read"}), "http")
 		entered, release = Event(), Event()
 		observed = []
 		def blocking(request, profile, actual_actor):

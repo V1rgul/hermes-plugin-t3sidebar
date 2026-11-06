@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from gateway.session_contract import Principal
+from gateway.session_contract import SessionActor
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from hermes_state import SessionDB
 import hermes_state_runtime as runtime
@@ -181,11 +181,11 @@ class DraftPersistence(unittest.TestCase):
 
 	def test_authority_topology_and_unauthorized_requests_fail_closed(self):
 		authority = SimpleNamespace(profile_id=str(self.home), db=SimpleNamespace(db_path=str(self.home / "state.db")))
-		actor = Principal("fixture", str(self.home), frozenset({"session:control"}), "http")
+		actor = SessionActor("fixture", str(self.home), frozenset({"session:control"}), "http")
 		with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(authority, actor)):
 			self.assertEqual(self.post().json()["detail"], "draft_persistence_unavailable")
-		for actor in (Principal("fixture", str(self.homes["other-profile"]), frozenset({"session:control"}), "http"),
-			Principal("fixture", str(self.home), frozenset({"session:read"}), "http")):
+		for actor in (SessionActor("fixture", str(self.homes["other-profile"]), frozenset({"session:control"}), "http"),
+			SessionActor("fixture", str(self.home), frozenset({"session:read"}), "http")):
 			with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(None, actor)):
 				self.assertEqual(self.post().status_code, 403)
 		self.hosted = True
