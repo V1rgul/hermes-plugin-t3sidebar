@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 VALID_DAYS = frozenset({1, 7, 30, 90})
-# Nominal bucket length in minutes per period (Virgile's choice: 24h per 10 min, 7d per hour, 30d per 6 h, 90d per day; 144, 168, 120 and 90 points). Each plotted point is the amount in its bucket, so the length is the chart's unit; every length divides a day, so buckets start at local midnight.
+# Nominal bucket length in minutes per period (24h per 10 min, 7d per hour, 30d per 6 h, 90d per day; 144, 168, 120 and 90 points). Each plotted point is the amount in its bucket, so the length is the chart's unit; every length divides a day, so buckets start at local midnight.
 BUCKET_MINUTES = {1: 10, 7: 60, 30: 360, 90: 1440}
 # Usage rows record first/last call times with some lag relative to the persisted assistant message, so call matching and window overlap tolerate this much clock skew.
 MATCH_SLACK_S = 120.0

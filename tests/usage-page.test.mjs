@@ -210,7 +210,7 @@ test('the first zero crossing is interpolated and ignores a later refill', () =>
 });
 
 // Plan units -----------------------------------------------------------------------------------------------------------
-test('plan units follow Virgile\'s table: Codex is linear in price in every window, Anthropic differs per window', () => {
+test('plan units follow the capacity table: Codex is linear in price in every window, Anthropic differs per window', () => {
   const codexRows = [['plus', 20], ['team', 20], ['business', 20], ['self_serve_business_usage_based', 20], ['self_serve_business_prolite', 100], ['prolite', 100], ['pro', 200], ['promax', 500]];
   for (const [plan, units] of codexRows) for (const key of ['weekly', 'five_hour', 'weekly:gpt-5', 'w7200']) {
     assert.equal(usage.planWeight('openai-codex', plan, key), units, `Codex ${plan} in ${key}`);
@@ -352,7 +352,7 @@ test('the verdict is unknown without drain data, with stale readings or for a lo
   assert.match(usage.verdictText({ status: 'unknown' }, now), /^Not enough recent readings/);
 });
 
-test('verdict severity follows Virgile\'s bands: hours blocked for a run-out, units lost against capacity for waste', () => {
+test('verdict severity follows the severity bands: hours blocked for a run-out, units lost against capacity for waste', () => {
   // Blocked: from 24h red, 6h orange, 2h yellow, 15 min muted; below that no glyph.
   assert.deepEqual([24 * H, 24 * H - 1, 6 * H, 6 * H - 1, 2 * H, 2 * H - 1, 900, 899, 0, NaN].map(usage.blockedSeverity), ['high', 'medium', 'medium', 'caution', 'caution', 'low', 'low', null, null, null]);
   // Lost: from 50% of capacity red, 30% orange, 15% yellow, 5% muted; below that no glyph.

@@ -1004,7 +1004,7 @@ const CSS = `
 .sf-limit svg[data-provider-mark]{width:13px;height:13px;flex-shrink:0}
 .sf-limit-value{font-variant-numeric:tabular-nums;white-space:nowrap}.sf-limit-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sf-limit .su-verdict-icon{display:inline-flex;flex-shrink:0}/* Stroke 2.29 keeps the toolbar's 1.33px line in the 14px verdict box. */.sf-limit .su-verdict-icon svg{width:14px;height:14px;stroke-width:2.29}
-/* Verdict glyph colour follows severity (hours blocked or units lost, see BLOCKED_BANDS and LOST_BANDS), the same rule as the Limits page: muted, yellow, orange, red. Red is the theme's destructive colour (Virgile's pick): dark mode's --ui-red is pinkish, and more so at the 0.75 opacity below. */
+/* Verdict glyph colour follows severity (hours blocked or units lost, see BLOCKED_BANDS and LOST_BANDS), the same rule as the Limits page: muted, yellow, orange, red. Red is the theme's destructive colour: dark mode's --ui-red is pinkish, and more so at the 0.75 opacity below. */
 .sf-limit .su-verdict-icon[data-severity=caution]{color:var(--ui-yellow,#c08532)}.sf-limit .su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.sf-limit .su-verdict-icon[data-severity=high]{color:var(--dt-destructive,#cf2d56)}
 /* Saturated hues read stronger than the neutral icons beside them at equal lightness contrast; 0.75 opacity brings the coloured glyphs to the same visual weight in light and dark themes. */.sf-limit .su-verdict-icon:is([data-severity=caution],[data-severity=medium],[data-severity=high]){opacity:.75;transition:opacity .1s}
 /* Hover, focus and the open page lift the neutral items to the primary text colour; the coloured glyphs rise with them to full opacity, over the Button's own 100ms colour transition. */.sf .sf-footer .sf-limits:is(:hover,:focus-visible,[aria-current=page]) .su-verdict-icon{opacity:1}
@@ -1090,7 +1090,7 @@ const BUNDLED_ICONS = {
   RefreshCw: ['M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8', 'M21 3v5h-5', 'M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16', 'M8 16H3v5'],
   Gauge: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M13.41 10.59l2.59 -2.59', 'M7 12a5 5 0 0 1 5 -5'],
   ClockX: ['M20.926 13.15a9 9 0 1 0 -7.835 7.784', 'M12 7v5l2 2', 'M22 22l-5 -5', 'M17 22l5 -5'],
-  // Derived from Tabler v3.44.0 arrow-bar-to-down (MIT) with the tip moved down to meet the bar's top edge, because Virgile wants the arrow to touch the floor.
+  // Derived from Tabler v3.44.0 arrow-bar-to-down (MIT) with the tip moved down to meet the bar's top edge, so the arrow visibly touches the floor.
   ArrowBarToDownTouching: ['M4 20h16', 'M12 4v14', 'M8 14l4 4l4 -4'],
   AlertTriangle: ['M12 9v4', 'M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0', 'M12 16h.01'],
   Flag: ['M5 5a5 5 0 0 1 7 0a5 5 0 0 0 7 0v9a5 5 0 0 1 -7 0a5 5 0 0 0 -7 0v-9', 'M5 21v-7'],
@@ -2387,7 +2387,7 @@ export function formatDurationShort(seconds) {
 // Plan capacity ─ pools are measured in units, where 20 is one base $20 plan's allowance (ChatGPT Plus, Claude Pro). Units measure capacity relative to that plan, not price, so accounts on different plans add up to what the pool can actually spend.
 export const BASE_PLAN_UNITS = 20;
 export const PLAN_UNITS_NOTE = `${BASE_PLAN_UNITS} units = one $20 plan's allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.`;
-// Source: Virgile's figures. Codex capacity is linear in price and the same in every window; Anthropic is not linear in its marketing multipliers and differs per window: Max 20x gets 2x Max 5x in the weekly window but 4x in the five-hour window, and the Anthropic Team/Enterprise seats are assumed by analogy (Standard seat = Pro, Premium seat = Max 5x), not verified figures. A window missing from a row (and any window other than five_hour) uses the weekly weight.
+// Source: observed plan capacities, not published figures. Codex capacity is linear in price and the same in every window; Anthropic is not linear in its marketing multipliers and differs per window: Max 20x gets 2x Max 5x in the weekly window but 4x in the five-hour window, and the Anthropic Team/Enterprise seats are assumed by analogy (Standard seat = Pro, Premium seat = Max 5x), not verified figures. A window missing from a row (and any window other than five_hour) uses the weekly weight.
 const PLAN_UNITS = {
   'openai-codex': {
     plus: { label: 'Plus', weekly: 20 },
@@ -2403,7 +2403,7 @@ const PLAN_UNITS = {
     premium_seat: { label: 'Premium seat', weekly: 100, five_hour: 100 }
   }
 };
-// Codex plans whose capacity Virgile has not given: T3 Code's codexPlanLabel names them, and they count as one base plan (flagged).
+// Codex plans with no known capacity: T3 Code's codexPlanLabel names them, and they count as one base plan (flagged).
 const CODEX_PLAN_LABELS = { free: 'Free', go: 'Go', ent26: 'Enterprise', enterprise: 'Enterprise', enterprise_cbp_automation: 'Enterprise', enterprise_cbp_usage_based: 'Enterprise', edu: 'Edu', edu_plus: 'Edu', edu_pro: 'Edu' };
 // Older samples hold Hermes's title-cased plan ("Prolite", "Self Serve Business Usage Based"); folding case and separators recovers the enum.
 const planSlug = plan => typeof plan === 'string' ? plan.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') : '';
@@ -2518,7 +2518,7 @@ export function drainStats(samples, now, lookbackS = 12 * HOUR_S) {
     }
   }
   const coveredS = pairs ? last - first : 0;
-  // Whatever history exists is used, however short (Virgile: better a rough rate than none); only fewer than two readings of an account leave the rate unknown.
+  // Whatever history exists is used, however short, because a rough rate is more useful than none; only fewer than two readings of an account leave the rate unknown.
   return { rate: coveredS > 0 ? consumed / (coveredS / HOUR_S) : null, coveredS, consumed, lookbackS,
     // Sampling gaps at either edge are normal; only a real shortfall (over a quarter of the lookback, capped at 30 minutes) is partial.
     partial: coveredS < lookbackS - Math.min(30 * 60, lookbackS / 4) };
@@ -2677,7 +2677,7 @@ export function bankedFlags(accounts, from, to) {
 }
 // The Limits decision in one value: will the pool run short or throw quota away at resets within the next week? Judged on the weekly window (a week ahead of a five-hour window says little, and the 5h merge is postponed), falling back to the saved window choice when a provider has no weekly one; uses the saved lookback and the pooled unit projection.
 export const VERDICT_DAYS = 7;
-// Virgile's severity bands, most severe first; below the last band an event is not meaningful and draws no glyph. Severities map to colours: high red, medium orange, caution yellow, low muted.
+// Severity bands, most severe first; below the last band an event is not meaningful and draws no glyph. Severities map to colours: high red, medium orange, caution yellow, low muted.
 // Blocked: the time the pool sits empty within the 7 days, every hour counted (the averaging window already smooths nights and weekends), because a person feels hours without quota whatever the plan size.
 export const BLOCKED_BANDS = [[24 * HOUR_S, 'high'], [6 * HOUR_S, 'medium'], [2 * HOUR_S, 'caution'], [15 * 60, 'low']];
 // Lost: the units expiring unused at resets against the pool's capacity (the sum of every account's weekly weight), in percent.
@@ -2722,7 +2722,7 @@ export function limitsVerdict(provider, prefs, now) {
   const severity = lostSeverity(lost, projection.capacity);
   return { ...result, status: severity ? 'waste' : 'ok', severity };
 }
-// One factual sentence for the verdict, shared by the Limits page and the sidebar footer: what happens, when and how much, never what to do about it (Virgile draws the conclusion himself).
+// One factual sentence for the verdict, shared by the Limits page and the sidebar footer: what happens, when and how much, never what to do about it (the user draws the conclusion).
 export function verdictText(verdict, now) {
   const shortText = () => {
     const at = verdict.empty_at - now < 60 ? 'Out of quota now' : `Runs out ${resetTime(verdict.empty_at, now)}`;
@@ -3120,7 +3120,7 @@ function MeasureRow({ nowPct, average, empty, lookback, setLookback }) {
       h(MeasureSpan, { fromPct: empty.fromPct, toPct: empty.toPct }), label(empty, 'right', nowPct, 100)) : null);
 }
 const rateShort = rate => rate === null ? 'no drain data' : `~${rateNumber(rate)} units / h`;
-// Verdict glyphs chosen by Virgile, shared by the Limits page and the sidebar footer: an arrow hitting the floor for a pool that runs dry within the week, Tabler clock-x for quota that expires unused, and a muted Tabler alert-triangle when the verdict cannot be computed (no drain data or only stale readings), so a missing glyph always means on track.
+// Verdict glyphs, shared by the Limits page and the sidebar footer: an arrow hitting the floor for a pool that runs dry within the week, Tabler clock-x for quota that expires unused, and a muted Tabler alert-triangle when the verdict cannot be computed (no drain data or only stale readings), so a missing glyph always means on track.
 const VERDICT_ICONS = { short: ['ArrowBarToDownTouching', '⤓'], waste: ['ClockX', '⌛'], unknown: ['AlertTriangle', '⚠'] };
 // The glyph carries the severity colour (muted, yellow, orange or red); the verdict text stays neutral.
 const verdictIcon = verdict => Object.hasOwn(VERDICT_ICONS, verdict?.status) ? h('span', { className: 'su-verdict-icon', 'aria-hidden': true, 'data-verdict-icon': verdict.status, 'data-severity': verdict.severity ?? undefined }, icon(...VERDICT_ICONS[verdict.status])) : null;
@@ -3373,7 +3373,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
   const emptyPct = emptyAt === null ? null : x(emptyAt) / VIEW_W * 100;
   const emptyText = emptyAt === null ? null : emptyAt - now < 60 ? 'Empty now' : `Empty in ${formatDurationShort(emptyAt - now)} · ${resetTime(emptyAt, now)}`;
   const emptyMeasured = emptyPct !== null && emptyPct - nowPct > 0.05;
-  // The averaged period spans the time the rate is actually based on: the requested lookback, or only the covered time when the history holds less (Virgile: the arrow must not claim 7d for a rate measured over 16 minutes). When it reaches back past the plot it is cut at the plot edge without a left arrowhead, since its true start is not on the chart.
+  // The averaged period spans the time the rate is actually based on: the requested lookback, or only the covered time when the history holds less (the arrow must not claim 7d for a rate measured over 16 minutes). When it reaches back past the plot it is cut at the plot edge without a left arrowhead, since its true start is not on the chart.
   const averageS = projection.partial ? projection.coveredS : lookbackS;
   const averageClipped = now - averageS < start, averagePct = averageClipped ? 0 : x(now - averageS) / VIEW_W * 100;
   const averageText = `Average over ${projection.partial ? coverageText(averageS) : lookbackLabel(lookback)} · ${rateShort(projection.rate)}`;
