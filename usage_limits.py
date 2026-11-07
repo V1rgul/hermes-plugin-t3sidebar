@@ -2,11 +2,11 @@
 
 Hermes keeps provider limit snapshots only in process memory and only fetches them on demand, so the page would have no history while Desktop is closed. A sampler therefore asks Hermes for a per-account refresh every few minutes and records what lands in Hermes's own cache.
 
-Read-only toward credentials, by construction:
+Read-only toward credentials, by construction, except that an expired Claude Code login is handed to Hermes's own refresh (below):
 - Pool rows come from ``read_credential_pool`` (a plain auth.json read), never ``load_pool`` (which can seed, heal and persist the store) or ``pool.select()``.
 - Fetches go through ``refresh_account_usage_entries_async``, which calls ``fetch_account_usage(read_only=True)`` with each entry's own token: the Codex read-only fetcher reports a 401 instead of refreshing or rotating, and the Anthropic fetcher with an explicit token never resolves or refreshes one. The provider-wide ``refresh_account_usage_async`` is deliberately not used because its Codex path resolves runtime credentials with ``refresh_if_expiring`` and force-refreshes on 401.
 - Only providers in ``VETTED_PROVIDERS`` are refreshed: plugin usage hooks are arbitrary code and OpenRouter issues two GETs.
-- Anthropic falls back to Claude Code's own login when Hermes's anthropic pool is empty: Claude sessions that run through the Claude Code CLI (claude-subscription-directsdk) consume that login's account, not a Hermes pool entry. Its access token is only read, sent once per sample to Hermes's OAuth usage fetcher (a single GET, no refresh), and never stored; an expired token is skipped until Claude Code refreshes it.
+- Anthropic falls back to Claude Code's own login when Hermes's anthropic pool is empty: Claude sessions that run through the Claude Code CLI (claude-subscription-directsdk) consume that login's account, not a Hermes pool entry. Its access token is sent once per sample to Hermes's OAuth usage fetcher (a single GET) and to Anthropic's OAuth profile for the plan, and never stored; an expired one is refreshed by Hermes's own Claude Code resolver, which writes the new pair back to Claude Code's credentials, then read again.
 - Codex banked reset credits are listed with one extra GET per account at most every ``CREDITS_INTERVAL_S``, on Hermes's own read-only list endpoint (the one the Codex CLI reads); the usage payload only carries their count, not their expiries. A 401 or any failure keeps the previous list and never refreshes the token.
 
 Nothing secret is stored or logged: tokens, identities and base URLs stay in local variables of one collection; the store keeps pool entry id + label, plan, window numbers, banked reset count, banked credit status/grant/expiry times and a closed set of error classes.
@@ -276,11 +276,12 @@ def _native_symbols():
 	take("agent.account_usage", "_codex_backend_urls")
 	take("agent.account_usage", "_codex_headers")
 	take("agent.account_usage", "_fetch_anthropic_account_usage")
+	take("agent.anthropic_credentials", "_resolve_claude_code_token_from_credentials")
 	return symbols
 
 
 def _claude_code_login(clock=time.time):
-	"""Claude Code's OAuth login on this host as {token, expired}, or None. Read-only: honours CLAUDE_CONFIG_DIR like the CLI, never writes or refreshes."""
+	"""Claude Code's OAuth login on this host as {token, expired}, or None. Read-only: honours CLAUDE_CONFIG_DIR like the CLI; refreshing is left to Hermes."""
 	config = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
 	path = (Path(config).expanduser() if config else Path.home() / ".claude") / ".credentials.json"
 	try:
@@ -310,9 +311,19 @@ def _fetch_claude_profile_plan(token):
 	return tier if isinstance(tier, str) and re.fullmatch(r"[A-Za-z0-9_ -]{1,64}", tier) else None
 
 
-def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=_fetch_claude_profile_plan):
+def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=_fetch_claude_profile_plan, refresher=None):
 	"""One Anthropic reading from Claude Code's login, or None when there is no such login."""
 	login = login_reader(clock)
+	if login is not None and login["expired"]:
+		# An expired login is handed to Hermes's own Claude Code resolver, the one its Anthropic calls use: it refreshes the token, skips a rotation it could not commit and writes the new pair back where Claude Code reads it. Its return value is the token, so it is dropped unbound and the file is read again.
+		refresh = refresher or symbols.get("_resolve_claude_code_token_from_credentials")
+		if refresh is not None:
+			login.clear()
+			try:
+				refresh()
+			except Exception:
+				pass
+			login = login_reader(clock)
 	if login is None:
 		return None
 	account = {"id": CLAUDE_CODE_ACCOUNT_ID, "label": "Claude Code", "priority": 0, "error": None, "snapshot": None}
@@ -354,7 +365,7 @@ _CREDITS_LOCK = threading.Lock()
 _CREDITS_READ = {}
 
 
-def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None, claude_login=_claude_code_login, claude_fetcher=None, claude_profile=_fetch_claude_profile_plan):
+def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None, claude_login=_claude_code_login, claude_fetcher=None, claude_profile=_fetch_claude_profile_plan, claude_refresher=None):
 	"""Trigger Hermes's read-only per-credential refresh for vetted pooled providers, then read each account's cached snapshot.
 
 	Must run inside the target home's context: Hermes keys both auth.json and its usage cache on the active home.
@@ -473,7 +484,7 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 	# Hermes's own anthropic pool wins; only an empty or missing one falls back to Claude Code's login.
 	current = next((reading for reading in providers if reading["provider"] == "anthropic"), None)
 	if current is None or current["error"] == "logged_out":
-		fallback = _collect_claude_code(symbols, clock, claude_login, claude_fetcher, claude_profile)
+		fallback = _collect_claude_code(symbols, clock, claude_login, claude_fetcher, claude_profile, claude_refresher)
 		if fallback is not None:
 			providers = sorted([reading for reading in providers if reading is not current] + [fallback], key=lambda reading: reading["provider"])
 	return providers

@@ -414,6 +414,7 @@ class CollectorTests(unittest.TestCase):
 			("agent.account_usage", "_codex_backend_urls"),
 			("agent.account_usage", "_codex_headers"),
 			("agent.account_usage", "_fetch_anthropic_account_usage"),
+			("agent.anthropic_credentials", "_resolve_claude_code_token_from_credentials"),
 		})
 		imported = {
 			(node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
@@ -424,6 +425,9 @@ class CollectorTests(unittest.TestCase):
 			("hermes_constants", "get_hermes_home"), ("hermes_constants", "hermes_home_key"),
 			("hermes_constants", "reset_hermes_home_override"), ("hermes_constants", "set_hermes_home_override"),
 		})
+		# The one refreshing path: an expired Claude Code login goes to Hermes's own resolver, nowhere else.
+		users = {fn.name for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef) and any(isinstance(node, ast.Constant) and node.value == "_resolve_claude_code_token_from_credentials" for node in ast.walk(fn))}
+		self.assertEqual(users, {"_native_symbols", "_collect_claude_code"})
 		forbidden = {
 			"refresh_account_usage_async", "fetch_account_usage", "load_pool", "select", "try_refresh_matching",
 			"resolve_codex_runtime_credentials", "resolve_anthropic_token", "_persist", "persist_pool_entries",
@@ -575,11 +579,11 @@ NO_CLAUDE = lambda clock: None
 
 
 class ClaudeCodeFallbackTests(unittest.TestCase):
-	def collect(self, pool, login, fetcher, profile=None):
+	def collect(self, pool, login, fetcher, profile=None, refresher=None):
 		symbols = CollectorTests.symbols(CollectorTests(), {}, [], pool)
 		profile = profile or (lambda token: "default_claude_max_5x")
 		with patch.object(limits, "_native_symbols", return_value=symbols):
-			return limits.collect_native(join_timeout=1, claude_login=login, claude_fetcher=fetcher, claude_profile=profile)
+			return limits.collect_native(join_timeout=1, claude_login=login, claude_fetcher=fetcher, claude_profile=profile, claude_refresher=refresher)
 
 	def test_plan_is_the_profiles_rate_limit_tier(self):
 		fetch = lambda **kwargs: SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
@@ -612,9 +616,25 @@ class ClaudeCodeFallbackTests(unittest.TestCase):
 		self.assertNotIn("secret", repr(readings))
 		self.assertEqual(login, {})
 
+	def test_expired_login_is_refreshed_by_hermes_then_read_again(self):
+		# Hermes's resolver rewrites Claude Code's file; the sampler only sees the new token by reading it again.
+		files = [{"token": "old", "expired": True}, {"token": "new", "expired": False}]
+		refreshed, sent = [], []
+		fetch = lambda **kw: sent.append(kw["api_key"]) or SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
+			SimpleNamespace(label="Current week", used_percent=4.0, reset_at=dt(NOW + 6 * 86400), scope="account"),))
+		(reading,) = self.collect({}, lambda clock: files.pop(0), fetch, refresher=lambda: refreshed.append(True) or "new")
+		self.assertEqual((refreshed, sent, reading["accounts"][0]["error"]), ([True], ["new"], None))
+		self.assertEqual(reading["accounts"][0]["snapshot"]["plan"], "default_claude_max_5x")
+
 	def test_expired_or_failing_login_is_an_account_error_and_no_login_stays_logged_out(self):
-		expired = self.collect({"anthropic": []}, lambda clock: {"token": "t", "expired": True}, lambda **kw: self.fail("an expired token is never sent"))
+		never = lambda **kw: self.fail("an expired token is never sent")
+		# Without Hermes's resolver, or when its refresh leaves the file expired or raises, the account reads as expired.
+		expired = self.collect({"anthropic": []}, lambda clock: {"token": "t", "expired": True}, never)
 		self.assertEqual(expired[0]["accounts"][0]["error"], "token_expired")
+		still = self.collect({}, lambda clock: {"token": "t", "expired": True}, never, refresher=lambda: None)
+		self.assertEqual(still[0]["accounts"][0]["error"], "token_expired")
+		raising = self.collect({}, lambda clock: {"token": "t", "expired": True}, never, refresher=lambda: (_ for _ in ()).throw(RuntimeError("invalid_grant")))
+		self.assertEqual(raising[0]["accounts"][0]["error"], "token_expired")
 		failing = self.collect({}, lambda clock: {"token": "t", "expired": False}, lambda **kw: (_ for _ in ()).throw(RuntimeError("401")))
 		self.assertEqual((failing[0]["provider"], failing[0]["accounts"][0]["error"]), ("anthropic", "refresh_failed"))
 		self.assertEqual(self.collect({"anthropic": []}, NO_CLAUDE, None)[0]["error"], "logged_out")

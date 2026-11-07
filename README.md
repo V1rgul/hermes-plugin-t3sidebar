@@ -52,7 +52,7 @@
 - Markers: reset step-ups, units lost at each reset, Codex banked reset credit expiries.
 - Per-account bars with reset times.
 - Codex banked resets listed per account, with a **Use one** button: green when Codex accepts a reset (an allowance below 80% left), dashed and padlocked otherwise. It confirms with the share of the weekly allowance the reset discards, then redeems through Hermes's own `/usage reset --force` on that account.
-- Backend sampler every 5 minutes, 35 days of history, read-only: never refreshes tokens, clears cooldowns or redeems resets.
+- Backend sampler every 5 minutes, 35 days of history, read-only: never refreshes pool tokens, clears cooldowns or redeems resets. An expired Claude Code login is the one exception: Hermes's own Claude Code resolver refreshes it.
 
 ![Limits page: OpenAI Codex pool running out Sunday with reset markers and lost units, its two accounts unfolded with 5-hour and weekly bars and banked resets, Anthropic pool with units expiring unused, averaging and time-to-empty measurements](docs/images/limits.png)
 
