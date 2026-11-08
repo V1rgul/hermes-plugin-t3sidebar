@@ -1058,7 +1058,8 @@ try {
     await page.getByRole('searchbox').fill(''); await page.waitForTimeout(100);
     check(`${height}px: dense Snoozed gets the same two-card minimum before Archived`, await page.locator('[data-section="snoozed"]').evaluate(el => {
       const grid = el.parentElement.getBoundingClientRect().height;
-      return el.getBoundingClientRect().height >= Math.min(30 + 2 * 56, grid * .2) - 1;
+      // Chromium quantizes flex tracks to 1/64px; preserve the CSS minimum without a subpixel false failure.
+      return el.getBoundingClientRect().height >= Math.floor(Math.min(30 + 2 * 56, grid * .2 - 1) * 64) / 64;
     }));
     check(`${height}px: toolbar single line and Search left of Filter and New session`, layout.toolbar.length === 3 && layout.toolbar.every(r => Math.abs((r.top + r.bottom) / 2 - (layout.toolbar[0].top + layout.toolbar[0].bottom) / 2) < 2) && layout.toolbar.every((r, i, arr) => !i || arr[i-1].right <= r.left));
     // Scroll each body in turn: every other category's scrollTop AND geometry stay fixed.
@@ -1117,6 +1118,8 @@ try {
     await page.locator('.harness-sidebar').evaluate(el => { el.style.height = '1000px'; });
     await page.evaluate(async count => {
       const fixture = window.hermesT3SidebarHarness; fixture.loadDenseFixtures();
+      // Keep Pinned at an ordinary size: this case exercises Working's content sizing, not the oversized-group cap.
+      fixture.control.rows = fixture.control.rows.filter(row => !row.id.startsWith('synthetic-pinned-') || Number(row.id.slice(-3)) < 2);
       fixture.control.rows = fixture.control.rows.filter(row => !row.id.startsWith('synthetic-working-') || Number(row.id.slice(-3)) < count);
       const ids = new Set(fixture.control.rows.map(row => row.id));
       fixture.control.live = fixture.control.live.filter(row => ids.has(row.session_key));
@@ -1472,12 +1475,32 @@ try {
     await group.getByRole('button', { name: '2 lines', exact: true }).click();
     await lines.waitForFunction(() => document.querySelector('[data-section=pinned] .sf-window')?.style.height === `${110 * 56}px`);
     check('switching to 2 lines re-reads the stride of the mounted windowed list', JSON.stringify(await slots()) === JSON.stringify({ height: `${110 * 56}px`, tops: ['0px', '56px', '112px'], row: 56 }));
-    for (const height of [300, 400, 650]) {
+    for (const height of [300, 400, 650, 1300]) {
       await lines.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
-      check(`${height}px with the pinned group: capped pinned scrolling and all secondary headings fit`, await lines.locator('.sf-scroll').evaluate(el => {
-        const pinned = el.querySelector('[data-section=pinned]'), body = pinned.querySelector('.sf-section-body');
-        return el.scrollHeight <= el.clientHeight + 1 && pinned.getBoundingClientRect().height <= el.clientHeight * .18 + 1 && body.scrollHeight > body.clientHeight &&
+      check(`${height}px with an oversized pinned group: Pinned scrolls past its cap (60% of the list, leaving 450px, at least 18%), Ready keeps a body and all secondary headings fit`, await lines.locator('.sf-scroll').evaluate(el => {
+        const pinned = el.querySelector('[data-section=pinned]'), body = pinned.querySelector('.sf-section-body'), h = el.clientHeight;
+        const cap = Math.max(h * .18, Math.min(h * .6, h - 450));
+        return el.scrollHeight <= el.clientHeight + 1 && Math.abs(pinned.getBoundingClientRect().height - cap) <= 2 && body.scrollHeight > body.clientHeight && el.querySelector('[data-section=active] .sf-section-body').getBoundingClientRect().height > 0 &&
           [...el.querySelectorAll('.sf-section-toggle')].every(header => header.getBoundingClientRect().bottom <= el.getBoundingClientRect().bottom + 1);
+      }));
+    }
+    // A few pinned cards in an ordinary window full of Ready sessions: every pinned card stays in sight and Ready scrolls instead.
+    await lines.setViewportSize({ width: 1200, height: 810 });
+    await lines.locator('.harness-sidebar').evaluate(el => { el.style.height = ''; });
+    for (const count of [1, 2, 3, 4]) {
+      await lines.evaluate(async count => {
+        const fixture = window.hermesT3SidebarHarness; fixture.loadDenseFixtures();
+        fixture.control.rows = fixture.control.rows.filter(row => !row.id.startsWith('synthetic-pinned-') || Number(row.id.slice(-3)) < count);
+        fixture.switchScope(`few-pinned-${count}`);
+        await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+      }, count);
+      await lines.waitForFunction(count => document.querySelectorAll('[data-section=pinned] .sf-row').length === count, count);
+      check(`810px window with ${count} pinned among many Ready: no pinned card is hidden behind a scroll; Ready scrolls instead`, await lines.locator('.sf-scroll').evaluate(el => {
+        const pinned = el.querySelector('[data-section=pinned]'), body = pinned.querySelector('.sf-section-body'), ready = el.querySelector('[data-section=active] .sf-section-body'), bounds = pinned.getBoundingClientRect();
+        return el.scrollHeight <= el.clientHeight + 1 && bounds.bottom <= el.getBoundingClientRect().bottom && body.scrollHeight <= body.clientHeight + 1 && [...pinned.querySelectorAll('.sf-row')].every(row => {
+          const card = row.getBoundingClientRect();
+          return card.height === 56 && card.top >= bounds.top && card.bottom <= bounds.bottom + 1;
+        }) && ready.scrollHeight > ready.clientHeight;
       }));
     }
     await lines.close();
@@ -1494,7 +1517,13 @@ try {
     }));
     await geometry.goto(`http://127.0.0.1:${server.address().port}`);
     await geometry.waitForSelector('.sf-row');
-    await geometry.evaluate(() => window.hermesT3SidebarHarness.loadDenseFixtures());
+    await geometry.evaluate(async () => {
+      const fixture = window.hermesT3SidebarHarness; fixture.loadDenseFixtures();
+      // An oversized Pinned group would dominate the available height instead of testing the themed shelf minimum.
+      fixture.control.rows = fixture.control.rows.filter(row => !row.id.startsWith('synthetic-pinned-') || Number(row.id.slice(-3)) < 2);
+      fixture.switchScope('themed-card-geometry');
+      await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
+    });
     await geometry.locator('[data-session-id="synthetic-active-000"]').waitFor();
     await geometry.waitForFunction(() => document.querySelector('[data-session-id="synthetic-working-000"]')?.dataset.working === 'true');
     const layout = await geometry.evaluate(() => {
