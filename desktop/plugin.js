@@ -892,9 +892,15 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       if (project === undefined) return env.host.newChat(route); // Preserve archive-and-advance fallback.
       if (project.isNoProject || project.id === '__no_project__') throw new Error('Home creation is unavailable: the public Desktop SDK cannot select a detached workspace. No session was created. Use native Home new chat.');
       if (typeof project.path !== 'string' || !project.path || !idempotencyKey) throw new Error('Choose a project folder before creating a session.');
-      const created = await fenced(scope, () => env.host.requestProfile(route, 'session.create', {
-        source: 'desktop', cwd: project.path, cwd_explicit: true, close_on_disconnect: false, idempotency_key: idempotencyKey
-      }));
+      const create = params => fenced(scope, () => env.host.requestProfile(route, 'session.create', params));
+      let created;
+      try {
+        created = await create({ source: 'desktop', cwd: project.path, cwd_explicit: true, close_on_disconnect: false, idempotency_key: idempotencyKey });
+      } catch (error) {
+        // The canonical gateway protocol (the Webapp, Hermes 0.23) refuses these two keys in the client before anything is sent, so this retry cannot create a second session; that protocol de-duplicates on request_id instead.
+        if (!/does not support explicit session options/.test(String(error?.message ?? error))) throw error;
+        created = await create({ source: 'desktop', cwd: project.path, cwd_explicit: true, request_id: idempotencyKey });
+      }
       if (!created?.stored_session_id || !created?.session_id) throw new Error('Session creation did not return stored and runtime identities.');
       await fenced(scope, () => env.host.openSession(created.stored_session_id, {
         route, profile: route?.profile || scope.profile, intent: 'in-place', awaitHydration: true, expectHistory: false
