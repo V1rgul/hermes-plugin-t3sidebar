@@ -285,7 +285,7 @@ def _claude_code_login(clock=time.time):
 	config = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
 	path = (Path(config).expanduser() if config else Path.home() / ".claude") / ".credentials.json"
 	try:
-		entry = json.loads(path.read_text(encoding="utf-8")).get("claudeAiOauth")
+		entry = json.loads(path.read_text(encoding="utf-8-sig")).get("claudeAiOauth")
 	except (OSError, ValueError, AttributeError):
 		return None
 	if not isinstance(entry, dict) or not isinstance(entry.get("accessToken"), str) or not entry["accessToken"].strip():

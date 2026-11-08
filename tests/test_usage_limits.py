@@ -658,6 +658,14 @@ class ClaudeCodeFallbackTests(unittest.TestCase):
 			path.write_text(body, encoding="utf-8")
 			self.assertEqual(path.read_text(encoding="utf-8"), body)
 
+	def test_login_reader_accepts_a_byte_order_mark(self):
+		# Windows tools (PowerShell Set-Content, some editors) prefix the files they touch with a BOM, which plain utf-8 JSON parsing rejects.
+		with tempfile.TemporaryDirectory() as temp:
+			body = '{"claudeAiOauth": {"accessToken": "tok", "expiresAt": 2000000}}'
+			(Path(temp) / ".credentials.json").write_text(body, encoding="utf-8-sig")
+			with patch.dict(limits.os.environ, {"CLAUDE_CONFIG_DIR": temp}):
+				self.assertEqual(limits._claude_code_login(clock=lambda: 1000.0), {"token": "tok", "expired": False})
+
 
 def dt_epoch(text):
 	return datetime.fromisoformat(text).timestamp()
