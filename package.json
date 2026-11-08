@@ -1,6 +1,7 @@
 {
   "name": "hermes-t3sidebar",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "test": "node --import ./tests/register-loader.mjs --test tests/*.test.mjs",

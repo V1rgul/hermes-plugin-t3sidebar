@@ -5,6 +5,7 @@
 - Plugin id: `hermes-t3sidebar`
 - Parts: **Agent plugin** (backend companion) + **Desktop UI**
 - Requires: Hermes `>=0.23.0`
+- License: [MIT](LICENSE)
 - Optional: `hermes-auto-titler` plugin (Hermes catalog id)
 
 ### Session shelves
