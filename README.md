@@ -95,6 +95,14 @@
 
 Remote backend or upgrade: [installation guide](docs/installation.md), including when a backend restart is needed.
 
+## Disclosure
+
+- **Network:** for the Limits page only, through Hermes's own fetchers. Every 5 minutes per account: the Codex usage endpoint on `chatgpt.com` and `api.anthropic.com/api/oauth/usage`. At most once an hour per Codex account: its banked reset credit list. In the Claude Code fallback only (no Anthropic account in Hermes): `api.anthropic.com/api/oauth/profile`, for the plan tier. A Codex banked reset is redeemed only after a confirmed click, through Hermes's `/usage reset --force`.
+- **Background:** one sampler thread starts on the first Desktop poll after a backend start and keeps sampling every 5 minutes, also while Desktop is closed. The `pre_llm_call` and `on_session_end` hooks run on every turn and session end, to record completions for the Done badge.
+- **Reads outside its own data:** Hermes `state.db` and `projects.db` (read-only), Hermes's credential pool via `read_credential_pool`, and Claude Code's `.credentials.json` (fallback only).
+- **Writes:** session rename, archive and delete through Hermes's own session code, and the plugin's own `<HERMES_HOME>/plugin-data/hermes-t3sidebar/state.sqlite3` and `usage-limits.sqlite3` (35 days of samples). When Claude Code's token has expired, Hermes's own resolver refreshes it under Hermes's cross-process lock and writes it back to Claude Code's credentials file; the plugin never refreshes or writes a token itself.
+- **Not done:** no stored or logged credentials, no telemetry, no shell commands, no self-updating code.
+
 ## Documentation
 
 - [Installation](docs/installation.md): remote backends, local checkouts, the old Session Flow name.
