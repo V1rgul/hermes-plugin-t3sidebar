@@ -3749,7 +3749,7 @@ ${SEGMENTED_FALLBACK_CSS}
 @media(max-width:640px){.su{padding:12px}.su-window{grid-template-columns:minmax(60px,7rem) minmax(40px,1fr) 4rem;}.su-window-reset{display:none}}
 `;
 export default {
-  id: 'hermes-t3sidebar', name: 'hermes-t3sidebar', defaultEnabled: false,
+  id: 'hermes-t3sidebar', name: 'hermes-t3sidebar', defaultEnabled: true,
   register(ctx) {
     const controller = createController(ctx);
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,

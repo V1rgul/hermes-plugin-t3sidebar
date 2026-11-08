@@ -34,7 +34,7 @@ afterEach(async () => { if (root) { await act(async () => root.unmount()); root 
 test('only supported import specifiers; opt-in left-pane registration and disposal', async () => {
   const source = await readFile(new URL('../desktop/plugin.js', import.meta.url), 'utf8');
   assert.deepEqual([...source.matchAll(/from ['"]([^'"]+)['"]/g)].map(match => match[1]), ['@hermes/plugin-sdk', 'react']);
-  assert.equal(plugin.id, 'hermes-t3sidebar'); assert.equal(plugin.name, plugin.id); assert.equal(plugin.defaultEnabled, false);
+  assert.equal(plugin.id, 'hermes-t3sidebar'); assert.equal(plugin.name, plugin.id); assert.equal(plugin.defaultEnabled, true);
   const [manifest, packageJson, lock, yaml] = await Promise.all(['../dashboard/manifest.json', '../package.json', '../package-lock.json', '../plugin.yaml'].map(path => readFile(new URL(path, import.meta.url), 'utf8')));
   assert.equal(JSON.parse(manifest).name, plugin.id); assert.equal(JSON.parse(manifest).label, plugin.name);
   assert.equal(JSON.parse(packageJson).name, plugin.id); assert.equal(JSON.parse(lock).name, plugin.id); assert.equal(JSON.parse(lock).packages[''].name, plugin.id);
