@@ -413,8 +413,8 @@ class CollectorTests(unittest.TestCase):
 			("hermes_cli.inventory", "_pool_entry_host"),
 			("agent.account_usage", "_codex_backend_urls"),
 			("agent.account_usage", "_codex_headers"),
-			("agent.account_usage", "_fetch_anthropic_account_usage"),
-			("agent.anthropic_credentials", "_resolve_claude_code_token_from_credentials"),
+			("agent.account_usage", "fetch_account_usage"),
+			("agent.anthropic_credentials", "resolve_anthropic_token"),
 		})
 		imported = {
 			(node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
@@ -425,12 +425,13 @@ class CollectorTests(unittest.TestCase):
 			("hermes_constants", "get_hermes_home"), ("hermes_constants", "hermes_home_key"),
 			("hermes_constants", "reset_hermes_home_override"), ("hermes_constants", "set_hermes_home_override"),
 		})
-		# The one refreshing path: an expired Claude Code login goes to Hermes's own resolver, nowhere else.
-		users = {fn.name for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef) and any(isinstance(node, ast.Constant) and node.value == "_resolve_claude_code_token_from_credentials" for node in ast.walk(fn))}
-		self.assertEqual(users, {"_native_symbols", "_collect_claude_code"})
+		# The one refreshing path (an expired Claude Code login to Hermes's resolver) and the Claude Code usage fetch stay inside the fallback.
+		for name in ("resolve_anthropic_token", "fetch_account_usage"):
+			users = {fn.name for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef) and any(isinstance(node, ast.Constant) and node.value == name for node in ast.walk(fn))}
+			self.assertEqual(users, {"_native_symbols", "_collect_claude_code"}, name)
 		forbidden = {
-			"refresh_account_usage_async", "fetch_account_usage", "load_pool", "select", "try_refresh_matching",
-			"resolve_codex_runtime_credentials", "resolve_anthropic_token", "_persist", "persist_pool_entries",
+			"refresh_account_usage_async", "load_pool", "select", "try_refresh_matching",
+			"resolve_codex_runtime_credentials", "_persist", "persist_pool_entries",
 			"_save_auth_store", "redeem_codex_reset_credit", "remember_account_usage", "_claim_refresh",
 		}
 		used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
@@ -625,6 +626,19 @@ class ClaudeCodeFallbackTests(unittest.TestCase):
 		(reading,) = self.collect({}, lambda clock: files.pop(0), fetch, refresher=lambda: refreshed.append(True) or "new")
 		self.assertEqual((refreshed, sent, reading["accounts"][0]["error"]), ([True], ["new"], None))
 		self.assertEqual(reading["accounts"][0]["snapshot"]["plan"], "default_claude_max_5x")
+
+	def test_default_path_uses_hermes_public_resolver_and_usage_fetch(self):
+		# Without injected seams the fallback reaches Hermes only through its public names: the token resolver for an expired login, then the provider-wide usage fetch with that login's token.
+		files = [{"token": "old", "expired": True}, {"token": "new", "expired": False}]
+		calls = []
+		symbols = CollectorTests.symbols(CollectorTests(), {}, [], {})
+		symbols["resolve_anthropic_token"] = lambda: calls.append(("resolve",)) or "new"
+		symbols["fetch_account_usage"] = lambda provider, **kwargs: calls.append(("fetch", provider, kwargs)) or SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
+			SimpleNamespace(label="Current week", used_percent=4.0, reset_at=dt(NOW + 6 * 86400), scope="account"),))
+		with patch.object(limits, "_native_symbols", return_value=symbols):
+			(reading,) = limits.collect_native(join_timeout=1, claude_login=lambda clock: files.pop(0), claude_profile=lambda token: "default_claude_max_5x")
+		self.assertEqual(calls, [("resolve",), ("fetch", "anthropic", {"api_key": "new"})])
+		self.assertEqual((reading["accounts"][0]["error"], reading["accounts"][0]["snapshot"]["windows"][0]["key"]), (None, "weekly"))
 
 	def test_expired_or_failing_login_is_an_account_error_and_no_login_stays_logged_out(self):
 		never = lambda **kw: self.fail("an expired token is never sent")

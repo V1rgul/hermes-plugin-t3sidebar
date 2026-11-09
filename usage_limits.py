@@ -6,7 +6,7 @@ Read-only toward credentials, by construction, except that an expired Claude Cod
 - Pool rows come from ``read_credential_pool`` (a plain auth.json read), never ``load_pool`` (which can seed, heal and persist the store) or ``pool.select()``.
 - Fetches go through ``refresh_account_usage_entries_async``, which calls ``fetch_account_usage(read_only=True)`` with each entry's own token: the Codex read-only fetcher reports a 401 instead of refreshing or rotating, and the Anthropic fetcher with an explicit token never resolves or refreshes one. The provider-wide ``refresh_account_usage_async`` is deliberately not used because its Codex path resolves runtime credentials with ``refresh_if_expiring`` and force-refreshes on 401.
 - Only providers in ``VETTED_PROVIDERS`` are refreshed: plugin usage hooks are arbitrary code and OpenRouter issues two GETs.
-- Anthropic falls back to Claude Code's own login when Hermes's anthropic pool is empty: Claude sessions that run through the Claude Code CLI (claude-subscription-directsdk) consume that login's account, not a Hermes pool entry. Its access token is sent once per sample to Hermes's OAuth usage fetcher (a single GET) and to Anthropic's OAuth profile for the plan, and never stored; an expired one is refreshed by Hermes's own Claude Code resolver, which writes the new pair back to Claude Code's credentials, then read again.
+- Anthropic falls back to Claude Code's own login when Hermes's anthropic pool is empty: Claude sessions that run through the Claude Code CLI (claude-subscription-directsdk) consume that login's account, not a Hermes pool entry. Its access token is sent once per sample to Hermes's public ``fetch_account_usage`` (a single GET, whose reading Hermes also keeps as its in-memory Anthropic gauge) and to Anthropic's OAuth profile for the plan, and never stored; an expired one is refreshed through Hermes's public ``resolve_anthropic_token``, which ends in Hermes's Claude Code resolver and writes the new pair back to Claude Code's credentials, then read again.
 - Codex banked reset credits are listed with one extra GET per account at most every ``CREDITS_INTERVAL_S``, on Hermes's own read-only list endpoint (the one the Codex CLI reads); the usage payload only carries their count, not their expiries. A 401 or any failure keeps the previous list and never refreshes the token.
 
 Nothing secret is stored or logged: tokens, identities and base URLs stay in local variables of one collection; the store keeps pool entry id + label, plan, window numbers, banked reset count, banked credit status/grant/expiry times and a closed set of error classes.
@@ -275,8 +275,8 @@ def _native_symbols():
 	take("hermes_cli.inventory", "_pool_entry_host")
 	take("agent.account_usage", "_codex_backend_urls")
 	take("agent.account_usage", "_codex_headers")
-	take("agent.account_usage", "_fetch_anthropic_account_usage")
-	take("agent.anthropic_credentials", "_resolve_claude_code_token_from_credentials")
+	take("agent.account_usage", "fetch_account_usage")
+	take("agent.anthropic_credentials", "resolve_anthropic_token")
 	return symbols
 
 
@@ -315,8 +315,8 @@ def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=
 	"""One Anthropic reading from Claude Code's login, or None when there is no such login."""
 	login = login_reader(clock)
 	if login is not None and login["expired"]:
-		# An expired login is handed to Hermes's own Claude Code resolver, the one its Anthropic calls use: it refreshes the token, skips a rotation it could not commit and writes the new pair back where Claude Code reads it. Its return value is the token, so it is dropped unbound and the file is read again.
-		refresh = refresher or symbols.get("_resolve_claude_code_token_from_credentials")
+		# An expired login is handed to Hermes's public Anthropic token resolver. With the anthropic pool empty, as here, it ends in Hermes's Claude Code resolver, which refreshes the token, skips a rotation it could not commit and writes the new pair back where Claude Code reads it; an Anthropic API key in Hermes's environment takes precedence and leaves the login expired. Its return value is a token, so it is dropped unbound and the file is read again.
+		refresh = refresher or symbols.get("resolve_anthropic_token")
 		if refresh is not None:
 			login.clear()
 			try:
@@ -332,7 +332,9 @@ def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=
 		if login["expired"]:
 			account["error"] = "token_expired"
 			return reading
-		fetch = fetcher or symbols.get("_fetch_anthropic_account_usage")
+		public = symbols.get("fetch_account_usage")
+		# The public fetch also lands the reading in Hermes's in-memory Anthropic gauge; it is the same account Claude Code sessions consume.
+		fetch = fetcher or (public and (lambda api_key: public("anthropic", api_key=api_key)))
 		if fetch is None:
 			reading["error"], reading["accounts"] = "unavailable", []
 			return reading
