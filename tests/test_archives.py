@@ -48,7 +48,8 @@ class NativeArchives(unittest.TestCase):
 			self.assertTrue(db.set_session_archived("root", True, notify=False))
 			db.create_session("active", "cli")
 		before = {path: path.read_bytes() for path in (self.db_path, self.home / "projects.db")}
-		with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", side_effect=self.open_db), patch.object(SessionDB, "get_session", side_effect=AssertionError("no full prompt reads")):
+		# Exact rows are read through Hermes's public get_session; its full row, prompt included, never reaches a response.
+		with patch.object(backend, "open_session_db", side_effect=self.open_db):
 			client = self.client()
 			# Old plugin settlement is not a native archive migration.
 			self.assertEqual(client.post("/sessions/active", json={"action": "settle"}).status_code, 200)
@@ -80,7 +81,7 @@ class NativeArchives(unittest.TestCase):
 		with closing(SessionDB(self.db_path)) as db:
 			self.assertTrue(db.set_session_archived("root", False, notify=False))
 		before_restore_reads = self.db_path.read_bytes()
-		with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", side_effect=self.open_db):
+		with patch.object(backend, "open_session_db", side_effect=self.open_db):
 			self.assertEqual(client.get("/archives").json()["sessions"], [])
 			for sid in ("root", "tip"):
 				self.assertIs(client.get(f"/sessions/{sid}/archive").json()["archived"], False)
@@ -93,7 +94,7 @@ class NativeArchives(unittest.TestCase):
 				db.set_session_archived(sid, True, notify=False)
 			db.set_session_hidden("hidden", True)
 		before = self.db_path.read_bytes()
-		with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", side_effect=self.open_db):
+		with patch.object(backend, "open_session_db", side_effect=self.open_db):
 			client = self.client()
 			rows = []
 			for offset in range(4):
@@ -116,27 +117,27 @@ class NativeArchives(unittest.TestCase):
 		with closing(SessionDB(self.db_path)) as db:
 			db.create_session("prefix-target-suffix", "cli")
 			db.set_session_archived("prefix-target-suffix", True, notify=False)
-		with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", side_effect=self.open_db):
+		with patch.object(backend, "open_session_db", side_effect=self.open_db):
 			client = self.client()
 			self.assertEqual(client.get("/sessions/target/archive").status_code, 404)
 			self.assertEqual(client.get("/sessions/absent/archive").json()["detail"], "session_not_found")
 			self.assertEqual(client.get("/sessions/bad%20id/archive").status_code, 422)
-		with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", side_effect=RuntimeError("unavailable")):
+		with patch.object(backend, "open_session_db", side_effect=RuntimeError("unavailable")):
 			for endpoint in ("/archives", "/sessions/target/archive"):
 				self.assertEqual(client.get(endpoint).status_code, 503)
 
-	def test_exact_reader_uses_compact_batch_and_closes_on_missing(self):
+	def test_exact_reader_uses_public_get_session_and_closes_on_missing(self):
 		for rows in ({"exact": {"archived": 1, "system_prompt": "must-not-return"}}, {}):
 			db = Mock()
-			db._get_session_rich_rows_batch.return_value = rows
-			with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", return_value=db):
+			db.get_session.return_value = rows.get("exact")
+			with patch.object(backend, "open_session_db", return_value=db):
 				if rows:
 					self.assertEqual(backend.native_archive("profile", "exact"), {"id": "exact", "archived": True})
 				else:
 					with self.assertRaises(HTTPException) as error:
 						backend.native_archive("profile", "exact")
 					self.assertEqual(error.exception.status_code, 404)
-			db._get_session_rich_rows_batch.assert_called_once_with(["exact"], compact_rows=True)
+			db.get_session.assert_called_once_with("exact")
 			db.close.assert_called_once()
 
 	def test_query_policy_injections_and_per_request_profile_isolation(self):
@@ -206,7 +207,7 @@ class NativeArchives(unittest.TestCase):
 	def test_native_query_owns_visibility_before_limit_and_no_backfill(self):
 		db = Mock()
 		db.list_sessions_rich.return_value = []
-		with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", return_value=db):
+		with patch.object(backend, "open_session_db", return_value=db):
 			self.assertEqual(backend.native_sessions("profile", 7, 3, ("ignored",), archived_only=True), {"sessions": [], "offset": 7, "limit": 3, "has_more": False})
 		db.list_sessions_rich.assert_called_once_with(limit=3, offset=7, compact_rows=True, order_by_last_active=True, include_archived=False, archived_only=True, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
 		db.close.assert_called_once()

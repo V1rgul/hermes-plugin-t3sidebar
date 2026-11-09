@@ -607,6 +607,10 @@ def main(argv=None):
 			return SessionDB(fx.native, read_only=True)
 
 		stack.enter_context(patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db))
+		# Current builds open the store through their own public-SessionDB helper; older baselines through Hermes's.
+		for impl in impls:
+			if hasattr(impl.api, "open_session_db"):
+				stack.enter_context(patch.object(impl.api, "open_session_db", open_db))
 		sys.stderr.write(f"running {args.warmup} warmup + {args.samples} samples per scenario...\n")
 		results = run_scenarios(fx, impls, args.warmup, args.samples, args.only)
 		if digest(fx.native) != fx.native_digest:

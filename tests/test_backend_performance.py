@@ -107,7 +107,7 @@ class NativeAliasPerformance(unittest.TestCase):
 				db._conn.set_trace_callback(statements.append)
 				return db
 			before = path.read_bytes()
-			with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db):
+			with patch.object(backend, "open_session_db", open_db):
 				value = backend.native_sessions("exact-profile", 0, 500, tuple(f"tip-{i}" for i in range(20)))
 			self.assertEqual(len(value["sessions"]), 20)
 			self.assertEqual(sum("WITH RECURSIVE chain(root_id, cur_id)" in sql for sql in statements), 1)
@@ -189,7 +189,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 						assert reader._conn is not None
 						reader._conn.set_trace_callback(statements.append)
 						return reader
-					with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db):
+					with patch.object(backend, "open_session_db", open_db):
 						actual = backend.native_sessions("exact-profile", 0, limit, organized)
 					self.assertEqual(actual, expected)
 					self.assertEqual({row["id"] for row in actual["sessions"]}, {"recent", "tip", "reset-tip"})
@@ -231,7 +231,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 						writer.execute("UPDATE sessions SET archived = 0 WHERE id = 'restored'")
 						writer.execute("INSERT INTO sessions(id, source, started_at) VALUES ('new', 'cli', 4)")
 				return page
-			with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db), patch.object(SessionDB, "list_sessions_rich", mutate_after_page):
+			with patch.object(backend, "open_session_db", open_db), patch.object(SessionDB, "list_sessions_rich", mutate_after_page):
 				first = backend.native_sessions("exact-profile", 0, 100, ("restored", "new"))
 				second = backend.native_sessions("exact-profile", 0, 100, ("root", "tip", "restored", "new"))
 			self.assertEqual(first, expected)
@@ -257,7 +257,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 				reader._conn.set_trace_callback(statements.append)
 				return reader
 			before = path.read_bytes()
-			with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db):
+			with patch.object(backend, "open_session_db", open_db):
 				value = backend.native_sessions("exact-profile", 0, 100, tuple(f"archived-{i}" for i in range(500)))
 			self.assertEqual(value, {"sessions": [], "offset": 0, "limit": 100, "has_more": False})
 			self.assertEqual(sum("WITH RECURSIVE chain(root_id, cur_id)" in sql for sql in statements), 1)
@@ -282,7 +282,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 				db._conn.set_trace_callback(statements.append)
 				return db
 			before = path.read_bytes()
-			with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db):
+			with patch.object(backend, "open_session_db", open_db):
 				value = backend.native_sessions("exact-profile", 0, 500, tuple(f"archive-{i:04d}" for i in range(500)))
 			self.assertEqual({row["id"] for row in value["sessions"]}, {f"regular-{i:04d}" for i in range(500)})
 			self.assertTrue(value["has_more"])
@@ -306,7 +306,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 					for source in ("cron", "tool", "kanban", "oneshot"):
 						db._conn.execute("INSERT INTO sessions(id, source, started_at) VALUES (?, ?, 500)", (source, source))
 			before = path.read_bytes()
-			with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", side_effect=lambda profile, *, read_only: SessionDB(path, read_only=read_only)):
+			with patch.object(backend, "open_session_db", side_effect=lambda profile, *, read_only: SessionDB(path, read_only=read_only)):
 				value = backend.native_sessions("exact-profile", 0, 1, tuple(f"tip-{i}" for i in range(32)) + ("cron", "tool", "kanban", "oneshot"))
 			self.assertEqual({row["id"] for row in value["sessions"]}, {"recent"} | {f"tip-{i}" for i in range(0, 32, 2)})
 			self.assertTrue(all(not row["archived"] for row in value["sessions"]))
@@ -324,7 +324,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 				return []
 			def close(self):
 				pass
-		with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", return_value=DB()), patch.object(backend, "card_rows", side_effect=lambda db, rows: list(rows)):
+		with patch.object(backend, "open_session_db", return_value=DB()), patch.object(backend, "card_rows", side_effect=lambda db, rows: list(rows)):
 			value = backend.native_sessions("exact-profile", 0, 500, ("old", "lookahead-49", *(f"missing-{i}" for i in range(30))))
 		self.assertEqual({row["id"] for row in value["sessions"]}, {f"recent-{i}" for i in range(500)} | {"old", "lookahead-49"})
 		self.assertEqual([row["id"] for row in value["sessions"][-2:]], ["old", "lookahead-49"])

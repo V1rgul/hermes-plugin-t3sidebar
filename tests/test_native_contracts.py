@@ -116,7 +116,7 @@ class NativeContracts(unittest.TestCase):
 			self.assertTrue(read_only)
 			opened.append(profile)
 			return SessionDB(db_path, read_only=read_only)
-		setattr(fake, "_open_session_db_for_profile", open_db)
+		self.enterContext(patch.object(backend, "open_session_db", open_db))
 		before = db_path.read_bytes()
 		with patch.dict(sys.modules, {fake.__name__: fake}):
 			client = self.client()
@@ -153,7 +153,7 @@ class NativeContracts(unittest.TestCase):
 				return [{"id": "old", "cwd": "/retained"}]
 			def close(self):
 				pass
-		setattr(fake, "_open_session_db_for_profile", lambda *args, **kwargs: DB())
+		self.enterContext(patch.object(backend, "open_session_db", lambda *args, **kwargs: DB()))
 		with patch.dict(sys.modules, {fake.__name__: fake}):
 			value = backend.native_sessions("exact-profile", 0, 500, ("old",))
 		self.assertEqual(value["sessions"], [{"id": "old", "cwd": "/retained", "archived": False,
@@ -171,7 +171,7 @@ class NativeContracts(unittest.TestCase):
 				return [row]
 			def close(self):
 				pass
-		setattr(fake, "_open_session_db_for_profile", lambda *args, **kwargs: DB())
+		self.enterContext(patch.object(backend, "open_session_db", lambda *args, **kwargs: DB()))
 		with patch.dict(sys.modules, {fake.__name__: fake}), patch.object(backend, "card_rows", side_effect=lambda db, rows: list(rows)):
 			value = backend.native_sessions("exact-profile", 0, 500, ("root", "tip", "middle", "tip"))
 		self.assertEqual(value["sessions"], [row])
@@ -186,7 +186,7 @@ class NativeContracts(unittest.TestCase):
 				return [{"id": "tip", "_lineage_root_id": "root", "_lineage_ids": ["root", "tip"]}] if options.get("id_query") else []
 			def close(self):
 				pass
-		setattr(fake, "_open_session_db_for_profile", lambda *args, **kwargs: DB())
+		self.enterContext(patch.object(backend, "open_session_db", lambda *args, **kwargs: DB()))
 		with patch.dict(sys.modules, {fake.__name__: fake}), patch.object(backend, "card_rows", side_effect=lambda db, rows: list(rows)):
 			value = backend.native_sessions("exact-profile", 0, 500, ("tip", "root", "tip"))
 		self.assertEqual(len(value["sessions"]), 1)
@@ -202,7 +202,7 @@ class NativeContracts(unittest.TestCase):
 				db.create_session(f"internal-{source}", source)
 			db.create_session("recent-human", "cli")
 		fake = ModuleType("hermes_cli.web_server_sessions")
-		setattr(fake, "_open_session_db_for_profile", lambda profile, *, read_only: SessionDB(db_path, read_only=read_only))
+		self.enterContext(patch.object(backend, "open_session_db", lambda profile, *, read_only: SessionDB(db_path, read_only=read_only)))
 		before = db_path.read_bytes()
 		with patch.dict(sys.modules, {fake.__name__: fake}):
 			first = backend.native_sessions("exact-profile", 0, 1, ())
@@ -219,7 +219,7 @@ class NativeContracts(unittest.TestCase):
 			db.create_session("human", "cli")
 			db.create_session("job-run", "cron")
 		fake = ModuleType("hermes_cli.web_server_sessions")
-		setattr(fake, "_open_session_db_for_profile", lambda profile, *, read_only: SessionDB(db_path, read_only=read_only))
+		self.enterContext(patch.object(backend, "open_session_db", lambda profile, *, read_only: SessionDB(db_path, read_only=read_only)))
 		with patch.dict(sys.modules, {fake.__name__: fake}):
 			for offset, expected in [(0, ["human"]), (1, [])]:
 				rows = backend.native_sessions("exact-profile", offset, 1, ("job-run",))["sessions"]

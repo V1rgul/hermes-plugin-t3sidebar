@@ -4,7 +4,7 @@ import { JSDOM } from 'jsdom';
 import React, { act } from 'react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import * as mock from './sdk.mock.mjs';
-import plugin, { snoozePresets } from '../desktop/plugin.js';
+import plugin, { snoozePresets, validExperimental } from '../desktop/plugin.js';
 
 const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', { url: 'http://localhost' });
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, IS_REACT_ACT_ENVIRONMENT: true });
@@ -236,4 +236,30 @@ test('the Working indicator setting defaults to Normal, persists, switches every
 	assert.match($('[role=alert]').textContent, /storage unavailable/);
 	assert.equal(pressed('Working indicator'), 'Normal');
 	assert.deepEqual(badge('root'), plain);
+});
+
+test('each experimental feature saves through the backend and disables only itself on an incompatible Hermes', async () => {
+	const section = () => $('section.sf-experimental');
+	const toggle = () => section().querySelector('[role=switch]');
+	const state = () => [toggle().getAttribute('aria-checked'), toggle().disabled];
+	plugin.register(mock.ctx); await render();
+	assert.ok(section().querySelector('[data-codicon=beaker]'), 'the category carries the flask icon');
+	assert.match(section().textContent, /^Experimental.*May break with updates\. Auto-disables in that case\.Banked reset expiries for every Codex account/);
+	assert.deepEqual(state(), ['false', false], 'off by default and available');
+	await click(toggle());
+	assert.deepEqual([state(), mock.control.experimentalSaved], [['true', false], { pool_credits: true }], 'saved through the feature\'s own route');
+	assert.deepEqual(mock.calls.filter(call => call[2]?.method === 'PUT').map(call => [call[1], call[2].body]), [['/settings/experimental/pool_credits', { enabled: true }]]);
+	assert.equal(section().querySelector('.text-destructive'), null);
+	await act(async () => root.unmount()); root = null;
+	// A Hermes without this feature's internals: its saved choice no longer applies, and its own switch says why it cannot be used.
+	mock.control.experimentalUnavailable = ['pool_credits']; mock.queryClient.clear();
+	await render();
+	assert.deepEqual(state(), ['false', true]);
+	assert.deepEqual([...section().querySelectorAll('.text-destructive')].map(node => [node.dataset.feature, node.textContent]), [['pool_credits', 'Incompatible with your Hermes version.']]);
+});
+
+test('availability is read per feature: one the backend does not report is unavailable, the others keep their state', () => {
+	assert.deepEqual(validExperimental({ features: { pool_credits: { enabled: true, available: true }, other: { enabled: true, available: false } } }), { pool_credits: { enabled: true, available: true } });
+	assert.deepEqual(validExperimental({ features: {} }), { pool_credits: { enabled: false, available: false } });
+	assert.throws(() => validExperimental({ pool_credits: { enabled: true, available: true } }), /Unsupported/);
 });

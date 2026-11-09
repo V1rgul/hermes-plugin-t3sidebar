@@ -252,6 +252,11 @@ class NormalizeTests(unittest.TestCase):
 				"rate_limit_reset_credits": {"available_count": 3}})
 		out = limits.normalize_snapshot("openai-codex", snapshot)
 		self.assertEqual((out["banked_resets"], out["windows"][0]["key"], out["windows"][0]["window_seconds"]), (3, "weekly", 604800))
+		# The count is read from the payload itself, the way Hermes counts it.
+		counts = [limits.normalize_snapshot("openai-codex", SimpleNamespace(fetched_at=dt(NOW), plan=None, windows=(), raw=raw))["banked_resets"] for raw in (
+			{"rate_limit_reset_credits": {"available_count": 2.0}}, {"rate_limit_reset_credits": {"available_count": "2"}}, {"rate_limit_reset_credits": None},
+			{"rate_limit_reset_credits": {"available_count": True}}, {"rate_limit_reset_credits": {"available_count": -1}}, {"other": 1})]
+		self.assertEqual(counts, [2, 0, 0, 0, 0, None])
 
 
 class FakeEntry:
@@ -276,30 +281,21 @@ class CollectorTests(unittest.TestCase):
 		# The hourly credit throttle is process-wide; each test starts with no recorded read.
 		limits._CREDITS_READ.clear()
 
-	def symbols(self, cache, refreshed, pool):
-		def refresh(requests):
-			refreshed.append([dict(r) for r in requests])
-			self.passed = requests
-
-			# Like Hermes's _refresh_entries, the worker gets its own copy of the requests.
-			due = list(requests)
-
-			def work():
-				time.sleep(0.05)
-				for request in due:
-					if request["identity_id"] not in ("id:fails", "id:old"):
-						cache[(request["provider"], request["identity_id"])] = SimpleNamespace(
-							fetched_at=dt(time.time()), plan="Pro", raw=None,
-							windows=(SimpleNamespace(label="Weekly", used_percent=50.0, reset_at=None, scope="account"),))
-			thread = threading.Thread(target=work)
-			thread.start()
-			return [thread]
+	def symbols(self, pool, fetched=None):
+		def fetch(provider, **kwargs):
+			if fetched is not None:
+				fetched.append((provider, kwargs))
+			token = kwargs.get("api_key")
+			time.sleep(2 if token == "slow" else 0.02)
+			if token == "fails":
+				return None
+			windows = () if token == "nowin" else (SimpleNamespace(label="Weekly", used_percent=50.0, reset_at=None, scope="account"),)
+			# Codex names the account that answered; tok-a2 is a second credential of tok-a's account.
+			identity = {"tok-a": "codex:acct-a", "tok-a2": "codex:acct-a", "tok-b": "codex:acct-b"}.get(token)
+			return SimpleNamespace(fetched_at=dt(time.time()), plan="Pro", raw=None, windows=windows, identity=identity)
 
 		return {
-			"cached_account_usage": lambda provider, identity_id=None: cache.get((provider, identity_id)),
-			"refresh_account_usage_entries_async": refresh,
-			"_identity_id_for": lambda provider, entry: f"id:{entry.runtime_api_key}",
-			"REFRESH_AFTER_S": 120.0,
+			"fetch_account_usage": fetch,
 			"PooledCredential": FakeEntry,
 			"STATUS_DEAD": "dead",
 			"read_credential_pool": lambda: pool,
@@ -316,33 +312,37 @@ class CollectorTests(unittest.TestCase):
 				{"id": "dead01", "label": "me@example.com", "priority": 3, "access_token": "tok-d", "last_status": "dead"},
 				{"id": "empty1", "priority": 4},
 				{"id": "fail01", "priority": 5, "access_token": "fails"},
-				{"id": "old001", "priority": 6, "access_token": "old"},
+				{"id": "nowin1", "priority": 6, "access_token": "nowin"},
+				{"id": "alias1", "priority": 7, "access_token": "tok-a2"},
 			],
 			"openrouter": [{"id": "or0001", "access_token": "tok-or"}],
 			"anthropic": [],
 		}
-		cache = {("openai-codex", "id:old"): SimpleNamespace(fetched_at=dt(time.time() - 3600), plan=None, raw=None,
-			windows=(SimpleNamespace(label="Session", used_percent=1.0, reset_at=None, scope="account"),))}
-		refreshed = []
-		with patch.object(limits, "_native_symbols", return_value=self.symbols(cache, refreshed, pool)):
+		fetched = []
+		with patch.object(limits, "_native_symbols", return_value=self.symbols(pool, fetched)):
 			readings = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5)
 		# An emptied pool key is reported as logged out; a provider outside the vetted set is never sampled.
 		self.assertEqual([(r["provider"], r["error"], r["accounts"]) for r in readings[:1]], [("anthropic", "logged_out", [])])
 		reading = readings[1]
 		self.assertEqual([r["provider"] for r in readings], ["anthropic", "openai-codex"])
 		by_id = {a["id"]: a for a in reading["accounts"]}
-		self.assertEqual(list(by_id), ["7c202b", "7ad3ca", "dead01", "empty1", "fail01", "old001"])
-		self.assertEqual([r["identity_id"] for r in refreshed[0]], ["id:tok-a", "id:tok-b", "id:fails", "id:old"])
-		self.assertEqual(self.passed, [], "the request list holding tokens must be cleared after the refresh call")
+		# dup001 shares tok-a and is never fetched; alias1 is fetched, then merged because Codex answers as tok-a's account.
+		self.assertEqual(list(by_id), ["7c202b", "7ad3ca", "dead01", "empty1", "fail01", "nowin1"])
+		# Every fetch is Hermes's read-only per-credential one, with the entry's own token and route, keyed by the token's fingerprint.
+		route = "https://example.invalid/backend-api/codex"
+		self.assertEqual(sorted((provider, kwargs["api_key"]) for provider, kwargs in fetched), [("openai-codex", token) for token in ("fails", "nowin", "tok-a", "tok-a2", "tok-b")])
+		for provider, kwargs in fetched:
+			self.assertEqual((kwargs["base_url"], kwargs["read_only"], kwargs["identity_id"]), (route, True, limits._token_fingerprint(kwargs["api_key"])))
 		self.assertEqual(by_id["dead01"]["error"], "credential_dead")
 		self.assertEqual(by_id["dead01"]["label"], "account dead01")
 		self.assertEqual(by_id["empty1"]["error"], "no_credential")
-		self.assertEqual(by_id["fail01"]["error"], "no_data")
-		self.assertEqual(by_id["old001"]["error"], "refresh_failed")
+		self.assertEqual(by_id["fail01"]["error"], "refresh_failed")
+		self.assertEqual(by_id["nowin1"]["error"], "no_data")
 		self.assertIsNone(by_id["7ad3ca"]["error"])
 		self.assertEqual(by_id["7ad3ca"]["snapshot"]["windows"][0]["key"], "weekly")
 		self.assertNotIn("tok-", repr(readings))
-		self.assertNotIn("id:", repr(readings))
+		self.assertNotIn("fp:", repr(readings))
+		self.assertNotIn("acct-", repr(readings))
 		with tempfile.TemporaryDirectory() as temp:
 			path = Path(temp) / "limits.sqlite3"
 			store = limits.LimitsStore(path)
@@ -352,7 +352,43 @@ class CollectorTests(unittest.TestCase):
 			self.assertNotIn(b"tok-", path.read_bytes())
 			self.assertNotIn(b"example", path.read_bytes())
 
-	def test_reads_codex_credit_lists_hourly_with_each_accounts_token(self):
+	def test_one_key_on_two_routes_is_two_accounts(self):
+		# Two proxies sharing one password are two accounts; the same key twice on one route is one.
+		pool = {"openai-codex": [
+			{"id": "proxy0", "priority": 0, "access_token": "shared", "base_url": "https://proxy-a.example.invalid/v1"},
+			{"id": "proxy1", "priority": 1, "access_token": "shared", "base_url": "https://proxy-b.example.invalid/v1"},
+			{"id": "proxy2", "priority": 2, "access_token": "shared", "base_url": "https://proxy-b.example.invalid/v1/"},
+		]}
+		fetched = []
+		symbols = self.symbols(pool, fetched)
+		symbols["_pool_entry_route_base_url"] = lambda provider, entry: entry.runtime_base_url
+		symbols["_pool_entry_host"] = lambda provider, entry: entry.runtime_base_url.rstrip("/")
+		with patch.object(limits, "_native_symbols", return_value=symbols):
+			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5)
+		self.assertEqual([a["id"] for a in reading["accounts"]], ["proxy0", "proxy1"])
+		self.assertEqual(sorted(kwargs["base_url"] for _provider, kwargs in fetched), ["https://proxy-a.example.invalid/v1", "https://proxy-b.example.invalid/v1"])
+
+	def test_a_fetch_still_running_is_reported_as_a_timeout(self):
+		pool = {"openai-codex": [{"id": "7c202b", "priority": 0, "access_token": "tok-a"}, {"id": "slow01", "priority": 1, "access_token": "slow"}]}
+		with patch.object(limits, "_native_symbols", return_value=self.symbols(pool)):
+			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=0.5)
+		self.assertEqual([(a["id"], a["error"]) for a in reading["accounts"]], [("7c202b", None), ("slow01", "timeout")])
+
+	def test_fetches_run_in_the_collections_profile_context(self):
+		# Hermes resolves auth and its cache from the active home, a context variable a plain thread would not inherit.
+		home = contextvars.ContextVar("home", default="none")
+		seen = []
+		symbols = self.symbols({"openai-codex": [{"id": "7c202b", "priority": 0, "access_token": "tok-a"}]})
+		symbols["fetch_account_usage"] = lambda provider, **kwargs: seen.append(home.get())
+		token = home.set("profile-a")
+		try:
+			with patch.object(limits, "_native_symbols", return_value=symbols):
+				limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5)
+		finally:
+			home.reset(token)
+		self.assertEqual(seen, ["profile-a"])
+
+	def test_experimental_setting_reads_codex_credit_lists_hourly_with_each_accounts_token(self):
 		pool = {"openai-codex": [
 			{"id": "7c202b", "label": "a", "priority": 0, "access_token": "tok-a"},
 			{"id": "7ad3ca", "label": "b", "priority": 1, "access_token": "tok-b"},
@@ -367,8 +403,12 @@ class CollectorTests(unittest.TestCase):
 				raise RuntimeError("401 from tok-b")
 			return [{"status": "available", "granted_at": 1.0e9, "expires_at": 2.0e9}]
 		now = [1_800_000_000.0]
-		with patch.object(limits, "_native_symbols", return_value=self.symbols({}, [], pool)):
-			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
+		symbols = dict(self.symbols(pool), _codex_backend_urls=lambda base: (None, None, None), _codex_headers=lambda token, account: {})
+		collect = lambda: limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch,
+			pool_credits_setting=lambda: True, current_credits_fetcher=lambda: self.fail("the per-account mode never reads the current account's list"))
+		with patch.object(limits, "_native_symbols", return_value=symbols):
+			(reading,) = collect()
+			self.assertEqual(reading["credits_mode"], "accounts")
 			# Duplicates of an account and dead credentials are never asked; a failed read leaves no list.
 			self.assertEqual(calls, ["tok-a", "tok-b"])
 			by_id = {a["id"]: a for a in reading["accounts"]}
@@ -377,15 +417,88 @@ class CollectorTests(unittest.TestCase):
 			self.assertNotIn("tok-", repr(reading))
 			# Within the hour nothing is read again, failures included; after it, both are.
 			now[0] += limits.CREDITS_INTERVAL_S - 1
-			limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
+			collect()
 			self.assertEqual(len(calls), 2)
 			now[0] += 1
-			limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
+			collect()
 			self.assertEqual(calls[2:], ["tok-a", "tok-b"])
 
+	def test_default_reads_only_the_current_accounts_credits_through_hermes_hourly(self):
+		pool = {"openai-codex": [{"id": "7c202b", "label": "a", "priority": 0, "access_token": "tok-a"}, {"id": "7ad3ca", "label": "b", "priority": 1, "access_token": "tok-b"}]}
+		current = []
+		listed = [{"status": "available", "granted_at": 1.0e9, "expires_at": 2.0e9}]
+		now = [1_800_000_000.0]
+		full = dict(self.symbols(pool), _codex_backend_urls=lambda base: (None, None, None), _codex_headers=lambda token, account: {})
+		# Off, or on while Hermes no longer has the private helpers: no pool token is used for credits, only Hermes's own signed read.
+		for setting, symbols in ((lambda: False, full), (lambda: True, self.symbols(pool)), (lambda: (_ for _ in ()).throw(RuntimeError("config")), full)):
+			limits._CREDITS_READ.clear()
+			with patch.object(limits, "_native_symbols", return_value=symbols):
+				(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], pool_credits_setting=setting,
+					credits_fetcher=lambda base_url, token: self.fail("no per-account read by default"), current_credits_fetcher=lambda: current.append(True) or listed)
+			self.assertEqual((reading["credits_mode"], reading["current_credits"]), ("current", listed))
+			self.assertTrue(all("credits" not in account for account in reading["accounts"]))
+		self.assertEqual(len(current), 3)
+		# Hourly like the per-account lists; a failed read leaves the stored list alone.
+		with patch.object(limits, "_native_symbols", return_value=full):
+			now[0] += limits.CREDITS_INTERVAL_S - 1
+			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], pool_credits_setting=lambda: False, current_credits_fetcher=lambda: current.append(True) or listed)
+			self.assertEqual((len(current), "current_credits" in reading), (3, False))
+			now[0] += 1
+			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], pool_credits_setting=lambda: False, current_credits_fetcher=lambda: None)
+			self.assertEqual((reading["credits_mode"], "current_credits" in reading), ("current", False))
+			# A redeemed reset may have changed the current account's list too.
+			limits.forget_credit_read("openai-codex", "7c202b")
+			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], pool_credits_setting=lambda: False, current_credits_fetcher=lambda: listed)
+			self.assertEqual(reading["current_credits"], listed)
+		# A logged-out Codex pool asks nothing.
+		with patch.object(limits, "_native_symbols", return_value=self.symbols({"openai-codex": []})):
+			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=1, clock=lambda: now[0] + 86400, current_credits_fetcher=lambda: self.fail("no sign-in to read with"))
+		self.assertNotIn("credits_mode", reading)
+
+	def test_current_account_read_goes_through_hermes_signed_request(self):
+		import hermes_cli.plugin_provider_requests as requests
+		calls = []
+		body = {"credits": [{"status": "available", "granted_at": "2026-09-29T18:58:39Z", "expires_at": "2026-10-29T18:58:39Z", "id": "secret-id"}]}
+
+		def signed(provider, method, url, **kwargs):
+			calls.append((provider, method, url, kwargs))
+			return SimpleNamespace(status=200, json=lambda: body)
+		with patch.object(requests, "credentialed_provider_request", signed):
+			self.assertEqual(limits._fetch_current_codex_credits(), limits.normalize_credits(body))
+		((provider, method, url, kwargs),) = calls
+		self.assertEqual((provider, method, url), ("openai-codex", "GET", "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"))
+		# The plugin names itself and sends no credential of its own; Hermes attaches the sign-in.
+		self.assertEqual(kwargs["headers"], {"Accept": "application/json", "User-Agent": "hermes-t3sidebar"})
+		for response in (SimpleNamespace(status=401, json=lambda: body), PermissionError("not declared")):
+			def failing(*args, response=response, **kwargs):
+				if isinstance(response, Exception):
+					raise response
+				return response
+			with patch.object(requests, "credentialed_provider_request", failing):
+				self.assertIsNone(limits._fetch_current_codex_credits())
+
+	def test_experimental_setting_lives_in_the_limits_store_and_needs_hermes_helpers(self):
+		with tempfile.TemporaryDirectory() as temp:
+			store = limits.LimitsStore(Path(temp) / "limits.sqlite3")
+			# Off until written, even before the store file exists.
+			self.assertFalse(store.read_setting(limits.POOL_CREDITS_SETTING))
+			store.write_setting(limits.POOL_CREDITS_SETTING, True)
+			self.assertTrue(store.read_setting(limits.POOL_CREDITS_SETTING))
+			store.write_setting(limits.POOL_CREDITS_SETTING, False)
+			self.assertFalse(store.read_setting(limits.POOL_CREDITS_SETTING))
+			# The sampler hands the stored value to each collection.
+			store.write_setting(limits.POOL_CREDITS_SETTING, True)
+			seen = []
+			with patch.object(limits, "collect_native", side_effect=lambda **kwargs: seen.append(kwargs["pool_credits_setting"]()) or []):
+				limits.LimitsSampler(store, home_resolver=lambda: Path(temp))._collect()
+			self.assertEqual(seen, [True])
+		self.assertTrue(limits.pool_credits_available({"_codex_backend_urls": len, "_codex_headers": len}))
+		self.assertFalse(limits.pool_credits_available({"_codex_backend_urls": len, "_codex_headers": None}))
+		self.assertFalse(limits.pool_credits_available({}))
+
 	def test_missing_native_symbol_reports_unavailable(self):
-		symbols = self.symbols({}, [], {"openai-codex": [{"id": "7ad3ca", "access_token": "x"}]})
-		symbols["_identity_id_for"] = None
+		symbols = self.symbols({"openai-codex": [{"id": "7ad3ca", "access_token": "x"}]})
+		symbols["fetch_account_usage"] = None
 		with patch.object(limits, "_native_symbols", return_value=symbols):
 			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=1)
 		self.assertEqual((reading["error"], reading["accounts"]), ("unavailable", []))
@@ -402,10 +515,6 @@ class CollectorTests(unittest.TestCase):
 			and isinstance(node.args[0], ast.Constant) and isinstance(node.args[1], ast.Constant)
 		}
 		self.assertEqual(taken, {
-			("agent.account_usage_cache", "cached_account_usage"),
-			("agent.account_usage_cache", "refresh_account_usage_entries_async"),
-			("agent.account_usage_cache", "_identity_id_for"),
-			("agent.account_usage_cache", "REFRESH_AFTER_S"),
 			("agent.credential_pool", "PooledCredential"),
 			("agent.credential_pool", "STATUS_DEAD"),
 			("hermes_cli.auth", "read_credential_pool"),
@@ -414,25 +523,28 @@ class CollectorTests(unittest.TestCase):
 			("agent.account_usage", "_codex_backend_urls"),
 			("agent.account_usage", "_codex_headers"),
 			("agent.account_usage", "fetch_account_usage"),
-			("agent.anthropic_credentials", "resolve_anthropic_token"),
 		})
 		imported = {
 			(node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
 			for alias in node.names if node.module and node.module.split(".")[0] in ("agent", "hermes_cli", "hermes_constants")
 		}
 		self.assertEqual(imported, {
-			("agent.account_usage", "_codex_banked_resets"),
+			("hermes_cli.plugin_provider_requests", "credentialed_provider_request"),
 			("hermes_constants", "get_hermes_home"), ("hermes_constants", "hermes_home_key"),
 			("hermes_constants", "reset_hermes_home_override"), ("hermes_constants", "set_hermes_home_override"),
 		})
-		# The one refreshing path (an expired Claude Code login to Hermes's resolver) and the Claude Code usage fetch stay inside the fallback.
-		for name in ("resolve_anthropic_token", "fetch_account_usage"):
-			users = {fn.name for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef) and any(isinstance(node, ast.Constant) and node.value == name for node in ast.walk(fn))}
-			self.assertEqual(users, {"_native_symbols", "_collect_claude_code"}, name)
+		functions = {fn.name: fn for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef)}
+		users = {name for name, fn in functions.items() if any(isinstance(node, ast.Constant) and node.value == "fetch_account_usage" for node in ast.walk(fn))}
+		self.assertEqual(users, {"_native_symbols", "_collect_claude_code", "collect_native"})
+		# Pool accounts are only ever fetched read-only with their own token; the one refreshing path (an expired Claude Code login, fetched without a token) stays inside the fallback.
+		(pooled,) = [node for node in ast.walk(functions["_fetch_accounts"]) if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "fetch"]
+		self.assertEqual({keyword.arg for keyword in pooled.keywords}, {"base_url", "api_key", "read_only", "identity_id"})
+		self.assertTrue(any(keyword.arg == "read_only" and getattr(keyword.value, "value", None) is True for keyword in pooled.keywords))
 		forbidden = {
 			"refresh_account_usage_async", "load_pool", "select", "try_refresh_matching",
 			"resolve_codex_runtime_credentials", "_persist", "persist_pool_entries",
 			"_save_auth_store", "redeem_codex_reset_credit", "remember_account_usage", "_claim_refresh",
+			"cached_account_usage", "refresh_account_usage_entries_async", "_identity_id_for", "resolve_anthropic_token",
 		}
 		used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
 		used |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
@@ -563,6 +675,29 @@ class CreditTests(unittest.TestCase):
 			block = limits.limits_payload(store, hours=24, now=now + 6 * 3600)["providers"][0]["accounts"][0]["banked_credits"]
 			self.assertEqual((block["applicable_count"], block["fetched_at"], [c["expires_at"] for c in block["credits"]]), (2, now, [now + 9 * 86400]))
 
+	def test_credit_mode_keeps_only_its_own_lists(self):
+		now = 1_800_000_000.0
+		listed = [{"status": "available", "granted_at": now - 86400, "expires_at": now + 3 * 86400}]
+		with tempfile.TemporaryDirectory() as temp:
+			store = limits.LimitsStore(Path(temp) / "limits.sqlite3")
+			payload = lambda t: limits.limits_payload(store, hours=24, now=t)["providers"][0]
+			sampled = lambda t, **extra: dict(account("7ad3ca", t, [window("weekly", 40.0, now + 86400)]), **extra)
+			# Per-account mode: lists sit on their accounts and nothing at the provider level.
+			store.record([{"provider": "openai-codex", "error": None, "credits_mode": "accounts", "accounts": [sampled(now, credits=listed)]}], checked_at=now)
+			block = payload(now)
+			self.assertEqual(([c["expires_at"] for c in block["accounts"][0]["banked_credits"]["credits"]], block["current_banked_credits"]), ([now + 3 * 86400], None))
+			# Default mode: the per-account list is dropped rather than left to go stale, and the current account's list is provider-level.
+			store.record([{"provider": "openai-codex", "error": None, "credits_mode": "current", "current_credits": listed, "accounts": [sampled(now + 300)]}], checked_at=now + 300)
+			block = payload(now + 300)
+			self.assertIsNone(block["accounts"][0]["banked_credits"])
+			self.assertEqual((block["current_banked_credits"]["fetched_at"], [c["expires_at"] for c in block["current_banked_credits"]["credits"]]), (now + 300, [now + 3 * 86400]))
+			self.assertNotIn(limits.CURRENT_CREDITS_ID, [a["id"] for a in block["accounts"]])
+			# A sample without a fresh read keeps the current list; switching back to per-account drops it.
+			store.record([{"provider": "openai-codex", "error": None, "credits_mode": "current", "accounts": [sampled(now + 600)]}], checked_at=now + 600)
+			self.assertIsNotNone(payload(now + 600)["current_banked_credits"])
+			store.record([{"provider": "openai-codex", "error": None, "credits_mode": "accounts", "accounts": [sampled(now + 900)]}], checked_at=now + 900)
+			self.assertIsNone(payload(now + 900)["current_banked_credits"])
+
 	def test_account_without_a_credit_read_has_none(self):
 		with tempfile.TemporaryDirectory() as temp:
 			path = Path(temp) / "limits.sqlite3"
@@ -581,7 +716,7 @@ NO_CLAUDE = lambda clock: None
 
 class ClaudeCodeFallbackTests(unittest.TestCase):
 	def collect(self, pool, login, fetcher, profile=None, refresher=None):
-		symbols = CollectorTests.symbols(CollectorTests(), {}, [], pool)
+		symbols = CollectorTests.symbols(CollectorTests(), pool)
 		profile = profile or (lambda token: "default_claude_max_5x")
 		with patch.object(limits, "_native_symbols", return_value=symbols):
 			return limits.collect_native(join_timeout=1, claude_login=login, claude_fetcher=fetcher, claude_profile=profile, claude_refresher=refresher)
@@ -627,22 +762,21 @@ class ClaudeCodeFallbackTests(unittest.TestCase):
 		self.assertEqual((refreshed, sent, reading["accounts"][0]["error"]), ([True], ["new"], None))
 		self.assertEqual(reading["accounts"][0]["snapshot"]["plan"], "default_claude_max_5x")
 
-	def test_default_path_uses_hermes_public_resolver_and_usage_fetch(self):
-		# Without injected seams the fallback reaches Hermes only through its public names: the token resolver for an expired login, then the provider-wide usage fetch with that login's token.
+	def test_default_path_refreshes_and_reads_through_hermes_public_usage_fetch(self):
+		# Without injected seams the fallback reaches Hermes only through its public usage fetch: without a token for an expired login, so Hermes resolves and refreshes one, then with the login's new token.
 		files = [{"token": "old", "expired": True}, {"token": "new", "expired": False}]
 		calls = []
-		symbols = CollectorTests.symbols(CollectorTests(), {}, [], {})
-		symbols["resolve_anthropic_token"] = lambda: calls.append(("resolve",)) or "new"
+		symbols = CollectorTests.symbols(CollectorTests(), {})
 		symbols["fetch_account_usage"] = lambda provider, **kwargs: calls.append(("fetch", provider, kwargs)) or SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
 			SimpleNamespace(label="Current week", used_percent=4.0, reset_at=dt(NOW + 6 * 86400), scope="account"),))
 		with patch.object(limits, "_native_symbols", return_value=symbols):
 			(reading,) = limits.collect_native(join_timeout=1, claude_login=lambda clock: files.pop(0), claude_profile=lambda token: "default_claude_max_5x")
-		self.assertEqual(calls, [("resolve",), ("fetch", "anthropic", {"api_key": "new"})])
+		self.assertEqual(calls, [("fetch", "anthropic", {}), ("fetch", "anthropic", {"api_key": "new"})])
 		self.assertEqual((reading["accounts"][0]["error"], reading["accounts"][0]["snapshot"]["windows"][0]["key"]), (None, "weekly"))
 
 	def test_expired_or_failing_login_is_an_account_error_and_no_login_stays_logged_out(self):
 		never = lambda **kw: self.fail("an expired token is never sent")
-		# Without Hermes's resolver, or when its refresh leaves the file expired or raises, the account reads as expired.
+		# When Hermes's refresh leaves the file expired or raises, the account reads as expired.
 		expired = self.collect({"anthropic": []}, lambda clock: {"token": "t", "expired": True}, never)
 		self.assertEqual(expired[0]["accounts"][0]["error"], "token_expired")
 		still = self.collect({}, lambda clock: {"token": "t", "expired": True}, never, refresher=lambda: None)

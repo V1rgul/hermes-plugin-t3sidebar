@@ -50,7 +50,9 @@ def native_snapshot(home, session_id, *, dispatched_before=None):
 	Parentage alone is not compression: native projection distinguishes real compression continuations from /branch, reset, and delegate forks. Never initialize/migrate state.db or attach to a global session/process registry.
 	"""
 	from hermes_state import SessionDB
-	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+	from .usage_history import internal_listing_sources
+
+	INTERNAL_LISTING_SOURCES = internal_listing_sources()
 
 	path = home / "state.db"
 	if path.resolve().parent != home or not path.is_file():
@@ -145,10 +147,9 @@ def awaits_processes(owners):
 def restore_archived_activity(home, session_id, before):
 	"""Use native archival only for a proven, exact human compression lineage.
 
-	Read the installed setter's exact lineage selector, since older cores included independent forks. Refuse any footprint beyond the proven rich lineage rather than restoring another conversation. The public setter has no compare-and-set fence, so concurrent external lineage changes between preflight and commit remain a native API limitation.
+	The public setter restores the lineage Hermes defines, which leaves independent forks archived on every supported core (0.23.0 and later), exactly as Desktop's own Unarchive does. The setter has no compare-and-set fence, so concurrent external lineage changes between preflight and commit remain a native API limitation; the result is verified afterwards.
 	"""
 	from hermes_state import SessionDB
-	from hermes_state_sessions import _LINEAGE_CTE_SQL
 
 	current = native_snapshot(home, session_id)
 	if current is None or current.root != before.root or current.aliases != before.aliases:
@@ -156,10 +157,6 @@ def restore_archived_activity(home, session_id, before):
 	if not current.archived:
 		return True
 	path = home / "state.db"
-	with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
-		rows = connection.execute(_LINEAGE_CTE_SQL + " SELECT id FROM lineage", (current.root, current.root)).fetchall()
-	if frozenset(row[0] for row in rows) != current.aliases:
-		return False
 	# Never call recoverable-session helpers: they also clear native end stamps.
 	# Explicit False preserves messages, activity, read state, and pin/hidden flags.
 	with closing(SessionDB(db_path=path)) as db:

@@ -247,8 +247,6 @@ class DeleteEndpoint(unittest.TestCase):
         self.native_grant = {"subject": "fixture", "profile_id": str(self.homes["other-profile"])}
         self.assertEqual(self.post().status_code, 403)
         self.native_grant = None
-        with patch("hermes_cli.web_server_sessions._session_db_path_for_profile", return_value=self.homes["other-profile"] / "state.db"):
-            self.assertEqual(self.post().status_code, 403)
         self.owner_forward.assert_not_called()
         self.assertTrue(self.exists("target"))
 
@@ -361,8 +359,10 @@ class DeleteEndpoint(unittest.TestCase):
                              if row.get("_lineage_root_id") == "target")
             self.assertEqual(projected["cwd"], "/different-tip")
         before = {path: path.read_bytes() for path in (self.home / "state.db", self.home / "projects.db")}
-        with patch.object(SessionDB, "get_session", side_effect=AssertionError("no full session read")):
+        # One exact read through Hermes's public get_session; only allowlisted fields reach the response.
+        with patch.object(SessionDB, "get_session", autospec=True, side_effect=SessionDB.get_session) as reads:
             response = self.client.get(f"{PREFIX}/sessions/target/workspace?profile=exact-profile&profile=exact-profile")
+            self.assertEqual([call.args[1] for call in reads.call_args_list], ["target"])
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(response.json(), {"profile": self.profile, "id": "target", "cwd": "/chosen/sub",

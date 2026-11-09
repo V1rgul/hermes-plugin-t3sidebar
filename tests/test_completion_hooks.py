@@ -571,32 +571,6 @@ class CompletionHookTests(unittest.TestCase):
 		self.end("tip", "tip-activity")
 		self.assertEqual(set(self.markers()), {"human"})
 
-	def test_legacy_overbroad_compression_selector_is_still_refused(self):
-		from hermes_state import SessionDB
-		self.db.end_session("human", "compression")
-		self.db.create_session("tip", "cli", parent_session_id="human")
-		self.db.create_session("branch", "cli", parent_session_id="human", model_config={"_branched_from": "human"})
-		self.archive()
-		self.archive("branch")
-		# Older native setters walked every child of a compression-ended parent.
-		legacy_selector = """
-			WITH RECURSIVE ancestors(id) AS (
-				SELECT ? UNION SELECT parent.id FROM ancestors a
-				JOIN sessions child ON child.id = a.id JOIN sessions parent ON parent.id = child.parent_session_id
-				WHERE parent.end_reason = 'compression'
-			), descendants(id) AS (
-				SELECT ? UNION SELECT child.id FROM descendants d
-				JOIN sessions parent ON parent.id = d.id JOIN sessions child ON child.parent_session_id = parent.id
-				WHERE parent.end_reason = 'compression'
-			), lineage(id) AS (SELECT id FROM ancestors UNION SELECT id FROM descendants)
-		"""
-		self.assertEqual(hooks.native_snapshot(self.home, "tip").aliases, {"human", "tip"})
-		with patch("hermes_state_sessions._LINEAGE_CTE_SQL", legacy_selector), patch.object(SessionDB, "set_session_archived", side_effect=AssertionError("overbroad write")):
-			self.begin("tip", "tip-activity")
-			self.end("tip", "tip-activity")
-		self.assertEqual(self.native_flags(), {"human": 1, "tip": 1, "branch": 1})
-		self.assertEqual(self.markers(), {})
-
 	def test_archived_end_and_archive_during_turn_never_record_done(self):
 		self.archive()
 		self.end()

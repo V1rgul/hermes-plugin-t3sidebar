@@ -52,7 +52,7 @@
 - Verdicts: when the pool runs out before a reset, or how many units expire unused; the next meaningful event picks the icon. Run-out colour by time blocked in the 7 days (15 min grey, 2 h yellow, 6 h orange, 24 h red), expiry colour by units lost against capacity (5% grey, 15% yellow, 30% orange, 50% red); below that, no icon. A grey warning icon means the verdict cannot be computed (no drain data or stale readings).
 - Markers: reset step-ups, units lost at each reset, Codex banked reset credit expiries.
 - Per-account bars with reset times.
-- Codex banked resets listed per account, with a **Use one** button: green when Codex accepts a reset (an allowance below 80% left), dashed and padlocked otherwise. It confirms with the share of the weekly allowance the reset discards, then redeems through Hermes's own `/usage reset --force` on that account.
+- Codex banked resets: expiries for the account Hermes is currently using, or for every pool account with an experimental setting; per account, a **Use one** button: green when Codex accepts a reset (an allowance below 80% left), dashed and padlocked otherwise. It confirms with the share of the weekly allowance the reset discards, then redeems through Hermes's own `/usage reset --force` on that account.
 - Backend sampler every 5 minutes, 35 days of history, read-only: never refreshes pool tokens, clears cooldowns or redeems resets. An expired Claude Code login is the one exception: Hermes's own Claude Code resolver refreshes it.
 
 ![Limits page: OpenAI Codex pool running out Sunday with reset markers and lost units, its two accounts unfolded with 5-hour and weekly bars and banked resets, Anthropic pool with units expiring unused, averaging and time-to-empty measurements](docs/images/limits.png)
@@ -84,6 +84,7 @@
 - Working indicator: Normal or Detailed
 - Pinned sessions: 1 or 2 lines
 - Show token counts
+- Experimental: banked reset expiries for every Codex account (off by default). Each experimental feature turns itself off, with its switch disabled and an *Incompatible with your Hermes version* note, when the Hermes internals it relies on are gone.
 
 ![Plugin settings page: Snooze preset time field with alarm-clock picker, Working indicator Normal or Detailed, Pinned sessions 1 or 2 lines, Show token counts switch](docs/images/settings.png)
 
@@ -97,7 +98,7 @@ Remote backend or upgrade: [installation guide](docs/installation.md), including
 
 ## Disclosure
 
-- **Network:** for the Limits page only, through Hermes's own fetchers. Every 5 minutes per account: the Codex usage endpoint on `chatgpt.com` and `api.anthropic.com/api/oauth/usage`. At most once an hour per Codex account: its banked reset credit list. In the Claude Code fallback only (no Anthropic account in Hermes): `api.anthropic.com/api/oauth/profile`, for the plan tier. A Codex banked reset is redeemed only after a confirmed click, through Hermes's `/usage reset --force`.
+- **Network:** for the Limits page only, through Hermes's own fetchers. Every 5 minutes per account: the Codex usage endpoint on `chatgpt.com` and `api.anthropic.com/api/oauth/usage`. At most once an hour: the banked reset credit list of the Codex account Hermes currently uses, sent by Hermes with its own sign-in (`requires_auth: [openai-codex]`), or, with the experimental per-account setting, of every Codex pool account with its own token. In the Claude Code fallback only (no Anthropic account in Hermes): `api.anthropic.com/api/oauth/profile`, for the plan tier. A Codex banked reset is redeemed only after a confirmed click, through Hermes's `/usage reset --force`.
 - **Background:** one sampler thread starts on the first Desktop poll after a backend start and keeps sampling every 5 minutes, also while Desktop is closed. The `pre_llm_call` and `on_session_end` hooks run on every turn and session end, to record completions for the Done badge.
 - **Reads outside its own data:** Hermes `state.db` and `projects.db` (read-only), Hermes's credential pool via `read_credential_pool`, and Claude Code's `.credentials.json` (fallback only).
 - **Writes:** session rename, archive and delete through Hermes's own session code, and the plugin's own `<HERMES_HOME>/plugin-data/hermes-t3sidebar/state.sqlite3` and `usage-limits.sqlite3` (35 days of samples). When Claude Code's token has expired, Hermes's own resolver refreshes it under Hermes's cross-process lock and writes it back to Claude Code's credentials file; the plugin never refreshes or writes a token itself.

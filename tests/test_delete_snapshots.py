@@ -22,7 +22,7 @@ class DeleteSnapshots(unittest.TestCase):
 		with closing(SessionDB(self.db_path)) as db:
 			db.create_session("empty", "desktop", system_prompt="PRIVATE TEST PROMPT")
 			db.create_session("empty-longer", "desktop")
-		self.reader = patch("hermes_cli.web_server_sessions._open_session_db_for_profile", side_effect=self.open_native)
+		self.reader = patch.object(backend, "open_session_db", side_effect=self.open_native)
 		self.reader.start()
 		self.addCleanup(self.reader.stop)
 		app = FastAPI()

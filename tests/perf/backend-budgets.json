@@ -1,8 +1,8 @@
 {
 	"_comment": "Statement counts are exact upper bounds (machine-independent, primary gate). median_ms is 4x the measured median, floor 5 ms, so only catastrophic regressions trip on a noisy machine. Regenerate with tests/perf/backend_bench.py --update-budgets after reviewing a change.",
 	"generated": {
-		"at": "2026-11-05T00:22:58+0100",
-		"git": "443e4c0-dirty",
+		"at": "2026-11-09T23:53:42+0100",
+		"git": "7e9e1b2-dirty",
 		"samples": 15,
 		"python": "3.14.9",
 		"sqlite": "3.53.1",
@@ -15,24 +15,24 @@
 			"measured_median_ms": 2.754
 		},
 		"native_archives": {
-			"statements": 106,
+			"statements": 199,
 			"median_ms": 225.0,
-			"measured_median_ms": 50.084
+			"measured_median_ms": 50.561
 		},
 		"native_sessions_archived_ids": {
-			"statements": 114,
+			"statements": 209,
 			"median_ms": 250.0,
-			"measured_median_ms": 60.461
+			"measured_median_ms": 59.441
 		},
 		"native_sessions_loaded_ids": {
-			"statements": 114,
+			"statements": 209,
 			"median_ms": 250.0,
-			"measured_median_ms": 60.948
+			"measured_median_ms": 61.079
 		},
 		"native_sessions_plain": {
-			"statements": 108,
+			"statements": 203,
 			"median_ms": 225.0,
-			"measured_median_ms": 52.447
+			"measured_median_ms": 51.013
 		},
 		"usage_history_1d_cached": {
 			"statements": 7,

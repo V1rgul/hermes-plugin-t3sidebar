@@ -45,11 +45,30 @@ usage_limits = _load_sibling("hermes_t3sidebar_shared_modules", "shared_modules.
 banked_reset = _load_sibling("hermes_t3sidebar_banked_reset", "banked_reset.py")
 
 
-def default_history_db_path(profile) -> Path:
-	# Core's own store resolution for the served profile; usage_history opens it strictly read-only.
-	from hermes_cli.web_server_sessions import _session_db_path_for_profile
+def session_db_path() -> Path:
+	"""The served profile's session store: routes run inside the host's profile scope, where Hermes's home is that profile's home."""
+	from hermes_constants import get_hermes_home
 
-	return _session_db_path_for_profile(profile)
+	return get_hermes_home() / "state.db"
+
+
+def open_session_db(profile, *, read_only=True):
+	"""The served profile's session store through Hermes's public ``SessionDB``, read-only. ``profile`` is already asserted to be the served one by every caller; any failure to open is a generic 503."""
+	from hermes_state import SessionDB
+
+	path = session_db_path()
+	try:
+		# Hermes creates and migrates the store when the profile's gateway starts; an empty file was never initialized.
+		if path.stat().st_size == 0:
+			raise sqlite3.OperationalError("uninitialized session store")
+		return SessionDB(db_path=path, read_only=True)
+	except (OSError, sqlite3.Error) as exc:
+		raise HTTPException(503, "session_store_unavailable") from exc
+
+
+def default_history_db_path(profile) -> Path:
+	# usage_history opens it strictly read-only.
+	return session_db_path()
 
 
 def default_limits_path() -> Path:
@@ -123,6 +142,12 @@ class SessionDelete(BaseModel):
 	request_id: str = Field(pattern=SESSION_ID_PATTERN, min_length=1, max_length=256)
 	expected_revision: int = Field(ge=0)
 	expected_generation: int = Field(ge=0)
+
+
+class ExperimentalToggle(BaseModel):
+	model_config = ConfigDict(extra="forbid", strict=True)
+
+	enabled: bool
 
 
 class BankedResetRedeem(BaseModel):
@@ -403,6 +428,16 @@ def subagent_run(record):
 	return isinstance(config, dict) and config.get("_delegate_from") is not None
 
 
+def stored_rows(db, session_ids):
+	"""Exact stored rows by id through Hermes's public ``get_session``, one read each; missing ids are absent. Only plain session columns are read from them: the list's own query carries preview and recency."""
+	rows = {}
+	for sid in dict.fromkeys(sid for sid in session_ids if sid):
+		row = db.get_session(sid)
+		if row is not None:
+			rows[sid] = row
+	return rows
+
+
 def runtime_retired(db, row):
 	"""A missing row can be an unsaved draft; only native retirement proves deletion."""
 	from hermes_state_mutation_retirement import retired_session
@@ -551,8 +586,7 @@ def standalone_runtime(request, profile, actor):
 	if server is None:
 		raise HTTPException(503, "standalone_runtime_unavailable")
 	from tui_gateway.ws_legacy_fallback import _own_profile_read
-	from hermes_cli.web_server_sessions import _open_session_db_for_profile
-	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+	INTERNAL_LISTING_SOURCES = usage_history.internal_listing_sources()
 
 	facts, parents, turn_starts, compressing, compacting, awaiting = {}, {}, {}, {}, {}, {}
 
@@ -603,11 +637,11 @@ def standalone_runtime(request, profile, actor):
 	if not rows:
 		return {"sessions": []}
 	# Persisted source facts win; native empty drafts have no DB row yet, so retain their source captured during the same exact-home native mapping.
-	db = _open_session_db_for_profile(profile, read_only=True)
+	db = open_session_db(profile, read_only=True)
 	try:
 		if Path(db.db_path).resolve().parent != home:
 			raise HTTPException(403, "profile_mismatch")
-		stored = db._get_session_rich_rows_batch({row["session_key"] for row in rows}, compact_rows=True)
+		stored = stored_rows(db, {row["session_key"] for row in rows})
 		projects = card_projects(db)
 		visible = []
 		for row in rows:
@@ -651,14 +685,13 @@ def standalone_runtime(request, profile, actor):
 def authority_runtime_rows(db_path, rows):
 	"""Read only the admitted authority's store, never another runtime registry."""
 	from hermes_state import SessionDB
-	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+	INTERNAL_LISTING_SOURCES = usage_history.internal_listing_sources()
 
 	with_db = SessionDB(db_path, read_only=True)
 	try:
 		rows = [row for row in rows if row.get("source") not in {*INTERNAL_LISTING_SOURCES, "cron", "subagent"}
 			and not runtime_retired(with_db, row)]
-		stored = with_db._get_session_rich_rows_batch(
-			{row.get("session_key") or row["id"] for row in rows}, compact_rows=True)
+		stored = stored_rows(with_db, {row.get("session_key") or row["id"] for row in rows})
 		rows = [row for row in rows if not subagent_run(stored.get(row.get("session_key") or row["id"]))]
 		projects = card_projects(with_db) if rows else []
 		result = []
@@ -850,7 +883,7 @@ def card_rows(db, rows):
 	rows = list(rows)
 	segment_ids = {sid for row in rows if row.get("_lineage_ids")
 		for sid in [row["id"], *row["_lineage_ids"]]}
-	segments = db._get_session_rich_rows_batch(segment_ids, compact_rows=True) if segment_ids else {}
+	segments = stored_rows(db, segment_ids) if segment_ids else {}
 	subagents = card_subagent_usage(db, {row["id"] for row in rows} | segment_ids)
 	tips = [segments.get(row["id"], {}) if row.get("_lineage_ids") else row for row in rows]
 	providers = [card_provider(tip.get("model_config")) for tip in tips]
@@ -885,12 +918,11 @@ def card_rows(db, rows):
 
 
 def native_sessions(profile, offset, limit, organized_ids, archived_only=False):
-	from hermes_cli.web_server_sessions import _open_session_db_for_profile
-	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+	INTERNAL_LISTING_SOURCES = usage_history.internal_listing_sources()
 
 	# Read-only SessionDB disables maintenance and history writes. Native rich
 	# projection owns compression roots, project/branch inheritance and visibility.
-	db = _open_session_db_for_profile(profile, read_only=True)
+	db = open_session_db(profile, read_only=True)
 	try:
 		# Native read-only SessionDB routes every _read_ctx through this same connection (no pooled readers). Keep admission, lookahead and card enrichment in one request-local snapshot so a concurrent archive/reset cannot invalidate exhaustion halfway through the response.
 		# Adapters without a native connection retain the exact-ID fallback.
@@ -956,11 +988,10 @@ def native_archives(profile, offset, limit):
 
 def native_archive(profile, session_id):
 	"""Read an exact stored ID, never a title/key/substring or lineage alias."""
-	from hermes_cli.web_server_sessions import _open_session_db_for_profile
 
-	db = _open_session_db_for_profile(profile, read_only=True)
+	db = open_session_db(profile, read_only=True)
 	try:
-		row = db._get_session_rich_rows_batch([session_id], compact_rows=True).get(session_id)
+		row = db.get_session(session_id)
 		if row is None:
 			raise HTTPException(404, "session_not_found")
 		return {"id": session_id, "archived": bool(row["archived"])}
@@ -970,11 +1001,10 @@ def native_archive(profile, session_id):
 
 def native_workspace(profile, session_id):
 	"""Exact stored segment facts after a native move; no resume/title/alias resolution."""
-	from hermes_cli.web_server_sessions import _open_session_db_for_profile
 
-	db = _open_session_db_for_profile(profile, read_only=True)
+	db = open_session_db(profile, read_only=True)
 	try:
-		row = db._get_session_rich_rows_batch([session_id], compact_rows=True).get(session_id)
+		row = db.get_session(session_id)
 		if row is None:
 			raise HTTPException(404, "session_not_found")
 		return {"id": session_id, **{key: row.get(key) for key in ("cwd", "git_branch", "git_repo_root")},
@@ -991,12 +1021,9 @@ def native_control_guard(request, profile, unavailable):
 	if getattr(request.state, "hosted_http_authenticated", None) is not None:
 		raise HTTPException(503, unavailable)
 	from hermes_constants import get_hermes_home
-	from hermes_cli.web_server_sessions import _session_mutation_context, _session_db_path_for_profile
+	from hermes_cli.web_server_sessions import _session_mutation_context
 
 	home = get_hermes_home().resolve()
-	# A matching display name is not enough: check core's actual store resolution.
-	if _session_db_path_for_profile(profile).resolve().parent != home:
-		raise HTTPException(403, "profile_mismatch")
 	authority, actor = _session_mutation_context(request, profile)
 	if actor is None:
 		raise HTTPException(503, unavailable)
@@ -1016,9 +1043,8 @@ def native_control_guard(request, profile, unavailable):
 
 def native_title(profile, session_id):
 	"""Exact read-only stored title; never resolve titles, prefixes or aliases."""
-	from hermes_cli.web_server_sessions import _open_session_db_for_profile
 
-	db = _open_session_db_for_profile(profile, read_only=True)
+	db = open_session_db(profile, read_only=True)
 	try:
 		row = db.get_session(session_id)
 		return None if row is None else row.get("title")
@@ -1028,9 +1054,8 @@ def native_title(profile, session_id):
 
 def native_delete_snapshot(profile, session_id):
 	"""Exact read-only CAS counters/absence; never resolve titles, prefixes or aliases."""
-	from hermes_cli.web_server_sessions import _open_session_db_for_profile
 
-	db = _open_session_db_for_profile(profile, read_only=True)
+	db = open_session_db(profile, read_only=True)
 	try:
 		row = db.get_session(session_id)
 		return {"session_id": session_id, "exists": row is not None,
@@ -1090,13 +1115,12 @@ def persist_draft_row(profile, session_id, runtime_id, authority):
 	"""
 	import sys
 	from hermes_constants import get_hermes_home
-	from hermes_cli.web_server_sessions import _open_session_db_for_profile
-	from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+	INTERNAL_LISTING_SOURCES = usage_history.internal_listing_sources()
 
 	home = get_hermes_home().resolve()
 
 	def stored():
-		db = _open_session_db_for_profile(profile, read_only=True)
+		db = open_session_db(profile, read_only=True)
 		try:
 			if Path(db.db_path).resolve().parent != home:
 				raise HTTPException(403, "profile_mismatch")
@@ -1171,7 +1195,7 @@ async def native_rename(request, profile, session_id, body):
 	return {"ok": True, "profile": profile, "session_id": session_id, "title": title}
 
 
-def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None, history_db_path=None, limits_path=None, limits_sampler=None, limits_redeemer=None) -> APIRouter:
+def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None, history_db_path=None, limits_path=None, limits_sampler=None, limits_redeemer=None, pool_credits_available=None) -> APIRouter:
 	"""Inject a temporary path and clock for tests; production accepts neither over HTTP.
 
 	``limits_sampler`` is a zero-argument starter returning the running sampler. Only the module-level production router passes one, so routers built by tests never sample live provider limits. ``limits_redeemer`` replaces the banked-reset redemption, so tests never reach Codex.
@@ -1366,6 +1390,48 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise HTTPException(422, str(exc)) from exc
 		except Exception as exc:
 			raise HTTPException(503, "usage_limits_unavailable") from exc
+		return {**value, "profile": profile}
+
+	# Experimental features by wire name: their store key and whether this Hermes still has the internals they need. Availability is per feature, so one missing internal never turns off the others.
+	experimental = {
+		"pool_credits": (usage_limits.POOL_CREDITS_SETTING, pool_credits_available or usage_limits.pool_credits_available),
+	}
+
+	def experimental_state():
+		limits_store = usage_limits.LimitsStore(limits_path if limits_path is not None else default_limits_path(), clock)
+		features = {}
+		for name, (key, available) in experimental.items():
+			ok = bool(available())
+			# Without its internals a feature is off whatever was saved, and comes back on if a later Hermes restores them.
+			features[name] = {"enabled": ok and limits_store.read_setting(key), "available": ok}
+		return {"features": features}
+
+	@api.get("/settings/experimental")
+	def get_experimental(request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		profile = listing_profile(request)
+		try:
+			value = experimental_state()
+		except Exception as exc:
+			raise HTTPException(503, "settings_unavailable") from exc
+		return {**value, "profile": profile}
+
+	@api.put("/settings/experimental/{feature}")
+	def put_experimental(feature: str, body: ExperimentalToggle, request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		profile = listing_profile(request)
+		if feature not in experimental:
+			raise HTTPException(404, "unknown_feature")
+		key, available = experimental[feature]
+		if body.enabled and not available():
+			raise HTTPException(409, "incompatible_hermes")
+		try:
+			usage_limits.LimitsStore(limits_path if limits_path is not None else default_limits_path(), clock).write_setting(key, body.enabled)
+			# The other mode's credit lists are due at once instead of after the hourly throttle.
+			usage_limits.forget_credit_reads()
+			value = experimental_state()
+		except Exception as exc:
+			raise HTTPException(503, "settings_unavailable") from exc
 		return {**value, "profile": profile}
 
 	@api.post("/usage/limits/redeem")

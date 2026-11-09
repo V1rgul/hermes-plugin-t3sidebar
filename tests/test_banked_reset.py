@@ -41,7 +41,7 @@ class RedeemTests(unittest.TestCase):
 			self.calls.append(("redeem", kwargs))
 			return self.result
 		return {
-			**collector_tests.CollectorTests.symbols(collector_tests.CollectorTests(), {}, [], self.pool),
+			**collector_tests.CollectorTests.symbols(collector_tests.CollectorTests(), self.pool),
 			"redeem_codex_reset_credit": redeem,
 			"fetch_account_usage": lambda provider, **kwargs: self.calls.append(("fetch", provider, kwargs)),
 		}
@@ -50,13 +50,14 @@ class RedeemTests(unittest.TestCase):
 		with patch.object(limits, "_home_key", return_value="home"), patch.object(limits, "_default_home", return_value="/scratch/home"):
 			return banked.redeem(account_id, limits=limits, symbols=symbols or self.symbols(), lock=lock or threading.Lock())
 
-	def test_redeems_with_the_entrys_own_credential_and_rereads_only_that_account(self):
+	def test_redeems_with_the_entrys_own_credential_and_makes_only_that_accounts_credits_due(self):
 		limits._CREDITS_READ.update({("home", "openai-codex", "7ad3ca"): 1.0, ("home", "openai-codex", "7c202b"): 1.0})
 		outcome = self.redeem("7ad3ca")
 		# Status and counts only: Hermes's message can carry exception text with URLs or tokens.
 		self.assertEqual(outcome, {"status": "reset", "available_count": 1, "windows_reset": 2})
 		self.assertEqual(self.calls[0], ("redeem", {"base_url": ROUTE, "api_key": "tok-b", "force": True}))
-		self.assertEqual(self.calls[1], ("fetch", "openai-codex", {"base_url": ROUTE, "api_key": "tok-b", "read_only": True, "identity_id": "id:tok-b"}))
+		# Nothing else is fetched here: the route's next collection reads the account's usage.
+		self.assertEqual(len(self.calls), 1)
 		# The redeemed account's credit list is due again; the other account keeps its hourly throttle.
 		self.assertEqual(set(limits._CREDITS_READ), {("home", "openai-codex", "7c202b")})
 
@@ -68,13 +69,6 @@ class RedeemTests(unittest.TestCase):
 			self.assertEqual([call[0] for call in self.calls], ["redeem"], status)
 		self.result = SimpleNamespace(status="surprise", available_count=True, windows_reset=-1)
 		self.assertEqual(self.redeem("7c202b"), {"status": "unavailable", "available_count": None, "windows_reset": 0})
-
-	def test_a_failed_reread_still_reports_the_redemption(self):
-		symbols = self.symbols()
-		def broken(provider, **kwargs):
-			raise RuntimeError("tok-b")
-		symbols["fetch_account_usage"] = broken
-		self.assertEqual(self.redeem("7ad3ca", symbols)["status"], "reset")
 
 	def test_unknown_dead_or_missing_credentials_never_reach_codex(self):
 		with self.assertRaises(LookupError):

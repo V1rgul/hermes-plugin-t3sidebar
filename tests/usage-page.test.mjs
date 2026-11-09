@@ -921,6 +921,33 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
   } finally { Date.now = realNow; }
 });
 
+test('without per-account reads, the current account\'s credits stand apart unless the pool has one account', async () => {
+  const listed = { fetched_at: 5, credits: [{ status: 'available', expires_at: 300, granted_at: 1 }] };
+  const one = usage.validUsageLimits({ providers: [{ provider: 'openai-codex', current_banked_credits: listed, accounts: [{ id: 'a' }] }] }).providers[0];
+  assert.deepEqual([one.current_banked_credits, one.accounts[0].banked_credits.credits.map(item => item.expires_at)], [null, [300]], 'a single pool account is the one Hermes uses');
+  const two = usage.validUsageLimits({ providers: [{ provider: 'openai-codex', current_banked_credits: listed, accounts: [{ id: 'a' }, { id: 'b' }] }] }).providers[0];
+  assert.deepEqual([two.current_banked_credits.credits.length, two.accounts.map(item => item.banked_credits)], [1, [null, null]], 'with several, the read does not say which one it was');
+  assert.equal(usage.validUsageLimits({ providers: [{ provider: 'openai-codex', current_banked_credits: 'broken', accounts: [{ id: 'a' }] }] }).providers[0].current_banked_credits, null);
+  assert.deepEqual(usage.bankedFlags(usage.bankedSources(two), 0, 1000).map(flag => flag.credits.map(item => item.label).join()), ['Current account']);
+  const realNow = Date.now, fixed = Date.parse('2026-10-28T15:00:00+01:00');
+  Date.now = () => fixed;
+  try {
+    const data = mock.syntheticUsageLimits(168), now = fixed / 1000;
+    const providers = data.providers.map(item => item.provider !== 'openai-codex' ? item : { ...item, accounts: item.accounts.map(account => ({ ...account, banked_credits: null })),
+      current_banked_credits: { fetched_at: now - 60, applicable_count: null, credits: [{ status: 'available', granted_at: now - D, expires_at: now + 5 * H }] } });
+    mock.control.usageLimits = { ...data, providers };
+    plugin.register(mock.ctx); await render(limitsPage());
+    const codexSection = $('.su-provider-limits[data-provider="openai-codex"]');
+    assert.deepEqual([...codexSection.querySelectorAll('.su-flag')].map(node => node.dataset.account), [usage.CURRENT_CREDITS_ID]);
+    await click(codexSection.querySelector('.su-disclosure'));
+    const current = codexSection.querySelector(`.su-account[data-account="${usage.CURRENT_CREDITS_ID}"]`);
+    assert.equal(current, codexSection.querySelector('.su-accounts > .su-account'), 'ahead of the account cards');
+    assert.equal(current.querySelector('strong').textContent, 'Current account');
+    assert.match([...current.querySelectorAll('.su-banked-credit')].map(node => node.textContent).join(), /^Banked reset · expires .* in 5h 0m$/);
+    assert.equal(current.querySelector('.su-redeem-use'), null, 'a reset is spent from a chosen account card');
+  } finally { Date.now = realNow; }
+});
+
 test('a logged-out provider is a compact muted row after every chart', async () => {
   mock.control.limitsScenario = 'logged-out';
   plugin.register(mock.ctx); await render(limitsPage());

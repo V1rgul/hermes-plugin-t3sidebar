@@ -36,6 +36,7 @@ with tempfile.TemporaryDirectory(prefix="hermes-t3sidebar-http-") as directory:
 		assert profile == "default" and read_only is True
 		return SessionDB(db_path, read_only=True)
 	setattr(native, "_open_session_db_for_profile", open_db)
+	module.open_session_db = open_db
 	sys.modules[native.__name__] = native
 	async def runtime_reader(request, profile):
 		# Injected fixture; native active_list itself is exercised in test_native_contracts.

@@ -56,7 +56,7 @@ class StandaloneRuntime(unittest.TestCase):
 		self.start_patch(patch.object(server_requests, "_open", {waiting.id: waiting}))
 		self.start_patch(patch("hermes_constants.profile_name_for_home", side_effect=lambda home: next((n for n, h in self.homes.items() if h.resolve() == Path(home).resolve()), None)))
 		self.start_patch(patch("hermes_cli.web_server_cron._cron_profile_home", side_effect=lambda profile: (profile, self.homes[profile])))
-		self.start_patch(patch.object(native_sessions, "_open_session_db_for_profile", self.open_db))
+		self.start_patch(patch.object(backend, "open_session_db", self.open_db))
 		# Native title projection normally borrows the server's owner DB. Supply only
 		# scratch read-only handles; the mapper/status and scoped helper stay real.
 		self.start_patch(patch.object(native_server, "_session_db", self.session_db))
@@ -538,7 +538,7 @@ class StandaloneRuntime(unittest.TestCase):
 		self.assertEqual(response.status_code, 503, response.text)
 
 	def test_wrong_opened_store_is_refused_before_retirement_or_catalog_reads(self):
-		with patch.object(native_sessions, "_open_session_db_for_profile", side_effect=lambda *args, **kwargs: SessionDB(self.homes["other-profile"] / "native.sqlite3", read_only=True)), patch.object(backend, "runtime_retired") as retired, patch.object(backend, "card_projects") as projects:
+		with patch.object(backend, "open_session_db", side_effect=lambda *args, **kwargs: SessionDB(self.homes["other-profile"] / "native.sqlite3", read_only=True)), patch.object(backend, "runtime_retired") as retired, patch.object(backend, "card_projects") as projects:
 			response = self.client.get("/runtime")
 		self.assertEqual(response.status_code, 403, response.text)
 		retired.assert_not_called()
@@ -567,7 +567,7 @@ class StandaloneRuntime(unittest.TestCase):
 					return read
 				owner, name = {"mapper": (native_server, "_session_live_item"), "catalog": (backend, "card_projects"),
 					"provider": (native_server, "_live_session_identity"), "retirement": (backend, "runtime_retired"),
-					"stored": (SessionDB, "_get_session_rich_rows_batch")}[seam]
+					"stored": (SessionDB, "get_session")}[seam]
 				def run():
 					token = set_hermes_home_override(str(self.current))
 					try:

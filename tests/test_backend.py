@@ -383,6 +383,30 @@ class BackendTests(unittest.TestCase):
 		with patch("hermes_constants.get_hermes_home", return_value=Path(self.temp.name)):
 			self.assertEqual(backend.default_state_path(), self.path)
 
+	def test_session_store_opens_read_only_through_public_session_db(self):
+		from hermes_state import SessionDB
+		from fastapi import HTTPException
+
+		path = Path(self.temp.name) / "state.db"
+		with closing(SessionDB(db_path=path)) as db:
+			db._conn.execute("INSERT INTO sessions(id, source, started_at) VALUES ('s1', 'cli', 1)")
+			db._conn.commit()
+		before = path.read_bytes()
+		with patch.object(backend, "session_db_path", return_value=path):
+			with closing(backend.open_session_db("default", read_only=True)) as db:
+				self.assertEqual(db.get_session("s1")["source"], "cli")
+				with self.assertRaises(sqlite3.OperationalError):
+					db._conn.execute("DELETE FROM sessions")
+		self.assertEqual(path.read_bytes(), before)
+		# A store Hermes never created, or a file it never initialized, is one generic 503.
+		for missing in (Path(self.temp.name) / "absent.db", Path(self.temp.name) / "empty.db"):
+			if missing.name == "empty.db":
+				missing.touch()
+			with patch.object(backend, "session_db_path", return_value=missing):
+				with self.assertRaises(HTTPException) as raised:
+					backend.open_session_db("default", read_only=True)
+			self.assertEqual((raised.exception.status_code, raised.exception.detail), (503, "session_store_unavailable"))
+
 	def test_no_native_history_mutation_or_execution_dependencies(self):
 		source = (ROOT / "dashboard/plugin_api.py").read_text()
 		tree = ast.parse(source)
@@ -392,7 +416,7 @@ class BackendTests(unittest.TestCase):
 				imports.update(alias.name for alias in node.names)
 			elif isinstance(node, ast.ImportFrom):
 				imports.add(node.module)
-		self.assertEqual(imports, {"asyncio", "dataclasses", "importlib.util", "json", "math", "pathlib", "re", "sqlite3", "sys", "threading", "time", "typing", "types", "uuid", "fastapi", "pydantic", "hermes_constants", "hermes_state", "hermes_state_mutation_retirement", "agent.voice_turn_route", "hermes_state_sessions", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "hermes_cli.web_models", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.session_notifications", "tui_gateway.ws_legacy_fallback"})
+		self.assertEqual(imports, {"asyncio", "dataclasses", "importlib.util", "json", "math", "pathlib", "re", "sqlite3", "sys", "threading", "time", "typing", "types", "uuid", "fastapi", "pydantic", "hermes_constants", "hermes_state", "hermes_state_mutation_retirement", "agent.voice_turn_route", "hermes_cli", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "hermes_cli.web_models", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.session_notifications", "tui_gateway.ws_legacy_fallback"})
 		# Native reads remain read-only; deletion and stored rename delegate to the sanctioned HTTP endpoints, and an unsent draft's row is written only by the native first-prompt writer.
 		self.assertNotIn("import tui_gateway.server", source)
 		self.assertEqual(source.count("_ensure_session_db_row"), 1)
@@ -416,7 +440,9 @@ class BackendTests(unittest.TestCase):
 		self.assertNotIn("read_only=False", source)
 		self.assertIn("read_only=True", source)
 		self.assertNotIn("ATTACH", source)
-		self.assertNotIn("state.db", source)
+		# The served profile's store is named in one place only and opened through the public read-only SessionDB.
+		self.assertEqual(source.count('"state.db"'), 1)
+		self.assertIn("SessionDB(db_path=path, read_only=True)", source)
 		# A native history sentinel is untouched by all supported operations.
 		history = Path(self.temp.name) / "sessions/example.jsonl"
 		history.parent.mkdir()
@@ -435,7 +461,7 @@ class BackendTests(unittest.TestCase):
 		self.assertEqual(manifest["name"], "hermes-t3sidebar")
 		self.assertEqual(manifest["api"], "plugin_api.py")
 		self.assertTrue(manifest["tab"]["hidden"])
-		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/environment", "/runtime", "/sessions", "/archives", "/sessions/{session_id}/archive", "/sessions/{session_id}/snapshot", "/sessions/{session_id}/workspace", "/sessions/{session_id}/delete", "/sessions/{session_id}/title", "/sessions/{session_id}/draft", "/sessions/{session_id}", "/usage/history", "/usage/limits", "/usage/limits/redeem"})
+		self.assertEqual({route.path for route in backend.router.routes}, {"/state", "/environment", "/runtime", "/sessions", "/archives", "/sessions/{session_id}/archive", "/sessions/{session_id}/snapshot", "/sessions/{session_id}/workspace", "/sessions/{session_id}/delete", "/sessions/{session_id}/title", "/sessions/{session_id}/draft", "/sessions/{session_id}", "/usage/history", "/usage/limits", "/usage/limits/redeem", "/settings/experimental", "/settings/experimental/{feature}"})
 
 
 if __name__ == "__main__":

@@ -3,11 +3,8 @@
 Kept apart from ``usage_limits``: the sampler module must never reference a path that spends credits or can refresh tokens, and its policy test enforces that. This module reuses the sampler's read-only pool and route helpers through the shared ``usage_limits`` instance passed in by the caller.
 """
 
-import logging
 import threading
 
-
-LOG = logging.getLogger(__name__)
 
 PROVIDER = "openai-codex"
 # Hermes's CodexResetRedeemResult statuses; anything else is reported as unavailable.
@@ -24,11 +21,10 @@ class Busy(RuntimeError):
 
 def _native_symbols(limits):
 	symbols = dict(limits._native_symbols())
-	for name in ("redeem_codex_reset_credit", "fetch_account_usage"):
-		try:
-			symbols[name] = getattr(__import__("agent.account_usage", fromlist=[name]), name)
-		except Exception:
-			symbols[name] = None
+	try:
+		symbols["redeem_codex_reset_credit"] = getattr(__import__("agent.account_usage", fromlist=["redeem_codex_reset_credit"]), "redeem_codex_reset_credit")
+	except Exception:
+		symbols["redeem_codex_reset_credit"] = None
 	return symbols
 
 
@@ -37,7 +33,7 @@ def _count(value):
 
 
 def redeem(account_id, *, limits, symbols=None, lock=_LOCK):
-	"""Redeem one credit through Hermes's own `/usage reset --force`, then re-read that account.
+	"""Redeem one credit through Hermes's own `/usage reset --force`; after a redemption the account's credit list is due again, and the caller's next collection reads its usage.
 
 	The entry's own token and route are passed explicitly, so Hermes never re-resolves the credential to another pool account. ``force`` skips Hermes's "a window is fully used" guard: the page shows what the reset loses before the user confirms, and Codex itself still refuses (``nothing_to_reset``, credit kept) while every allowance has 80% or more left. Codex picks which credit is spent. Only the status code and counts are returned: Hermes's messages can carry exception text.
 	"""
@@ -64,20 +60,9 @@ def redeem(account_id, *, limits, symbols=None, lock=_LOCK):
 		status = status if status in STATUSES else "unavailable"
 		outcome = {"status": status, "available_count": _count(getattr(result, "available_count", None)), "windows_reset": _count(getattr(result, "windows_reset", None)) or 0}
 		if status in REDEEMED:
-			_reread(symbols, limits, entry, account_id, base_url, token)
+			limits.forget_credit_read(PROVIDER, account_id)
 		return outcome
 	finally:
 		token = None
 		lock.release()
 
-
-def _reread(symbols, limits, entry, account_id, base_url, token):
-	"""Let the next collection show the redeemed account: its credit list is due again, and its usage is fetched now rather than after Hermes's two-minute refresh throttle (one read-only GET through Hermes's per-credential fetcher, which lands in the shared cache the sampler reads)."""
-	limits.forget_credit_read(PROVIDER, account_id)
-	fetch, identity = symbols.get("fetch_account_usage"), symbols.get("_identity_id_for")
-	if fetch is None or identity is None:
-		return
-	try:
-		fetch(PROVIDER, base_url=base_url, api_key=token, read_only=True, identity_id=identity(PROVIDER, entry))
-	except Exception as exc:
-		LOG.debug("t3sidebar redeemed account re-read failed: %s", type(exc).__name__)

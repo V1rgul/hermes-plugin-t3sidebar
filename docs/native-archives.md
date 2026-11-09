@@ -20,7 +20,7 @@ Both `/sessions` and `/archives` card rows include an `archived` JSON boolean. R
 
 `GET /sessions/{session_id}/archive`
 
-Returns `{profile, id, archived}` with `id` exactly equal to the validated requested ID. The native reader uses `_get_session_rich_rows_batch([session_id], compact_rows=True)` and an exact dictionary lookup. It does not resolve aliases, titles, substrings, or foreign lineage roots. A missing stored ID is 404 (`session_not_found`), never a fabricated `archived: false`. An unavailable/incompatible native store is 503. Only the optional exact-profile assertion is accepted on this endpoint.
+Returns `{profile, id, archived}` with `id` exactly equal to the validated requested ID. The native reader uses Hermes's public `get_session(session_id)`, an exact ID lookup. It does not resolve aliases, titles, substrings, or foreign lineage roots. A missing stored ID is 404 (`session_not_found`), never a fabricated `archived: false`. An unavailable/incompatible native store is 503. Only the optional exact-profile assertion is accepted on this endpoint.
 
 The frontend owns mutations through native `session.archive`, passing the durable stored lineage root and an explicit `archived` boolean. Installed native `tui_gateway/methods_session.py` applies this to the lineage without submitting a prompt or stopping execution. After the RPC, the frontend can verify the exact root's persisted state through the readback endpoint. The plugin exposes no native archive mutation route.
 

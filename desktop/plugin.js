@@ -1216,7 +1216,49 @@ function Settings({ ctx }) {
     description: 'Show total input and output tokens on session cards.',
     checked: showTokens, onChange: saveTokens,
     below: tokensError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, tokensError) : null
-  }));
+  }), h(ExperimentalSettings, { ctx }));
+}
+// Experimental features lean on Hermes internals. The backend reports, feature by feature, whether this Hermes still has them; a feature without them is off, its switch disabled and the reason shown under it, while the others keep working.
+const EXPERIMENTAL_KEY = ['hermes-t3sidebar-settings', 'experimental'];
+export const INCOMPATIBLE_HERMES = 'Incompatible with your Hermes version.';
+export const EXPERIMENTAL_FEATURES = [
+  { id: 'pool_credits', label: 'Banked reset expiries for every Codex account',
+    description: 'Lists when each banked Codex reset expires for every account in Hermes\'s credential pool, using each account\'s own token. Off: only the account Hermes is using now.' },
+];
+export function validExperimental(value) {
+  const features = value?.features;
+  if (!features || typeof features !== 'object') throw new Error('Unsupported experimental settings response.');
+  // A feature the backend does not report is treated as unavailable rather than guessed.
+  return Object.fromEntries(EXPERIMENTAL_FEATURES.map(({ id }) => [id, { enabled: features[id]?.enabled === true, available: features[id]?.available === true }]));
+}
+function ExperimentalSettings({ ctx }) {
+  const query = useQuery({ queryKey: EXPERIMENTAL_KEY, queryFn: async () => validExperimental(await ctx.rest('/settings/experimental')), staleTime: 0, retry: false });
+  // Same heading as Desktop's own settings sections (SectionHeading, not exported by the SDK): icon and title, with the caveat right after the title.
+  return h('section', { className: 'sf-experimental mt-6', 'aria-label': 'Experimental' },
+    h('div', { className: 'mb-2.5 flex items-center gap-2 pt-2 text-[length:var(--conversation-text-font-size)] font-medium' },
+      typeof sdk.Codicon === 'function' ? h(sdk.Codicon, { name: 'beaker', size: 16, className: 'shrink-0 text-muted-foreground' }) : null,
+      h('span', null, 'Experimental'),
+      h('span', { className: 'text-xs font-normal text-muted-foreground' }, 'May break with updates. Auto-disables in that case.')),
+    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, feature, state: query.data?.[feature.id], readError: query.isError })));
+}
+function ExperimentalFeature({ ctx, feature, state, readError }) {
+  const client = useQueryClient(), [error, setError] = useState('');
+  const save = async enabled => {
+    try {
+      client.setQueryData(EXPERIMENTAL_KEY, validExperimental(await ctx.rest(`/settings/experimental/${feature.id}`, { method: 'PUT', body: { enabled } })));
+      setError('');
+    } catch (_) {
+      setError('The setting was not saved.');
+      client.invalidateQueries({ queryKey: EXPERIMENTAL_KEY });
+    }
+  };
+  const unavailable = state?.available === false;
+  const note = unavailable ? INCOMPATIBLE_HERMES : error || (readError ? 'Could not read this setting from the plugin backend.' : '');
+  return h(sdk.ToggleRow ?? SettingsToggleRow, {
+    label: feature.label, description: feature.description,
+    checked: state?.enabled === true, disabled: !state || unavailable, onChange: save,
+    below: note ? h('div', { role: unavailable ? undefined : 'alert', className: 'mt-1.5 text-xs text-destructive', 'data-feature': feature.id }, note) : null
+  });
 }
 // The settings page renders without the sidebar's stylesheet. Masking the native picker button keeps its click-to-open picker while drawing the same alarm as the hover Snooze control instead of a plain clock.
 const ALARM_MASK = `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>${BUNDLED_ICONS.Alarm.map(d => `<path d='${d}'/>`).join('')}</svg>`)}")`;
@@ -1230,9 +1272,9 @@ const SETTINGS_CSS = `${SEGMENTED_FALLBACK_CSS}
 function SettingsRow({ title, description, action, below }) {
   return h('div', { style: { display: 'grid', gap: 6, padding: '12px 0' } }, h('div', null, title), h('div', { style: { color: 'var(--ui-text-tertiary)' } }, description), h('div', null, action), below);
 }
-function SettingsToggleRow({ label, description, checked, onChange, below }) {
+function SettingsToggleRow({ label, description, checked, disabled, onChange, below }) {
   return h(sdk.ListRow ?? SettingsRow, { title: label, description, below,
-    action: h('input', { type: 'checkbox', role: 'switch', checked, 'aria-label': label, onChange: event => onChange(event.target.checked) }) });
+    action: h('input', { type: 'checkbox', role: 'switch', checked, disabled, 'aria-label': label, onChange: event => onChange(event.target.checked) }) });
 }
 // Approved project metadata palette and Codicons; independent of chrome/theme colors.
 export const PROJECT_ICON_GROUPS = [
@@ -2177,13 +2219,23 @@ export function limitHistoryRows(history) {
 }
 export function validUsageLimits(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.providers)) throw new Error('Unsupported usage limits response.');
-  const providers = value.providers.filter(item => item && typeof item.provider === 'string').map(item => ({
+  const providers = value.providers.filter(item => item && typeof item.provider === 'string').map(item => placeCurrentCredits({
     // Only an explicit logged_out marks a provider without a usable credential; anything else keeps the normal view.
     ...item, auth: item.auth === 'logged_out' ? 'logged_out' : 'ok', auth_reason: typeof item.auth_reason === 'string' && item.auth_reason ? item.auth_reason : null, accounts: Array.isArray(item.accounts) ? item.accounts.filter(account => account && typeof account.id === 'string').map(account => ({ ...account, windows: Array.isArray(account.windows) ? account.windows.filter(win => win && typeof win.key === 'string') : [], banked_credits: validBankedCredits(account.banked_credits) })) : [],
-    history: limitHistoryRows(item.history)
+    history: limitHistoryRows(item.history), current_banked_credits: validBankedCredits(item.current_banked_credits)
   }));
   return { ...value, providers, sampler: value.sampler && typeof value.sampler === 'object' ? value.sampler : null };
 }
+// Without the experimental per-account setting, banked credit expiries come only for the Codex account Hermes currently uses, and that read cannot say which pool entry it is. With a single account in the pool there is nothing to tell apart, so the list goes on that account; otherwise it stays a provider-level "current account" list.
+export const CURRENT_CREDITS_ID = '@current';
+export function placeCurrentCredits(provider) {
+  const current = provider.current_banked_credits;
+  if (!current || provider.accounts.length !== 1 || provider.accounts[0].banked_credits) return provider;
+  return { ...provider, accounts: [{ ...provider.accounts[0], banked_credits: current }], current_banked_credits: null };
+}
+// Accounts whose banked credits feed the chart's expiry flags, the provider-level current-account list included under its own label.
+export const bankedSources = provider => provider.current_banked_credits
+  ? [...provider.accounts, { id: CURRENT_CREDITS_ID, label: 'Current account', banked_credits: provider.current_banked_credits }] : provider.accounts;
 // Banked reset credits: null when never read, else the well-formed available credits by expiry (no expiry last). Malformed entries are dropped rather than shown, and an applicable count that is not a whole number reads as unknown.
 const optionalTime = value => value == null ? null : Number.isFinite(value) ? value : undefined;
 export function validBankedCredits(value) {
@@ -3025,8 +3077,18 @@ function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem }
       h('span', { className: 'su-disclosure-chevron', 'aria-hidden': true }, icon('ChevronRight', '›')),
       h('span', { className: 'su-disclosure-label' }, 'Accounts'), h('span', { className: 'su-disclosure-count' }, count),
       names ? h('span', { className: 'su-disclosure-names', title: names }, names) : null),
-    open ? h('div', { className: 'su-accounts', id }, count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now, redeem }))
-      : h(UsageState, null, 'No accounts in this provider pool.')) : null);
+    open ? h('div', { className: 'su-accounts', id }, h(CurrentBankedResets, { credits: provider.current_banked_credits, now }),
+      count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now, redeem }))
+        : h(UsageState, null, 'No accounts in this provider pool.')) : null);
+}
+// The expiries Hermes's signed request returned for the account it uses now, ahead of the account cards because the response does not name the pool entry. No redeem button: a reset is spent on a chosen account, from its own card.
+function CurrentBankedResets({ credits, now }) {
+  const live = (credits?.credits || []).filter(credit => credit.expires_at === null || credit.expires_at > now);
+  if (!live.length) return null;
+  return h('div', { className: 'su-account', 'data-account': CURRENT_CREDITS_ID },
+    h('div', { className: 'su-account-head' }, h('strong', null, 'Current account'), h('span', { className: 'su-spacer' }),
+      h('span', { className: 'su-muted', title: 'Hermes reads this list with the Codex sign-in it is using now and does not say which pool account that is. The experimental per-account setting lists every account instead.' }, 'the account Hermes is using now')),
+    h('div', { className: 'su-banked-row' }, h('ul', { className: 'su-banked', 'aria-label': 'Banked resets of the current account' }, live.map((credit, index) => bankedCreditLine(credit, index, now)))));
 }
 // Shared notes once under every section: how the samples and projections work, what a unit is, and which capacities are guessed.
 function LimitsFootnotes({ providers, sampler, now }) {
@@ -3347,7 +3409,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
   const waste = useMemo(() => wasteMarks(projection).filter(mark => mark.t > now && mark.t < end), [projection, now, end]);
   const resets = useMemo(() => resetMarkers(projection, now, end), [projection, now, end]);
   const pastResets = useMemo(() => pastResetMarkers(provider.accounts, samples, start, now, providerId), [provider, samples, start, now, providerId]);
-  const flags = useMemo(() => bankedFlags(provider.accounts, now, end), [provider, now, end]);
+  const flags = useMemo(() => bankedFlags(bankedSources(provider), now, end), [provider, now, end]);
   const [hover, setHover] = useState(null);
   // The axis tops out at the pool's capacity in units (or above it if an older reading held more, e.g. before a plan change).
   const cap = Math.max(projection.capacity || BASE_PLAN_UNITS, ...past.map(point => point.value));
@@ -3495,13 +3557,14 @@ export function redeemFailure(result) {
   return 'Codex could not confirm the reset. Refresh to check whether it was spent.';
 }
 // One line per banked reset credit under the account's bars, soonest expiry first (a credit expiring within a day turns orange, its countdown grey like the bars' reset times), and on their right one button spanning the list: Codex picks the credit, so the action belongs to the account, not to a line.
+const bankedCreditLine = (credit, index, now) => h('li', { key: `${credit.expires_at}:${index}`, className: 'su-banked-credit', 'data-soon': credit.expires_at !== null && credit.expires_at - now < DAY_S },
+  credit.expires_at === null ? 'Banked reset · no expiry reported' : [`Banked reset · expires ${resetTime(credit.expires_at, now)} `, h('span', { key: 'in', className: 'su-banked-in' }, `in ${formatDurationShort(credit.expires_at - now)}`)]);
 function BankedResets({ provider, account, windows, now, redeem }) {
   const [confirming, setConfirming] = useState(false);
   const credits = (account.banked_credits?.credits || []).filter(credit => credit.expires_at === null || credit.expires_at > now);
   const count = credits.length || (Number.isInteger(account.banked_resets) && account.banked_resets > 0 ? account.banked_resets : 0);
   if (!count) return null;
-  const lines = credits.length ? credits.map((credit, index) => h('li', { key: `${credit.expires_at}:${index}`, className: 'su-banked-credit', 'data-soon': credit.expires_at !== null && credit.expires_at - now < DAY_S },
-    credit.expires_at === null ? 'Banked reset · no expiry reported' : [`Banked reset · expires ${resetTime(credit.expires_at, now)} `, h('span', { key: 'in', className: 'su-banked-in' }, `in ${formatDurationShort(credit.expires_at - now)}`)]))
+  const lines = credits.length ? credits.map((credit, index) => bankedCreditLine(credit, index, now))
     : [h('li', { key: 'count', className: 'su-banked-credit' }, `${count} banked reset${count === 1 ? '' : 's'}`)];
   const canRedeem = provider === 'openai-codex' && typeof redeem === 'function' && typeof sdk.ConfirmDialog === 'function';
   const label = account.label || account.id, loss = canRedeem ? redeemLoss(provider, account, windows) : null;

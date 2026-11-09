@@ -24,7 +24,7 @@ class CardMetadata(unittest.TestCase):
 		self.db_path = self.root / "native.sqlite3"
 
 	def sessions(self, *organized):
-		with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", side_effect=lambda profile, *, read_only: SessionDB(self.db_path, read_only=read_only)):
+		with patch.object(backend, "open_session_db", side_effect=lambda profile, *, read_only: SessionDB(self.db_path, read_only=read_only)):
 			return backend.native_sessions("scratch-profile", 0, 500, organized)["sessions"]
 
 	def test_native_projects_longest_folder_multiple_folders_archived_and_boundary(self):
@@ -59,8 +59,10 @@ class CardMetadata(unittest.TestCase):
 				if sid != "tip":
 					db.end_session(sid, "compression")
 		before = self.db_path.read_bytes()
-		with patch.object(SessionDB, "get_session", side_effect=AssertionError("no per-row full reads")):
+		# Segments are read through Hermes's public get_session, each once; the full rows never reach the response.
+		with patch.object(SessionDB, "get_session", autospec=True, side_effect=SessionDB.get_session) as reads:
 			rows = self.sessions("middle")
+		self.assertEqual(sorted(call.args[1] for call in reads.call_args_list), ["middle", "root", "tip"])
 		self.assertEqual(len(rows), 1)
 		row = rows[0]
 		self.assertEqual((row["id"], row["provider"], row["model"]), ("tip", "actual-tip-provider", "tip-model"))
@@ -156,7 +158,8 @@ class CardMetadata(unittest.TestCase):
 		self.assertNotIn("message_count", projected[1])
 
 	def test_duplicate_segments_are_counted_once_and_unknown_counts_stay_null(self):
-		db = SimpleNamespace(_get_session_rich_rows_batch=lambda ids, *, compact_rows: {"root": {"input_tokens": 3, "output_tokens": 4}, "tip": {"input_tokens": 5, "output_tokens": 6, "model_config": '{"provider":"tip"}'}})
+		stored = {"root": {"input_tokens": 3, "output_tokens": 4}, "tip": {"input_tokens": 5, "output_tokens": 6, "model_config": '{"provider":"tip"}'}}
+		db = SimpleNamespace(get_session=stored.get)
 		rows = backend.card_rows(db, [{"id": "tip", "_lineage_ids": ["root", "tip", "root"]}, {"id": "missing", "model": "openai/not-evidence"}])
 		self.assertEqual(rows[0]["total_tokens"], 18)
 		self.assertEqual(rows[0]["provider"], "tip")
@@ -164,17 +167,19 @@ class CardMetadata(unittest.TestCase):
 			self.assertIsNone(rows[1][key])
 
 	def test_batched_segments_partial_unknown_counts_and_tip_not_root(self):
-		fetch = Mock(return_value={
+		stored = {
 			"root": {"input_tokens": 3, "output_tokens": 4, "model_config": {"provider": "root-only"}},
 			"tip": {"input_tokens": 5, "output_tokens": None, "model": "tip-model", "model_config": None},
 			"other": {"input_tokens": 0, "output_tokens": 0},
-		})
-		db = SimpleNamespace(_get_session_rich_rows_batch=fetch)
+		}
+		fetch = Mock(side_effect=stored.get)
+		db = SimpleNamespace(get_session=fetch)
 		rows = backend.card_rows(db, [
 			{"id": "tip", "_lineage_ids": ["root", "tip", "root"], "model_config": {"provider": "must-not-use-root"}},
 			{"id": "other", "_lineage_ids": ["other", "absent"]},
 		])
-		fetch.assert_called_once_with({"root", "tip", "other", "absent"}, compact_rows=True)
+		# Each distinct segment is read once, a repeated one included.
+		self.assertEqual(sorted(call.args[0] for call in fetch.call_args_list), ["absent", "other", "root", "tip"])
 		self.assertIsNone(rows[0]["provider"])
 		self.assertEqual(rows[0]["model"], "tip-model")
 		self.assertEqual(rows[0]["input_tokens"], 8)

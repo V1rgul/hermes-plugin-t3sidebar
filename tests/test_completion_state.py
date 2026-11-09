@@ -314,7 +314,7 @@ class CompletionTests(unittest.TestCase):
             self.assertTrue(read_only)
             return SessionDB(native_path, read_only=True)
         client = self.client(profile_reader=lambda: "exact")
-        with patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db):
+        with patch.object(backend, "open_session_db", open_db):
             self.assertEqual([row["id"] for row in client.get("/sessions?limit=1").json()["sessions"]], ["recent"])
             self.producer.record("old-root", "turn-1")
             result = client.get("/sessions?limit=1")

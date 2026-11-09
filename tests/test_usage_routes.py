@@ -171,5 +171,27 @@ class UsageRouteTests(unittest.TestCase):
 		self.assertEqual(calls, [])
 
 
+	def test_experimental_features_are_saved_and_offered_per_feature(self):
+		available = [True]
+		client = self.client(pool_credits_available=lambda: available[0])
+		url = f"{PREFIX}/settings/experimental"
+		self.assertEqual(client.get(f"{url}?profile=default").json(), {"features": {"pool_credits": {"enabled": False, "available": True}}, "profile": "default"})
+		response = client.put(f"{url}/pool_credits", json={"enabled": True})
+		self.assertEqual((response.status_code, response.json()["features"]["pool_credits"]), (200, {"enabled": True, "available": True}))
+		# Kept in the plugin's Limits store, where the sampler reads it.
+		self.assertTrue(backend.usage_limits.LimitsStore(self.limits).read_setting(backend.usage_limits.POOL_CREDITS_SETTING))
+		# This Hermes lost the feature's internals: it reads as off and cannot be turned on, while the saved choice is kept for a Hermes that has them again.
+		available[0] = False
+		self.assertEqual(client.get(url).json()["features"]["pool_credits"], {"enabled": False, "available": False})
+		refused = client.put(f"{url}/pool_credits", json={"enabled": True})
+		self.assertEqual((refused.status_code, refused.json()["detail"]), (409, "incompatible_hermes"))
+		self.assertEqual(client.put(f"{url}/pool_credits", json={"enabled": False}).status_code, 200, "turning an unavailable feature off is always allowed")
+		available[0] = True
+		self.assertEqual(client.get(url).json()["features"]["pool_credits"], {"enabled": False, "available": True})
+		self.assertEqual(client.put(f"{url}/unknown", json={"enabled": True}).status_code, 404)
+		for body in ({"enabled": "yes"}, {"enabled": True, "extra": 1}, {}):
+			self.assertEqual(client.put(f"{url}/pool_credits", json=body).status_code, 422, body)
+		self.assertEqual(client.get(f"{url}?profile=other").status_code, 422)
+
 if __name__ == "__main__":
 	unittest.main()
