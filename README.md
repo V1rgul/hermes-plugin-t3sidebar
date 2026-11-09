@@ -109,6 +109,6 @@ Remote backend or upgrade: [installation guide](docs/installation.md), including
 - [Sidebar behavior](docs/behavior.md): controls, status badges, search, compatibility limits.
 - [Usage and Limits](docs/usage.md): data sources, timing approximation, cost, limits sampling.
 - [Architecture](docs/architecture.md): backend storage, package layout, performance.
-- [Development](docs/development.md): tests, browser harness, screenshots.
+- [Development](docs/development.md): tests, browser harness, test Webapp container, screenshots.
 
 The Desktop UI uses the public plugin SDK; some backend reads depend on version-sensitive Hermes internals: [limitations and compatibility](docs/behavior.md#limitations-and-compatibility).

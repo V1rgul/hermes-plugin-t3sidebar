@@ -22,6 +22,25 @@ README screenshots render the current plugin with sample sessions and a developm
 
 The settings screenshot renders the plugin's registered settings page with Hermes Desktop's own settings primitives (`ListRow`, `ToggleRow`, `Input`, `SegmentedControl`, breadcrumb and `SettingsContent`) and Tailwind build, Midnight dark, default preferences, in Chromium with an en-GB locale. The Settings left rail is omitted; it is a browser preview, not a live Desktop capture.
 
+## Testing a change
+
+Test changes in the real Hermes Webapp running in a container. It runs the actual Desktop renderer, gateway, plugin loader and dashboard routes, so it covers SDK and route contracts, plugin enablement, backend hooks and live turns. The web-only harness above is optional, only for quick visual checks such as icons. The container holds only invented data and a dedicated test account, never a real Hermes home, its credentials or its history, and it does not touch the host's Hermes services.
+
+`tools/test-webapp/t3webapp.sh` drives that container with Podman when installed, otherwise Docker (`T3WEBAPP_RUNTIME` overrides the choice):
+
+```sh
+tools/test-webapp/t3webapp.sh setup   # creates the container, or reuses an existing one with its data, then installs and enables the plugin
+tools/test-webapp/t3webapp.sh seed    # invented projects, 78 antedated sessions for Usage, 10 days of pooled Limits samples
+tools/test-webapp/t3webapp.sh sync    # after each change: copies the working tree, uncommitted edits included, and restarts the container
+tools/test-webapp/t3webapp.sh stop    # keeps the container and its data for the next session; start resumes it
+tools/test-webapp/t3webapp.sh destroy # linked worktree only: removes its container and data, before git worktree remove
+tools/test-webapp/t3webapp.sh prune   # removes the containers of worktrees that no longer exist; setup also does it
+```
+
+From the main checkout the script drives the shared container. From a linked worktree it drives that worktree's own container (`t3demo-<worktree>`, data in `~/t3sidebar-demo-worktrees/<worktree>`, first free port from 19121), so worktrees tested in parallel do not overwrite each other's plugin. Its first `setup` clones the shared container's data, pausing it during the copy, so it starts seeded and signed into the test account. Git has no hook on worktree removal: run `destroy` before `git worktree remove`, otherwise the next `setup` or `prune` from any checkout removes the leftover container. The shared container is never destroyed by the script.
+
+The Webapp listens on loopback only (`http://127.0.0.1:19120` by default), with a generated login kept in the data directory, outside the repository. The container name, data directory, port and Hermes image are overridable through `T3WEBAPP_NAME`, `T3WEBAPP_DIR`, `T3WEBAPP_PORT` and `T3WEBAPP_IMAGE`; a second container on another port lets a test start from a clean state without losing the main one. Hermes keeps a plugin's Desktop half opt-in: if the T3 Sidebar tab is missing, enable it in Settings → Plugins. Live turns need the container signed into a dedicated test account with a free model; `setup` prints the commands, and personal accounts must never be used there. `seed_limits.py follow`, started by `seed` and `start`, keeps the Limits readings fresh while the container runs.
+
 ## Performance regression benchmarks
 
 Run these before merging a feature, so it cannot silently undo the optimizations recorded in [`performance.md`](performance.md) and [`large-history-performance.md`](large-history-performance.md). The deterministic work-bound tests in `npm test` and `npm run test:backend` already catch specific regressions. The benchmarks also measure interactions end to end.

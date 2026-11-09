@@ -9,3 +9,4 @@ harness/app.bundle.css
 artifacts/*.zip
 *.sqlite3*
 .scratch/
+.worktrees/
