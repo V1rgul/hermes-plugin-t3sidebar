@@ -59,10 +59,8 @@ BROWSER_DIR=$REPO/.t3webapp
 PROFILE=$BROWSER_DIR/browser-profile
 CDP_PORT=${T3WEBAPP_CDP_PORT:-$((PORT + 1000))}
 
-# Hermes serves a non-loopback bind only behind a login, so the Webapp listens on loopback inside the container (port 9121) and this forwarder, started with it, exposes it on the published port 9120. The published port is itself loopback-only on the host, so the test Webapp needs no login. The forwarder runs as the container's hermes user: Hermes lets only a connection from the server's own user redeem a launch link.
-FORWARD='import asyncio, os, pwd
-user = pwd.getpwnam("hermes")
-os.setgroups([]); os.setgid(user.pw_gid); os.setuid(user.pw_uid)
+# Hermes serves a non-loopback bind only behind a login, so the Webapp listens on loopback inside the container (port 9121) and this forwarder, started with it, exposes it on the published port 9120. The published port is itself loopback-only on the host, so the test Webapp needs no login. The forwarder runs as the container's hermes user, through the image's own privilege drop: Hermes lets only a connection from the server's own user redeem a launch link.
+FORWARD='import asyncio
 async def pipe(reader, writer):
 	try:
 		while data := await reader.read(65536):
@@ -178,7 +176,7 @@ create() {
 	loopback_config
 	# Loopback-only port and a volume of invented data: no real Hermes home, credentials or history ever enter the container. The labels let prune find the container once its worktree is gone, and mark it as served without a login.
 	"$RUNTIME" run -d --name "$NAME" --label "t3webapp.worktree=$WORKTREE" --label "t3webapp.dir=$DIR" --label t3webapp.login=none -v "$DIR/data:/opt/data:Z" -p "127.0.0.1:$PORT:9120" \
-		--entrypoint sh "$IMAGE" -c '/opt/hermes/.venv/bin/python -c "$1" & exec /opt/hermes/docker/entrypoint-dispatch.sh gateway run' sh "$FORWARD" >/dev/null
+		--entrypoint sh "$IMAGE" -c '/command/s6-setuidgid hermes /opt/hermes/.venv/bin/python -c "$1" & exec /opt/hermes/docker/entrypoint-dispatch.sh gateway run' sh "$FORWARD" >/dev/null
 	wait_ready
 }
 
