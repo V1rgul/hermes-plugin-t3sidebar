@@ -10,3 +10,4 @@ artifacts/*.zip
 *.sqlite3*
 .scratch/
 .worktrees/
+.t3webapp/

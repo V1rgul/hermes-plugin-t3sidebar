@@ -1,7 +1,7 @@
 #!/bin/sh
 # Real Hermes Webapp in a container, for testing the plugin against the actual Desktop renderer and gateway with invented data only.
-# Usage: tools/test-webapp/t3webapp.sh <setup|sync|seed|start|stop|login-url|status|destroy|prune>
-# Settings (environment): T3WEBAPP_RUNTIME (podman when installed, else docker), T3WEBAPP_NAME (t3demo, or t3demo-<worktree> in a linked worktree), T3WEBAPP_DIR (~/t3sidebar-demo, or ~/t3sidebar-demo-worktrees/<worktree>), T3WEBAPP_PORT (19120, or the first free port from 19121 in a linked worktree), T3WEBAPP_IMAGE (docker.io/nousresearch/hermes-agent:v0.23.0).
+# Usage: tools/test-webapp/t3webapp.sh <setup|sync|seed|start|stop|login-url|browser|drive '<code>'|browser-reset|status|destroy|prune>
+# Settings (environment): T3WEBAPP_RUNTIME (podman when installed, else docker), T3WEBAPP_NAME (t3demo, or t3demo-<worktree> in a linked worktree), T3WEBAPP_DIR (~/t3sidebar-demo, or ~/t3sidebar-demo-worktrees/<worktree>), T3WEBAPP_PORT (19120, or the first free port from 19121 in a linked worktree), T3WEBAPP_CDP_PORT (the test browser's, T3WEBAPP_PORT + 1000), T3WEBAPP_IMAGE (docker.io/nousresearch/hermes-agent:v0.23.0).
 set -eu
 
 RUNTIME=${T3WEBAPP_RUNTIME:-$(command -v podman >/dev/null 2>&1 && echo podman || echo docker)}
@@ -9,6 +9,7 @@ IMAGE=${T3WEBAPP_IMAGE:-docker.io/nousresearch/hermes-agent:v0.23.0}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 PLUGIN=/opt/data/plugins/hermes-t3sidebar
+ENABLER=/opt/data/desktop-plugins/t3webapp-enable-sidebar
 # The shared container used from the main checkout; linked worktrees clone its data.
 MAIN_NAME=t3demo
 MAIN_DIR=$HOME/t3sidebar-demo
@@ -53,6 +54,11 @@ elif [ -z "$PORT" ]; then
 	done
 fi
 
+# The worktree's test browser: Playwright's Chromium with its profile inside the worktree (ignored by Git), on its own CDP port, so its sign-in and site storage last until browser-reset and worktrees run their browsers side by side.
+BROWSER_DIR=$REPO/.t3webapp
+PROFILE=$BROWSER_DIR/browser-profile
+CDP_PORT=${T3WEBAPP_CDP_PORT:-$((PORT + 1000))}
+
 # Hermes serves a non-loopback bind only behind a login, so the Webapp listens on loopback inside the container (port 9121) and this forwarder, started with it, exposes it on the published port 9120. The published port is itself loopback-only on the host, so the test Webapp needs no login. The forwarder runs as the container's hermes user: Hermes lets only a connection from the server's own user redeem a launch link.
 FORWARD='import asyncio, os, pwd
 user = pwd.getpwnam("hermes")
@@ -94,6 +100,24 @@ follow() {
 	"$RUNTIME" exec -d --user hermes -e HERMES_HOME=/opt/data "$NAME" sh -c 'cd /opt/data/demo && exec /opt/hermes/.venv/bin/python seed_limits.py follow >> /opt/data/demo/limits-follow.log 2>&1' >/dev/null
 }
 
+# The pid file alone could name a recycled pid: the process must also hold this profile.
+browser_pid() {
+	pid=$(cat "$BROWSER_DIR/browser.pid" 2>/dev/null) || return 1
+	{ tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null | grep -q -- "--user-data-dir=$PROFILE " && echo "$pid"
+}
+
+# Closed through CDP so Chromium writes its storage to the profile first: a signal can lose the last writes, such as a plugin switch. The signal is only the fallback.
+stop_browser() {
+	pid=$(browser_pid) || return 0
+	drive 'const cdp = await context.browser().newBrowserCDPSession(); await cdp.send("Browser.close").catch(() => {});' >/dev/null 2>&1 || true
+	i=0
+	while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+	! kill -0 "$pid" 2>/dev/null || kill "$pid"
+	rm -f "$BROWSER_DIR/browser.pid"
+}
+
+drive() { T3WEBAPP_CDP_PORT=$CDP_PORT T3WEBAPP_SHOTS=$BROWSER_DIR/shots node "$HERE/drive.mjs" "$@"; }
+
 ensure_running() {
 	running "$NAME" || "$RUNTIME" start "$NAME" >/dev/null
 	wait_ready
@@ -110,9 +134,13 @@ restart_box() {
 sync_plugin() {
 	"$RUNTIME" exec "$NAME" rm -rf "$PLUGIN"
 	"$RUNTIME" exec "$NAME" mkdir -p "$PLUGIN"
-	tar -C "$REPO" --exclude=.git --exclude=.worktrees --exclude=node_modules --exclude=__pycache__ --exclude=artifacts --exclude=harness --exclude=tests --exclude=docs --exclude=tools --exclude=AGENTS.md -cf - . \
+	tar -C "$REPO" --exclude=.git --exclude=.worktrees --exclude=.t3webapp --exclude=node_modules --exclude=__pycache__ --exclude=artifacts --exclude=harness --exclude=tests --exclude=docs --exclude=tools --exclude=AGENTS.md -cf - . \
 		| "$RUNTIME" exec -i "$NAME" tar -C "$PLUGIN" -xf -
 	"$RUNTIME" exec "$NAME" chown -R hermes:hermes "$PLUGIN"
+	# A browser keeps the Desktop half's on/off choice, and a new browser profile starts with it off: this container-only plugin turns it on there (see enable-sidebar.js).
+	"$RUNTIME" exec "$NAME" mkdir -p "$ENABLER"
+	"$RUNTIME" cp "$HERE/enable-sidebar.js" "$NAME:$ENABLER/plugin.js"
+	"$RUNTIME" exec "$NAME" chown -R hermes:hermes "$ENABLER"
 }
 
 # Points the Webapp at the forwarder's upstream: loopback port 9121, without a login. Runs on every create, so data cloned from a container made before this change is converted too.
@@ -154,6 +182,9 @@ create() {
 	wait_ready
 }
 
+# A worktree's browser is found by its profile path, which survives the pid file of a removed worktree.
+stop_worktree_browser() { pkill -f -- "--user-data-dir=$1/.t3webapp/browser-profile" 2>/dev/null || true; }
+
 # Deletes only what create made (data, and the login file of containers made before logins were dropped, then the directory if nothing else is left), so a wrong directory never loses unrelated files.
 remove_box() {
 	! exists "$1" || "$RUNTIME" rm -f "$1" >/dev/null
@@ -169,6 +200,7 @@ prune() {
 		wt=$(label "$box" t3webapp.worktree)
 		[ -n "$wt" ] && [ ! -e "$wt/.git" ] || continue
 		echo "Removing $box: worktree $wt is gone"
+		stop_worktree_browser "$wt"
 		remove_box "$box" "$(label "$box" t3webapp.dir)"
 	done
 }
@@ -228,6 +260,7 @@ start)
 	follow
 	;;
 stop)
+	stop_browser
 	"$RUNTIME" stop "$NAME"
 	;;
 login-url)
@@ -235,12 +268,52 @@ login-url)
 	ensure_running
 	in_box hermes webapp --no-open --skip-build | sed -n "s|^ *http://127.0.0.1:9121/|http://127.0.0.1:$PORT/|p"
 	;;
+browser)
+	# No inactivity timeout: it runs until stop or browser-reset. Each start signs in again, which a still valid sign-in does not mind.
+	ensure_running
+	if ! browser_pid >/dev/null; then
+		mkdir -p "$PROFILE" "$BROWSER_DIR/shots"
+		chrome=$(node "$HERE/drive.mjs" --chromium)
+		# No sandbox, like the browser smoke test: Ubuntu denies it to unprivileged users, and this browser only opens the loopback test Webapp.
+		nohup "$chrome" --headless=new --no-sandbox --user-data-dir="$PROFILE" --remote-debugging-address=127.0.0.1 --remote-debugging-port="$CDP_PORT" \
+			--window-size=1400,900 --no-first-run --no-default-browser-check about:blank > "$BROWSER_DIR/browser.log" 2>&1 &
+		echo $! > "$BROWSER_DIR/browser.pid"
+		i=0
+		until curl -s -o /dev/null "http://127.0.0.1:$CDP_PORT/json/version"; do
+			i=$((i + 1))
+			[ "$i" -lt 100 ] || { echo "Test browser did not open CDP port $CDP_PORT; see $BROWSER_DIR/browser.log" >&2; exit 1; }
+			sleep 0.1
+		done
+	fi
+	link=$(in_box hermes webapp --no-open --skip-build | sed -n "s|^ *http://127.0.0.1:9121/|http://127.0.0.1:$PORT/|p")
+	# Ready once the sidebar tab shows, or the profile holds an explicit Off; a blank profile first reloads once (enable-sidebar.js), which a read can straddle.
+	T3WEBAPP_URL=$link drive 'await page.goto(process.env.T3WEBAPP_URL);
+		const ready = () => JSON.parse(localStorage.getItem("hermes.desktop.pluginDecisions.v2") || "{}")["hermes-t3sidebar"] === false || [...document.querySelectorAll("[role=tab]")].some(tab => tab.textContent.trim() === "t3sidebar");
+		for (let i = 0; i < 60; i++) {
+			try { if (await page.evaluate(ready)) return page.url(); } catch (_) { /* the reload replaced the page mid-read */ }
+			await page.waitForTimeout(500);
+		}
+		throw new Error("The Webapp did not show the sidebar within 30 s");' >/dev/null
+	echo "Test browser signed in to http://127.0.0.1:$PORT (CDP port $CDP_PORT, profile $PROFILE); drive it with: $0 drive '<code>'"
+	;;
+drive)
+	shift
+	drive "$@"
+	;;
+browser-reset)
+	# Only on request: the profile holds the browser's sign-in and site storage, including the plugin switch.
+	stop_browser
+	rm -rf -- "$PROFILE"
+	echo "Erased $PROFILE; $0 browser starts a blank one"
+	;;
 status)
 	"$RUNTIME" ps -a --filter "name=^$NAME\$" --format '{{.Names}} {{.Status}} {{.Ports}}'
 	;;
 destroy)
 	# The shared container holds the test-account login made interactively, so this command never destroys it.
 	[ "$NAME" != "$MAIN_NAME" ] || { echo "Refusing to destroy the shared container $MAIN_NAME" >&2; exit 1; }
+	stop_browser
+	rm -rf -- "$BROWSER_DIR"
 	remove_box "$NAME" "$DIR"
 	;;
 prune)
