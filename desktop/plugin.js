@@ -1417,49 +1417,7 @@ function Settings({ ctx }) {
     description: 'Show total input and output tokens on session cards.',
     checked: showTokens, onChange: saveTokens,
     below: tokensError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, tokensError) : null
-  }), h(ExperimentalSettings, { ctx }));
-}
-// Experimental features lean on Hermes internals. The backend reports, feature by feature, whether this Hermes still has them; a feature without them is off, its switch disabled and the reason shown under it, while the others keep working.
-const EXPERIMENTAL_KEY = ['hermes-t3sidebar-settings', 'experimental'];
-export const INCOMPATIBLE_HERMES = 'Incompatible with your Hermes version.';
-export const EXPERIMENTAL_FEATURES = [
-  { id: 'pool_credits', label: 'Banked reset expiries for every Codex account',
-    description: 'Lists when each banked Codex reset expires for every account in Hermes\'s credential pool, using each account\'s own token. Off: only the account Hermes is using now.' },
-];
-export function validExperimental(value) {
-  const features = value?.features;
-  if (!features || typeof features !== 'object') throw new Error('Unsupported experimental settings response.');
-  // A feature the backend does not report is treated as unavailable rather than guessed.
-  return Object.fromEntries(EXPERIMENTAL_FEATURES.map(({ id }) => [id, { enabled: features[id]?.enabled === true, available: features[id]?.available === true }]));
-}
-function ExperimentalSettings({ ctx }) {
-  const query = useQuery({ queryKey: EXPERIMENTAL_KEY, queryFn: async () => validExperimental(await ctx.rest('/settings/experimental')), staleTime: 0, retry: false });
-  // Same heading as Desktop's own settings sections (SectionHeading, not exported by the SDK): icon and title, with the caveat right after the title.
-  return h('section', { className: 'sf-experimental mt-6', 'aria-label': 'Experimental' },
-    h('div', { className: 'mb-2.5 flex items-center gap-2 pt-2 text-[length:var(--conversation-text-font-size)] font-medium' },
-      typeof sdk.Codicon === 'function' ? h(sdk.Codicon, { name: 'beaker', size: 16, className: 'shrink-0 text-muted-foreground' }) : null,
-      h('span', null, 'Experimental'),
-      h('span', { className: 'text-xs font-normal text-muted-foreground' }, 'May break with updates. Auto-disables in that case.')),
-    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, feature, state: query.data?.[feature.id], readError: query.isError })));
-}
-function ExperimentalFeature({ ctx, feature, state, readError }) {
-  const client = useQueryClient(), [error, setError] = useState('');
-  const save = async enabled => {
-    try {
-      client.setQueryData(EXPERIMENTAL_KEY, validExperimental(await ctx.rest(`/settings/experimental/${feature.id}`, { method: 'PUT', body: { enabled } })));
-      setError('');
-    } catch (_) {
-      setError('The setting was not saved.');
-      client.invalidateQueries({ queryKey: EXPERIMENTAL_KEY });
-    }
-  };
-  const unavailable = state?.available === false;
-  const note = unavailable ? INCOMPATIBLE_HERMES : error || (readError ? 'Could not read this setting from the plugin backend.' : '');
-  return h(sdk.ToggleRow ?? SettingsToggleRow, {
-    label: feature.label, description: feature.description,
-    checked: state?.enabled === true, disabled: !state || unavailable, onChange: save,
-    below: note ? h('div', { role: unavailable ? undefined : 'alert', className: 'mt-1.5 text-xs text-destructive', 'data-feature': feature.id }, note) : null
-  });
+  }));
 }
 // The settings page renders without the sidebar's stylesheet. Masking the native picker button keeps its click-to-open picker while drawing the same alarm as the hover Snooze control instead of a plain clock.
 const ALARM_MASK = `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>${BUNDLED_ICONS.Alarm.map(d => `<path d='${d}'/>`).join('')}</svg>`)}")`;
@@ -2443,7 +2401,7 @@ export function validUsageLimits(value) {
   }));
   return { ...value, providers, sampler: value.sampler && typeof value.sampler === 'object' ? value.sampler : null };
 }
-// Without the experimental per-account setting, banked credit expiries come only for the Codex account Hermes currently uses, and that read cannot say which pool entry it is. With a single account in the pool there is nothing to tell apart, so the list goes on that account; otherwise it stays a provider-level "current account" list.
+// Banked credit expiries come only for the Codex account Hermes currently uses, and that read cannot say which pool entry it is. With a single account in the pool there is nothing to tell apart, so the list goes on that account; otherwise it stays a provider-level "current account" list.
 export const CURRENT_CREDITS_ID = '@current';
 export function placeCurrentCredits(provider) {
   const current = provider.current_banked_credits;
@@ -3304,7 +3262,7 @@ function CurrentBankedResets({ credits, now }) {
   if (!live.length) return null;
   return h('div', { className: 'su-account', 'data-account': CURRENT_CREDITS_ID },
     h('div', { className: 'su-account-head' }, h('strong', null, 'Current account'), h('span', { className: 'su-spacer' }),
-      h('span', { className: 'su-muted', title: 'Hermes reads this list with the Codex sign-in it is using now and does not say which pool account that is. The experimental per-account setting lists every account instead.' }, 'the account Hermes is using now')),
+      h('span', { className: 'su-muted', title: 'Hermes reads this list with the Codex sign-in it is using now and does not say which pool account that is.' }, 'the account Hermes is using now')),
     h('div', { className: 'su-banked-row' }, h('ul', { className: 'su-banked', 'aria-label': 'Banked resets of the current account' }, live.map((credit, index) => bankedCreditLine(credit, index, now)))));
 }
 // Shared notes once under every section: how the samples and projections work, what a unit is, and which capacities are guessed.
