@@ -53,6 +53,27 @@ elif [ -z "$PORT" ]; then
 	done
 fi
 
+# Hermes serves a non-loopback bind only behind a login, so the Webapp listens on loopback inside the container (port 9121) and this forwarder, started with it, exposes it on the published port 9120. The published port is itself loopback-only on the host, so the test Webapp needs no login. The forwarder runs as the container's hermes user: Hermes lets only a connection from the server's own user redeem a launch link.
+FORWARD='import asyncio, os, pwd
+user = pwd.getpwnam("hermes")
+os.setgroups([]); os.setgid(user.pw_gid); os.setuid(user.pw_uid)
+async def pipe(reader, writer):
+	try:
+		while data := await reader.read(65536):
+			writer.write(data); await writer.drain()
+	finally:
+		writer.close()
+async def client(reader, writer):
+	try:
+		upstream = await asyncio.open_connection("127.0.0.1", 9121)
+	except OSError:
+		writer.close(); return
+	await asyncio.gather(pipe(reader, upstream[1]), pipe(upstream[0], writer), return_exceptions=True)
+async def main():
+	async with await asyncio.start_server(client, "0.0.0.0", 9120):
+		await asyncio.Event().wait()
+asyncio.run(main())'
+
 # Root in a throwaway container is the host user (rootless Podman) or real root (Docker), so it can copy and delete the container user's files that the host user cannot read. Labelling is disabled so the source volume is not relabelled away from its own container.
 as_root() { "$RUNTIME" run --rm --security-opt label=disable "$@"; }
 
@@ -94,6 +115,17 @@ sync_plugin() {
 	"$RUNTIME" exec "$NAME" chown -R hermes:hermes "$PLUGIN"
 }
 
+# Points the Webapp at the forwarder's upstream: loopback port 9121, without a login. Runs on every create, so data cloned from a container made before this change is converted too.
+loopback_config() {
+	as_root -v "$DIR/data:/d" --entrypoint /opt/hermes/.venv/bin/python "$IMAGE" -c 'from ruamel.yaml import YAML
+yaml, path = YAML(), "/d/config.yaml"
+with open(path) as file:
+	config = yaml.load(file) or {}
+config.setdefault("webapp", {}).update(host="127.0.0.1", port=9121)
+with open(path, "w") as file:
+	yaml.dump(config, file)'
+}
+
 # Starts a worktree container from the shared container's seeded data and test-account login, so it needs neither seed nor an interactive login. A running shared container is paused during the copy so its databases are not caught mid-write.
 clone_main_data() {
 	paused=
@@ -107,22 +139,22 @@ clone_main_data() {
 create() {
 	# Volume files are written before the first start: afterwards they belong to the container's mapped UID.
 	mkdir -p "$DIR/data"
-	if [ ! -f "$DIR/demo-login.env" ]; then
-		(umask 077 && printf 'HERMES_DASHBOARD_BASIC_AUTH_USERNAME=demo\nHERMES_DASHBOARD_BASIC_AUTH_PASSWORD=%s\n' "$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')" > "$DIR/demo-login.env")
-	fi
 	"$RUNTIME" pull "$IMAGE"
 	if [ -n "$WORKTREE" ] && [ -d "$MAIN_DIR/data" ] && [ -z "$(ls -A "$DIR/data")" ]; then
 		echo "Cloning the data of $MAIN_NAME"
 		clone_main_data
-	elif [ ! -f "$DIR/data/config.yaml" ]; then
-		printf 'webapp:\n  enabled: true\n  host: 0.0.0.0\n  port: 9120\n  public_url: "http://127.0.0.1:%s"\ntelemetry:\n  shared_metrics:\n    enabled: false\n    send: false\n' "$PORT" > "$DIR/data/config.yaml"
+	elif ! as_root -v "$DIR/data:/d:ro" --entrypoint test "$IMAGE" -f /d/config.yaml; then
+		# Checked from inside: once started, the data belongs to the container's user and the host user cannot see into it.
+		printf 'webapp:\n  enabled: true\n  public_url: "http://127.0.0.1:%s"\ntelemetry:\n  shared_metrics:\n    enabled: false\n    send: false\n' "$PORT" > "$DIR/data/config.yaml"
 	fi
-	# Loopback-only port and a volume of invented data: no real Hermes home, credentials or history ever enter the container. The labels let prune find the container once its worktree is gone.
-	"$RUNTIME" run -d --name "$NAME" --label "t3webapp.worktree=$WORKTREE" --label "t3webapp.dir=$DIR" --env-file "$DIR/demo-login.env" -v "$DIR/data:/opt/data:Z" -p "127.0.0.1:$PORT:9120" "$IMAGE" gateway run >/dev/null
+	loopback_config
+	# Loopback-only port and a volume of invented data: no real Hermes home, credentials or history ever enter the container. The labels let prune find the container once its worktree is gone, and mark it as served without a login.
+	"$RUNTIME" run -d --name "$NAME" --label "t3webapp.worktree=$WORKTREE" --label "t3webapp.dir=$DIR" --label t3webapp.login=none -v "$DIR/data:/opt/data:Z" -p "127.0.0.1:$PORT:9120" \
+		--entrypoint sh "$IMAGE" -c '/opt/hermes/.venv/bin/python -c "$1" & exec /opt/hermes/docker/entrypoint-dispatch.sh gateway run' sh "$FORWARD" >/dev/null
 	wait_ready
 }
 
-# Deletes only what create made (data and login, then the directory if nothing else is left), so a wrong directory never loses unrelated files.
+# Deletes only what create made (data, and the login file of containers made before logins were dropped, then the directory if nothing else is left), so a wrong directory never loses unrelated files.
 remove_box() {
 	! exists "$1" || "$RUNTIME" rm -f "$1" >/dev/null
 	[ -n "$2" ] && [ -d "$2" ] || return 0
@@ -147,16 +179,24 @@ setup)
 	if exists "$NAME"; then
 		owner=$(label "$NAME" t3webapp.worktree)
 		[ "$owner" = "$WORKTREE" ] || { echo "Container $NAME belongs to ${owner:-the main checkout}; set T3WEBAPP_NAME and T3WEBAPP_DIR" >&2; exit 1; }
-		# Reuses the container and its data: only the plugin is refreshed and re-enabled.
-		echo "Reusing existing container $NAME"
-		ensure_running
+		if [ "$(label "$NAME" t3webapp.login)" != none ]; then
+			# Made before logins were dropped: a container's command and environment are fixed, so it is recreated on the same data.
+			echo "Recreating $NAME without a login; its data, test account included, is kept"
+			"$RUNTIME" rm -f "$NAME" >/dev/null
+			rm -f "$DIR/demo-login.env"
+			create
+		else
+			# Reuses the container and its data: only the plugin is refreshed and re-enabled.
+			echo "Reusing existing container $NAME"
+			ensure_running
+		fi
 	else
 		create
 	fi
 	sync_plugin
 	in_box hermes plugins enable hermes-t3sidebar >/dev/null
 	restart_box
-	echo "Container $NAME is up on http://127.0.0.1:$PORT (login in $DIR/demo-login.env)."
+	echo "Container $NAME is up on http://127.0.0.1:$PORT; sign a browser in with: $0 login-url"
 	if ! in_box test -s /opt/data/auth.json; then
 		cat <<EOF
 For live turns, sign the container into a dedicated free Nous Portal account (never a personal one), then pick a free model:
@@ -191,7 +231,9 @@ stop)
 	"$RUNTIME" stop "$NAME"
 	;;
 login-url)
-	echo "http://127.0.0.1:$PORT  (user and password: $DIR/demo-login.env)"
+	# A loopback Webapp signs a browser in through a one-use link (valid 60 s) from `hermes webapp`, which names the container's own port.
+	ensure_running
+	in_box hermes webapp --no-open --skip-build | sed -n "s|^ *http://127.0.0.1:9121/|http://127.0.0.1:$PORT/|p"
 	;;
 status)
 	"$RUNTIME" ps -a --filter "name=^$NAME\$" --format '{{.Names}} {{.Status}} {{.Ports}}'
