@@ -373,12 +373,8 @@ def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=
 
 
 def _route(symbols, provider, entry):
-	"""(base_url, host) the picker would use for this entry; falls back to the row's own URL."""
-	route, host = symbols.get("_pool_entry_route_base_url"), symbols.get("_pool_entry_host")
-	if route is not None and host is not None:
-		return route(provider, entry), host(provider, entry)
-	base = getattr(entry, "runtime_base_url", None) or None
-	return base, str(base or "").strip().rstrip("/").lower()
+	"""(base_url, host) Hermes's model picker uses for this entry; only called once both helpers are known present."""
+	return symbols["_pool_entry_route_base_url"](provider, entry), symbols["_pool_entry_host"](provider, entry)
 
 
 # Last credit-list read per (home, provider, account), process-wide so every sampler of a home shares it.
@@ -427,7 +423,8 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 	pool = read_pool()
 	if not isinstance(pool, dict):
 		return []
-	required = ("fetch_account_usage", "PooledCredential")
+	# Fail closed without Hermes's route for each entry: a guessed URL can send a key to the wrong host (a proxy key to chatgpt.com, Hermes issue #121486), so then nothing is sent at all.
+	required = ("fetch_account_usage", "PooledCredential", "_pool_entry_route_base_url", "_pool_entry_host")
 	started = float(clock())
 	providers, slots, requests = [], [], []
 	# Per-account credit lists only on request and while Hermes still has the private helpers they need; otherwise the account Hermes uses is read through its public signed request.

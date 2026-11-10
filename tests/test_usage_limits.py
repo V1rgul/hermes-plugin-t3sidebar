@@ -507,6 +507,17 @@ class CollectorTests(unittest.TestCase):
 			with self.assertRaises(RuntimeError):
 				limits.collect_native(claude_login=NO_CLAUDE, join_timeout=1)
 
+	def test_a_missing_route_helper_sends_nothing_rather_than_guessing_a_route(self):
+		# A guessed route can send a key to the wrong host (a proxy key to chatgpt.com), so without either helper no account is fetched.
+		for name in ("_pool_entry_route_base_url", "_pool_entry_host"):
+			with self.subTest(missing=name):
+				fetched = []
+				symbols = self.symbols({"openai-codex": [{"id": "7ad3ca", "access_token": "proxy-key", "base_url": "https://chatgpt.com/backend-api/codex"}]}, fetched)
+				symbols[name] = None
+				with patch.object(limits, "_native_symbols", return_value=symbols):
+					(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=1, credits_fetcher=lambda *args: self.fail("credit list fetched"))
+				self.assertEqual((reading["error"], reading["accounts"], fetched), ("unavailable", [], []))
+
 	def test_default_collector_only_uses_vetted_native_functions(self):
 		tree = ast.parse((ROOT / "usage_limits.py").read_text(encoding="utf-8"))
 		taken = {
