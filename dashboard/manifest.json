@@ -2,7 +2,7 @@
 	"name": "hermes-t3sidebar",
 	"label": "hermes-t3sidebar",
 	"description": "Backend companion for the hermes-t3sidebar desktop sidebar: shared completion, snooze and pin metadata, token usage history and rate-limit sampling.",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"tab": { "hidden": true },
 	"api": "plugin_api.py"
 }
