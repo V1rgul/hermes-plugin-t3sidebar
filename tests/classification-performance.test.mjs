@@ -23,7 +23,8 @@ function reference(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown
 		const section = status === 'waiting' ? 'active' : row.archived === true ? status === 'working' ? 'working' : 'archived' : status === 'unknown' ? 'active'
 			: meta.state === 'snoozed' && !woke ? 'snoozed' : meta.pinned ? 'pinned' : status === 'working' ? 'working' : 'active';
 		const newSession = isEmptySession(row, runtimeKnown ? matches : []);
-		const drafted = newSession && !row._liveOnly && row.source === 'desktop';
+		// No server drafts are passed here: no card is drafted.
+		const drafted = false;
 		if (!matchesFilters({ ...row, newSession })) continue;
 		const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
 		const runtimes = matches.filter(item => typeof item.id === 'string' && item.id && item.id !== item.session_key);

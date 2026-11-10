@@ -24,8 +24,39 @@ const composer = {
     if (control.readDraft) return control.readDraft(sessionId);
     if (Object.hasOwn(control.mountedDrafts, sessionId)) return control.mountedDrafts[sessionId];
     return control.drafts[sessionId] ?? null;
+  },
+  // Like Desktop, only a mounted composer (the focused session, a tile, or the fresh 'new' draft) accepts text.
+  async setDraft(sessionId, text) {
+    calls.push(['setDraft', sessionId, text]);
+    if (control.setDraftError) throw new Error('fixture composer unavailable');
+    const mounted = sessionId === 'new' || sessionId === host.state.focusedStoredSessionId.get() || Object.hasOwn(control.mountedDrafts, sessionId);
+    if (!mounted || control.composerUnmounted) return false;
+    control.mountedDrafts[sessionId] = text;
+    return true;
   }
 };
+// The plugin's draft store, like the backend: control.serverDrafts holds the rows (text null once deleted), each write takes the next
+// sequence value, and a sync returns the rows changed after its cursor plus those it changed. A newer edited_at keeps its row.
+function draftsRoute(path, options) {
+  if (path !== '/drafts/sync' || options?.method !== 'POST') throw new Error(`Unexpected drafts request ${path}`);
+  if (control.draftsError) throw new Error('fixture drafts unavailable');
+  const body = options.body, drafts = control.serverDrafts ||= [];
+  (control.draftSyncs ||= []).push(clone(body));
+  control.draftSeq = Math.max(control.draftSeq || 0, ...drafts.map(draft => draft.seq || 0));
+  const changed = new Set();
+  for (const change of body.changes) {
+    changed.add(change.session_id);
+    const edited_at = Date.now() / 1000 - Math.min(Math.max(body.sent_at - change.edited_at, 0), 30);
+    const current = drafts.find(draft => draft.session_id === change.session_id);
+    if (current && current.edited_at > edited_at) continue;
+    const row = { session_id: change.session_id, text: change.text.trim() ? change.text : null, cwd: change.cwd ?? current?.cwd ?? null,
+      edited_at, seq: ++control.draftSeq, project: current?.project ?? null };
+    if (current) Object.assign(current, row); else drafts.push(row);
+  }
+  const reset = body.since === 0 || body.since > control.draftSeq;
+  const rows = drafts.filter(draft => changed.has(draft.session_id) || (reset ? draft.text !== null : draft.seq > body.since));
+  return { profile: control.draftsProfile || host.state.profile.get(), cursor: control.draftSeq, reset, drafts: clone(rows) };
+}
 export const host = {
   composer,
   state: { connectionId: atom('source-a'), profile: atom('default'), gateway: atom('open'), activeSessionId: atom('runtime-design'), focusedSessionId: atom('runtime-design'), focusedStoredSessionId: atom('design'), focusedSessionOwner: atom({ connectionId: 'source-a', profile: 'default' }) },
@@ -145,6 +176,7 @@ export const ctx = {
   },
   async rest(path, options) {
     calls.push(['rest', path, options]); if (control.backendMissing) throw new Error('404 backend not enabled');
+    if (path.startsWith('/drafts')) return draftsRoute(path, options);
     // The redeem route answers control.redeemResult (a value, or a function of the posted body that may throw like a failed request).
     if (path === '/usage/limits/redeem') return clone(typeof control.redeemResult === 'function' ? await control.redeemResult(options?.body) : control.redeemResult ?? { status: 'reset', available_count: 1, windows_reset: 2, profile: host.state.profile.get() || 'default' });
     // Experimental settings: control.experimentalUnavailable lists the features this Hermes lacks the internals for; enabling one of them fails like the backend's 409.
@@ -222,20 +254,6 @@ export const ctx = {
       control.afterDelete?.();
       if (control.deleteLostReply) { control.deleteLostReply = false; throw new Error('fixture reply lost after commit'); }
       return clone(control.deleteResult || receipt.result);
-    }
-    if (path.endsWith('/draft') && options?.method === 'POST') {
-      // Off by default, like a backend without the route: existing tests see no persisted drafts.
-      if (!control.draftPersistence) throw new Error('404 draft persistence unavailable');
-      const id = decodeURIComponent(path.slice('/sessions/'.length, -'/draft'.length));
-      (control.draftRequests ||= []).push({ id, body: clone(options.body) });
-      let row = [...control.rows, ...(control.extra || [])].find(item => item.id === id);
-      if (!row) {
-        const runtime = control.live.find(item => item.id === options.body.runtime_id && item.session_key === id);
-        if (!runtime) throw new Error('draft_runtime_not_found');
-        row = { id, source: runtime.source, message_count: 0, cwd: runtime.cwd ?? null, project: runtime.project ?? null, provider: runtime.provider ?? null, last_active: runtime.last_active ?? now() };
-        control.rows.push(row);
-      }
-      return { ok: true, profile: host.state.profile.get(), session_id: control.draftWrongId || id, message_count: row.message_count ?? 0 };
     }
     if (path.endsWith('/workspace')) {
       const id = decodeURIComponent(path.slice('/sessions/'.length, -'/workspace'.length));

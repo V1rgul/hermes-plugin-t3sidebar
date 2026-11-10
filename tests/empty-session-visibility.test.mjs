@@ -41,22 +41,39 @@ test('both persisted and runtime-only empty sessions are absent without a prompt
 	assert.equal(Boolean(document.querySelector('[data-section="active"] .sf-empty')), false);
 });
 
+// One drafts sync, as its 30 s poll would run it.
+async function sync() {
+	await act(async () => mock.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-draft-sync'] })); await tick(); await tick();
+}
+const sent = () => (mock.control.draftSyncs || []).flatMap(body => body.changes.map(({ session_id, text, cwd }) => ({ session_id, text, ...(cwd ? { cwd } : {}) })));
+const serverText = id => mock.control.serverDrafts?.find(draft => draft.session_id === id)?.text;
+// Another client's write, as the backend would record it.
+function remote(id, text) {
+	const drafts = mock.control.serverDrafts, seq = Math.max(0, ...drafts.map(draft => draft.seq)) + 1, current = drafts.find(draft => draft.session_id === id);
+	Object.assign(current, { text, seq, edited_at: Date.now() / 1000 });
+}
+
 test('draft-bearing empty session displays exact runtime project, glyph, color and provider, then disappears on clear', async () => {
 	fixtures(); mock.control.mountedDrafts['live-empty'] = 'PRIVATE unsent prompt';
-	await mount();
+	await mount(); await sync();
 	const draft = row('live-empty'); assert.ok(draft);
 	assert.equal(draft.querySelector('.sf-project-name').textContent, 'Robot');
 	assert.equal(draft.querySelector('[data-codicon]').dataset.codicon, 'tools');
 	assert.equal(draft.querySelector('.sf-project-icon').style.color, 'rgb(255, 96, 0)');
 	assert.ok(draft.querySelector('[data-provider-mark="anthropic"]'));
 	assert.equal(draft.dataset.hasDraft, 'true');
+	// One sync carried the text with the session's folder; neither the page nor any query holds it.
+	assert.deepEqual(sent(), [{ session_id: 'live-empty', text: 'PRIVATE unsent prompt', cwd: '/robot' }]);
 	assert.equal(document.body.textContent.includes('PRIVATE'), false);
 	assert.equal(JSON.stringify(mock.queryClient.getQueryCache().getAll().map(query => query.state.data)).includes('PRIVATE'), false);
-	// Without backend support the only write is the refused draft persistence request, which carries identities only.
-	const posts = mock.calls.filter(call => call[0] === 'rest' && call[2]?.method === 'POST');
-	assert.deepEqual(posts.map(call => [call[1], call[2].body]), [['/sessions/live-empty/draft', { runtime_id: 'runtime-empty' }]]);
+	assert.equal(mock.calls.some(call => call[0] === 'rest' && call[2]?.method === 'POST' && call[1] !== '/drafts/sync'), false, 'no native row or plugin metadata is written');
+	// Without a change, a sync sends nothing.
+	await sync();
+	assert.equal(sent().length, 1);
 	mock.control.mountedDrafts['live-empty'] = '';
-	await act(async () => mock.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-drafts'] })); await tick();
+	await sync(); await act(async () => mock.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-drafts'] })); await tick();
+	assert.deepEqual(sent().at(-1), { session_id: 'live-empty', text: '', cwd: '/robot' });
+	assert.equal(serverText('live-empty'), null);
 	assert.equal(!!row('live-empty'), false);
 	mock.control.mountedDrafts['live-empty'] = 'typed again';
 	await act(async () => mock.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-drafts'] })); await tick();
@@ -72,55 +89,126 @@ test('inactive stored draft survives filtering, and the first real message keeps
 	assert.equal(row('stored-empty').querySelector('.sf-row-title').textContent, 'First reply');
 });
 
-const draftPosts = () => mock.calls.filter(call => call[0] === 'rest' && call[2]?.method === 'POST' && call[1].endsWith('/draft'));
+test('a draft typed into an unsaved session survives Desktop erasing its local copy, and is put back on return', async () => {
+	fixtures(); mock.control.mountedDrafts['live-empty'] = 'unsent';
+	await mount(); await sync();
+	// Leaving the session records its text without a request; Desktop's prune then erases the local copy.
+	const syncs = mock.control.draftSyncs.length;
+	await act(async () => mock.host.state.focusedStoredSessionId.set('history')); await tick();
+	assert.equal(mock.control.draftSyncs.length, syncs);
+	delete mock.control.mountedDrafts['live-empty'];
+	await sync();
+	const card = row('live-empty'); assert.ok(card, 'the saved draft keeps the card');
+	assert.equal(card.dataset.current, 'false'); assert.equal(card.dataset.hasDraft, 'true');
+	// Back on it: the composer opens empty, and the saved text is put back instead of the draft being deleted.
+	mock.control.mountedDrafts['live-empty'] = '';
+	await act(async () => mock.host.state.focusedStoredSessionId.set('live-empty')); await tick(); await sync();
+	assert.equal(mock.control.mountedDrafts['live-empty'], 'unsent');
+	assert.equal(sent().some(change => change.text === ''), false);
+	assert.equal(serverText('live-empty'), 'unsent');
+});
 
-test('typing into an unsaved session persists its row once, and the card stays tinted after the composer is cleared', async () => {
-	fixtures(); mock.control.draftPersistence = true; mock.control.mountedDrafts['live-empty'] = 'PRIVATE unsent prompt';
-	await mount(); await tick();
-	assert.deepEqual(mock.control.draftRequests, [{ id: 'live-empty', body: { runtime_id: 'runtime-empty' } }]);
-	assert.equal(JSON.stringify(mock.calls.filter(call => call[0] === 'rest')).includes('PRIVATE'), false);
-	assert.equal(mock.calls.some(call => call[0] === 'rest' && call[2]?.method === 'POST' && !call[1].endsWith('/draft')), false, 'no plugin metadata is written');
-	// The stored row replaces the runtime-only card, keeping the runtime's project and provider.
+test('discarding a draft from its card unmarks it at once, though Desktop keeps the unfocused local copy until next focused', async () => {
+	fixtures(); mock.control.mountedDrafts.history = 'synced copy';
+	mock.host.state.focusedStoredSessionId.set('history');
+	await mount(); await sync();
+	assert.equal(serverText('history'), 'synced copy');
+	await act(async () => mock.host.state.focusedStoredSessionId.set('live-empty')); await tick();
+	delete mock.control.mountedDrafts.history; mock.control.drafts.history = 'synced copy';
+	mock.control.drafts['stored-empty'] = 'local only';
 	await refresh();
-	let card = row('live-empty'); assert.ok(card);
+	assert.equal(row('history').dataset.hasDraft, 'true'); assert.equal(row('stored-empty').dataset.hasDraft, 'true');
+	for (const id of ['history', 'stored-empty']) await act(async () => controller.discardDraft(captureScope(), { id }));
+	await refresh();
+	// Only a mounted composer can be written, so both local copies remain; neither counts as a draft any more.
+	assert.equal(mock.control.drafts.history, 'synced copy'); assert.equal(mock.control.drafts['stored-empty'], 'local only');
+	assert.equal(row('history').dataset.hasDraft, 'false'); assert.equal(!!row('stored-empty'), false);
+	await sync(); await refresh();
+	assert.equal(serverText('history'), null);
+	assert.equal(row('history').dataset.hasDraft, 'false'); assert.equal(!!row('stored-empty'), false);
+	// A later edit is a draft again, once the card next reads its composer.
+	mock.control.drafts.history = 'synced copy, edited';
+	await act(async () => mock.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-drafts'] })); await tick();
+	assert.equal(row('history').dataset.hasDraft, 'true');
+});
+
+test('a composer that mounts late on entering is restored, and a sync meanwhile deletes nothing', async () => {
+	fixtures(); mock.control.mountedDrafts['live-empty'] = 'unsent';
+	await mount(); await sync();
+	await act(async () => mock.host.state.focusedStoredSessionId.set('history')); await tick();
+	delete mock.control.mountedDrafts['live-empty'];
+	// Back on it: at first nothing answers for its composer, and a sync runs before it mounts empty.
+	let mounted = false;
+	mock.control.readDraft = id => id === 'live-empty' && !mounted ? null : mock.control.mountedDrafts[id] ?? mock.control.drafts[id] ?? null;
+	mock.control.composerUnmounted = true;
+	await act(async () => mock.host.state.focusedStoredSessionId.set('live-empty')); await tick();
+	await sync();
+	assert.equal(serverText('live-empty'), 'unsent');
+	mounted = true; mock.control.composerUnmounted = false; mock.control.mountedDrafts['live-empty'] = '';
+	await act(async () => new Promise(resolve => setTimeout(resolve, 300))); await sync();
+	assert.equal(mock.control.mountedDrafts['live-empty'], 'unsent');
+	assert.equal(serverText('live-empty'), 'unsent');
+	assert.equal(sent().some(change => change.text === ''), false);
+});
+
+test('text typed and left between two syncs goes up with the next one', async () => {
+	fixtures(); mock.host.state.focusedStoredSessionId.set('history');
+	await mount(); await sync();
+	assert.deepEqual(sent(), []);
+	mock.control.mountedDrafts['live-empty'] = 'quick note';
+	await act(async () => mock.host.state.focusedStoredSessionId.set('live-empty')); await tick();
+	await act(async () => mock.host.state.focusedStoredSessionId.set('history')); await tick();
+	delete mock.control.mountedDrafts['live-empty'];
+	await sync();
+	assert.deepEqual(sent(), [{ session_id: 'live-empty', text: 'quick note', cwd: '/robot' }]);
+});
+
+test('the most recent edit wins between clients, and a draft sent elsewhere clears this composer', async () => {
+	fixtures(); mock.host.state.focusedStoredSessionId.set('history'); mock.control.mountedDrafts.history = 'mine';
+	await mount(); await sync();
+	assert.deepEqual(sent().map(change => change.text), ['mine']);
+	assert.equal(row('history').dataset.hasDraft, 'true', 'a draft of a conversation with history is synced too');
+	// Another client's newer edit replaces the text here, and is not sent back.
+	remote('history', 'theirs');
+	await sync();
+	assert.equal(mock.control.mountedDrafts.history, 'theirs');
+	await sync();
+	assert.deepEqual(sent().map(change => change.text), ['mine']);
+	// A local edit after that goes up.
+	mock.control.mountedDrafts.history = 'mine again';
+	await sync();
+	assert.deepEqual(sent().map(change => change.text), ['mine', 'mine again']);
+	// Sent from another client: the draft is deleted there, and this composer, still holding the last synced text, is cleared.
+	remote('history', null);
+	await sync(); await sync();
+	assert.equal(mock.control.mountedDrafts.history, '');
+	assert.equal(sent().length, 2);
+});
+
+test('a saved draft whose session is gone reopens in a new session in its folder, and can be discarded', async () => {
+	fixtures(); mock.host.state.focusedStoredSessionId.set('history');
+	mock.control.serverDrafts = [{ session_id: 'gone', text: 'Reopen me', cwd: '/robot', seq: 7, edited_at: Date.now() / 1000,
+		project: { id: 'robot', name: 'Robot', cwd: '/robot', icon: 'tools', color: '#ff6000' } }];
+	await mount(); await sync();
+	const card = row('gone'); assert.ok(card);
 	assert.equal(card.querySelector('.sf-row-title').textContent, 'New session');
 	assert.equal(card.querySelector('.sf-project-name').textContent, 'Robot');
-	// Cleared composer: the session no longer disappears, and stays orange once another session is focused.
-	mock.control.mountedDrafts['live-empty'] = '';
-	await act(async () => mock.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar-drafts'] })); await tick();
-	await act(async () => mock.host.state.focusedStoredSessionId.set('history')); await tick(); await refresh();
-	card = row('live-empty'); assert.ok(card);
-	assert.equal(card.dataset.current, 'false');
 	assert.equal(card.dataset.hasDraft, 'true');
-	assert.equal(draftPosts().length, 1, 'a stored session is not persisted again');
-	// The first message ends the draft treatment.
-	Object.assign(mock.control.rows.find(item => item.id === 'live-empty'), { title: 'First reply', message_count: 2 });
+	await act(async () => card.querySelector('.sf-open').click()); await tick(); await tick(); await tick();
+	const create = mock.calls.find(call => call[0] === 'requestProfile' && call[2] === 'session.create');
+	assert.equal(create[3].cwd, '/robot');
+	assert.equal(mock.control.composerCwd, '/robot');
+	assert.equal(mock.control.mountedDrafts['fixture-created'], 'Reopen me');
+	// The move went up at once: the new session holds the draft, the old one's is deleted.
+	assert.equal(serverText('fixture-created'), 'Reopen me');
+	assert.equal(serverText('gone'), null);
+	assert.equal(!!row('gone'), false);
+	// Discarding deletes it and empties the focused composer.
+	mock.control.rows.push({ id: 'fixture-created', source: 'desktop', message_count: 0, cwd: '/robot' });
 	await refresh();
-	assert.equal(row('live-empty').querySelector('.sf-row-title').textContent, 'First reply');
-	assert.equal(row('live-empty').dataset.hasDraft, 'false');
-});
-
-test('a stored empty Desktop row stays visible and tinted without composer text; other sources and runtime-only rows do not', async () => {
-	fixtures(); mock.control.draftPersistence = true;
-	mock.control.rows.push({ id: 'acp-empty', source: 'acp', message_count: 0 }, { id: 'desktop-empty', source: 'desktop', message_count: 0 });
-	await mount();
-	assert.ok(row('desktop-empty')); assert.equal(row('desktop-empty').dataset.hasDraft, 'true');
-	assert.equal(row('desktop-empty').querySelector('.sf-row-title').textContent, 'New session');
-	assert.equal(!!row('acp-empty'), false, 'empty non-Desktop rows such as ACP health checks stay hidden');
-	assert.equal(!!row('stored-empty'), false, 'rows without known Desktop provenance stay hidden');
-	assert.equal(!!row('live-empty'), false, 'an unsaved session without text stays hidden');
-	assert.equal(draftPosts().length, 0, 'stored rows are never persisted again');
-});
-
-test('a refused or unconfirmed persistence backs off instead of repeating every render', async () => {
-	fixtures(); mock.control.mountedDrafts['live-empty'] = 'typed';
-	await mount(); await refresh(); await refresh();
-	assert.equal(draftPosts().length, 1);
-	assert.ok(row('live-empty'), 'the text still shows the card while unsupported');
-	mock.reset(); if (root) await act(async () => root.unmount()); root = null; controller?.dispose();
-	fixtures(); mock.control.draftPersistence = true; mock.control.draftWrongId = 'another'; mock.control.mountedDrafts['live-empty'] = 'typed';
-	await mount(); await refresh();
-	assert.equal(draftPosts().length, 1);
+	await act(async () => controller.discardDraft(captureScope(), { id: 'fixture-created' })); await tick(); await tick();
+	assert.equal(mock.control.mountedDrafts['fixture-created'], '');
+	assert.equal(serverText('fixture-created'), null);
 });
 
 test('empty visibility remains fail-closed on failed composer reads', async () => {

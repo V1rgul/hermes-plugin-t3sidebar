@@ -43,6 +43,7 @@ def _load_sibling(name, filename):
 usage_history = _load_sibling("hermes_t3sidebar_usage_history", "usage_history.py")
 usage_limits = _load_sibling("hermes_t3sidebar_shared_modules", "shared_modules.py").load_limits_module()
 banked_reset = _load_sibling("hermes_t3sidebar_banked_reset", "banked_reset.py")
+session_drafts = _load_sibling("hermes_t3sidebar_session_drafts", "session_drafts.py")
 
 
 def session_db_path() -> Path:
@@ -158,11 +159,26 @@ class BankedResetRedeem(BaseModel):
 	account: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
-class DraftPersist(BaseModel):
-	model_config = ConfigDict(extra="forbid", strict=True)
+class DraftChange(BaseModel):
+	model_config = ConfigDict(extra="forbid")
 
-	# The live runtime holding an unsaved draft; absent when the stored row already exists.
-	runtime_id: str | None = Field(default=None, pattern=SESSION_ID_PATTERN, max_length=256)
+	session_id: str = Field(pattern=SESSION_ID_PATTERN, max_length=256)
+	# Blank text deletes the draft.
+	text: Annotated[str, Field(strict=True, max_length=session_drafts.MAX_TEXT_LENGTH)]
+	# The folder a new session reopens this draft in when its own session has no stored history; absent keeps the stored one.
+	cwd: Annotated[str, Field(strict=True, min_length=1, max_length=4096)] | None = None
+	# When the edit happened, by the client's clock; only its distance to sent_at is used.
+	edited_at: float = Field(allow_inf_nan=False)
+
+
+class DraftSync(BaseModel):
+	model_config = ConfigDict(extra="forbid")
+
+	# The cursor returned by the previous sync; 0 asks for every draft.
+	since: Annotated[int, Field(strict=True, ge=0)]
+	# The client's clock when sending.
+	sent_at: float = Field(allow_inf_nan=False)
+	changes: list[DraftChange] = Field(default_factory=list, max_length=200)
 
 
 class SessionTitle(BaseModel):
@@ -1108,65 +1124,19 @@ async def native_delete(request, profile, session_id, body):
 	return value
 
 
-def persist_draft_row(profile, session_id, runtime_id, authority):
-	"""Give an unsent draft its stored row now, through the native first-prompt writer.
-
-	Native creates a Desktop session's row only on its first prompt, and Desktop's dead-session prune erases the composer stash of any session whose stored row is missing, so typed but unsent text is lost after navigating away. This runs the exact idempotent INSERT OR IGNORE the first prompt would run, on this process's own live session, and then reads the row back. Returns the stored message count.
-	"""
-	import sys
-	from hermes_constants import get_hermes_home
-	INTERNAL_LISTING_SOURCES = usage_history.internal_listing_sources()
-
-	home = get_hermes_home().resolve()
-
-	def stored():
-		db = open_session_db(profile, read_only=True)
+def native_drafts(profile, drafts):
+	"""Attach each existing draft's project the way session cards get theirs; drafts stay listed when Hermes's catalog cannot be read."""
+	if not any(draft["text"] is not None and draft["cwd"] for draft in drafts):
+		return [{**draft, "project": None} for draft in drafts]
+	try:
+		db = open_session_db(profile)
 		try:
-			if Path(db.db_path).resolve().parent != home:
-				raise HTTPException(403, "profile_mismatch")
-			# Never recreate a deleted session whose runtime is still alive.
-			if runtime_retired(db, {"session_key": session_id, "id": runtime_id}):
-				raise HTTPException(409, "session_retired")
-			row = db.get_session(session_id)
-			return None if row is None else (row.get("message_count"),)
+			projects = card_projects(db)
 		finally:
 			db.close()
-
-	if (row := stored()) is not None:
-		return row[0]
-	# Authority-backed topologies keep live sessions in another process; there is no native seam to reach them from here.
-	server = sys.modules.get("tui_gateway.server")
-	ensure = getattr(server, "_ensure_session_db_row", None)
-	if authority is not None or server is None or not callable(ensure):
-		raise HTTPException(503, "draft_persistence_unavailable")
-	if runtime_id is None:
-		raise HTTPException(404, "draft_runtime_not_found")
-	with server._sessions_lock:
-		session = server._sessions.get(runtime_id)
-		parent = session.get("agent") if isinstance(session, dict) else None
-		valid = (isinstance(session, dict) and not session.get("_finalized")
-			and session.get("session_key") == session_id
-			and str(getattr(parent, "session_id", None) or session_id) == session_id
-			and Path(session.get("profile_home") or server._launch_home()).resolve() == home)
-		source = str(session.get("source") or "").strip().lower() if valid else ""
-	if not valid:
-		raise HTTPException(404, "draft_runtime_not_found")
-	# Unknown provenance is not a human draft; internal runs never become sidebar rows.
-	if not source or source in {*INTERNAL_LISTING_SOURCES, "cron", "subagent"}:
-		raise HTTPException(409, "draft_source_unsupported")
-	if ensure(session) is False:
-		raise HTTPException(503, "draft_persistence_failed")
-	# The native writer swallows ordinary failures, so only the stored row proves persistence.
-	if (row := stored()) is None:
-		raise HTTPException(503, "draft_persistence_verification_failed")
-	return row[0]
-
-
-async def native_persist_draft(request, profile, session_id, body):
-	authority = native_control_guard(request, profile, "draft_persistence_context_unavailable")
-	count = await asyncio.to_thread(persist_draft_row, profile, session_id, body.runtime_id, authority)
-	# The stored empty Desktop row is itself the record that this session once held text; nothing else is kept.
-	return {"ok": True, "profile": profile, "session_id": session_id, "message_count": count}
+	except Exception:
+		projects = []
+	return [{**draft, "project": card_project(draft["cwd"], projects) if draft["text"] is not None and draft["cwd"] else None} for draft in drafts]
 
 
 async def native_rename(request, profile, session_id, body):
@@ -1206,6 +1176,9 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 
 	def store():
 		return HermesT3SidebarStore(path if path is not None else default_state_path(), clock)
+
+	def drafts():
+		return session_drafts.DraftStore(path if path is not None else default_state_path(), clock)
 
 	def sampler():
 		if limits_sampler is None:
@@ -1313,23 +1286,31 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		response.headers["Cache-Control"] = "no-store"
 		try:
 			profile = listing_profile(request)
-			return await native_delete(request, profile, session_id, body)
+			value = await native_delete(request, profile, session_id, body)
 		except HTTPException:
 			raise
 		except Exception as exc:
 			# Ambiguous failures must retain the original request for exact retry.
 			raise HTTPException(503, "native_delete_unavailable") from exc
+		try:
+			# A deleted session's draft would otherwise come back as a card that reopens it in a new session.
+			drafts().delete(value["deleted_ids"])
+		except Exception:
+			pass
+		return value
 
-	@api.post("/sessions/{session_id}/draft")
-	async def persist_draft(session_id: SessionId, body: DraftPersist, request: Request, response: Response):
+	@api.post("/drafts/sync")
+	def sync_drafts(body: DraftSync, request: Request, response: Response):
+		# One call per client every sync slot: its changes go up, everything changed since its cursor comes back.
 		response.headers["Cache-Control"] = "no-store"
 		try:
 			profile = listing_profile(request)
-			return await native_persist_draft(request, profile, session_id, body)
+			value = drafts().sync(body.since, [change.model_dump(exclude_none=True) for change in body.changes], body.sent_at)
+			return {**value, "profile": profile, "drafts": native_drafts(profile, value["drafts"])}
 		except HTTPException:
 			raise
 		except Exception as exc:
-			raise HTTPException(503, "draft_persistence_unavailable") from exc
+			raise HTTPException(503, "drafts_sync_failed") from exc
 
 	@api.post("/sessions/{session_id}/title")
 	async def rename_session(session_id: SessionId, body: SessionTitle, request: Request, response: Response):

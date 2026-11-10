@@ -10,6 +10,13 @@ const EMPTY_ROWS = [];
 const DEFAULT_META = { state: 'active', pinned: false };
 const ARCHIVE_FIRST_PAGE_SIZE = 100;
 const HISTORY_PAGE_SIZE = 500;
+// Drafts sync with one call per interval, both ways; the backend caps an edit's reported age to the same slot.
+const DRAFT_SYNC_MS = 30_000;
+// How often the focused composer is compared with the draft state, locally: no request, only what the next sync sends.
+const DRAFT_FOCUS_MS = 2000;
+// Received drafts a client keeps; deletion markers, the oldest first, are forgotten beyond it.
+const DRAFT_STATE_LIMIT = 500;
+export const draftSyncKey = scope => ['hermes-t3sidebar-draft-sync', scope.connectionId, scope.profile, scope.epoch];
 const ARCHIVE_TAIL_STALE_MS = 30000;
 const HISTORY_PAGE_GC_MS = 300000;
 const tokenFormatter = Intl.NumberFormat('en', { useGrouping: false, maximumFractionDigits: 0 });
@@ -184,6 +191,22 @@ export function isEmptySession(row, runtimes = []) {
   return count === 0 && !runtimeCounts.some(value => value > 0) && ![row, ...runtimes].some(contentful);
 }
 export const sessionTitle = row => row.newSession ? 'New session' : row.title || 'Untitled session';
+// A content fingerprint: which text a composer held when it last matched a draft.
+export function draftHash(text) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) { hash ^= text.charCodeAt(index); hash = Math.imul(hash, 0x01000193); }
+  return `${(hash >>> 0).toString(16)}:${text.length}`;
+}
+const validDraft = draft => typeof draft?.session_id === 'string' && draft.session_id && (draft.text === null || typeof draft.text === 'string') &&
+  Number.isSafeInteger(draft.seq) && Number.isFinite(draft.edited_at) && (draft.cwd === null || typeof draft.cwd === 'string');
+// A server draft whose session has neither stored history nor a live runtime here becomes its own card; opening it starts a session in its folder.
+export function withDraftRows(rows, drafts) {
+  if (!drafts?.length) return rows;
+  const known = new Set(rows.flatMap(aliases));
+  const extra = drafts.filter(draft => !known.has(draft.session_id)).map(draft => ({ id: draft.session_id, source: 'desktop', message_count: 0,
+    cwd: draft.cwd ?? null, project: draft.project ?? null, last_active: draft.edited_at, _limited: !draft.cwd, _liveOnly: true, _draftOnly: true }));
+  return extra.length ? [...rows, ...extra] : rows;
+}
 const draftIdentity = row => JSON.stringify([durableId(row), row.resolved_id || row.id]);
 const draftKey = (scope, row) => ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, durableId(row), row.resolved_id || row.id];
 const knownWorkspace = row => typeof row.cwd === 'string' || row.project?.is_home === true;
@@ -256,7 +279,7 @@ function projectFromRows(rows, cwd) {
   const row = rows.find(row => inProject(row) && row.project?.name) || rows.find(inProject);
   return row ? { ...row.project, cwd, nativeName: !!row.project?.name, name: row.project?.name || cwd || 'No project' } : { name: cwd || 'No project' };
 }
-export function buildSections(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown = true, runtimeStale = false, query = '', project = '*' } = {}) {
+export function buildSections(rows, metadata, live, { now = Date.now() / 1000, runtimeKnown = true, runtimeStale = false, query = '', project = '*', draftIds = null } = {}) {
   const result = Object.fromEntries(SECTIONS.map(section => [section, []]));
   const tokens = searchTokens(query);
   const runtimeIndex = new Map();
@@ -292,9 +315,8 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
       : meta.pinned ? 'pinned'
       : observed === 'working' ? 'working' : 'active';
     const newSession = isEmptySession(row, runtimeKnown ? matches : []);
-    // Native stores an empty Desktop session's row only once text was typed into it (see controller.persistDraft), so a stored
-    // empty Desktop row keeps its card (and tint) until its first message or deletion, even with the composer cleared.
-    const drafted = newSession && !row._liveOnly && String(row.source || '').toLowerCase() === 'desktop';
+    // A draft saved on the server, typed here or on another client: it keeps an empty session's card and tints any card.
+    const drafted = !!draftIds?.size && ids.some(id => draftIds.has(id));
     if ((tokens.length || project !== '*') && !matchesFilters({ ...row, newSession }, tokens, project)) continue;
     // Runtime last_active is also a resume/reattach clock, not conversation progress.
     const activity = seconds(row.last_active || row.updated_at || row.started_at || row.created_at);
@@ -373,7 +395,109 @@ const retrySupersededDelay = failures => Math.min(250 * 2 ** failures, 4000);
 export function createController(ctx, client = queryClient, env = { capture: captureScope, routes: () => host.profileRoutes(), host }) {
   let disposed = false, writing = false, generation = 0;
   let pendingRoutes = null, archiveHead = null;
-  const wakeAcks = new Map(), doneAcks = new Map(), deleteRequests = new Map();
+  const wakeAcks = new Map(), doneAcks = new Map(), deleteRequests = new Map(), draftStates = new Map();
+  // Per source and profile, kept in plugin storage across restarts: the sync cursor, the drafts as last received (deleted ones as markers,
+  // each with the fingerprint of the text this client's composer last matched), and local changes not yet acknowledged, so text typed
+  // before Desktop prunes it or closes survives until the next sync.
+  function draftState(scope) {
+    const key = `drafts:${scope.connectionId ?? 'local'}:${scope.profile}`;
+    if (draftStates.has(key)) return draftStates.get(key);
+    let stored;
+    try { stored = ctx.storage.get(key, null); } catch (_) { stored = null; }
+    const entries = value => Object.entries(value && typeof value === 'object' ? value : {});
+    // settled: the focused session once its composer has been reconciled; until then it is being entered, and an empty composer there is
+    // a copy not restored yet, never a deletion.
+    const state = { key, running: null, settled: null,
+      cursor: Number.isSafeInteger(stored?.cursor) && stored.cursor >= 0 ? stored.cursor : 0,
+      known: new Map(entries(stored?.known).filter(([, entry]) => entry && (entry.text === null || typeof entry.text === 'string'))),
+      pending: new Map(entries(stored?.pending).filter(([, change]) => change && typeof change.text === 'string' && Number.isFinite(change.edited_at))) };
+    draftStates.set(key, state);
+    return state;
+  }
+  function saveDraftState(state) {
+    for (const [id, entry] of state.known) {
+      if (state.known.size <= DRAFT_STATE_LIMIT) break;
+      if (entry.text === null) state.known.delete(id);
+    }
+    try { ctx.storage.set(state.key, { cursor: state.cursor, known: Object.fromEntries(state.known), pending: Object.fromEntries(state.pending) }); }
+    catch (_) { /* Sync still works for this run. */ }
+  }
+  // What the cards need: every session with a nonblank draft, local changes first. No text, so the query cache never holds composer contents.
+  function draftView(state) {
+    const view = [];
+    for (const id of new Set([...state.known.keys(), ...state.pending.keys()])) {
+      const known = state.known.get(id), pending = state.pending.get(id);
+      if (pending ? pending.text : known?.text) view.push({ session_id: id, cwd: pending?.cwd ?? known?.cwd ?? null, project: known?.project ?? null, edited_at: known?.edited_at ?? pending.edited_at });
+    }
+    return view;
+  }
+  function publishDrafts(scope, state) {
+    saveDraftState(state);
+    if (!disposed && sameScope(scope, env.capture())) client.setQueryData(draftSyncKey(scope), draftView(state));
+  }
+  // Cards' own draft markers, which only the focused card polls: rereads their composers once a draft was deleted or changed elsewhere.
+  const refreshCardDrafts = scope => refresh(scope, { queryKey: ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch] });
+  const draftKeyFor = (state, target) => target.ids?.find(id => state.known.has(id) || state.pending.has(id)) ?? target.key;
+  /* Compares one composer with the draft state. The most recent edit wins:
+     - a composer unchanged since it last matched the draft, while the draft changed (or was deleted) elsewhere since, takes the newer text;
+     - entering a session whose composer is empty under an existing draft: Desktop's dead-session prune erased the local copy of a session
+       without stored history, so the draft is put back (as it is into a composer that never held this draft);
+     - any other difference is a local edit, kept as pending and sent with the next sync (blank text deletes the draft).
+     Only a mounted composer is written. False means retry once it is: a failed write, or, when entering, a composer not mounted yet. */
+  async function reconcileDraft(scope, state, target, { mounted = false, entering = false } = {}) {
+    const raw = await readComposer(scope, target.address);
+    if (raw === null) return !entering;
+    const key = draftKeyFor(state, target), local = raw.trim() ? raw : '', localHash = draftHash(local);
+    const known = state.known.get(key), pending = state.pending.get(key);
+    if (local === (pending ? pending.text : known?.text ?? '')) {
+      if (known && !pending) known.seen = localHash;
+      // Typed before its session was listed: the folder is known now.
+      if (pending && !pending.cwd && target.cwd) pending.cwd = target.cwd;
+      return true;
+    }
+    if (!pending && known && (known.seen === localHash || entering && known.text !== null && (!local || known.seen == null))) {
+      if (!mounted) return true;
+      if (!(await writeComposer(scope, target.address, known.text ?? ''))) return false;
+      known.seen = draftHash(known.text ?? '');
+      return true;
+    }
+    state.pending.set(key, { text: local, cwd: target.cwd ?? pending?.cwd ?? known?.cwd ?? null, edited_at: Date.now() / 1000 });
+    return true;
+  }
+  // The focused composer, by whichever reader comes first after a focus change (entry, the local poll or a sync).
+  async function reconcileFocused(scope, state, target) {
+    if (!ownsFocus(scope)) return false;
+    const done = await reconcileDraft(scope, state, target, { mounted: true, entering: state.settled !== target.key });
+    if (done) state.settled = target.key;
+    return done;
+  }
+  // A composer still holding the exact text of a draft deleted since (discarded here, sent or cleared elsewhere), which Desktop keeps until that
+  // session is next focused and cleared: it no longer counts as a draft. Any edit after that text does.
+  function deletedCopy(state, id, text) {
+    const pending = state.pending.get(id), known = state.known.get(id), hash = draftHash(text);
+    return pending ? pending.text === '' && pending.discarded === hash : known?.text === null && known.seen === hash;
+  }
+  // Deletes a draft with the next sync. Composers still holding its text are cleared when next focused, as for a draft sent elsewhere.
+  // local: the composer's text, for a draft this client has not synced yet.
+  function dropDraft(state, id, cwd = null, local = null) {
+    const text = state.pending.get(id)?.text || state.known.get(id)?.text || local?.trim() && local;
+    if (text) state.pending.set(id, { text: '', cwd, edited_at: Date.now() / 1000, discarded: draftHash(text) });
+  }
+  const ownsFocus = scope => { const owner = env.host.state?.focusedSessionOwner?.get(); return owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile; };
+  // Text of one composer, or null when nothing answers for it (an unmounted session falls back to Desktop's local copy until its prune).
+  async function readComposer(scope, address) {
+    const composer = env.host.composer;
+    if (typeof composer?.getDraft !== 'function' || !address) return null;
+    try { const text = await fenced(scope, () => composer.getDraft(address)); return typeof text === 'string' ? text : null; }
+    catch (_) { check(scope); return null; }
+  }
+  // Only a mounted composer accepts text; false tells the caller to retry once it is.
+  async function writeComposer(scope, address, text) {
+    const composer = env.host.composer;
+    if (typeof composer?.setDraft !== 'function' || !address) return false;
+    try { return await fenced(scope, () => composer.setDraft(address, text)) === true; }
+    catch (_) { check(scope); return false; }
+  }
   function check(scope) { if (disposed || !sameScope(scope, env.capture())) throw new Error('Source/profile changed; refresh before trying again.'); }
   async function fenced(scope, fn) { check(scope); const result = await fn(); check(scope); return result; }
   async function routeFor(scope) {
@@ -469,7 +593,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         // Reduce at the SDK boundary: no composer text enters QueryCache or plugin storage.
         const present = await fenced(scope, async () => {
           const text = await composer.getDraft(id);
-          return typeof text === 'string' && text.trim().length > 0;
+          return typeof text === 'string' && text.trim().length > 0 && !(!hasAlias(row, env.host.state?.focusedStoredSessionId?.get()) && deletedCopy(draftState(scope), id, text));
         });
         return ownerMatches() && present;
       } catch (_) { check(scope); return false; }
@@ -633,26 +757,96 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         }
       }
     },
-    // Desktop's dead-session prune erases the composer text of any session without a stored row, and native writes that row
-    // only on the first prompt, so typed but unsent text vanished after navigating away. Persist the row as soon as text
-    // appears; the stored empty row then keeps its card until it is sent to or deleted. No plugin metadata is written, so
-    // this takes no writer lock and is fenced by scope alone.
-    async persistDraft(scope, row) {
-      check(scope);
-      const id = durableId(row);
-      if (!row._liveOnly || !row.runtimeId) throw new Error('Only an unsaved session with one live runtime needs persisting.');
-      try {
+    // One call both ways, every DRAFT_SYNC_MS: the focused composer's change and every pending one go up, and the drafts changed since this
+    // client's cursor come back. Concurrent callers share the call in flight.
+    async syncDrafts(scope, focus) {
+      const state = draftState(scope);
+      if (state.running) return state.running;
+      const work = (async () => {
+        const target = focus?.();
+        if (target) await reconcileFocused(scope, state, target);
         const route = await routeFor(scope);
-        const result = await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}/draft`, { method: 'POST', body: { runtime_id: row.runtimeId } }));
-        // The companion has already read the stored row back; a receipt for another session or profile is not confirmation.
-        if (result?.ok !== true || result.profile !== (route?.targetProfile || scope.profile) || result.session_id !== id || !Number.isInteger(result.message_count) || result.message_count < 0) {
-          throw new Error('The server did not confirm this draft session.');
+        const sent = [...state.pending];
+        const body = { since: state.cursor, sent_at: Date.now() / 1000,
+          changes: sent.map(([session_id, change]) => ({ session_id, text: change.text, edited_at: change.edited_at, ...(change.cwd ? { cwd: change.cwd } : {}) })) };
+        const value = await fenced(scope, () => ctx.rest('/drafts/sync', { method: 'POST', body }));
+        if (value?.profile !== (route?.targetProfile || scope.profile) || !Number.isSafeInteger(value.cursor) || value.cursor < 0 || typeof value.reset !== 'boolean' ||
+          !Array.isArray(value.drafts) || !value.drafts.every(validDraft)) throw new Error('Invalid current-profile drafts response.');
+        if (value.reset) {
+          const listed = new Set(value.drafts.map(draft => draft.session_id));
+          for (const [id, entry] of state.known) if (entry.text !== null && !listed.has(id)) state.known.set(id, { ...entry, text: null });
         }
-        return result;
-      } finally {
-        // The stored row replaces the runtime-only card on the next listing.
-        if (!disposed && sameScope(scope, env.capture())) refresh(scope, { queryKey: scopeKey(scope) });
+        for (const draft of value.drafts) {
+          state.known.set(draft.session_id, { text: draft.text, cwd: draft.cwd, project: draft.project ?? null, edited_at: draft.edited_at, seen: state.known.get(draft.session_id)?.seen ?? null });
+        }
+        for (const [id, change] of sent) {
+          // The composer held the sent text, so an edit that lost to a newer one is then replaced like any remote change.
+          const known = state.known.get(id);
+          if (known) known.seen = change.discarded ?? draftHash(change.text);
+          if (state.pending.get(id) === change) state.pending.delete(id);
+        }
+        state.cursor = value.cursor;
+        if (target) await reconcileFocused(scope, state, target);
+        saveDraftState(state);
+        if (value.drafts.length) refreshCardDrafts(scope);
+        return draftView(state);
+      })();
+      state.running = work;
+      try { return await work; } finally { if (state.running === work) state.running = null; }
+    },
+    localDrafts(scope) { return draftView(draftState(scope)); },
+    flushDrafts(scope) { refresh(scope, { queryKey: draftSyncKey(scope) }); },
+    // Entering a session: apply a newer or lost draft, retrying while its composer mounts. Leaving one: record its last text, which Desktop's
+    // prune may erase before the next sync. Neither makes a request.
+    async enterDraft(scope, target) {
+      if (!ownsFocus(scope)) return;
+      const state = draftState(scope);
+      if (state.settled === target.key) state.settled = null;
+      for (let attempt = 0; attempt < 20 && state.settled !== target.key && !(await reconcileFocused(scope, state, target)); attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 250));
       }
+      publishDrafts(scope, state);
+    },
+    // The focused composer between syncs: records a change so its card, and the edit time sent with the next sync, follow it within DRAFT_FOCUS_MS.
+    async noteDraft(scope, target) {
+      if (!ownsFocus(scope)) return;
+      const state = draftState(scope), before = JSON.stringify(draftView(state));
+      await reconcileFocused(scope, state, target);
+      if (JSON.stringify(draftView(state)) !== before) publishDrafts(scope, state);
+    },
+    async leaveDraft(scope, target) {
+      const state = draftState(scope);
+      if (state.settled === target.key) state.settled = null;
+      await reconcileDraft(scope, state, target);
+      publishDrafts(scope, state);
+    },
+    // A draft whose session has no stored history and no live runtime here reopens in a new session in the same folder, then moves onto it.
+    async openDraft(scope, row) {
+      const state = draftState(scope), id = aliases(row).find(alias => state.pending.get(alias)?.text ?? state.known.get(alias)?.text);
+      const text = id && (state.pending.has(id) ? state.pending.get(id).text : state.known.get(id)?.text);
+      if (!text) throw new Error('This draft is no longer saved. Refresh and retry.');
+      const cwd = state.pending.get(id)?.cwd ?? state.known.get(id)?.cwd ?? null;
+      const route = await routeFor(scope); check(scope);
+      let created = null;
+      if (cwd) created = await this.newChat(scope, { id: cwd, path: cwd }, `hermes-t3sidebar:draft:${id}:${draftHash(text)}`);
+      // A Home draft: the public SDK opens a fresh chat without a session id, so the text moves into it and leaves the server.
+      else await fenced(scope, () => env.host.newChat(route));
+      const address = created ? created.stored_session_id : 'new';
+      let written = false;
+      for (let attempt = 0; attempt < 20 && !(written = await writeComposer(scope, address, text)); attempt++) await new Promise(resolve => setTimeout(resolve, 100));
+      if (!written) throw new Error('A new session opened, but the draft could not be put into its composer. It stays saved.');
+      if (created) state.pending.set(created.stored_session_id, { text, cwd, edited_at: Date.now() / 1000 });
+      dropDraft(state, id, cwd);
+      publishDrafts(scope, state);
+      this.flushDrafts(scope);
+    },
+    async discardDraft(scope, row) {
+      const state = draftState(scope);
+      for (const id of aliases(row)) dropDraft(state, id, null, row._draftOnly ? null : await readComposer(scope, id));
+      if (!row._draftOnly && ownsFocus(scope) && hasAlias(row, env.host.state?.focusedStoredSessionId?.get())) await writeComposer(scope, row.resolved_id || row.id, '');
+      publishDrafts(scope, state);
+      refreshCardDrafts(scope);
+      this.flushDrafts(scope);
     },
     // The backend's command catalog lists commands actually registered by loaded plugins, not merely installed files.
     async autotitlerAvailable(scope) {
@@ -870,8 +1064,15 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       try { return await work; } finally { doneAcks.delete(key); }
     },
     async open(scope, row) {
+      if (row._draftOnly) return this.openDraft(scope, row);
       const route = await routeFor(scope); check(scope);
-      await fenced(scope, () => env.host.openSession(row.resolved_id || row.id, { route, profile: route?.profile || scope.profile, intent: 'in-place' }));
+      try {
+        await fenced(scope, () => env.host.openSession(row.resolved_id || row.id, { route, profile: route?.profile || scope.profile, intent: 'in-place' }));
+      } catch (error) {
+        // Another client's unsaved session has no stored history to resume here; its draft still reopens in its folder.
+        if (row._liveOnly && row.drafted) return this.openDraft(scope, row);
+        throw error;
+      }
       await this.ackWake(scope, row);
       await this.ackDone(scope, row);
       check(scope); refresh(scope, { queryKey: [...scopeKey(scope), 'sessions'] });
@@ -1447,7 +1648,9 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
           onClick: () => void perform(() => controller.autotitlerRename(scope, row)) }, 'Autotitler: rename now'),
         h(MenuAction, { name: 'Copy', disabled: busy, onClick: () => void perform(() => controller.copyId(scope, row)) }, 'Copy session ID'),
         h(MenuAction, { name: 'Trash2', destructive: true, disabled: disabled || busy || row.status !== 'idle' || row._liveOnly || typeof sdk.ConfirmDialog !== 'function', onClick: () => { controller.check(scope); deleteSession(row); close(); } }, 'Delete session'),
-        row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null,
+        row.drafted ? h(MenuAction, { name: 'X', destructive: true, disabled: busy, onClick: () => void perform(() => controller.discardDraft(scope, row)) }, 'Discard draft') : null,
+        row._draftOnly ? h('p', null, 'Opening this draft starts a new session in its folder.')
+          : row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null,
         h(sdk.Popover, { open: moveOpen, onOpenChange: setMoveOpen },
           h(sdk.PopoverTrigger, { asChild: true }, h(MenuAction, { name: 'FolderSymlink', 'aria-label': 'Move to project', disabled: disabled || busy || row.status !== 'idle' || row._liveOnly,
             onKeyDown: event => { if (event.key === 'ArrowRight') { event.preventDefault(); setMoveOpen(true); } } }, 'Move to project', h('span', { className: 'sf-submenu-arrow', 'aria-hidden': true }, icon('ChevronRight', '›')))),
@@ -1480,6 +1683,35 @@ function useSessionDraft({ row, active, hidden, controller, scope }) {
     if (!hidden && !previous.hidden && previous.active !== active) void draft.refetch();
   }, [active, hidden, draft.refetch]);
   return draft;
+}
+// Tells the draft sync which composer is focused, and reconciles a session's composer when entering and leaving it (see controller.enterDraft).
+function useDraftFocus({ controller, scope, rows, focusedId, focus }) {
+  const latest = useRef(rows);
+  latest.current = rows;
+  const targetFor = useCallback(id => {
+    const row = latest.current.find(item => hasAlias(item, id));
+    if (row?._draftOnly) return null;
+    // A session not listed yet (a new chat before the next runtime poll) is addressed by its own id, without a folder.
+    return row ? { key: durableId(row), ids: aliases(row), address: row.resolved_id || row.id, cwd: typeof row.cwd === 'string' && row.cwd ? row.cwd : null }
+      : { key: id, ids: [id], address: id, cwd: null };
+  }, []);
+  focus.current = () => focusedId ? targetFor(focusedId) : null;
+  // Local reads only, like the focused card's own draft poll; its data is a constant and it notifies nobody.
+  useQuery({ queryKey: [...draftSyncKey(scope), 'focus', focusedId], enabled: !!focusedId, refetchInterval: DRAFT_FOCUS_MS, staleTime: 0, gcTime: 0, retry: false,
+    refetchOnWindowFocus: false, refetchOnReconnect: false, notifyOnChangeProps: [],
+    queryFn: async () => {
+      const target = focus.current?.();
+      if (target) await controller.noteDraft(scope, target).catch(() => {});
+      return true;
+    } });
+  const previous = useRef(null);
+  useEffect(() => {
+    const before = previous.current;
+    previous.current = focusedId;
+    const left = before && before !== focusedId ? targetFor(before) : null, entered = focusedId ? targetFor(focusedId) : null;
+    if (left) void controller.leaveDraft(scope, left).catch(() => {});
+    if (entered) void controller.enterDraft(scope, entered).catch(() => {});
+  }, [focusedId, controller, scope, targetFor]);
 }
 function EmptySessionDraft({ row, active, controller, scope, onPresence, refreshAt }) {
   // Keep observing even while its card is absent: otherwise typing into a
@@ -1528,7 +1760,8 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   const bare = kind => menu?.kind === kind ? {} : { onClick: () => openMenu(kind) };
   const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
   const draft = useSessionDraft({ row, active, hidden: hidden || row.newSession, controller, scope });
-  const hasDraft = row.newSession ? draftPresent || row.drafted : draft.data === true && !draft.isError;
+  // The focused composer is read every 2 s, while its synced copy can lag one sync behind, so a focused card follows its composer alone.
+  const hasDraft = (row.newSession ? draftPresent : draft.data === true && !draft.isError) || !active && row.drafted;
   const attention = row.status === 'waiting', snoozed = row.section === 'snoozed', badge = snoozed ? null : cardStatus(row, active);
   const tokens = compactTokens(row), provider = providerMark(row.provider);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
@@ -1869,6 +2102,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // (which moves cards between categories) render instantly.
   const loaded = [sessions, runtime, metadata, archives].every(query => query.data !== undefined || query.isError);
   const [settled, setSettled] = useState(false);
+  const draftFocus = useRef(null);
+  // Its own root, so list refreshes never trigger a sync; the data is the drafts to show, without text. It starts once the lists have loaded,
+  // so the focused session's folder is known.
+  const drafts = useQuery({ queryKey: draftSyncKey(scope), queryFn: () => controller.syncDrafts(scope, () => draftFocus.current?.()), placeholderData: () => controller.localDrafts(scope),
+    enabled: loaded, refetchInterval: DRAFT_SYNC_MS, staleTime: DRAFT_SYNC_MS, retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false });
   useEffect(() => { if (loaded) setSettled(true); }, [loaded]);
   const previousLimits = useRef({ limit, archiveLimit });
   useEffect(() => {
@@ -1885,7 +2123,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const liveCounts = useMemo(() => rememberSubagents(live, subagentMemory.current, scopeId), [live, scopeId]);
   const rich = sessions.data?.sessions || EMPTY_ROWS, extra = sessions.data?.capped ? EMPTY_ROWS : expanded.data?.sessions || EMPTY_ROWS;
   const archivedRows = archives.data?.sessions || EMPTY_ROWS;
-  const rows = useMemo(() => mergeRows(rich, extra, live, true, archivedRows), [rich, extra, live, archivedRows]);
+  const serverDrafts = drafts.data || EMPTY_ROWS;
+  const rows = useMemo(() => withDraftRows(mergeRows(rich, extra, live, true, archivedRows), serverDrafts), [rich, extra, live, archivedRows, serverDrafts]);
+  const draftIds = useMemo(() => new Set(serverDrafts.map(draft => draft.session_id)), [serverDrafts]);
   const runtimeKnown = !!runtime.data, runtimeStale = runtimeKnown && runtime.isError;
   // Successful polls still advance ages and due snoozes when Query structural
   // sharing keeps data references unchanged. Use existing polls, no extra timer.
@@ -1902,38 +2142,15 @@ function ScopedSidebar({ ctx, controller, scope }) {
     }
     return low ? snoozeDeadlines[low - 1] : 0;
   }, [snoozeDeadlines, now]);
-  const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, liveCounts, { runtimeKnown, runtimeStale, now: classificationNow }), [rows, metadata.data, liveCounts, runtimeKnown, runtimeStale, classificationNow]);
-  const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession), [classified]);
+  const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, liveCounts, { runtimeKnown, runtimeStale, now: classificationNow, draftIds }), [rows, metadata.data, liveCounts, runtimeKnown, runtimeStale, classificationNow, draftIds]);
+  const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession && !row._draftOnly), [classified]);
+  const ownsActive = activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile;
+  useDraftFocus({ controller, scope, rows, focusedId: ownsActive ? activeId : null, focus: draftFocus });
   const tokens = useMemo(() => searchTokens(query), [query]);
   // Populate text only for rows actually searched; replacing the classified snapshot also replaces its search index.
   const searchIndex = useMemo(() => new WeakMap(), [classified]);
   const sections = useMemo(() => Object.fromEntries(SECTIONS.map(section => [section,
     classified[section].filter(row => (!row.newSession || row.drafted || emptyDrafts.has(draftIdentity(row)) || ['waiting', 'working'].includes(row.status)) && matchesFilters(row, tokens, project, searchIndex))])), [classified, emptyDrafts, tokens, project, searchIndex]);
-  // Persist each newly drafted unsaved session (see controller.persistDraft). One attempt at a time per session; failures back off
-  // so an unsupported backend is not hammered.
-  const draftPersists = useRef(new Map()), [draftRetry, setDraftRetry] = useState(0);
-  useEffect(() => {
-    const now = Date.now();
-    let wake = Infinity;
-    for (const row of emptyCandidates) {
-      const id = draftIdentity(row);
-      if (!row._liveOnly || !row.runtimeId || !emptyDrafts.has(id)) continue;
-      const attempt = draftPersists.current.get(id);
-      if (attempt?.pending || attempt?.done) continue;
-      if (attempt && attempt.retryAt > now) { wake = Math.min(wake, attempt.retryAt); continue; }
-      draftPersists.current.set(id, { pending: true, failures: attempt?.failures || 0 });
-      // A confirmed session stays done: its stored row arrives with the refreshed listing.
-      controller.persistDraft(scope, row).then(() => draftPersists.current.set(id, { done: true }), error => {
-        const failures = (attempt?.failures || 0) + 1;
-        const delay = Math.min(5000 * 2 ** (failures - 1), 300000);
-        draftPersists.current.set(id, { pending: false, failures, retryAt: Date.now() + delay });
-        setDraftRetry(value => value + 1);
-      });
-    }
-    if (wake === Infinity) return undefined;
-    const timer = setTimeout(() => setDraftRetry(value => value + 1), Math.max(0, wake - now));
-    return () => clearTimeout(timer);
-  }, [emptyCandidates, emptyDrafts, controller, scope, draftRetry]);
   const searching = !!query.trim();
   const isClosed = section => !!collapsed[section] && !(searching && section === 'working');
   const filtering = searching || project !== '*';
@@ -3849,6 +4066,6 @@ export default {
         return queryClient.invalidateQueries({ queryKey: scopeKey(scope), predicate: query => resources.includes(query.queryKey[4]), refetchType: 'active' }, { cancelRefetch: false });
       }).catch(() => { /* Query retains errors for the pane's normal recovery UI. */ });
     });
-    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-preferences', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
+    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-draft-sync', 'hermes-t3sidebar-preferences', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
   }
 };

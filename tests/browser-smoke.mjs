@@ -788,6 +788,8 @@ try {
   check('new runtime-only empty session stays hidden with no draft prompt', !await runtimeDraft.count());
   await page.evaluate(() => { window.hermesT3SidebarHarness.control.mountedDrafts['synthetic-runtime-draft'] = 'PRIVATE unsent robot prompt'; });
   await runtimeDraft.waitFor();
+  // The card can appear first from the draft the sync recorded on entering; the focused card's own marker follows its composer's next 2 s poll.
+  await page.waitForFunction(() => document.querySelector('[data-session-id="synthetic-runtime-draft"]')?.dataset.hasDraft === 'true');
   check('typing in a hidden empty session reveals its card through ordinary focused composer polling', await runtimeDraft.getAttribute('data-has-draft') === 'true' && await runtimeDraft.locator('.sf-row-title').textContent() === 'New session');
   check('zero-message draft card has its exact project name, native icon/color and provider', await runtimeDraft.locator('.sf-project-name').textContent() === 'Draft robot' && await runtimeDraft.locator('[data-codicon="tools"]').count() === 1 && await runtimeDraft.locator('[data-provider-mark="anthropic"]').count() === 1 && await runtimeDraft.locator('.sf-project-icon').evaluate(el => getComputedStyle(el).color === 'rgb(255, 96, 0)'));
   check('draft contents never enter sidebar DOM or plugin query cache', !/PRIVATE unsent robot/.test(await page.locator('.sf').innerText()) && await page.evaluate(() => !JSON.stringify(window.hermesT3SidebarHarness.queryClient.getQueryCache().getAll().map(query => query.state.data)).includes('PRIVATE unsent robot')));

@@ -1059,7 +1059,8 @@ test('legacy completion metadata never classifies native archives or migrates hi
   assert.deepEqual(sections.archived.map(r => r.id), ['native']);
   await mount();
   assert.equal(row('legacy').closest('section')?.getAttribute('aria-label'), 'Ready');
-  assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.archive' || c[0] === 'rest' && c[2]?.method === 'POST'), false);
+  // The drafts sync is the only POST a mount makes; it writes no session metadata.
+  assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.archive' || c[0] === 'rest' && c[2]?.method === 'POST' && c[1] !== '/drafts/sync'), false);
   assert.doesNotMatch(document.body.textContent, /\bsettle(?:d)?\b/i);
   await click(button('Actions for Sidebar layout')); assert.doesNotMatch($('[role=dialog]').textContent, /\bsettle(?:d)?\b/i);
 });
@@ -1659,7 +1660,9 @@ test('React draft focus entering/leaving refetches only affected cards and confi
   assert.equal(row('design').dataset.hasDraft, 'true'); assert.equal(row('readme').dataset.hasDraft, 'true');
   assert.equal(row('design').dataset.current, 'false'); assert.equal(row('readme').dataset.current, 'true');
   const after = counts();
-  assert.equal(after.design, before.design + 1); assert.equal(after.readme, before.readme + 1); assert.equal(after.approval, before.approval);
+  // Leaving design: its card's refetch, plus the draft sync's last read of the session just left (before Desktop's prune can erase it).
+  // Entering readme: its card's refetch, the draft sync's entry check, and the first of its local 2 s comparisons.
+  assert.equal(after.design, before.design + 2); assert.equal(after.readme, before.readme + 3); assert.equal(after.approval, before.approval);
   for (const query of draftQueries()) {
     const observer = query.getObserversCount() ? query.observers[0] : null;
     assert.equal(observer?.options.refetchInterval, query.queryKey[4] === 'readme' ? 2000 : false);
@@ -1700,8 +1703,10 @@ async function remount() {
 test('fold preferences survive remount/reconnect but remain source and profile scoped', async () => {
   await mount();
   for (const label of ['Working', 'Snoozed', 'Archived']) await click(button(`${label} (1)`));
-  assert.equal(mock.storageData.size, 1);
-  const [key, raw] = [...mock.storageData][0];
+  // Besides folds, plugin storage holds only the drafts sync state.
+  const folds = () => [...mock.storageData].filter(([key]) => key.startsWith('["folds"'));
+  assert.equal(folds().length, 1);
+  const [key, raw] = folds()[0];
   assert.deepEqual(JSON.parse(raw), { working: true, snoozed: true, archived: true });
   await remount();
   for (const id of ['root', 'snoozed', 'archived']) assert.equal(row(id), null);
@@ -1719,7 +1724,7 @@ test('fold preferences survive remount/reconnect but remain source and profile s
 });
 
 test('fold storage accepts only secondary-shelf booleans and tolerates read/write failures', async () => {
-  await mount(); const key = [...mock.storageData.keys()][0];
+  await mount(); const key = [...mock.storageData.keys()].find(item => item.startsWith('["folds"'));
   for (const value of [null, [], 'bad', { working: 'true', snoozed: 1, archived: true, active: true, pinned: true }]) {
     mock.ctx.storage.set(key, value); await remount();
     assert.ok(row('root')); assert.ok(row('snoozed')); assert.ok(row('pinned')); assert.ok(row('design'));
