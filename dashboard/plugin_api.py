@@ -1324,8 +1324,9 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise HTTPException(503, "native_rename_unavailable") from exc
 
 	@api.get("/state", response_model=FlowState)
-	def get_state(response: Response):
+	def get_state(request: Request, response: Response):
 		response.headers["Cache-Control"] = "no-store"
+		listing_profile(request)
 		return store().state()
 
 	@api.post("/sessions/{session_id}", response_model=FlowState)
