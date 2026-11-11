@@ -232,8 +232,8 @@ class CompletionObserver:
 					recorded = snapshot is not None and self._begin_run(snapshot.root, key[1], started_wall, fired)
 					self._receipts[key] = (started, snapshot, recorded)
 					self._prune(now)
-		except Exception:
-			log.debug("Completion begin observation unavailable")
+		except Exception as exc:
+			log.debug("Completion begin observation unavailable (%s)", type(exc).__name__)
 		return None
 
 	def _begin_run(self, root, turn_id, started_wall, heartbeat_fired_at):
@@ -241,8 +241,8 @@ class CompletionObserver:
 		try:
 			self.store.begin_run(root, turn_id, float(started_wall), heartbeat_fired_at)
 			return True
-		except Exception:
-			log.debug("Turn start unavailable")
+		except Exception as exc:
+			log.debug("Turn start unavailable (%s)", type(exc).__name__)
 			return False
 
 	def on_session_end(self, *, session_id=None, task_id=None, turn_id=None, completed=None,
@@ -266,8 +266,8 @@ class CompletionObserver:
 			if before is not None and interrupted is not True:
 				try:
 					after = native_snapshot(self.home, sid)
-				except Exception:
-					log.debug("Turn end snapshot unavailable")
+				except Exception as exc:
+					log.debug("Turn end snapshot unavailable (%s)", type(exc).__name__)
 			pending = before is not None and interrupted is not True and (
 				bool(after and (after.live or after.undelivered - before.undelivered))
 				or awaits_processes({sid, key[0], *before.aliases}))
@@ -278,8 +278,8 @@ class CompletionObserver:
 					return None
 				try:
 					self.store.end_run(key[1], pending)
-				except Exception:
-					log.debug("Turn end unavailable")
+				except Exception as exc:
+					log.debug("Turn end unavailable (%s)", type(exc).__name__)
 			if (completed is not True or failed is not False or interrupted is not False
 					or (platform and not _human(platform)) or receipt is None):
 				return None
@@ -292,9 +292,9 @@ class CompletionObserver:
 				if not self._closed and self._same_home():
 					# A turn whose start was recorded yields to any turn that started after it; without that start the ledger proves nothing either way, so Done stays independent of timer writes.
 					self.store.record(after.root, turn_id, current_only=receipt[2])
-		except Exception:
+		except Exception as exc:
 			# Observation must never break a turn or return injectable context.
-			log.debug("Completion end observation unavailable")
+			log.debug("Completion end observation unavailable (%s)", type(exc).__name__)
 		return None
 
 	def close(self):

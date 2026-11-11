@@ -8,6 +8,7 @@ import asyncio
 import dataclasses
 import importlib.util
 import json
+import logging
 import math
 from pathlib import Path
 import re
@@ -20,6 +21,9 @@ from typing import Annotated, Callable, Literal
 from types import SimpleNamespace
 from fastapi import APIRouter, HTTPException, Path as PathParameter, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+log = logging.getLogger(__name__)
 
 
 # Dashboard loads this file directly, without a reliable package name. Load exactly our fixed sibling ledger; no request or profile value controls code.
@@ -424,8 +428,9 @@ def standalone_subagent_count(server, row, snapshot, db, home):
 			session_db=owner_db, route=row["id"], include_fallback_evicted=True))
 		with server._sessions_lock:
 			return count if admitted_db() is owner_db else None
-	except Exception:
+	except Exception as exc:
 		# Older cores, stale objects and failed projections are unknown per row.
+		log.debug("Running subagent count unavailable (%s)", type(exc).__name__)
 		return None
 
 
@@ -775,11 +780,11 @@ async def native_runtime(request, profile):
 			projection = await read(connection, SessionRef(reader.profile_id, row["id"]),
 				{"session_id": row["id"], "profile": profile}, kind="subagents")
 			row["running_subagents"] = running_subagent_count(projection.get("subagents"))
-		except Exception:
+		except Exception as exc:
 			# Unsupported worker projections, stale generations, missing seams or
 			# authority failures cannot turn unknown into idle or retain an old count.
 			# Cancellation (BaseException) still cancels the request.
-			pass
+			log.debug("Subagent projection unavailable (%s)", type(exc).__name__)
 	return value
 
 
@@ -1194,8 +1199,9 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			return None
 		try:
 			return limits_sampler()
-		except Exception:
+		except Exception as exc:
 			# Sampling is best-effort telemetry; it must never fail the sidebar request that happened to start it.
+			log.debug("Limits sampler unavailable (%s)", type(exc).__name__)
 			return None
 
 	def listing_profile(request, allowed=()):
@@ -1304,8 +1310,9 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		try:
 			# A deleted session's draft would otherwise come back as a card that reopens it in a new session.
 			await asyncio.to_thread(drafts().delete, value["deleted_ids"])
-		except Exception:
-			pass
+		except Exception as exc:
+			# The verified deletion is still reported as such; the drafts left behind are only logged.
+			log.warning("Drafts of deleted sessions were not cleared (%s)", type(exc).__name__)
 		return value
 
 	@api.post("/drafts/sync")

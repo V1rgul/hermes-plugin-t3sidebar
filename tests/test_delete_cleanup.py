@@ -48,6 +48,15 @@ class DeleteCleanupTests(unittest.TestCase):
 		self.assertEqual(response.json(), VALUE)
 		self.assertEqual(calls, [("worker", ["target", "child"])])
 
+	def test_failed_draft_cleanup_keeps_the_verified_deletion_and_logs_only_the_failure_class(self):
+		failure = sqlite3.OperationalError("database is locked: target child")
+		with self.assertLogs(level="WARNING") as logs, patch.object(backend.session_drafts.DraftStore, "delete", side_effect=failure):
+			response = self.delete()
+		self.assertEqual(response.status_code, 200, response.text)
+		self.assertEqual(response.json(), VALUE)
+		self.assertEqual([(record.levelno, record.getMessage()) for record in logs.records],
+			[(logging.WARNING, "Drafts of deleted sessions were not cleared (OperationalError)")])
+
 
 if __name__ == "__main__":
 	unittest.main()
