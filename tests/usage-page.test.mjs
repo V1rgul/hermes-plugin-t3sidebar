@@ -1213,10 +1213,12 @@ test('a range change glides through the viewBox and translates, then settles; po
   const plot = $('.su-pooled .su-plot');
   assert.deepEqual([grid().dataset.gliding, viewBox(), translated(), gridline().getAttribute('x1'), gridline().getAttribute('x2'), (Number(plot.dataset.end) - Number(plot.dataset.start)) / D],
     [undefined, '0 0 1000 100', 0, '0', '1000', 8], `the interrupted glide (at ${shown}) settles on one day back and seven ahead`);
-  // A poll moves Now and both ends of the axis but keeps the range: no glide.
-  const before = $('.su-pooled .su-plot').dataset.start;
-  await act(async () => { await mock.queryClient.refetchQueries(); }); await tick();
-  assert.deepEqual([$('.su-pooled .su-plot').dataset.start !== before || restPaths().length > 0, grid().dataset.gliding, viewBox()], [true, undefined, '0 0 1000 100']);
+  // A poll moves Now and both ends of the axis but keeps the range: no glide. The clock jumps an hour before it, so the move cannot be missed.
+  const before = Number($('.su-pooled .su-plot').dataset.start), realNow = Date.now;
+  Date.now = () => realNow() + 3600_000;
+  try { await act(async () => { await mock.queryClient.refetchQueries(); }); await tick(); } finally { Date.now = realNow; }
+  const moved = Number($('.su-pooled .su-plot').dataset.start) - before;
+  assert.deepEqual([moved >= 3600 && moved <= 3602, grid().dataset.gliding, viewBox()], [true, undefined, '0 0 1000 100'], `the axis start moved by ${moved}s`);
   // Switching the window redraws at once: a different series, not the same one at another range.
   await click(button('5-hour'));
   assert.deepEqual([grid().dataset.gliding, viewBox()], [undefined, '0 0 1000 100']);
