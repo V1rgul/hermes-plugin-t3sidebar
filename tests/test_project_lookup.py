@@ -1,5 +1,6 @@
-"""Project projection of cards and drafts degrades without Hermes's version-sensitive helpers."""
+"""Project projection of cards and drafts: degrades without Hermes's version-sensitive helpers, and owns descendants with either separator."""
 
+import ntpath
 from pathlib import Path
 import sys
 import tempfile
@@ -8,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import hermes_cli
+from hermes_cli import projects_db
 
 from test_backend import backend
 
@@ -46,6 +48,29 @@ class MissingProjectHelpers(unittest.TestCase):
 		self.assertEqual([(draft["session_id"], draft["project"]) for draft in value], [
 			("a", {"id": "/work/repo", "name": "repo", "icon": None, "color": None, "cwd": "/work/repo"}), ("b", None)])
 
+
+
+class WindowsDescendants(unittest.TestCase):
+	def setUp(self):
+		# Hermes on Windows: its normalizer yields backslash paths and os.sep is a backslash.
+		normalize = lambda path: ntpath.abspath(str(path).strip()).rstrip("/\\") or path
+		for patcher in (patch.object(projects_db, "_normalize_path", normalize), patch.object(backend, "os", SimpleNamespace(sep="\\"))):
+			patcher.start()
+			self.addCleanup(patcher.stop)
+
+	def test_backslash_descendant_belongs_to_the_longest_owning_folder(self):
+		projects = [project("outer", "C:\\work\\repo", "D:\\second"), project("inner", "C:\\work\\repo\\nested")]
+		cases = {
+			"C:\\work\\repo": ("outer", "C:\\work\\repo"),
+			"C:\\work\\repo\\src": ("outer", "C:\\work\\repo"),
+			"C:\\work\\repo\\nested\\deep": ("inner", "C:\\work\\repo\\nested"),
+			"D:\\second\\x": ("outer", "D:\\second"),
+			"C:\\work\\repository": ("C:\\work\\repository", "C:\\work\\repository"),
+		}
+		for cwd, expected in cases.items():
+			with self.subTest(cwd=cwd):
+				card = backend.card_project(cwd, projects)
+				self.assertEqual((card["id"], card["cwd"]), expected)
 
 if __name__ == "__main__":
 	unittest.main()

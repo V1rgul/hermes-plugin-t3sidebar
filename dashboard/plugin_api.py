@@ -10,6 +10,7 @@ import importlib.util
 import json
 import logging
 import math
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -828,9 +829,9 @@ def card_project(cwd, projects):
 		target = cwd.strip()
 		return {"id": target, "name": Path(target).name or target, "icon": None, "color": None, "cwd": target}
 	target = _normalize_path(cwd)
-	# Match project_for_path's longest owning folder, including secondary folders.
+	# Match project_for_path's longest owning folder, including secondary folders, and its descendant test: either the OS separator or "/".
 	owners = [(folder.path, project) for project in projects for folder in project.folders
-		if target == folder.path or target.startswith(folder.path.rstrip("/\\") + "/")]
+		if target == folder.path or any(target.startswith(folder.path.rstrip("/\\") + separator) for separator in (os.sep, "/"))]
 	if owners:
 		folder, project = max(owners, key=lambda owner: len(owner[0]))
 		return {"id": project.id, "name": project.name, "icon": project.icon, "color": project.color, "cwd": folder}
