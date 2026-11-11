@@ -3508,9 +3508,10 @@ function BankedFlag({ flag, xPct, now }) {
     icon('Flag', '⚑'), count > 1 ? h('span', { className: 'su-flag-count', 'aria-hidden': true }, `×${count}`) : null));
 }
 // Everything drawn at a time x over the plot, as HTML so dots, arrowheads and labels keep their pixel size over the stretched SVG: waste measurements (vertical dimension lines from the level before a reset down by the units that expire, in the Now line's neutral colour), reset markers and banked-credit flags.
-function ChartMarks({ waste, resets, past, flags, xPct, cap, now }) {
+function ChartMarks({ waste, resets, past, flags, xPct, start, end, cap, now }) {
   const layer = useRef(null);
-  const signature = JSON.stringify([waste.map(mark => [mark.t, mark.before, mark.lost]), [...past, ...resets].map(group => [group.t, group.accounts.map(item => [item.id, item.base, item.gain])]), flags.map(flag => [flag.t, flag.credits.map(item => item.account).join()]), cap]);
+  // Placement depends on where the marks sit and on their label texts (a reset's weight and gain, a waste's loss): the displayed range moves marks without changing them, so it is a dependency of its own (the x mapping callback is new on every render and would place them each time).
+  const signature = JSON.stringify([waste.map(mark => [mark.t, mark.before, mark.lost]), [...past, ...resets].map(group => [group.t, group.accounts.map(item => [item.id, item.base, item.gain, item.weight])]), flags.map(flag => [flag.t, flag.credits.map(item => item.account).join()]), cap]);
   useLayoutEffect(() => {
     const node = layer.current;
     if (!node) return undefined;
@@ -3519,7 +3520,7 @@ function ChartMarks({ waste, resets, past, flags, xPct, cap, now }) {
     const observer = new ResizeObserver(() => placeMarkLabels(node));
     observer.observe(node);
     return () => observer.disconnect();
-  }, [signature]);
+  }, [signature, start, end]);
   if (!waste.length && !resets.length && !past.length && !flags.length) return null;
   const yPct = value => clamp(value / cap * 100, 0, 100);
   const group = (kind, item, lines) => h('div', { key: `${kind}${item.t}`, className: 'su-reset', 'data-kind': kind, 'data-t': Math.round(item.t), style: { left: `${xPct(item.t)}%` } },
@@ -3750,7 +3751,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
           h('path', { className: 'su-area su-projected', d: projectedArea }),
           h('path', { className: 'su-line su-projected', d: projectedLine })),
         h('div', { className: 'su-now', style: { left: `${nowPct}%` } }, h('span', null, 'Now')),
-        h(ChartMarks, { waste, resets, past: pastResets, flags, xPct: t => x(t) / VIEW_W * 100, cap, now }),
+        h(ChartMarks, { waste, resets, past: pastResets, flags, xPct: t => x(t) / VIEW_W * 100, start, end, cap, now }),
         emptyPct === null ? null : h('span', { className: 'su-empty-dot', title: emptyText, style: { left: `${emptyPct}%` } })),
       h(AxisRangeControl, { side: 'past', hours: range.past, stops, onChange: hours => onRange('past', hours) }),
       h('div', { className: 'su-xaxis' }, axis.times.map((t, index) => {
