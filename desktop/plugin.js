@@ -2766,7 +2766,7 @@ export function pooledHistory(samples) {
   });
   return points;
 }
-// Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in units per hour (a drop on a 100-unit plan weighs five times a drop of the same percent on a 20-unit one), or null without at least 15 minutes of paired readings.
+// Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in units per hour (a drop on a 100-unit plan weighs five times a drop of the same percent on a 20-unit one), or null when no account has two readings at different times reaching into the lookback (the last one before it pairs with the first one inside), however close together they are.
 // Readings at 0% remaining are left out: Hermes scales Anthropic's 1% used to 100% (anything at or below 1 is taken for a fraction), so a fresh window reads 100 → 0 → 98 remaining, and that drop to zero would count as a whole window consumed while the climb back looks like a reset. Only deltas matter here, so skipping zeros loses at most the last drop into a window that genuinely ran dry.
 export function drainStats(samples, now, lookbackS = 12 * HOUR_S) {
   const from = now - lookbackS, groups = new Map(), before = new Map();
