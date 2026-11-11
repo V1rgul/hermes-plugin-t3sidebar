@@ -1090,7 +1090,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
 
     async newChat(scope, project, idempotencyKey) {
       const route = await routeFor(scope); check(scope);
-      if (project === undefined) return env.host.newChat(route); // Preserve archive-and-advance fallback.
+      if (project === undefined) return fenced(scope, () => env.host.newChat(route)); // Preserve archive-and-advance fallback.
       if (project.isNoProject || project.id === '__no_project__') throw new Error('Home creation is unavailable: the public Desktop SDK cannot select a detached workspace. No session was created. Use native Home new chat.');
       if (typeof project.path !== 'string' || !project.path || !idempotencyKey) throw new Error('Choose a project folder before creating a session.');
       const create = params => fenced(scope, () => env.host.requestProfile(route, 'session.create', params));
