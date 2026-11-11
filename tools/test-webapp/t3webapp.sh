@@ -128,19 +128,29 @@ restart_box() {
 	follow
 }
 
-# The project's own files, NUL-separated: tracked ones and untracked ones Git does not ignore, so ignored scratch material, environments and databases never enter the container; development-only paths are left out too. A tracked file deleted in the working tree is skipped.
+# Runs $1 if the script ends before release, including on hang-up, Ctrl-C or termination, so an interrupted step still undoes what it started.
+on_exit() { trap "$1" EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; }
+release() { trap - EXIT HUP INT TERM; }
+
+# Writes the project's own files to $1/files, NUL-separated: tracked ones and untracked ones Git does not ignore, so ignored scratch material, environments and databases never enter the container; development-only paths are left out too. A tracked file deleted in the working tree is skipped. Each step writes a file rather than feeding a pipe, so a failing step stops the script.
 project_files() {
 	git -C "$REPO" ls-files -z -c -o --exclude-standard -- . ':(exclude).worktrees' ':(exclude).t3webapp' ':(exclude)node_modules' ':(exclude,glob)**/__pycache__/**' \
-		':(exclude)artifacts' ':(exclude)harness' ':(exclude)tests' ':(exclude)docs' ':(exclude)tools' ':(exclude)AGENTS.md' \
-		| (cd "$REPO" && xargs -0 sh -c 'for f; do if [ -e "$f" ] || [ -L "$f" ]; then printf "%s\0" "$f"; fi; done' sh)
+		':(exclude)artifacts' ':(exclude)harness' ':(exclude)tests' ':(exclude)docs' ':(exclude)tools' ':(exclude)AGENTS.md' > "$1/listed"
+	(cd "$REPO" && xargs -0 sh -c 'for f; do if [ -e "$f" ] || [ -L "$f" ]; then printf "%s\0" "$f"; fi; done' sh) < "$1/listed" > "$1/files"
 }
 
-# Copies the project files of the working tree (uncommitted changes included) over the installed plugin.
+# Copies the project files of the working tree (uncommitted changes included) over the installed plugin. The archive is built and checked before the installed copy is removed: in a pipeline, sh would ignore a failing tar on the left and install a partial copy.
 sync_plugin() {
+	staging=$(mktemp -d "${TMPDIR:-/tmp}/t3webapp-sync.XXXXXX")
+	on_exit 'rm -rf -- "$staging"'
+	project_files "$staging"
+	tar -C "$REPO" --null -T "$staging/files" -cf "$staging/plugin.tar"
+	tar -tf "$staging/plugin.tar" | grep -qx plugin.yaml || { echo "Refusing to sync: the archive holds no plugin.yaml" >&2; exit 1; }
 	"$RUNTIME" exec "$NAME" rm -rf "$PLUGIN"
 	"$RUNTIME" exec "$NAME" mkdir -p "$PLUGIN"
-	project_files | tar -C "$REPO" --null -T - -cf - \
-		| "$RUNTIME" exec -i "$NAME" tar -C "$PLUGIN" -xf -
+	"$RUNTIME" exec -i "$NAME" tar -C "$PLUGIN" -xf - < "$staging/plugin.tar"
+	rm -rf -- "$staging"
+	release
 	"$RUNTIME" exec "$NAME" chown -R hermes:hermes "$PLUGIN"
 	# A browser keeps the Desktop half's on/off choice, and a new browser profile starts with it off: this container-only plugin turns it on there (see enable-sidebar.js).
 	"$RUNTIME" exec "$NAME" mkdir -p "$ENABLER"

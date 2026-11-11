@@ -2,7 +2,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -121,4 +121,20 @@ test('sync copies tracked and unignored project files with their uncommitted edi
   assert.deepEqual(await tarList(join(root, 'sync.tar')), ['.gitignore', '__init__.py', 'desktop/plugin.js', 'name with space.py', 'new_module.py', 'odd \'"$name\\n.py', 'plugin.yaml']);
   assert.equal((await run('tar', ['-xOf', join(root, 'sync.tar'), 'desktop/plugin.js'])).stdout, 'uncommitted edit');
   assertScratchVolumes(result.calls);
+});
+
+test('sync keeps the installed plugin when the archive cannot be built, and leaves no temporary file', async () => {
+  const repo = await checkout({ '__init__.py': '', 'unreadable.py': 'x' });
+  chmodSync(join(repo, 'unreadable.py'), 0);
+  try {
+    const result = await rig(repo, ['sync'], { STUB_RUNNING: 't3demo' });
+    assert.notEqual(result.code, 0);
+    assert.deepEqual(result.calls.filter(call => call[0] === 'exec' || call[0] === 'restart').map(call => call.join(' ')), []);
+  } finally { chmodSync(join(repo, 'unreadable.py'), 0o644); }
+  assert.deepEqual(readdirSync(join(root, 'tmp')), []);
+  const result = await rig(repo, ['sync'], { STUB_RUNNING: 't3demo' });
+  assert.equal(result.code, 0, result.stderr);
+  const plugin = result.calls.filter(call => call.includes('/opt/data/plugins/hermes-t3sidebar')).map(call => call.slice(0, 4).join(' '));
+  assert.deepEqual(plugin.slice(0, 3), ['exec t3demo rm -rf', 'exec t3demo mkdir -p', 'exec -i t3demo tar']);
+  assert.deepEqual(readdirSync(join(root, 'tmp')), []);
 });
