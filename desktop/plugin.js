@@ -484,8 +484,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     return true;
   }
   // The focused composer, by whichever reader comes first after a focus change (entry, the local poll or a sync).
-  // Focus can move to another session of the same scope while a read is in flight: the reader of the session it left then neither writes
-  // that composer nor marks it settled, which would make the session focused now count as entered again, and a clear there as a prune.
+  // Focus can move to another session of the same scope while a read is in flight: the reader of the session it left then neither writes that composer nor marks it settled, which would make the session focused now count as entered again, and a clear there as a prune.
   async function reconcileFocused(scope, state, target) {
     if (!ownsFocus(scope)) return false;
     const focused = () => ownsFocus(scope) && target.ids.includes(env.host.state?.focusedStoredSessionId?.get());
@@ -505,8 +504,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     const text = state.pending.get(id)?.text || state.known.get(id)?.text || local?.trim() && local;
     if (text) state.pending.set(id, { text: '', cwd, edited_at: Date.now() / 1000, discarded: draftHash(text) });
   }
-  // A deleted session's draft goes with it, so no draft-only card brings it back and no pending edit is sent for it again; the companion
-  // marks its own row deleted.
+  // A deleted session's draft goes with it, so no draft-only card brings it back and no pending edit is sent for it again; the companion marks its own row deleted.
   function forgetDrafts(scope, ids) {
     const state = draftState(scope);
     for (const id of ids) {
@@ -800,8 +798,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         const target = focus?.();
         if (target) await reconcileFocused(scope, state, target);
         const route = await routeFor(scope);
-        // At most one batch per call, the rest in the calls that follow at once; a text the companion would refuse stays pending here
-        // without holding up the others.
+        // At most one batch per call, the rest in the calls that follow at once; a text the companion would refuse stays pending here without holding up the others.
         const tried = new Set(), sendable = ([id, change]) => !tried.has(id) && draftFits(change.text);
         let received = false, more;
         do {
