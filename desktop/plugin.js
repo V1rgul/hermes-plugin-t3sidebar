@@ -2755,14 +2755,15 @@ export function limitSamples(accounts, history, windowKey, provider = null) {
 const sampleUnits = sample => Number.isFinite(sample.units) ? sample.units : sample.value;
 // Pooled remaining over time: each account carries its last reading forward, and the pool sums the accounts seen so far.
 export function pooledHistory(samples) {
-  const last = new Map(), points = [];
-  for (const sample of [...samples].sort((a, b) => a.t - b.t)) {
+  const last = new Map(), points = [], sorted = [...samples].sort((a, b) => a.t - b.t);
+  // Summed once per distinct time, after its last reading (the point a same-time reading replaced anyway); a running total would drift from this sum in floating point.
+  sorted.forEach((sample, index) => {
     last.set(sample.account, sampleUnits(sample));
+    if (sorted[index + 1]?.t === sample.t) return;
     let value = 0;
     for (const item of last.values()) value += item;
-    const point = { t: sample.t, value, count: last.size };
-    if (points.length && points.at(-1).t === sample.t) points[points.length - 1] = point; else points.push(point);
-  }
+    points.push({ t: sample.t, value, count: last.size });
+  });
   return points;
 }
 // Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in units per hour (a drop on a 100-unit plan weighs five times a drop of the same percent on a 20-unit one), or null without at least 15 minutes of paired readings.
@@ -2915,8 +2916,8 @@ export function resetMarkers(projection, from, to, minShare = 0.01) {
     return { t: group.t, accounts };
   }).filter(group => group.accounts.length);
 }
-// Past step-ups inside (from, to]: an account's reading rising, or its reset time moving later, means it reset between two readings, and the pooled past line steps up at the later reading. Accounts stepping up at the same reading stack in pool priority order below the pooled level after the step.
-export function pastResetMarkers(accounts, samples, from, to, provider = null) {
+// Past step-ups inside (from, to]: an account's reading rising, or its reset time moving later, means it reset between two readings, and the pooled past line steps up at the later reading. Accounts stepping up at the same reading stack in pool priority order below the pooled level after the step. A chart that already holds the pooled series of these samples passes it rather than having it rebuilt.
+export function pastResetMarkers(accounts, samples, from, to, provider = null, pooled = pooledHistory(samples || [])) {
   const info = new Map((accounts || []).map((account, index) => [account.id, { label: account.label || account.id, plan_label: planLabel(provider, account.plan), priority: Number.isFinite(account.priority) ? account.priority : Infinity, index }]));
   const previous = new Map(), steps = [];
   for (const sample of [...(samples || [])].sort((a, b) => a.t - b.t)) {
@@ -2927,8 +2928,9 @@ export function pastResetMarkers(accounts, samples, from, to, provider = null) {
     const gain = sampleUnits(sample) - sampleUnits(before);
     if (restarted && gain > 1e-9) steps.push({ t: sample.t, account: sample.account, gain, reset_at: before.resets_at !== null && before.resets_at <= sample.t ? before.resets_at : sample.t });
   }
-  const pooled = pooledHistory(samples || []);
-  const levelAt = t => { let value = 0; for (const point of pooled) { if (point.t > t) break; value = point.value; } return value; };
+  // The groups come in time order, so one cursor walks the pooled series once.
+  let cursor = 0, level = 0;
+  const levelAt = t => { while (cursor < pooled.length && !(pooled[cursor].t > t)) level = pooled[cursor++].value; return level; };
   const rank = id => info.get(id) ?? { priority: Infinity, index: Infinity };
   return resetGroups(steps, 0).map(group => {
     const ordered = [...group.items].sort((a, b) => rank(a.account).priority - rank(b.account).priority || rank(a.account).index - rank(b.account).index);
@@ -3289,8 +3291,12 @@ function LimitsView({ query, prefs, update, toolbar, redeem, unsettled }) {
     h('div', { className: 'su-body su-overview' },
       query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
       providers.length ? null : h(UsageState, null, 'No subscription limits recorded yet.'),
-      providers.map(provider => provider.auth === 'logged_out' ? h(LoggedOutProvider, { key: provider.provider, provider })
-        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange, setLookback, redeem, unsettled })),
+      providers.map(provider => {
+        if (provider.auth === 'logged_out') return h(LoggedOutProvider, { key: provider.provider, provider });
+        // Each section gets only the preference values it draws, so unfolding one provider's accounts does not re-render every other provider's chart.
+        const windowKey = chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, range = windowKey ? prefs.range[rangeGroup(windowKey)] : null;
+        return h(ProviderLimits, { key: provider.provider, provider, windowKey, lookback: prefs.lookback, verdictWindow: prefs.window, past: range?.past, future: range?.future, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange, setLookback, redeem, unsettled });
+      }),
       h(LimitsFootnotes, { providers: active, sampler: data.sampler, now }))));
 }
 // Hermes knows the provider but has no usable credential, so there is nothing to sample or project: one muted row instead of a chart.
@@ -3300,14 +3306,14 @@ function LoggedOutProvider({ provider }) {
       h('span', { className: 'su-logged-out-text' }, `${provider.label || provider.provider} · logged out in Hermes — sign in to track limits`),
       provider.auth_reason ? h('span', { className: 'su-muted su-logged-out-reason' }, provider.auth_reason) : null));
 }
-// Memoized: its props only change with the data, the clock, the preferences or the window, so a page render for anything else (the toolbar's fetching state, the preference echo) skips the charts.
-const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange, setLookback, redeem, unsettled }) {
+// Memoized: its props only change with the data, the clock, the preferences it draws, its own fold or the window, so a page render for anything else (the toolbar's fetching state, the preference echo, another provider's fold) skips the charts.
+const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, lookback, verdictWindow, past, future, now, expanded, setExpanded, setRange, setLookback, redeem, unsettled }) {
   const name = provider.label || provider.provider;
   // The verdict always looks a week ahead whatever range the chart shows, so it reads the same as the sidebar footer.
-  const verdict = useMemo(() => limitsVerdict(provider, { lookback: prefs.lookback, window: prefs.window }, now), [provider, prefs.lookback, prefs.window, now]);
+  const verdict = useMemo(() => limitsVerdict(provider, { lookback, window: verdictWindow }, now), [provider, lookback, verdictWindow, now]);
   return h('section', { className: 'su-provider-limits', 'data-provider': provider.provider, style: { '--su-color': providerHueColor(provider.provider) } },
     h('h2', { className: 'su-provider-head' }, providerMark(provider.provider), h('span', null, name)),
-    windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, range: prefs.range[rangeGroup(windowKey)], lookback: prefs.lookback, setLookback, onRange: (side, hours) => setRange(rangeGroup(windowKey), side, hours) })
+    windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, range: { past, future }, lookback, setLookback, onRange: (side, hours) => setRange(rangeGroup(windowKey), side, hours) })
       : h(UsageState, null, 'No limit windows reported for this provider.'),
     h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open), redeem, unsettled }));
 });
@@ -3653,7 +3659,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
   useEffect(() => () => glide.current.run?.cancel(), []);
   const waste = useMemo(() => wasteMarks(projection).filter(mark => mark.t > now && mark.t < end), [projection, now, end]);
   const resets = useMemo(() => resetMarkers(projection, now, end), [projection, now, end]);
-  const pastResets = useMemo(() => pastResetMarkers(provider.accounts, samples, start, now, providerId), [provider, samples, start, now, providerId]);
+  const pastResets = useMemo(() => pastResetMarkers(provider.accounts, samples, start, now, providerId, past), [provider, samples, start, now, providerId, past]);
   const flags = useMemo(() => bankedFlags(bankedSources(provider), now, end), [provider, now, end]);
   const [hover, setHover] = useState(null);
   // The axis tops out at the pool's capacity in units (or above it if an older reading held more, e.g. before a plan change).
