@@ -183,10 +183,15 @@ create() {
 # A worktree's browser is found by its profile path, which survives the pid file of a removed worktree.
 stop_worktree_browser() { pkill -f -- "--user-data-dir=$1/.t3webapp/browser-profile" 2>/dev/null || true; }
 
-# Deletes only what create made (data, and the login file of containers made before logins were dropped, then the directory if nothing else is left), so a wrong directory never loses unrelated files.
+# The same directory can be spelled several ways (a trailing slash, a symlink, a dot segment), so data directories are compared by their physical path.
+canonical() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"; }
+is_shared_dir() { [ "$(canonical "$1")" = "$(canonical "$MAIN_DIR")" ]; }
+
+# Deletes only what create made (data, and the login file of containers made before logins were dropped, then the directory if nothing else is left), so a wrong directory never loses unrelated files. The shared data directory is never deleted, whichever container claims it.
 remove_box() {
 	! exists "$1" || "$RUNTIME" rm -f "$1" >/dev/null
 	[ -n "$2" ] && [ -d "$2" ] || return 0
+	! is_shared_dir "$2" || { echo "Kept $2: it is the shared container's data directory" >&2; return 0; }
 	[ ! -d "$2/data" ] || as_root -v "$2:/d" --entrypoint rm "$IMAGE" -rf /d/data
 	rm -f "$2/demo-login.env"
 	rmdir "$2" 2>/dev/null || echo "Kept $2: it holds other files"
@@ -308,8 +313,9 @@ status)
 	"$RUNTIME" ps -a --filter "name=^$NAME\$" --format '{{.Names}} {{.Status}} {{.Ports}}'
 	;;
 destroy)
-	# The shared container holds the test-account login made interactively, so this command never destroys it.
+	# The shared container holds the test-account login made interactively, so this command never destroys it, nor its data directory under another container name.
 	[ "$NAME" != "$MAIN_NAME" ] || { echo "Refusing to destroy the shared container $MAIN_NAME" >&2; exit 1; }
+	! is_shared_dir "$DIR" || { echo "Refusing to destroy $NAME: its data directory $DIR is the shared container's; set T3WEBAPP_DIR" >&2; exit 1; }
 	stop_browser
 	rm -rf -- "$BROWSER_DIR"
 	remove_box "$NAME" "$DIR"
