@@ -1,22 +1,17 @@
 // Actual Python HTTP companion + actual frontend controller; SDK routing is a test adapter.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { QueryClient } from '@tanstack/react-query';
 import plugin, { createController, buildSections } from '../desktop/plugin.js';
+import { startFixture } from './child-fixture.mjs';
 
 test('frontend controller interoperates with real FastAPI and persistent SQLite metadata', { timeout: 15000 }, async () => {
-	const child = spawn(process.env.PYTHON || 'python', [new URL('./backend_fixture.py', import.meta.url).pathname], { stdio: ['ignore', 'pipe', 'pipe'] });
-	const exited = once(child, 'exit');
-	let stderr = '';
-	child.stderr.on('data', bytes => { stderr += bytes; });
-	const lines = createInterface({ input: child.stdout });
-	const timeout = setTimeout(() => child.kill('SIGTERM'), 14000);
+	const fixture = startFixture(process.env.PYTHON || 'python', [new URL('./backend_fixture.py', import.meta.url).pathname], { readyMs: 12000 });
+	// The test's own timeout abandons this function without running its finally; the watchdog still stops the fixture so the runner can exit.
+	const timeout = setTimeout(() => fixture.stop(), 14000);
 	try {
-		const [line] = await once(lines, 'line');
+		const line = await fixture.ready;
 		const base = `http://127.0.0.1:${Number(line)}/api/plugins/${plugin.id}`;
 		const rest = async (path, options = {}) => {
 			const url = new URL(base + path);
@@ -32,7 +27,7 @@ test('frontend controller interoperates with real FastAPI and persistent SQLite 
 		for (let attempt = 0; attempt < 40; attempt++) {
 			try { await rest('/state'); ready = true; break; } catch { await delay(50); }
 		}
-		assert.ok(ready, `HTTP fixture did not start: ${stderr}`);
+		assert.ok(ready, `HTTP fixture did not start: ${fixture.stderr()}`);
 		const scope = { connectionId: 'fixture', profile: 'default', epoch: 1 };
 		let cached;
 		const pageCache = new QueryClient();
@@ -129,8 +124,6 @@ test('frontend controller interoperates with real FastAPI and persistent SQLite 
 		pageCache.clear();
 	} finally {
 		clearTimeout(timeout);
-		lines.close();
-		child.kill('SIGTERM');
-		await exited;
+		await fixture.stop();
 	}
 });
