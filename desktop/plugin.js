@@ -872,7 +872,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       for (let attempt = 0; attempt < 20 && !(written = await writeComposer(scope, address, text)); attempt++) await new Promise(resolve => setTimeout(resolve, 100));
       if (!written) throw new Error('A new session opened, but the draft could not be put into its composer. It stays saved.');
       if (created) state.pending.set(created.stored_session_id, { text, cwd, edited_at: Date.now() / 1000 });
-      dropDraft(state, id, cwd);
+      // Only the version copied leaves: one received or typed during the handoff is newer, and stays.
+      if ((state.pending.has(id) ? state.pending.get(id).text : state.known.get(id)?.text) === text) dropDraft(state, id, cwd);
       publishDrafts(scope, state);
       this.flushDrafts(scope);
     },

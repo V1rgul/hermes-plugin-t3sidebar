@@ -153,3 +153,28 @@ test('a sync still in flight from a previous gateway activation is not shared wi
 		await assert.rejects(old, /Source\/profile changed/);
 	} finally { mock.ctx.rest = rest; }
 });
+
+test('reopening a draft deletes only the version it copied: a newer one received during the handoff stays', async () => {
+	let release, reached;
+	const gate = new Promise(resolve => { release = resolve; }), arrived = new Promise(resolve => { reached = resolve; });
+	// The new session's workspace confirmation is held until the test lets it through.
+	const host = Object.create(mock.host, { requestProfile: { value: async (route, method, params) => {
+		if (method === 'session.cwd.set') { reached(); await gate; }
+		return mock.host.requestProfile(route, method, params);
+	} } });
+	const controller = createController(mock.ctx, mock.queryClient, { capture: captureScope, routes: () => mock.host.profileRoutes(), host }), scope = captureScope();
+	controllers.push(controller);
+	mock.control.serverDrafts = [{ session_id: 'gone', text: 'Reopen me', cwd: '/robot', project: null, seq: 7, edited_at: Date.now() / 1000 }];
+	await controller.syncDrafts(scope);
+	const opening = controller.openDraft(scope, { id: 'gone', _draftOnly: true, _liveOnly: true, cwd: '/robot' });
+	await arrived;
+	// Another client edits the source draft meanwhile, and this one receives it.
+	Object.assign(mock.control.serverDrafts[0], { text: 'Edited elsewhere', seq: 8, edited_at: Date.now() / 1000 });
+	await controller.syncDrafts(scope);
+	release();
+	await opening;
+	await controller.syncDrafts(scope);
+	assert.equal(mock.control.mountedDrafts['fixture-created'], 'Reopen me');
+	const server = Object.fromEntries(mock.control.serverDrafts.map(draft => [draft.session_id, draft.text]));
+	assert.deepEqual(server, { gone: 'Edited elsewhere', 'fixture-created': 'Reopen me' });
+});
