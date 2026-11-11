@@ -1587,7 +1587,7 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
   const update = patch => void perform(() => controller.updateProject(scope, project, patch));
   return h('div', { className: 'sf-menu sf-project-submenu', style: { '--sf-project-color': project?.color || 'var(--ui-text-tertiary)' } },
     h('div', { className: 'sf-menu-title' }, project?.name || 'Project unavailable'),
-    h(MenuAction, { name: 'Pencil', disabled: busy || !editable, onClick: () => setRenaming(true) }, 'Rename'),
+    h(MenuAction, { name: 'Pencil', disabled: busy || !editable, onClick: () => { if (!renaming) setName(project?.name || ''); setRenaming(true); } }, 'Rename'),
     renaming ? h('form', { onSubmit: event => { event.preventDefault(); update({ name }); } },
       h('span', { className: 'sf-custom-time' },
         h('input', { value: name, autoFocus: true, 'aria-label': 'Project name', disabled: busy, onChange: event => setName(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
@@ -1667,7 +1667,8 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
         h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value, 'data-valid': customValid })))
       : h('div', null,
         row.archived !== true ? action(row.meta.pinned ? 'Unpin' : 'Pin', 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
-        h(MenuAction, { name: 'Pencil', disabled: busy || (row._liveOnly && !row.runtimeId), onClick: () => setRenaming(true) }, 'Rename'),
+        // The field starts from the title current now, not when the menu opened; once editing, a poll never replaces the typed text.
+        h(MenuAction, { name: 'Pencil', disabled: busy || (row._liveOnly && !row.runtimeId), onClick: () => { if (!renaming) setTitle(row.title || ''); setRenaming(true); } }, 'Rename'),
         renaming ? h('form', { onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
           h('span', { className: 'sf-custom-time' },
           h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
