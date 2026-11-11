@@ -3623,6 +3623,26 @@ function glideRange(grid, from, to, drawn, onEnd) {
   handle = frame(step);
   return { shown: () => shown, cancel: () => { if (handle) cancelFrame?.(handle); settle(); } };
 }
+// The pooled chart's plot holds the inspection state, so a pointer move or arrow key redraws only the crosshair and its tooltip; the chart drawn inside it comes in as children that keep their identity until the chart itself changes.
+function LimitPlot({ start, end, now, nowPct, cap, pastAt, projectedAt, children }) {
+  const [hover, setHover] = useState(null);
+  const hoverT = hover === null ? null : start + hover * (end - start);
+  const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
+  // Over a mark its own tooltip speaks, so the crosshair and its inline tooltip step aside.
+  const move = event => {
+    if (event.target?.closest?.('.su-reset-dot, .su-flag, .su-waste')) { setHover(null); return; }
+    const box = event.currentTarget.getBoundingClientRect();
+    if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1));
+  };
+  return h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota in units over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end), 'data-cap': cap,
+    onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null),
+    onKeyDown: event => { const step = { ArrowLeft: -0.02, ArrowRight: 0.02 }[event.key]; if (step) { event.preventDefault(); setHover(clamp((hover ?? nowPct / 100) + step, 0, 1)); } if (event.key === 'Escape') setHover(null); } },
+    ...children,
+    hoverValue === null ? null : h(Fragment, null,
+      h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
+      h('div', { className: 'su-tip su-tip-inline', style: hover > 0.6 ? { right: `calc(${100 - hover * 100}% + 10px)` } : { left: `calc(${hover * 100}% + 10px)` } },
+        `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${unitsText(hoverValue)} units left${hoverT > now ? ' (projected)' : ''}`)));
+}
 // "Business: 20, Pro 100: 100": what each account adds to the pool's capacity, an asterisk marking a guessed one.
 function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, setLookback, onRange }) {
   const lookbackS = lookback * HOUR_S, providerId = provider.provider, stops = LIMITS_RANGE_STOPS[rangeGroup(windowKey)];
@@ -3661,7 +3681,6 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
   const resets = useMemo(() => resetMarkers(projection, now, end), [projection, now, end]);
   const pastResets = useMemo(() => pastResetMarkers(provider.accounts, samples, start, now, providerId, past), [provider, samples, start, now, providerId, past]);
   const flags = useMemo(() => bankedFlags(bankedSources(provider), now, end), [provider, now, end]);
-  const [hover, setHover] = useState(null);
   // The axis tops out at the pool's capacity in units (or above it if an older reading held more, e.g. before a plan change).
   const cap = Math.max(projection.capacity || BASE_PLAN_UNITS, ...past.map(point => point.value));
   const ticks = unitTicks(cap);
@@ -3707,14 +3726,6 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
     if (bound !== null && (valueAt(from) - bound) * Math.sign(perS) > 0) from = now - (bound - projection.current) / perS;
     if (from < now) trendLine = `M${x(from).toFixed(2)},${y(valueAt(from)).toFixed(2)} L${x(now).toFixed(2)},${y(projection.current).toFixed(2)}`;
   }
-  const hoverT = hover === null ? null : start + hover * (end - start);
-  const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
-  // Over a mark its own tooltip speaks, so the crosshair and its inline tooltip step aside.
-  const move = event => {
-    if (event.target?.closest?.('.su-reset-dot, .su-flag, .su-waste')) { setHover(null); return; }
-    const box = event.currentTarget.getBoundingClientRect();
-    if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1));
-  };
   // Reset times now show as markers in the chart; the notes keep only what the chart cannot show.
   const notes = [
     projection.nextReset ? null : h('span', { key: 'none' }, 'No reset time reported'),
@@ -3729,9 +3740,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
     h('div', { className: 'su-limits-grid', ref: grid },
       // No unit caption (the headline already says units) and no 0 label, which would sit on the past range control under it; the 0 gridline stays.
       h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, ticks.filter(tick => tick > 0).map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, unitsText(tick)))),
-      h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota in units over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end), 'data-cap': cap,
-        onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null),
-        onKeyDown: event => { const step = { ArrowLeft: -0.02, ArrowRight: 0.02 }[event.key]; if (step) { event.preventDefault(); setHover(clamp((hover ?? nowPct / 100) + step, 0, 1)); } if (event.key === 'Escape') setHover(null); } },
+      h(LimitPlot, { start, end, now, nowPct, cap, pastAt, projectedAt },
         h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
           axis.midnights.map(t => h('line', { key: `d${t}`, className: 'su-day-grid', x1: x(t), x2: x(t), y1: 0, y2: VIEW_H })),
           ticks.map(tick => h('line', { key: tick, className: 'su-grid', x1: 0, x2: VIEW_W, y1: y(tick), y2: y(tick) })),
@@ -3742,11 +3751,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
           h('path', { className: 'su-line su-projected', d: projectedLine })),
         h('div', { className: 'su-now', style: { left: `${nowPct}%` } }, h('span', null, 'Now')),
         h(ChartMarks, { waste, resets, past: pastResets, flags, xPct: t => x(t) / VIEW_W * 100, cap, now }),
-        emptyPct === null ? null : h('span', { className: 'su-empty-dot', title: emptyText, style: { left: `${emptyPct}%` } }),
-        hoverValue === null ? null : h(Fragment, null,
-          h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
-          h('div', { className: 'su-tip su-tip-inline', style: hover > 0.6 ? { right: `calc(${100 - hover * 100}% + 10px)` } : { left: `calc(${hover * 100}% + 10px)` } },
-            `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${unitsText(hoverValue)} units left${hoverT > now ? ' (projected)' : ''}`))),
+        emptyPct === null ? null : h('span', { className: 'su-empty-dot', title: emptyText, style: { left: `${emptyPct}%` } })),
       h(AxisRangeControl, { side: 'past', hours: range.past, stops, onChange: hours => onRange('past', hours) }),
       h('div', { className: 'su-xaxis' }, axis.times.map((t, index) => {
         const share = x(t) / VIEW_W * 100;
