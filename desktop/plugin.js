@@ -180,8 +180,8 @@ export function compactTokens(row) {
   const thousands = Math.round(total / 1000);
   return thousands < 1000 ? `${tokenFormatter.format(thousands)}K` : `${millionTokenFormatter.format(total / 1000000)}M`;
 }
-export function isEmptySession(row, runtimes = []) {
-  if (aliases(row).length > 1) return false; // Native counts describe only the tip, not ancestor history.
+export function isEmptySession(row, runtimes = [], ids = aliases(row)) {
+  if (ids.length > 1) return false; // Native counts describe only the tip, not ancestor history.
   const knownCount = value => Number.isInteger(value) && value >= 0;
   const runtimeCounts = runtimes.map(item => item.message_count).filter(knownCount);
   const count = knownCount(row.message_count) ? row.message_count : runtimeCounts.includes(0) ? 0 : null;
@@ -314,7 +314,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
       : meta.state === 'snoozed' && !woke ? 'snoozed'
       : meta.pinned ? 'pinned'
       : observed === 'working' ? 'working' : 'active';
-    const newSession = isEmptySession(row, runtimeKnown ? matches : []);
+    const newSession = isEmptySession(row, runtimeKnown ? matches : [], ids);
     // A draft saved on the server, typed here or on another client: it keeps an empty session's card and tints any card.
     const drafted = !!draftIds?.size && ids.some(id => draftIds.has(id));
     if ((tokens.length || project !== '*') && !matchesFilters({ ...row, newSession }, tokens, project)) continue;
@@ -2018,13 +2018,13 @@ export function projectDisplayPath(path, home) {
   return value === prefix ? '~' : value.startsWith(`${prefix}/`) ? `~${path.slice(root.length)}` : path;
 }
 function prepareProjectGroups(entries, home) {
-  const groups = new Map(), paths = new Map(), text = new Map();
+  const groups = new Map(), seen = new Map(), paths = new Map(), text = new Map();
   for (const choice of entries) {
     if (choice.isNoProject || choice.id === '__no_project__' || typeof choice.path !== 'string' || !choice.path) continue;
     const id = choice.projectId || choice.id;
-    if (!groups.has(id)) groups.set(id, { id, name: choice.name, choices: [] });
-    const group = groups.get(id);
-    if (!group.choices.some(item => item.path === choice.path)) group.choices.push(choice);
+    if (!groups.has(id)) { groups.set(id, { id, name: choice.name, choices: [] }); seen.set(id, new Set()); }
+    // The first choice for a folder wins; a per-group set avoids rescanning the choices kept so far.
+    if (!seen.get(id).has(choice.path)) { seen.get(id).add(choice.path); groups.get(id).choices.push(choice); }
   }
   const ordered = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map(group => ({
     ...group, multiple: group.choices.length > 1,
