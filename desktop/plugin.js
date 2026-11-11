@@ -1368,35 +1368,21 @@ function Note({ children, error = false }) { return h('div', { className: 'sf-no
 function Settings({ ctx }) {
   const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
   const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [linesError, setLinesError] = useState(''), [tokensError, setTokensError] = useState('');
+  // Write, exact readback, then publication to the mounted sidebar; a failure is reported under its own setting.
+  const savePreference = (storageKey, queryKey, value, message, setFailure) => {
+    try {
+      ctx.storage.set(storageKey, value);
+      if (ctx.storage.get(storageKey) !== value) throw new Error(message);
+      client.setQueryData(queryKey, value); setFailure('');
+    } catch (err) { setFailure(err.message); }
+  };
   const save = value => {
     if (!validSnoozeTime(value)) { setError('Choose a valid time.'); return; }
-    try {
-      ctx.storage.set('snooze-time', value);
-      if (ctx.storage.get('snooze-time') !== value) throw new Error('The snooze preset time was not saved.');
-      client.setQueryData(SNOOZE_TIME_KEY, value); setError('');
-    } catch (err) { setError(err.message); }
+    savePreference('snooze-time', SNOOZE_TIME_KEY, value, 'The snooze preset time was not saved.', setError);
   };
-  const saveDetails = on => {
-    try {
-      ctx.storage.set('working-details', on);
-      if (ctx.storage.get('working-details') !== on) throw new Error('The Working indicator setting was not saved.');
-      client.setQueryData(WORKING_DETAILS_KEY, on); setDetailsError('');
-    } catch (err) { setDetailsError(err.message); }
-  };
-  const saveLines = lines => {
-    try {
-      ctx.storage.set('pinned-lines', lines);
-      if (ctx.storage.get('pinned-lines') !== lines) throw new Error('The pinned session height setting was not saved.');
-      client.setQueryData(PINNED_LINES_KEY, lines); setLinesError('');
-    } catch (err) { setLinesError(err.message); }
-  };
-  const saveTokens = on => {
-    try {
-      ctx.storage.set('show-tokens', on);
-      if (ctx.storage.get('show-tokens') !== on) throw new Error('The token count setting was not saved.');
-      client.setQueryData(SHOW_TOKENS_KEY, on); setTokensError('');
-    } catch (err) { setTokensError(err.message); }
-  };
+  const saveDetails = on => savePreference('working-details', WORKING_DETAILS_KEY, on, 'The Working indicator setting was not saved.', setDetailsError);
+  const saveLines = lines => savePreference('pinned-lines', PINNED_LINES_KEY, lines, 'The pinned session height setting was not saved.', setLinesError);
+  const saveTokens = on => savePreference('show-tokens', SHOW_TOKENS_KEY, on, 'The token count setting was not saved.', setTokensError);
   // The host already supplies the page title and gutters; behavior notes live in docs/behavior.md.
   return h('div', null, h('style', null, SETTINGS_CSS), h(sdk.ListRow ?? SettingsRow, {
     title: 'Snooze preset time',
