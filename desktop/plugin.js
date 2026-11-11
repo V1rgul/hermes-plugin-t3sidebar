@@ -500,6 +500,17 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     const text = state.pending.get(id)?.text || state.known.get(id)?.text || local?.trim() && local;
     if (text) state.pending.set(id, { text: '', cwd, edited_at: Date.now() / 1000, discarded: draftHash(text) });
   }
+  // A deleted session's draft goes with it, so no draft-only card brings it back and no pending edit is sent for it again; the companion
+  // marks its own row deleted.
+  function forgetDrafts(scope, ids) {
+    const state = draftState(scope);
+    for (const id of ids) {
+      state.pending.delete(id);
+      const known = state.known.get(id);
+      if (known && known.text !== null) state.known.set(id, { ...known, text: null, edited_at: Date.now() / 1000 });
+    }
+    publishDrafts(scope, state);
+  }
   const ownsFocus = scope => { const owner = env.host.state?.focusedSessionOwner?.get(); return owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile; };
   // Text of one composer, or null when nothing answers for it (an unmounted session falls back to Desktop's local copy until its prune).
   async function readComposer(scope, address) {
@@ -951,6 +962,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         }
         check(scope);
         updateRows(scope, new Set(deletedIds), null);
+        forgetDrafts(scope, deletedIds);
         const owner = env.host.state?.focusedSessionOwner?.get();
         if (owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile && hasAlias(row, env.host.state?.focusedStoredSessionId?.get())) {
           await fenced(scope, () => env.host.newChat(route));

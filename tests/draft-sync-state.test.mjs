@@ -178,3 +178,15 @@ test('reopening a draft deletes only the version it copied: a newer one received
 	const server = Object.fromEntries(mock.control.serverDrafts.map(draft => [draft.session_id, draft.text]));
 	assert.deepEqual(server, { gone: 'Edited elsewhere', 'fixture-created': 'Reopen me' });
 });
+
+test('deleting a session forgets its local draft: no draft card returns and its pending edit is never sent', async () => {
+	store({ cursor: 3, known: { readme: { text: 'synced', cwd: '/projects/docs', project: null, edited_at: 100, seen: null } },
+		pending: { readme: change('unsent edit', Date.now() / 1000), design: change('kept', Date.now() / 1000) } });
+	const scope = captureScope(), controller = make();
+	assert.deepEqual(controller.localDrafts(scope).map(draft => draft.session_id).sort(), ['design', 'readme']);
+	await controller.delete(scope, { id: 'readme', status: 'idle' });
+	assert.deepEqual(mock.queryClient.getQueryData(draftSyncKey(scope))?.map(draft => draft.session_id), ['design']);
+	assert.deepEqual(make().localDrafts(scope).map(draft => draft.session_id), ['design'], 'also after a restart');
+	await controller.syncDrafts(scope);
+	assert.deepEqual(mock.control.draftSyncs.flatMap(body => body.changes.map(item => item.session_id)), ['design']);
+});
