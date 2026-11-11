@@ -1294,7 +1294,7 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise HTTPException(503, "native_delete_unavailable") from exc
 		try:
 			# A deleted session's draft would otherwise come back as a card that reopens it in a new session.
-			drafts().delete(value["deleted_ids"])
+			await asyncio.to_thread(drafts().delete, value["deleted_ids"])
 		except Exception:
 			pass
 		return value
