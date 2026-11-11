@@ -1,4 +1,6 @@
 """Loopback-only integration fixture; never used by the installed plugin."""
+# First Hermes import, as in `npm run test:backend`: it activates Hermes's managed dependency environment, without which hermes_state and fastapi do not import.
+import hermes_bootstrap  # noqa: F401
 import importlib.util
 from pathlib import Path
 import socket
