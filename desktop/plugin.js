@@ -3915,7 +3915,7 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-plot-row{display:grid;grid-template-columns:56px minmax(0,1fr);margin-top:6px}
 .su-yaxis,.su-plot{position:relative;height:128px}.su-yaxis-tall,.su-plot-tall{height:200px}
 .su-yaxis span{position:absolute;right:8px;transform:translateY(50%);font-size:10px;line-height:1;color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums;white-space:nowrap}
-.su-plot{min-width:0;touch-action:none;cursor:crosshair}.su-plot>svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.su-plot{min-width:0;touch-action:pan-y;cursor:crosshair}.su-plot>svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
 .su-grid{stroke:var(--ui-stroke-secondary);stroke-width:1;vector-effect:non-scaling-stroke}
 .su-line{fill:none;stroke-width:1.5;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .su-past.su-area{fill:var(--su-color);fill-opacity:.22}.su-past.su-line{stroke:var(--su-color)}
