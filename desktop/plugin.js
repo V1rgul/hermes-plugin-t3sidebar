@@ -3971,7 +3971,7 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-range:focus-visible{outline:2px solid var(--ui-accent);outline-offset:2px;border-radius:4px}
 .su-empty-dot{position:absolute;bottom:0;width:9px;height:9px;margin:0 0 -4.5px -4.5px;border:2px solid var(--ui-red,var(--su-color));border-radius:50%;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:none}
 /* Pooled chart grid: y-axis | plot | a column as wide as the y-axis, then the x-axis between its two range controls and the measurement row under the plot column. */
-.su-limits-grid{display:grid;grid-template-columns:56px minmax(0,1fr) 56px;grid-template-rows:auto 16px 30px;margin-top:6px}
+.su-limits-grid{display:grid;grid-template-columns:56px minmax(0,1fr) 56px;grid-template-rows:auto 16px 30px;margin-top:22px}
 .su-limits-grid>.su-yaxis{grid-area:1/1}.su-limits-grid>.su-plot{grid-area:1/2}.su-limits-grid>.su-xaxis{grid-area:2/2;margin:0}
 /* Each range control sits against its end of the x axis, vertically centred on the axis labels. */
 .su-axis-range{display:inline-flex;align-items:center;margin-top:-1px;height:18px}
@@ -4010,8 +4010,6 @@ ${SEGMENTED_FALLBACK_CSS}
 /* The theme's primary (--ui-accent-secondary, #0053fd by default) mixed toward the base text as the sidebar's --sf-blue: the raw blue is about 3.3:1 on dark backgrounds. */
 .su{--su-primary:color-mix(in srgb,var(--ui-accent-secondary,#0053fd) 66%,var(--ui-base,var(--ui-text-primary)));--su-primary:oklch(from color-mix(in oklab,var(--ui-accent-secondary,#0053fd) 62%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.6) h)}
 .su-badge-half[data-tone=primary]{background:color-mix(in srgb,var(--su-primary) 14%,transparent);color:var(--su-primary)}
-.su-badge-half[data-tone=success]{background:color-mix(in srgb,var(--ui-green,#1f8a65) 16%,transparent);color:var(--ui-green,#1f8a65)}
-.su-badge-half[data-tone=warn]{background:color-mix(in srgb,var(--ui-orange,#db704b) 16%,transparent);color:var(--ui-orange,#db704b)}
 .su-badge[data-tone=warn]{background:color-mix(in srgb,var(--ui-orange,#db704b) 16%,transparent);color:var(--ui-orange,#db704b)}
 .su-badge[data-tone=error]{background:color-mix(in srgb,var(--ui-red,#e5534b) 16%,transparent);color:var(--ui-red,#e5534b)}
 .su-account-error{margin-bottom:6px;font-size:11px;color:var(--ui-red,var(--ui-text-primary))}
@@ -4030,7 +4028,6 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-verdict[data-status=short],.su-verdict[data-status=waste]{color:var(--ui-text-secondary)}
 .su-verdict-icon{display:inline-flex;flex-shrink:0;color:var(--ui-text-tertiary)}.su-verdict .su-verdict-icon svg{width:15px;height:15px}
 .su-verdict-icon[data-severity=caution]{color:var(--ui-yellow,#c08532)}.su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.su-verdict-icon[data-severity=high]{color:var(--dt-destructive,#cf2d56)}
-.su-limits-grid{margin-top:22px}
 .su-assumed{font-style:italic}
 .su-marks{position:absolute;inset:0;pointer-events:none}
 /* Same neutral as the Now line: the provider colour already fills the chart, and orange would read as a severity. */
