@@ -136,3 +136,20 @@ test('a sync response that does not acknowledge each sent change, or repeats a s
 		assert.deepEqual(mock.control.draftSyncs.at(-1).changes.map(item => item.session_id).sort(), ['first', 'second']);
 	}
 });
+
+test('a sync still in flight from a previous gateway activation is not shared with the new one', async () => {
+	const rest = mock.ctx.rest, scope = captureScope(), controller = make();
+	let reached, release;
+	const arrived = new Promise(resolve => { reached = resolve; }), gate = new Promise(resolve => { release = resolve; });
+	mock.ctx.rest = async (path, options) => { if (path === '/drafts/sync' && !release.used) { release.used = true; reached(); await gate; } return rest(path, options); };
+	try {
+		const old = controller.syncDrafts(scope);
+		await arrived;
+		mock.switchScope('source-a', 'default');
+		const next = captureScope();
+		assert.notEqual(next.epoch, scope.epoch);
+		assert.ok(Array.isArray(await controller.syncDrafts(next)), 'the new activation syncs on its own');
+		release();
+		await assert.rejects(old, /Source\/profile changed/);
+	} finally { mock.ctx.rest = rest; }
+});

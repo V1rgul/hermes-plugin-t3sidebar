@@ -778,7 +778,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     // client's cursor come back. Concurrent callers share the call in flight.
     async syncDrafts(scope, focus) {
       const state = draftState(scope);
-      if (state.running) return state.running;
+      // The state outlives an activation, but a call in flight is fenced to the one that started it.
+      if (state.running && sameScope(state.running.scope, scope)) return state.running.work;
       const work = (async () => {
         const target = focus?.();
         if (target) await reconcileFocused(scope, state, target);
@@ -823,8 +824,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         state.unshown = false;
         return draftView(state);
       })();
-      state.running = work;
-      try { return await work; } finally { if (state.running === work) state.running = null; }
+      const running = { scope: { ...scope }, work };
+      state.running = running;
+      try { return await work; } finally { if (state.running === running) state.running = null; }
     },
     localDrafts(scope) { return draftView(draftState(scope)); },
     flushDrafts(scope) { refresh(scope, { queryKey: draftSyncKey(scope) }); },
