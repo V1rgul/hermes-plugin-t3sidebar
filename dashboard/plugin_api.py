@@ -795,8 +795,6 @@ LIST_FIELDS = frozenset({"id", "source", "archived", "resolved_id", "title", "pr
 
 def card_projects(db):
 	"""Read this SessionDB's catalog once, without schema initialization or home lookup."""
-	from hermes_cli import projects_db
-
 	db_path = getattr(db, "db_path", None)
 	if db_path is None:
 		return []
@@ -804,10 +802,15 @@ def card_projects(db):
 	if not path.is_file():
 		return []
 	try:
+		from hermes_cli.projects_db import list_projects
+	except ImportError:
+		# A core without this helper still lists every chat, just without registered projects.
+		return []
+	try:
 		connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
 		try:
 			connection.row_factory = sqlite3.Row
-			return projects_db.list_projects(connection, include_archived=False)
+			return list_projects(connection, include_archived=False)
 		finally:
 			connection.close()
 	except sqlite3.Error:
@@ -816,10 +819,14 @@ def card_projects(db):
 
 
 def card_project(cwd, projects):
-	from hermes_cli.projects_db import _normalize_path
-
 	if not isinstance(cwd, str) or not cwd.strip():
 		return {"id": "__no_project__", "name": "Home", "icon": None, "color": None, "cwd": None, "is_home": True}
+	try:
+		from hermes_cli.projects_db import _normalize_path
+	except ImportError:
+		# Without Hermes's own normalizer no folder can be proven to own this one: show it unregistered rather than guess.
+		target = cwd.strip()
+		return {"id": target, "name": Path(target).name or target, "icon": None, "color": None, "cwd": target}
 	target = _normalize_path(cwd)
 	# Match project_for_path's longest owning folder, including secondary folders.
 	owners = [(folder.path, project) for project in projects for folder in project.folders
