@@ -2188,6 +2188,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const selectProject = useCallback(cwd => { controller.check(scope); setProject(cwd); setFilterOpen(false); }, [controller, scope]);
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
   // A background acknowledgment notice describes one thread's marker; it is stale once a later acknowledgment succeeds or another thread is shown, and must not hide an unrelated action error.
+  const shownThread = useRef(activeId), shownError = useRef(actionError);
+  shownThread.current = activeId; shownError.current = actionError;
   const clearMarkerNotice = useCallback(() => {
     const message = markerNotice.current;
     markerNotice.current = null;
@@ -2221,6 +2223,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
           // Another write finishing republishes metadata, which reruns this effect and retries silently.
           if (error instanceof WriterBusy) return;
           if (!sameScope(scope, captureScope())) return;
+          // By now another thread may be shown, or a foreground action error: neither is replaced by this background notice.
+          if (shownThread.current !== activeId || shownError.current && shownError.current !== markerNotice.current) return;
           const message = `Thread opened, but its ${marker.label} marker could not be acknowledged: ${error.message}`;
           markerNotice.current = message; setActionError(message);
         }
