@@ -2164,6 +2164,12 @@ function ScopedSidebar({ ctx, controller, scope }) {
   // Search keystrokes and toolbar state do not touch these observers, which cover hidden empty sessions too.
   const draftObservers = useMemo(() => emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId) })), [emptyCandidates, scope, controller, onDraftPresence, runtime.dataUpdatedAt, activeOwner, activeId]);
+  // An observer only reports while mounted: forget the presence of a session that gained history, left the list or changed identity.
+  useEffect(() => setEmptyDrafts(previous => {
+    if (!previous.size) return previous;
+    const ids = new Set(emptyCandidates.map(draftIdentity));
+    return [...previous].every(id => ids.has(id)) ? previous : new Set([...previous].filter(id => ids.has(id)));
+  }), [emptyCandidates]);
   const ownsActive = activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile;
   useDraftFocus({ controller, scope, rows, focusedId: ownsActive ? activeId : null, focus: draftFocus });
   const tokens = useMemo(() => searchTokens(query), [query]);
