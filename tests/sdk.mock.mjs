@@ -277,6 +277,8 @@ export const ctx = {
     }
     const id = decodeURIComponent(path.slice('/sessions/'.length));
     if (!options || options.method !== 'POST') throw new Error('Unexpected REST request');
+    // Like the companion, pin and snooze are refused for a natively archived session before anything is written.
+    if (['pin', 'snooze'].includes(options.body?.action) && [...control.rows, ...(control.extra || [])].some(row => (row.id === id || row._lineage_root_id === id) && row.archived === true)) throw new Error('409: {"detail":"native_session_archived"}');
     if (control.metadataWriteError) throw new Error('fixture metadata write failed');
     if (options.body.action === 'ack_done') {
       if (!control.dropWrite && control.metadata.completions?.[id]?.done_token === options.body.done_token) delete control.metadata.completions[id];

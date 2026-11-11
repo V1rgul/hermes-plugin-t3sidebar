@@ -700,11 +700,14 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           check(scope); client.setQueryData(key, state);
           return { archived, before };
         }
-        if (['pin', 'snooze'].includes(payload.action)) {
-          const route = await routeFor(scope);
-          if (await archiveFlag(scope, route, id)) throw new Error('Unarchive this session before pinning or snoozing it.');
+        if (['pin', 'snooze'].includes(payload.action)) await routeFor(scope);
+        try { await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: payload })); }
+        catch (error) {
+          // The companion refuses pinning or snoozing an archived session itself (HTTP 409 native_session_archived); the transport reports it as "409: <body>".
+          const message = String(error?.message ?? error);
+          if (['pin', 'snooze'].includes(payload.action) && /(?:^|error:\s*)409:/i.test(message) && message.includes('native_session_archived')) throw new Error('Unarchive this session before pinning or snoozing it.');
+          throw error;
         }
-        await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: payload }));
         const value = verifyAction(validState(await fenced(scope, () => ctx.rest('/state'))), id, payload);
         await client.cancelQueries({ queryKey: key, exact: true }); check(scope);
         client.setQueryData(key, value);

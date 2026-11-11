@@ -59,8 +59,9 @@ test('active archived runtimes immediately leave Archived even before persisted 
 
 test('archived metadata guard prevents pin/snooze writes including stale menu clicks', async () => {
 	controller = createController(mock.ctx);
+	const before = structuredClone(mock.control.metadata);
 	for (const payload of [{ action: 'pin' }, { action: 'snooze', wake_at: Date.now() / 1000 + 3600 }]) await assert.rejects(controller.mutate(captureScope(), 'archived', payload), /Unarchive/);
-	assert.ok(!mock.calls.some(call => call[0] === 'rest' && call[2]?.method === 'POST'));
+	assert.deepEqual(mock.control.metadata, before, 'the companion refuses both writes');
 });
 
 function target() {
