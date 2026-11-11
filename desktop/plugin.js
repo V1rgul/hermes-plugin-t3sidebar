@@ -2195,6 +2195,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
   }, []);
   useEffect(clearMarkerNotice, [activeId, clearMarkerNotice]);
   useEffect(() => {
+    // Remember an acknowledged marker only while the metadata still carries it: an in-flight one is still there, and one that returns is acknowledged again.
+    if (metadata.data) for (const key of readMarkers.current) {
+      const [id, label, token] = JSON.parse(key);
+      if ((label === 'Woke' ? metadata.data.sessions[id]?.woke_at : metadata.data.completions?.[id]?.done_token) !== token) readMarkers.current.delete(key);
+    }
     if (!metadata.data || metadata.isError || mutation.isPending || !activeId || activeOwner?.connectionId !== (scope.connectionId ?? 'local') || activeOwner?.profile !== scope.profile) return;
     const row = rows.find(item => hasAlias(item, activeId));
     const meta = row && metadata.data.sessions[durableId(row)];
