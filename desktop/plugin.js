@@ -3057,9 +3057,12 @@ function useUsagePreferences(ctx) {
 // Two pages can be open at once, so a change is merged into what is stored now rather than into one page's copy, which would overwrite the other page's later choices. A function patch derives nested values (the per-provider account folds) from whichever copy it is merged into.
 const resolvePatch = (patch, base) => typeof patch === 'function' ? patch(base) : patch;
 function updateUsagePreferences(ctx, client, patch) {
-  const stored = readUsagePreferences(ctx.storage);
-  writeUsagePreferences(ctx.storage, { ...stored, ...resolvePatch(patch, stored) });
-  client.setQueryData(USAGE_PREFERENCES_QUERY, previous => validUsagePreferences({ ...previous, ...resolvePatch(patch, validUsagePreferences(previous)) }));
+  // One base for the write and the in-memory copy, so the two never diverge. When storage cannot be read, the copy on screen stands in for it rather than the defaults, which would reset unrelated choices.
+  let base;
+  try { base = validUsagePreferences(ctx.storage.get(USAGE_PREFERENCES_KEY, null)); } catch (_) { base = validUsagePreferences(client.getQueryData(USAGE_PREFERENCES_QUERY)); }
+  const next = validUsagePreferences({ ...base, ...resolvePatch(patch, base) });
+  writeUsagePreferences(ctx.storage, next);
+  client.setQueryData(USAGE_PREFERENCES_QUERY, next);
 }
 // One component for both route pages; `view` picks the content and the only endpoint that page fetches.
 export function UsagePage({ ctx, view = 'usage' }) {
