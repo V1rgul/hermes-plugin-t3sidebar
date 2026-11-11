@@ -655,13 +655,21 @@ test('the Usage page draws three charts from /usage/history only and toggles spl
   assert.deepEqual([tipValues.length, tipValues.at(-1), $$('.su-tip-raw').length], [3, tipValues[0] + tipValues[1], 0]);
 });
 
-test('a usage period change glides all three charts: a longer period widens once it arrives, a shorter one zooms in on the old drawing first', async t => {
-  // A manual frame queue stands in for requestAnimationFrame, so the test steps the glide at chosen timestamps.
-  const queue = [], saved = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame, media: globalThis.matchMedia };
-  let reduce = false;
-  Object.assign(globalThis, { requestAnimationFrame: callback => queue.push(callback), cancelAnimationFrame: handle => { queue[handle - 1] = null; }, matchMedia: () => ({ matches: reduce }) });
+// A manual frame queue stands in for requestAnimationFrame, so a test steps glides at chosen timestamps. As in a browser, handles only grow, so cancelling one never hits another frame, and a step runs only the frames requested before it that are still pending.
+function fakeFrames(t, reduced) {
+  const frames = new Map(), saved = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame, media: globalThis.matchMedia };
+  let last = 0;
+  Object.assign(globalThis, { requestAnimationFrame: callback => { frames.set(++last, callback); return last; }, cancelAnimationFrame: handle => { frames.delete(handle); }, matchMedia: () => ({ matches: reduced() }) });
   t.after(() => Object.assign(globalThis, { requestAnimationFrame: saved.raf, cancelAnimationFrame: saved.caf, matchMedia: saved.media }));
-  const run = async time => act(async () => { for (const callback of queue.splice(0)) callback?.(time); });
+  const run = async time => act(async () => {
+    for (const handle of [...frames.keys()]) { const callback = frames.get(handle); if (callback) { frames.delete(handle); callback(time); } }
+  });
+  return { frames, run };
+}
+
+test('a usage period change glides all three charts: a longer period widens once it arrives, a shorter one zooms in on the old drawing first', async t => {
+  let reduce = false;
+  const { frames, run } = fakeFrames(t, () => reduce);
   plugin.register(mock.ctx); await render(page());
   const charts = () => $$('.su-chart[data-metric]'), gliding = () => charts().map(chart => chart.dataset.gliding ?? '').join();
   const boxes = () => charts().map(chart => chart.querySelector('.su-plot > svg').getAttribute('viewBox')), box = () => boxes()[0].split(' ').map(Number);
@@ -679,7 +687,7 @@ test('a usage period change glides all three charts: a longer period widens once
   [left, , width] = box();
   assert.ok(left > 0 && left < 22 / 30 * 1000 && width > 7 / 30 * 1000 && width < 1000, `half way the window is between the periods (${boxes()[0]})`);
   await run(1300);
-  assert.deepEqual([gliding(), boxes().join(), translated(), queue.length], [',,', settled, 0, 0], 'settled: the React viewBox is back and every translate is cleared');
+  assert.deepEqual([gliding(), boxes().join(), translated(), frames.size], [',,', settled, 0, 0], 'settled: the React viewBox is back and every translate is cleared');
   // 30d → 7d: the 30-day drawing stays while the glide zooms in on the last seven days, then the 7-day payload is drawn once, at the end.
   await step('right');
   assert.deepEqual([gliding(), days(), boxes()[0]], ['true,true,true', 30, '0.000 0 1000.000 100'], 'the click keeps the wide drawing');
@@ -691,7 +699,7 @@ test('a usage period change glides all three charts: a longer period widens once
   // Reduced motion: the period changes instantly.
   reduce = true;
   await step('left');
-  assert.deepEqual([gliding(), boxes().join(), days(), queue.length], [',,', settled, 30, 0]);
+  assert.deepEqual([gliding(), boxes().join(), days(), frames.size], [',,', settled, 30, 0]);
 });
 
 test('hovering a bucket synchronizes the crosshair and tooltip across all three charts', async () => {
@@ -1157,12 +1165,8 @@ test('unfold arrows beside each end of the x axis set four page-wide ranges that
 });
 
 test('a range change glides through the viewBox and translates, then settles; polls, window switches and reduced motion do not glide', async t => {
-  // A manual frame queue stands in for requestAnimationFrame, so the test steps the glide at chosen timestamps.
-  const queue = [], saved = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame, media: globalThis.matchMedia };
   let reduce = false;
-  Object.assign(globalThis, { requestAnimationFrame: callback => queue.push(callback), cancelAnimationFrame: handle => { queue[handle - 1] = null; }, matchMedia: () => ({ matches: reduce }) });
-  t.after(() => Object.assign(globalThis, { requestAnimationFrame: saved.raf, cancelAnimationFrame: saved.caf, matchMedia: saved.media }));
-  const run = async time => act(async () => { for (const callback of queue.splice(0)) callback?.(time); });
+  const { frames, run } = fakeFrames(t, () => reduce);
   plugin.register(mock.ctx); await render(limitsPage());
   const grid = () => $('.su-limits-grid'), viewBox = () => grid().querySelector('.su-plot > svg').getAttribute('viewBox');
   const translated = () => $$('.su-limits-grid .su-xaxis > span, .su-limits-grid .su-marks > *, .su-limits-grid .su-now').filter(node => node.style.translate !== '').length;
@@ -1181,7 +1185,7 @@ test('a range change glides through the viewBox and translates, then settles; po
   const middle = Number(viewBox().split(' ')[2]);
   assert.ok(middle > 14 / 37 * 1000 && middle < 1000, `half way the window is between the ranges (${viewBox()})`);
   await run(1300);
-  assert.deepEqual([grid().dataset.gliding, viewBox(), translated(), queue.length], [undefined, '0 0 1000 100', 0, 0], 'settled: the React viewBox is back and every translate is cleared');
+  assert.deepEqual([grid().dataset.gliding, viewBox(), translated(), frames.size], [undefined, '0 0 1000 100', 0, 0], 'settled: the React viewBox is back and every translate is cleared');
   const settled = spans();
   assert.ok(settled !== gliding && settled.split(',').every(item => /^[\d.]+%\|[\d.]+%$/.test(item)), `measurement spans moved (${gliding}) and settled on React's percentages (${settled})`);
   // Shrinking 30d → 7d keeps the 37-day drawing on the click and opens on all of it, zooms in on its first 14 days, then draws the 7-day range once, at the end. The drawn range shows in the plot's data-end.
@@ -1209,6 +1213,7 @@ test('a range change glides through the viewBox and translates, then settles; po
   const shown = viewBox();
   await click($('.su-axis-range[data-side=past] [data-direction=right]'));
   assert.equal(grid().dataset.gliding, 'true');
+  assert.equal(frames.size, $$('.su-limits-grid[data-gliding]').length, 'the interrupted glides cancelled the frames they had requested after their last step; only the new ones are pending');
   await run(4000); await run(4300);
   const plot = $('.su-pooled .su-plot');
   assert.deepEqual([grid().dataset.gliding, viewBox(), translated(), gridline().getAttribute('x1'), gridline().getAttribute('x2'), (Number(plot.dataset.end) - Number(plot.dataset.start)) / D],
