@@ -1648,7 +1648,8 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
   };
   const action = (text, name, payload) => h(MenuAction, { key: text, name, disabled: disabled || busy, onClick: () => run(payload) }, text);
 
-  const customValid = (() => { try { parseLocalWake(value); return true; } catch (_) { return false; } })();
+  // Only the snooze menu shows the custom field, and an empty one is never valid; submitting validates again.
+  const customValid = snoozeOnly && !!value && (() => { try { parseLocalWake(value); return true; } catch (_) { return false; } })();
   const custom = event => {
     event.preventDefault();
     try { const wake_at = parseLocalWake(value); setError(''); run({ action: 'snooze', wake_at }); } catch (err) { setError(err.message); }
@@ -1793,7 +1794,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   // The focused composer is read every 2 s, while its synced copy can lag one sync behind, so a focused card follows its composer alone.
   const hasDraft = (row.newSession ? draftPresent : draft.data === true && !draft.isError) || !active && row.drafted;
   const attention = row.status === 'waiting', snoozed = row.section === 'snoozed', badge = snoozed ? null : cardStatus(row, active);
-  const tokens = compactTokens(row), provider = providerMark(row.provider);
+  const tokens = showTokens ? compactTokens(row) : null, provider = providerMark(row.provider);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
     if (event.target !== event.currentTarget) return;
@@ -2154,7 +2155,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const rich = sessions.data?.sessions || EMPTY_ROWS, extra = sessions.data?.capped ? EMPTY_ROWS : expanded.data?.sessions || EMPTY_ROWS;
   const archivedRows = archives.data?.sessions || EMPTY_ROWS;
   const serverDrafts = drafts.data || EMPTY_ROWS;
-  const rows = useMemo(() => withDraftRows(mergeRows(rich, extra, live, true, archivedRows), serverDrafts), [rich, extra, live, archivedRows, serverDrafts]);
+  // Draft-view changes (every focused composer check) reuse the merged history; only its own inputs merge it again.
+  const merged = useMemo(() => mergeRows(rich, extra, live, true, archivedRows), [rich, extra, live, archivedRows]);
+  const rows = useMemo(() => withDraftRows(merged, serverDrafts), [merged, serverDrafts]);
   const draftIds = useMemo(() => new Set(serverDrafts.map(draft => draft.session_id)), [serverDrafts]);
   const runtimeKnown = !!runtime.data, runtimeStale = runtimeKnown && runtime.isError;
   // Successful polls still advance ages and due snoozes when Query structural
@@ -2174,6 +2177,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
   }, [snoozeDeadlines, now]);
   const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, liveCounts, { runtimeKnown, runtimeStale, now: classificationNow, draftIds }), [rows, metadata.data, liveCounts, runtimeKnown, runtimeStale, classificationNow, draftIds]);
   const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession && !row._draftOnly), [classified]);
+  // Search keystrokes and toolbar state do not touch these observers, which cover hidden empty sessions too.
+  const draftObservers = useMemo(() => emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
+    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId) })), [emptyCandidates, scope, controller, onDraftPresence, runtime.dataUpdatedAt, activeOwner, activeId]);
   const ownsActive = activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile;
   useDraftFocus({ controller, scope, rows, focusedId: ownsActive ? activeId : null, focus: draftFocus });
   const tokens = useMemo(() => searchTokens(query), [query]);
@@ -2244,13 +2250,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
     } catch (error) { if (sameScope(scope, captureScope())) setActionError(error.message); return false; }
   }, [controller, scope, mutation.mutateAsync]);
   const navigate = useCallback((event, id) => {
-    const keys = latest.current.visible.map(row => row.key), index = keys.indexOf(id);
-    let target;
-    if (event.key === 'ArrowDown') target = keys[Math.min(keys.length - 1, index + 1)];
-    if (event.key === 'ArrowUp') target = keys[Math.max(0, index - 1)];
-    if (event.key === 'Home') target = keys[0];
-    if (event.key === 'End') target = keys.at(-1);
-    if (target) { event.preventDefault(); const row = latest.current.visible.find(row => row.key === target); navigators.current.get(row.section)?.(target); }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const visible = latest.current.visible, index = event.key === 'ArrowDown' || event.key === 'ArrowUp' ? visible.findIndex(row => row.key === id) : -1;
+    const target = event.key === 'Home' ? visible[0] : event.key === 'End' ? visible.at(-1)
+      : visible[event.key === 'ArrowDown' ? Math.min(visible.length - 1, index + 1) : Math.max(0, index - 1)];
+    if (target) { event.preventDefault(); navigators.current.get(target.section)?.(target.key); }
   }, []);
   useEffect(() => {
     // Only recover a card's own focus; blur relinquishes ownership to search, menus or the composer.
@@ -2313,8 +2317,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   return h('aside', { className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); search.current?.focus(); }
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
-  } }, ...emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
-    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId) })), h('style', null, CSS),
+  } }, ...draftObservers, h('style', null, CSS),
     h('header', { className: 'sf-header' },
       h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) }),
         query ? h(IconButton, { label: 'Clear search', name: 'X', glyph: '×', className: 'sf-clear', onClick: () => { setQuery(''); search.current?.focus(); } }) : null),
