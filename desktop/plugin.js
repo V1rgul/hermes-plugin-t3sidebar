@@ -1420,7 +1420,14 @@ function Settings({ ctx }) {
   }), h(ExperimentalSettings, { ctx }));
 }
 // Experimental features lean on Hermes internals. The backend reports, feature by feature, whether this Hermes still has them; a feature without them is off, its switch disabled and the reason shown under it, while the others keep working.
-const EXPERIMENTAL_KEY = ['hermes-t3sidebar-settings', 'experimental'];
+const experimentalKey = scope => ['hermes-t3sidebar-settings', scope.connectionId, scope.profile, scope.epoch, 'experimental'];
+// Each read and save belongs to the backend of the source and profile it started on; an answer arriving after a switch is dropped.
+async function experimentalRequest(ctx, scope, path, options) {
+  if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load this setting.');
+  const value = await ctx.rest(path, options);
+  if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load this setting.');
+  return validExperimental(value);
+}
 export const INCOMPATIBLE_HERMES = 'Incompatible with your Hermes version.';
 export const EXPERIMENTAL_FEATURES = [
   { id: 'pool_credits', label: 'Banked reset expiries for every Codex account',
@@ -1433,31 +1440,50 @@ export function validExperimental(value) {
   return Object.fromEntries(EXPERIMENTAL_FEATURES.map(({ id }) => [id, { enabled: features[id]?.enabled === true, available: features[id]?.available === true }]));
 }
 function ExperimentalSettings({ ctx }) {
-  const query = useQuery({ queryKey: EXPERIMENTAL_KEY, queryFn: async () => validExperimental(await ctx.rest('/settings/experimental')), staleTime: 0, retry: false });
+  const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
+  useValue(host.state.gateway);
+  useValue(activationEpoch);
+  const epoch = gatewayActivationEpoch();
+  const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
+  return h(ScopedExperimentalSettings, { key: JSON.stringify(experimentalKey(scope)), ctx, scope });
+}
+function ScopedExperimentalSettings({ ctx, scope }) {
+  const query = useQuery({ queryKey: experimentalKey(scope), queryFn: () => experimentalRequest(ctx, scope, '/settings/experimental'), staleTime: 0, retry: false });
   // Same heading as Desktop's own settings sections (SectionHeading, not exported by the SDK): icon and title, with the caveat right after the title.
   return h('section', { className: 'sf-experimental mt-6', 'aria-label': 'Experimental' },
     h('div', { className: 'mb-2.5 flex items-center gap-2 pt-2 text-[length:var(--conversation-text-font-size)] font-medium' },
       typeof sdk.Codicon === 'function' ? h(sdk.Codicon, { name: 'beaker', size: 16, className: 'shrink-0 text-muted-foreground' }) : null,
       h('span', null, 'Experimental'),
       h('span', { className: 'text-xs font-normal text-muted-foreground' }, 'May break with updates. Auto-disables in that case.')),
-    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, feature, state: query.data?.[feature.id], readError: query.isError })));
+    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, scope, feature, state: query.data?.[feature.id], readError: query.isError })));
 }
-function ExperimentalFeature({ ctx, feature, state, readError }) {
-  const client = useQueryClient(), [error, setError] = useState('');
+function ExperimentalFeature({ ctx, scope, feature, state, readError }) {
+  const client = useQueryClient(), [error, setError] = useState(''), [saving, setSaving] = useState(false), pending = useRef(false);
+  const key = experimentalKey(scope);
+  // One save at a time: the switch stays disabled until the backend's readback of this save is published.
   const save = async enabled => {
+    if (pending.current) return;
+    pending.current = true; setSaving(true);
     try {
-      client.setQueryData(EXPERIMENTAL_KEY, validExperimental(await ctx.rest(`/settings/experimental/${feature.id}`, { method: 'PUT', body: { enabled } })));
+      // A background read started before or during the write could otherwise publish the state from before it.
+      await client.cancelQueries({ queryKey: key });
+      const value = await experimentalRequest(ctx, scope, `/settings/experimental/${feature.id}`, { method: 'PUT', body: { enabled } });
+      if (value[feature.id].enabled !== enabled) throw new Error('The setting was not confirmed.');
+      await client.cancelQueries({ queryKey: key });
+      if (!sameScope(scope, captureScope())) return;
+      client.setQueryData(key, value);
       setError('');
     } catch (_) {
+      if (!sameScope(scope, captureScope())) return;
       setError('The setting was not saved.');
-      client.invalidateQueries({ queryKey: EXPERIMENTAL_KEY });
-    }
+      client.invalidateQueries({ queryKey: key });
+    } finally { pending.current = false; setSaving(false); }
   };
   const unavailable = state?.available === false;
   const note = unavailable ? INCOMPATIBLE_HERMES : error || (readError ? 'Could not read this setting from the plugin backend.' : '');
   return h(sdk.ToggleRow ?? SettingsToggleRow, {
     label: feature.label, description: feature.description,
-    checked: state?.enabled === true, disabled: !state || unavailable, onChange: save,
+    checked: state?.enabled === true, disabled: !state || unavailable || saving, onChange: save,
     below: note ? h('div', { role: unavailable ? undefined : 'alert', className: 'mt-1.5 text-xs text-destructive', 'data-feature': feature.id }, note) : null
   });
 }
@@ -4066,6 +4092,6 @@ export default {
         return queryClient.invalidateQueries({ queryKey: scopeKey(scope), predicate: query => resources.includes(query.queryKey[4]), refetchType: 'active' }, { cancelRefetch: false });
       }).catch(() => { /* Query retains errors for the pane's normal recovery UI. */ });
     });
-    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-draft-sync', 'hermes-t3sidebar-preferences', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
+    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-draft-sync', 'hermes-t3sidebar-preferences', 'hermes-t3sidebar-settings', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
   }
 };
