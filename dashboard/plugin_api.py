@@ -683,9 +683,10 @@ def standalone_runtime(request, profile, actor):
 			metadata = runtime_display_metadata(server, captured, projects)
 			# Native legacy previews may contain pending prompts. Runtime needs
 			# liveness/identity only; do not return that text or any extra fields.
-			# Compaction is transparent: a turn's own compaction keeps its native start, and a manual one counts from when it was first seen.
-			item["turn_started_at"] = turn_starts.get(identity) or runtime_compression_started_at(
+			# Compaction is transparent: a turn's own compaction keeps its native start, and a manual one counts from when it was first seen. Called even under a native turn, so a compaction that ends meanwhile is forgotten.
+			compaction_started_at = runtime_compression_started_at(
 				home, row["id"], parents[identity][0], compressing.get(identity, False))
+			item["turn_started_at"] = turn_starts.get(identity) or compaction_started_at
 			item["awaiting_processes"] = awaiting.get(identity)
 			item["compacting"] = compacting.get(identity, False)
 			item["running_subagents"] = standalone_subagent_count(server, row,
