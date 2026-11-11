@@ -687,11 +687,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           try {
             state = validState(await fenced(scope, () => ctx.rest('/state')));
             const meta = state.sessions[id];
-            const restore = payload.restoreMetadata;
-            const metadataPayload = restore ? (restore.state === 'snoozed' && restore.wake_at > Date.now() / 1000 ? { action: 'snooze', wake_at: restore.wake_at } : { action: restore.state === 'settled' ? 'settle' : 'restore' })
-              // Record an explicit Ready restoration even for external archives with no plugin metadata,
-              // so the companion's organized-row backfill retains an older unarchived conversation.
-              : !archived && (!meta || meta.state !== 'active') ? { action: 'restore' } : null;
+            // Record an explicit Ready restoration even for external archives with no plugin metadata,
+            // so the companion's organized-row backfill retains an older unarchived conversation.
+            const metadataPayload = !archived && (!meta || meta.state !== 'active') ? { action: 'restore' } : null;
             if (metadataPayload) {
               await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: metadataPayload }));
               state = verifyAction(validState(await fenced(scope, () => ctx.rest('/state'))), id, metadataPayload);
