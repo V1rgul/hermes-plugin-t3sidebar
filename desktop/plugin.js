@@ -471,6 +471,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       state.unsaved = true;
       return true;
     }
+    // The same prune can erase text not synced yet; a pending deletion has no text to put back.
+    if (entering && !local && pending?.text) return !mounted || writeComposer(scope, target.address, pending.text);
     state.pending.set(key, { text: local, cwd: target.cwd ?? pending?.cwd ?? known?.cwd ?? null, edited_at: Date.now() / 1000 });
     state.unsaved = state.unshown = true;
     return true;

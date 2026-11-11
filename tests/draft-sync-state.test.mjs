@@ -74,3 +74,28 @@ test('beyond the retention limit, the oldest deletion markers are forgotten firs
 	assert.equal(Object.hasOwn(kept, 'marker-0') || Object.hasOwn(kept, 'marker-1'), false);
 	assert.equal(Object.hasOwn(kept, 'live-a') && Object.hasOwn(kept, 'live-b') && Object.hasOwn(kept, 'marker-2'), true);
 });
+
+test('an unsynced draft erased by Desktop\'s prune is put back on return, while a later clear still deletes it', async () => {
+	const scope = captureScope(), controller = make(), fresh = target('fresh', null);
+	// Every sync fails meanwhile, so the text exists only as a local pending change.
+	mock.control.draftsError = true;
+	mock.host.state.focusedStoredSessionId.set('fresh'); mock.control.mountedDrafts.fresh = 'unsent';
+	await controller.enterDraft(scope, fresh);
+	mock.host.state.focusedStoredSessionId.set('design');
+	await controller.leaveDraft(scope, fresh);
+	delete mock.control.mountedDrafts.fresh;
+	// Back on it: its composer opens empty.
+	mock.control.mountedDrafts.fresh = '';
+	mock.host.state.focusedStoredSessionId.set('fresh');
+	await controller.enterDraft(scope, fresh);
+	assert.equal(mock.control.mountedDrafts.fresh, 'unsent');
+	assert.deepEqual(controller.localDrafts(scope).map(draft => draft.session_id), ['fresh']);
+	// Once entered, clearing the composer is a deletion, and stays one when the session is entered again.
+	mock.control.mountedDrafts.fresh = '';
+	await controller.noteDraft(scope, fresh);
+	await controller.enterDraft(scope, fresh);
+	assert.equal(mock.control.mountedDrafts.fresh, '');
+	mock.control.draftsError = false;
+	await controller.syncDrafts(scope);
+	assert.equal(lastSent('fresh')?.text, '');
+});
