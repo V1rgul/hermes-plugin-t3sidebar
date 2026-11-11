@@ -98,10 +98,13 @@ follow() {
 	"$RUNTIME" exec -d --user hermes -e HERMES_HOME=/opt/data "$NAME" sh -c 'cd /opt/data/demo && exec /opt/hermes/.venv/bin/python seed_limits.py follow >> /opt/data/demo/limits-follow.log 2>&1' >/dev/null
 }
 
+# True when process $1 has exactly --user-data-dir=$2 among its arguments: the path is compared as a whole argument, never as a pattern, so a similar or longer profile path does not match.
+holds_profile() { { tr '\0' '\n' < "/proc/$1/cmdline"; } 2>/dev/null | grep -Fxq -- "--user-data-dir=$2"; }
+
 # The pid file alone could name a recycled pid: the process must also hold this profile.
 browser_pid() {
 	pid=$(cat "$BROWSER_DIR/browser.pid" 2>/dev/null) || return 1
-	{ tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null | grep -q -- "--user-data-dir=$PROFILE " && echo "$pid"
+	holds_profile "$pid" "$PROFILE" && echo "$pid"
 }
 
 # Closed through CDP so Chromium writes its storage to the profile first: a signal can lose the last writes, such as a plugin switch. The signal is only the fallback.
@@ -203,8 +206,12 @@ create() {
 	wait_ready
 }
 
-# A worktree's browser is found by its profile path, which survives the pid file of a removed worktree.
-stop_worktree_browser() { pkill -f -- "--user-data-dir=$1/.t3webapp/browser-profile" 2>/dev/null || true; }
+# A worktree's browser is found by its profile path, which survives the pid file of a removed worktree; every process holding exactly that profile is signalled, Chromium's helpers included.
+stop_worktree_browser() {
+	for candidate in $(pgrep -f -- '--user-data-dir=' 2>/dev/null || true); do
+		! holds_profile "$candidate" "$1/.t3webapp/browser-profile" || kill "$candidate" 2>/dev/null || true
+	done
+}
 
 # The same directory can be spelled several ways (a trailing slash, a symlink, a dot segment), so data directories are compared by their physical path.
 canonical() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"; }

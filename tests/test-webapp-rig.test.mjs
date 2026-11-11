@@ -1,7 +1,7 @@
 // tools/test-webapp/t3webapp.sh against a stub container runtime: a copy of the script runs in a scratch Git checkout, with HOME, the data directories and the runtime redirected into one scratch directory, so no real container, demo directory or browser profile can be reached.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -161,4 +161,28 @@ test('an interrupted worktree setup unpauses the shared container it paused, and
   assert.notEqual(stopped.code, 0);
   assert.deepEqual(pauses(stopped.calls), []);
   for (const result of [interrupted, completed, stopped]) assertScratchVolumes(result.calls);
+});
+
+test('prune stops only the browser whose profile argument is exactly the gone worktree\'s', async () => {
+  const repo = await checkout();
+  const gone = join(root, 'gone/wt.1'), data = join(root, 'gone-data');
+  write(join(data, 'data/state.db'), 'x');
+  const profiles = { target: `${gone}/.t3webapp/browser-profile`, longer: `${gone}/.t3webapp/browser-profile-other`, pattern: `${join(root, 'gone/wtx1')}/.t3webapp/browser-profile` };
+  const browsers = Object.fromEntries(Object.entries(profiles).map(([name, profile]) => [name, spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', `--user-data-dir=${profile}`], { stdio: 'ignore' })]));
+  const ended = Object.fromEntries(Object.entries(browsers).map(([name, child]) => [name, new Promise(resolve => child.once('exit', (code, signal) => resolve(signal)))]));
+  try {
+    for (const child of Object.values(browsers)) {
+      for (let i = 0; i < 200 && !readFileSync(`/proc/${child.pid}/cmdline`, 'utf8').includes('--user-data-dir='); i++) await new Promise(done => setTimeout(done, 10));
+    }
+    const result = await rig(repo, ['prune'], { STUB_PS: 't3demo-gone', STUB_EXISTING: 't3demo-gone', STUB_LABEL_WORKTREE: gone, STUB_LABEL_DIR: data });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /Removing t3demo-gone: worktree .* is gone/);
+    assert.equal(await ended.target, 'SIGTERM');
+    assert.equal(browsers.longer.exitCode === null && browsers.longer.signalCode === null, true);
+    assert.equal(browsers.pattern.exitCode === null && browsers.pattern.signalCode === null, true);
+    assertScratchVolumes(result.calls);
+  } finally {
+    for (const child of Object.values(browsers)) child.kill('SIGKILL');
+    await Promise.all(Object.values(ended));
+  }
 });
