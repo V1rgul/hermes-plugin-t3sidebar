@@ -3775,8 +3775,10 @@ function LimitAccount({ provider, account, selected, now, redeem, unsettled }) {
 // OpenAI lets a banked reset be redeemed manually once any allowance it covers has less than 80% left (help.openai.com/en/articles/20001498). The account-wide windows shown are exactly the covered ones (weekly on Pro, 5-hour and weekly on Plus/Business), so the rule applies to the whole account. Codex's own applicable_available_count follows the assistant's stricter 10% rule and would call a manually redeemable reset unusable.
 const BANKED_REDEEM_BELOW_PERCENT = 80;
 export function bankedRedeemable(windows) {
-  const remaining = windows.filter(win => win.scope !== 'model' && Number.isFinite(win.remaining_percent)).map(win => win.remaining_percent);
-  return remaining.length ? remaining.some(value => value < BANKED_REDEEM_BELOW_PERCENT) : null;
+  // One known allowance below the threshold is enough; claiming every one is at or above it needs every account-wide reading.
+  const account = windows.filter(win => win.scope !== 'model');
+  if (account.some(win => Number.isFinite(win.remaining_percent) && win.remaining_percent < BANKED_REDEEM_BELOW_PERCENT)) return true;
+  return account.length && account.every(win => Number.isFinite(win.remaining_percent)) ? false : null;
 }
 // The window a redeemed reset is judged by: weekly, because once it is empty what is left of the 5-hour window has no value; plans without one fall back to their longest account-wide window instead.
 export function redeemWindow(windows) {
