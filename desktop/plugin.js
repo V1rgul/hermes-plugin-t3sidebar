@@ -2307,7 +2307,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const knownTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0;
   const fallbackCount = knownTotal && total > 500 ? ` is capped at 500 of ${total}`
     : `: ${sessions.data?.sessions.length || 0} loaded${knownTotal ? ` of ${total} available` : ''}`;
-  const canExpand = !sessions.data?.capped && (limit === 0 ? sessions.data?.has_more : expanded.data?.has_more);
+  // Until the expansion has answered (a failed first request included), the first page's has_more keeps the button, which is then the retry.
+  const canExpand = !sessions.data?.capped && (limit === 0 || !expanded.data ? sessions.data?.has_more : expanded.data.has_more);
   return h('aside', { className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); search.current?.focus(); }
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
