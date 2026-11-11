@@ -603,11 +603,11 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       readTicket(scope, ticket);
       const route = await routeFor(scope);
       try {
-        const value = qualified(await fenced(scope, () => ctx.rest('/sessions?offset=0&limit=500')), scope, route);
+        const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=0&limit=${HISTORY_PAGE_SIZE}`)), scope, route);
         readTicket(scope, ticket); return value;
       } catch (error) {
         readTicket(scope, ticket);
-        const value = await fenced(scope, () => env.host.listPersistedSessions(route, { profile: route?.targetProfile || scope.profile, limit: 500 }));
+        const value = await fenced(scope, () => env.host.listPersistedSessions(route, { profile: route?.targetProfile || scope.profile, limit: HISTORY_PAGE_SIZE }));
         readTicket(scope, ticket);
         return { ...value, capped: true, companionError: error.message };
       }
@@ -653,9 +653,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const route = await routeFor(scope), sessions = [];
       let has_more = true;
       for (let page = 1; page <= pages && has_more; page++) {
-        const offset = page * 500;
+        const offset = page * HISTORY_PAGE_SIZE;
         const value = await fenced(scope, () => client.fetchQuery({ queryKey: [...scopeKey(scope), 'page', offset], staleTime: Infinity, gcTime: HISTORY_PAGE_GC_MS,
-          queryFn: async () => { const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=${offset}&limit=500`)), scope, route); readTicket(scope, ticket); return value; } }));
+          queryFn: async () => { const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=${offset}&limit=${HISTORY_PAGE_SIZE}`)), scope, route); readTicket(scope, ticket); return value; } }));
         readTicket(scope, ticket);
         sessions.push(...value.sessions); has_more = value.has_more;
       }
