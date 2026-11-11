@@ -190,3 +190,31 @@ test('deleting a session forgets its local draft: no draft card returns and its 
 	await controller.syncDrafts(scope);
 	assert.deepEqual(mock.control.draftSyncs.flatMap(body => body.changes.map(item => item.session_id)), ['design']);
 });
+
+test('a reconciliation of a session focus has left neither writes its composer nor counts as the entry of the session focused now', async () => {
+	const scope = captureScope(), controller = make();
+	mock.control.serverDrafts = [{ session_id: 'design', text: 'b text', cwd: null, project: null, seq: 1, edited_at: Date.now() / 1000 },
+		{ session_id: 'alpha', text: 'a text', cwd: null, project: null, seq: 2, edited_at: Date.now() / 1000 }];
+	await controller.syncDrafts(scope);
+	let release, reached;
+	const gate = new Promise(resolve => { release = resolve; }), arrived = new Promise(resolve => { reached = resolve; });
+	mock.control.readDraft = id => {
+		if (id === 'alpha' && !reached.used) { reached.used = true; reached(); return gate; }
+		return Object.hasOwn(mock.control.mountedDrafts, id) ? mock.control.mountedDrafts[id] : mock.control.drafts[id] ?? null;
+	};
+	// Entering alpha, whose composer Desktop emptied: its read is still in flight when focus moves on to design.
+	mock.host.state.focusedStoredSessionId.set('alpha'); mock.control.mountedDrafts.alpha = '';
+	const enteringAlpha = controller.enterDraft(scope, target('alpha'));
+	await arrived;
+	mock.host.state.focusedStoredSessionId.set('design'); mock.control.mountedDrafts.design = 'b text';
+	await controller.enterDraft(scope, target('design'));
+	release('');
+	await enteringAlpha;
+	assert.equal(mock.control.mountedDrafts.alpha, '', 'the composer focus left is not written');
+	// Clearing design after its entry settled deletes its draft rather than restoring it.
+	mock.control.mountedDrafts.design = '';
+	await controller.noteDraft(scope, target('design'));
+	assert.equal(mock.control.mountedDrafts.design, '');
+	await controller.syncDrafts(scope);
+	assert.equal(lastSent('design')?.text, '');
+});

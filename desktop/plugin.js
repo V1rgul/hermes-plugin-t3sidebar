@@ -457,7 +457,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
        without stored history, so the draft is put back (as it is into a composer that never held this draft);
      - any other difference is a local edit, kept as pending and sent with the next sync (blank text deletes the draft).
      Only a mounted composer is written. False means retry once it is: a failed write, or, when entering, a composer not mounted yet. */
-  async function reconcileDraft(scope, state, target, { mounted = false, entering = false } = {}) {
+  async function reconcileDraft(scope, state, target, { mounted = () => false, entering = false } = {}) {
     const raw = await readComposer(scope, target.address);
     if (raw === null) return !entering;
     const key = draftKeyFor(state, target), local = raw.trim() ? raw : '', localHash = draftHash(local);
@@ -469,23 +469,26 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       return true;
     }
     if (!pending && known && (known.seen === localHash || entering && known.text !== null && (!local || known.seen == null))) {
-      if (!mounted) return true;
+      if (!mounted()) return true;
       if (!(await writeComposer(scope, target.address, known.text ?? ''))) return false;
       known.seen = draftHash(known.text ?? '');
       state.unsaved = true;
       return true;
     }
     // The same prune can erase text not synced yet; a pending deletion has no text to put back.
-    if (entering && !local && pending?.text) return !mounted || writeComposer(scope, target.address, pending.text);
+    if (entering && !local && pending?.text) return !mounted() || writeComposer(scope, target.address, pending.text);
     state.pending.set(key, { text: local, cwd: target.cwd ?? pending?.cwd ?? known?.cwd ?? null, edited_at: Date.now() / 1000 });
     state.unsaved = state.unshown = true;
     return true;
   }
   // The focused composer, by whichever reader comes first after a focus change (entry, the local poll or a sync).
+  // Focus can move to another session of the same scope while a read is in flight: the reader of the session it left then neither writes
+  // that composer nor marks it settled, which would make the session focused now count as entered again, and a clear there as a prune.
   async function reconcileFocused(scope, state, target) {
     if (!ownsFocus(scope)) return false;
-    const done = await reconcileDraft(scope, state, target, { mounted: true, entering: state.settled !== target.key });
-    if (done) state.settled = target.key;
+    const focused = () => ownsFocus(scope) && target.ids.includes(env.host.state?.focusedStoredSessionId?.get());
+    const done = await reconcileDraft(scope, state, target, { mounted: focused, entering: state.settled !== target.key });
+    if (done && focused()) state.settled = target.key;
     return done;
   }
   // A composer still holding the exact text of a draft deleted since (discarded here, sent or cleared elsewhere), which Desktop keeps until that
