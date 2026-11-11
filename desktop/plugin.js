@@ -405,20 +405,28 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     let stored;
     try { stored = ctx.storage.get(key, null); } catch (_) { stored = null; }
     const entries = value => Object.entries(value && typeof value === 'object' ? value : {});
+    const optional = (value, type) => value == null || typeof value === type;
+    // Each record is checked whole and dropped alone when invalid, so one damaged entry cannot break the view or take the others with it.
+    const validKnown = entry => entry && (entry.text === null || typeof entry.text === 'string') && optional(entry.cwd, 'string') && Number.isFinite(entry.edited_at) &&
+      optional(entry.seen, 'string') && optional(entry.project, 'object') && !Array.isArray(entry.project);
+    const validPending = change => change && typeof change.text === 'string' && Number.isFinite(change.edited_at) && optional(change.cwd, 'string') &&
+      (change.discarded === undefined || typeof change.discarded === 'string');
     // settled: the focused session once its composer has been reconciled; until then it is being entered, and an empty composer there is
-    // a copy not restored yet, never a deletion.
-    const state = { key, running: null, settled: null,
+    // a copy not restored yet, never a deletion. unsaved / unshown: changed since last stored / since the cards last got the view.
+    const state = { key, running: null, settled: null, unsaved: false, unshown: false,
       cursor: Number.isSafeInteger(stored?.cursor) && stored.cursor >= 0 ? stored.cursor : 0,
-      known: new Map(entries(stored?.known).filter(([, entry]) => entry && (entry.text === null || typeof entry.text === 'string'))),
-      pending: new Map(entries(stored?.pending).filter(([, change]) => change && typeof change.text === 'string' && Number.isFinite(change.edited_at))) };
+      known: new Map(entries(stored?.known).filter(([, entry]) => validKnown(entry))),
+      pending: new Map(entries(stored?.pending).filter(([, change]) => validPending(change))) };
     draftStates.set(key, state);
     return state;
   }
   function saveDraftState(state) {
-    for (const [id, entry] of state.known) {
-      if (state.known.size <= DRAFT_STATE_LIMIT) break;
-      if (entry.text === null) state.known.delete(id);
+    // A marker's edit time is when its draft was deleted; Map order is only when its session was first seen.
+    if (state.known.size > DRAFT_STATE_LIMIT) {
+      const markers = [...state.known].filter(([, entry]) => entry.text === null).sort((a, b) => a[1].edited_at - b[1].edited_at);
+      for (const [id] of markers.slice(0, state.known.size - DRAFT_STATE_LIMIT)) state.known.delete(id);
     }
+    state.unsaved = false;
     try { ctx.storage.set(state.key, { cursor: state.cursor, known: Object.fromEntries(state.known), pending: Object.fromEntries(state.pending) }); }
     catch (_) { /* Sync still works for this run. */ }
   }
@@ -427,12 +435,13 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     const view = [];
     for (const id of new Set([...state.known.keys(), ...state.pending.keys()])) {
       const known = state.known.get(id), pending = state.pending.get(id);
-      if (pending ? pending.text : known?.text) view.push({ session_id: id, cwd: pending?.cwd ?? known?.cwd ?? null, project: known?.project ?? null, edited_at: known?.edited_at ?? pending.edited_at });
+      if (pending ? pending.text : known?.text) view.push({ session_id: id, cwd: pending?.cwd ?? known?.cwd ?? null, project: known?.project ?? null, edited_at: pending?.edited_at ?? known.edited_at });
     }
     return view;
   }
   function publishDrafts(scope, state) {
     saveDraftState(state);
+    state.unshown = false;
     if (!disposed && sameScope(scope, env.capture())) client.setQueryData(draftSyncKey(scope), draftView(state));
   }
   // Cards' own draft markers, which only the focused card polls: rereads their composers once a draft was deleted or changed elsewhere.
@@ -450,18 +459,20 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     const key = draftKeyFor(state, target), local = raw.trim() ? raw : '', localHash = draftHash(local);
     const known = state.known.get(key), pending = state.pending.get(key);
     if (local === (pending ? pending.text : known?.text ?? '')) {
-      if (known && !pending) known.seen = localHash;
+      if (known && !pending && known.seen !== localHash) { known.seen = localHash; state.unsaved = true; }
       // Typed before its session was listed: the folder is known now.
-      if (pending && !pending.cwd && target.cwd) pending.cwd = target.cwd;
+      if (pending && !pending.cwd && target.cwd) { pending.cwd = target.cwd; state.unsaved = state.unshown = true; }
       return true;
     }
     if (!pending && known && (known.seen === localHash || entering && known.text !== null && (!local || known.seen == null))) {
       if (!mounted) return true;
       if (!(await writeComposer(scope, target.address, known.text ?? ''))) return false;
       known.seen = draftHash(known.text ?? '');
+      state.unsaved = true;
       return true;
     }
     state.pending.set(key, { text: local, cwd: target.cwd ?? pending?.cwd ?? known?.cwd ?? null, edited_at: Date.now() / 1000 });
+    state.unsaved = state.unshown = true;
     return true;
   }
   // The focused composer, by whichever reader comes first after a focus change (entry, the local poll or a sync).
@@ -789,6 +800,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         if (target) await reconcileFocused(scope, state, target);
         saveDraftState(state);
         if (value.drafts.length) refreshCardDrafts(scope);
+        state.unshown = false;
         return draftView(state);
       })();
       state.running = work;
@@ -810,9 +822,11 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     // The focused composer between syncs: records a change so its card, and the edit time sent with the next sync, follow it within DRAFT_FOCUS_MS.
     async noteDraft(scope, target) {
       if (!ownsFocus(scope)) return;
-      const state = draftState(scope), before = JSON.stringify(draftView(state));
+      const state = draftState(scope);
       await reconcileFocused(scope, state, target);
-      if (JSON.stringify(draftView(state)) !== before) publishDrafts(scope, state);
+      // Pending text is stored as soon as it changes, so closing Desktop keeps it; the cards are only told when what they show changed.
+      if (state.unshown) publishDrafts(scope, state);
+      else if (state.unsaved) saveDraftState(state);
     },
     async leaveDraft(scope, target) {
       const state = draftState(scope);

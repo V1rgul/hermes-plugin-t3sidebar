@@ -1,0 +1,76 @@
+// The draft-sync state machine of the Desktop controller, driven directly (no React tree): persistence, restoration, batching and handoff.
+import test, { afterEach } from 'node:test';
+import assert from 'node:assert/strict';
+import * as mock from './sdk.mock.mjs';
+import { captureScope, createController, draftSyncKey } from '../desktop/plugin.js';
+
+const STORAGE_KEY = 'drafts:source-a:default';
+const stored = () => JSON.parse(mock.storageData.get(STORAGE_KEY) ?? 'null');
+const store = value => mock.storageData.set(STORAGE_KEY, JSON.stringify(value));
+// The focused-composer target the sidebar hands the controller for a listed session.
+const target = (id, cwd = '/projects/hermes-t3sidebar') => ({ key: id, ids: [id], address: id, cwd });
+const lastSent = id => mock.control.draftSyncs?.at(-1)?.changes.find(change => change.session_id === id);
+let controllers = [];
+function make() { const controller = createController(mock.ctx); controllers.push(controller); return controller; }
+afterEach(() => { for (const controller of controllers) controller.dispose(); controllers = []; mock.reset(); });
+
+test('editing an already synced draft saves the new text at once, so a restart before the next sync still sends it', async () => {
+	const scope = captureScope(), controller = make();
+	mock.control.mountedDrafts.design = 'first version';
+	await controller.noteDraft(scope, target('design'));
+	await controller.syncDrafts(scope);
+	assert.equal(mock.control.serverDrafts.find(draft => draft.session_id === 'design')?.text, 'first version');
+	mock.control.mountedDrafts.design = 'second version';
+	await controller.noteDraft(scope, target('design'));
+	// Desktop closes before the next sync; the next run sends the edit from storage.
+	await make().syncDrafts(scope);
+	assert.equal(lastSent('design')?.text, 'second version');
+	assert.equal(mock.control.serverDrafts.find(draft => draft.session_id === 'design')?.text, 'second version');
+});
+
+test('the focused poll stores and publishes nothing while the composer is unchanged', async () => {
+	const scope = captureScope(), controller = make(), set = mock.ctx.storage.set, writes = [];
+	mock.ctx.storage.set = function (key, value) { writes.push(key); return set.call(this, key, value); };
+	try {
+		mock.control.mountedDrafts.design = 'typed';
+		await controller.noteDraft(scope, target('design'));
+		const published = mock.queryClient.getQueryState(draftSyncKey(scope))?.dataUpdateCount, saved = writes.length;
+		assert.equal(published, 1); assert.equal(saved, 1);
+		for (let poll = 0; poll < 3; poll++) await controller.noteDraft(scope, target('design'));
+		assert.equal(mock.queryClient.getQueryState(draftSyncKey(scope))?.dataUpdateCount, published);
+		assert.equal(writes.length, saved);
+	} finally { mock.ctx.storage.set = set; }
+});
+
+test('a draft edited here takes the time of its local edit, not the time it was last received', () => {
+	store({ cursor: 3, known: { design: { text: 'synced', cwd: '/p', project: null, edited_at: 1000, seen: null } },
+		pending: { design: { text: 'edited', cwd: '/p', edited_at: 2000 } } });
+	assert.deepEqual(make().localDrafts(captureScope()).map(draft => [draft.session_id, draft.edited_at]), [['design', 2000]]);
+});
+
+test('restored draft records are validated one by one: invalid ones are dropped, valid ones of the same store survive', () => {
+	store({ cursor: 2,
+		known: { bare: { text: 'no time' }, badcwd: { text: 'y', cwd: 5, project: null, edited_at: 1, seen: null },
+			badseen: { text: 'z', cwd: null, project: null, edited_at: 1, seen: 7 }, badproject: { text: 'p', cwd: null, project: 'robot', edited_at: 1, seen: null },
+			legacy: { text: 'kept', cwd: '/p', project: null, edited_at: 5, seen: null }, marker: { text: null, cwd: null, project: null, edited_at: 6, seen: 'abc:1' } },
+		pending: { textless: { edited_at: 1 }, badtime: { text: 't', edited_at: 'now' }, baddiscard: { text: '', cwd: null, edited_at: 1, discarded: 4 },
+			badpcwd: { text: 'u', cwd: [], edited_at: 1 }, good: { text: 'pending', cwd: null, edited_at: 7 } } });
+	const view = make().localDrafts(captureScope());
+	assert.deepEqual(view.map(draft => draft.session_id).sort(), ['good', 'legacy']);
+	assert.ok(view.every(draft => !Object.hasOwn(draft, 'text')), 'the view stays text-free');
+});
+
+test('beyond the retention limit, the oldest deletion markers are forgotten first, and never a live draft', async () => {
+	const known = { 'live-a': { text: 'live', cwd: null, project: null, edited_at: 1, seen: null }, 'live-b': { text: 'live', cwd: null, project: null, edited_at: 2, seen: null },
+		// First seen long ago, deleted most recently.
+		'recent-marker': { text: null, cwd: null, project: null, edited_at: 5000, seen: null } };
+	for (let index = 0; index < 499; index++) known[`marker-${index}`] = { text: null, cwd: null, project: null, edited_at: 1000 + index, seen: null };
+	store({ cursor: 9, known, pending: {} });
+	mock.control.mountedDrafts.design = 'typed';
+	await make().noteDraft(captureScope(), target('design'));
+	const kept = stored().known;
+	assert.equal(Object.keys(kept).length, 500);
+	assert.equal(Object.hasOwn(kept, 'recent-marker'), true);
+	assert.equal(Object.hasOwn(kept, 'marker-0') || Object.hasOwn(kept, 'marker-1'), false);
+	assert.equal(Object.hasOwn(kept, 'live-a') && Object.hasOwn(kept, 'live-b') && Object.hasOwn(kept, 'marker-2'), true);
+});
