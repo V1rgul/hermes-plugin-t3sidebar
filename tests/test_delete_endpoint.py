@@ -194,7 +194,7 @@ class DeleteEndpoint(unittest.TestCase):
         self.emit.assert_not_called()
 
     def test_ambiguous_post_commit_read_failure_exact_retry_replays_receipt(self):
-        with patch.object(backend, "native_delete_snapshot", side_effect=OSError("synthetic read failure")):
+        with patch.object(backend, "native_delete_snapshots", side_effect=OSError("synthetic read failure")):
             response = self.post()
         self.assertEqual(response.status_code, 503)
         self.assertFalse(self.exists("target"))

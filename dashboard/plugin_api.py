@@ -1071,12 +1071,21 @@ def native_title(profile, session_id):
 def native_delete_snapshot(profile, session_id):
 	"""Exact read-only CAS counters/absence; never resolve titles, prefixes or aliases."""
 
+	return native_delete_snapshots(profile, [session_id])[0]
+
+
+def native_delete_snapshots(profile, session_ids):
+	"""native_delete_snapshot of each id, in order, through one opening of the store."""
+
 	db = open_session_db(profile, read_only=True)
 	try:
-		row = db.get_session(session_id)
-		return {"session_id": session_id, "exists": row is not None,
-			"runtime_revision": row["runtime_revision"] if row else 0,
-			"runtime_generation": row["runtime_generation"] if row else None}
+		snapshots = []
+		for session_id in session_ids:
+			row = db.get_session(session_id)
+			snapshots.append({"session_id": session_id, "exists": row is not None,
+				"runtime_revision": row["runtime_revision"] if row else 0,
+				"runtime_generation": row["runtime_generation"] if row else None})
+		return snapshots
 	finally:
 		db.close()
 
@@ -1111,10 +1120,10 @@ async def native_delete(request, profile, session_id, body):
 			or any(not isinstance(sid, str) or re.fullmatch(SESSION_ID_PATTERN, sid) is None for sid in deleted_ids)
 			or len(set(deleted_ids)) != len(deleted_ids)):
 			raise HTTPException(503, "native_delete_receipt_invalid")
-	for sid in deleted_ids:
-		snapshot = await asyncio.to_thread(native_delete_snapshot, profile, sid)
-		if snapshot["session_id"] != sid or snapshot["exists"] is not False:
-			raise HTTPException(503, "native_delete_verification_failed")
+	snapshots = await asyncio.to_thread(native_delete_snapshots, profile, deleted_ids)
+	if ([snapshot["session_id"] for snapshot in snapshots] != deleted_ids
+		or any(snapshot["exists"] is not False for snapshot in snapshots)):
+		raise HTTPException(503, "native_delete_verification_failed")
 	# Allowlist the response: no native session payloads/configuration escape.
 	value = {"ok": True, "profile": profile, "session_id": session_id,
 		"request_id": body.request_id, "operation": "delete", "deleted_ids": deleted_ids,
