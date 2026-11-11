@@ -16,6 +16,10 @@ const DRAFT_SYNC_MS = 30_000;
 const DRAFT_FOCUS_MS = 2000;
 // Received drafts a client keeps; deletion markers, the oldest first, are forgotten beyond it.
 const DRAFT_STATE_LIMIT = 500;
+// The companion's request limits: DraftSync.changes in dashboard/plugin_api.py, and session_drafts.MAX_TEXT_LENGTH, which counts code points.
+const DRAFT_SYNC_BATCH = 200;
+const DRAFT_TEXT_LIMIT = 200_000;
+const draftFits = text => text.length <= DRAFT_TEXT_LIMIT || [...text].length <= DRAFT_TEXT_LIMIT;
 export const draftSyncKey = scope => ['hermes-t3sidebar-draft-sync', scope.connectionId, scope.profile, scope.epoch];
 const ARCHIVE_TAIL_STALE_MS = 30000;
 const HISTORY_PAGE_GC_MS = 300000;
@@ -779,29 +783,43 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         const target = focus?.();
         if (target) await reconcileFocused(scope, state, target);
         const route = await routeFor(scope);
-        const sent = [...state.pending];
-        const body = { since: state.cursor, sent_at: Date.now() / 1000,
-          changes: sent.map(([session_id, change]) => ({ session_id, text: change.text, edited_at: change.edited_at, ...(change.cwd ? { cwd: change.cwd } : {}) })) };
-        const value = await fenced(scope, () => ctx.rest('/drafts/sync', { method: 'POST', body }));
-        if (value?.profile !== (route?.targetProfile || scope.profile) || !Number.isSafeInteger(value.cursor) || value.cursor < 0 || typeof value.reset !== 'boolean' ||
-          !Array.isArray(value.drafts) || !value.drafts.every(validDraft)) throw new Error('Invalid current-profile drafts response.');
-        if (value.reset) {
+        // At most one batch per call, the rest in the calls that follow at once; a text the companion would refuse stays pending here
+        // without holding up the others.
+        const tried = new Set(), sendable = ([id, change]) => !tried.has(id) && draftFits(change.text);
+        let received = false, more;
+        do {
+          const sent = [...state.pending].filter(sendable).slice(0, DRAFT_SYNC_BATCH);
+          for (const [id] of sent) tried.add(id);
+          const body = { since: state.cursor, sent_at: Date.now() / 1000,
+            changes: sent.map(([session_id, change]) => ({ session_id, text: change.text, edited_at: change.edited_at, ...(change.cwd ? { cwd: change.cwd } : {}) })) };
+          const value = await fenced(scope, () => ctx.rest('/drafts/sync', { method: 'POST', body }));
+          if (value?.profile !== (route?.targetProfile || scope.profile) || !Number.isSafeInteger(value.cursor) || value.cursor < 0 || typeof value.reset !== 'boolean' ||
+            !Array.isArray(value.drafts) || !value.drafts.every(validDraft)) throw new Error('Invalid current-profile drafts response.');
+          // The companion returns the current row of every changed session, once: anything else is not an acknowledgment of what was sent.
           const listed = new Set(value.drafts.map(draft => draft.session_id));
-          for (const [id, entry] of state.known) if (entry.text !== null && !listed.has(id)) state.known.set(id, { ...entry, text: null });
-        }
-        for (const draft of value.drafts) {
-          state.known.set(draft.session_id, { text: draft.text, cwd: draft.cwd, project: draft.project ?? null, edited_at: draft.edited_at, seen: state.known.get(draft.session_id)?.seen ?? null });
-        }
-        for (const [id, change] of sent) {
-          // The composer held the sent text, so an edit that lost to a newer one is then replaced like any remote change.
-          const known = state.known.get(id);
-          if (known) known.seen = change.discarded ?? draftHash(change.text);
-          if (state.pending.get(id) === change) state.pending.delete(id);
-        }
-        state.cursor = value.cursor;
+          if (listed.size !== value.drafts.length || !sent.every(([id]) => listed.has(id)) || value.drafts.some(draft => draft.seq > value.cursor)) {
+            throw new Error('Invalid current-profile drafts response.');
+          }
+          if (value.reset) {
+            for (const [id, entry] of state.known) if (entry.text !== null && !listed.has(id)) state.known.set(id, { ...entry, text: null });
+          }
+          for (const draft of value.drafts) {
+            state.known.set(draft.session_id, { text: draft.text, cwd: draft.cwd, project: draft.project ?? null, edited_at: draft.edited_at, seen: state.known.get(draft.session_id)?.seen ?? null });
+          }
+          for (const [id, change] of sent) {
+            // The composer held the sent text, so an edit that lost to a newer one is then replaced like any remote change.
+            const known = state.known.get(id);
+            if (known) known.seen = change.discarded ?? draftHash(change.text);
+            if (state.pending.get(id) === change) state.pending.delete(id);
+          }
+          state.cursor = value.cursor;
+          received ||= value.drafts.length > 0;
+          more = [...state.pending].some(sendable);
+          if (more) saveDraftState(state);
+        } while (more);
         if (target) await reconcileFocused(scope, state, target);
         saveDraftState(state);
-        if (value.drafts.length) refreshCardDrafts(scope);
+        if (received) refreshCardDrafts(scope);
         state.unshown = false;
         return draftView(state);
       })();

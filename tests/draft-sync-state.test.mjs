@@ -99,3 +99,40 @@ test('an unsynced draft erased by Desktop\'s prune is put back on return, while 
 	await controller.syncDrafts(scope);
 	assert.equal(lastSent('fresh')?.text, '');
 });
+
+// A pending change as an older run of this client stored it.
+const change = (text, edited_at = 100) => ({ text, cwd: null, edited_at });
+
+test('a large backlog goes up in batches the companion accepts, and a text it would refuse stays pending here without blocking the rest', async () => {
+	const pending = { oversized: change('x'.repeat(200_001)) };
+	for (let index = 0; index < 450; index++) pending[`backlog-${index}`] = change(`draft ${index}`);
+	// Counted in code points, as the companion counts: within the limit, though longer in UTF-16 units.
+	pending.astral = change('\u{1F600}'.repeat(100_001));
+	store({ cursor: 0, known: {}, pending });
+	const scope = captureScope(), controller = make();
+	await controller.syncDrafts(scope);
+	const bodies = mock.control.draftSyncs;
+	assert.ok(bodies.every(body => body.changes.length <= 200), `batch sizes ${bodies.map(body => body.changes.length)}`);
+	const sent = bodies.flatMap(body => body.changes.map(item => item.session_id));
+	assert.equal(new Set(sent).size, 451); assert.equal(sent.length, 451);
+	assert.equal(sent.includes('oversized'), false);
+	assert.equal(mock.control.serverDrafts.length, 451);
+	// The refused text is kept, still shown as a draft, and sent once it fits.
+	assert.deepEqual(Object.keys(stored().pending), ['oversized']);
+	assert.ok(controller.localDrafts(scope).some(draft => draft.session_id === 'oversized'));
+});
+
+test('a sync response that does not acknowledge each sent change, or repeats a session, changes nothing locally', async () => {
+	const rest = mock.ctx.rest;
+	for (const alter of [drafts => drafts.filter(draft => draft.session_id !== 'second'), drafts => [...drafts, drafts[0]]]) {
+		mock.reset();
+		store({ cursor: 0, known: {}, pending: { first: change('one'), second: change('two') } });
+		const before = mock.storageData.get(STORAGE_KEY), scope = captureScope(), controller = make();
+		mock.ctx.rest = async (path, options) => { const value = await rest(path, options); return { ...value, drafts: alter(value.drafts) }; };
+		try { await assert.rejects(controller.syncDrafts(scope), /Invalid current-profile drafts response/); }
+		finally { mock.ctx.rest = rest; }
+		assert.equal(mock.storageData.get(STORAGE_KEY), before);
+		await controller.syncDrafts(scope);
+		assert.deepEqual(mock.control.draftSyncs.at(-1).changes.map(item => item.session_id).sort(), ['first', 'second']);
+	}
+});
