@@ -218,3 +218,25 @@ test('a reconciliation of a session focus has left neither writes its composer n
 	await controller.syncDrafts(scope);
 	assert.equal(lastSent('design')?.text, '');
 });
+
+test('a discarded draft whose composer could not be cleared stays discarded, while a later edit there is a draft again', async () => {
+	const scope = captureScope(), controller = make(), design = target('design');
+	mock.control.serverDrafts = [{ session_id: 'design', text: 'synced copy', cwd: null, project: null, seq: 1, edited_at: Date.now() / 1000 }];
+	await controller.syncDrafts(scope);
+	mock.control.mountedDrafts.design = 'synced copy';
+	await controller.enterDraft(scope, design);
+	// The focused composer refuses the clear.
+	mock.control.composerUnmounted = true;
+	await controller.discardDraft(scope, { id: 'design' });
+	assert.equal(mock.control.mountedDrafts.design, 'synced copy');
+	mock.control.composerUnmounted = false;
+	await controller.noteDraft(scope, design);
+	assert.equal(mock.control.mountedDrafts.design, '', 'the next focused check clears it');
+	await controller.syncDrafts(scope);
+	assert.equal(lastSent('design')?.text, '');
+	assert.equal(mock.control.serverDrafts[0].text, null);
+	mock.control.mountedDrafts.design = 'new words';
+	await controller.noteDraft(scope, design);
+	await controller.syncDrafts(scope);
+	assert.equal(mock.control.serverDrafts[0].text, 'new words');
+});

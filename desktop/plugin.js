@@ -477,6 +477,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     }
     // The same prune can erase text not synced yet; a pending deletion has no text to put back.
     if (entering && !local && pending?.text) return !mounted() || writeComposer(scope, target.address, pending.text);
+    // A copy of a draft discarded here whose deletion is not synced yet, as when its clear failed: cleared like one deleted elsewhere, never an edit.
+    if (local && pending?.discarded === localHash) return !mounted() || writeComposer(scope, target.address, '');
     state.pending.set(key, { text: local, cwd: target.cwd ?? pending?.cwd ?? known?.cwd ?? null, edited_at: Date.now() / 1000 });
     state.unsaved = state.unshown = true;
     return true;
