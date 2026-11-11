@@ -3079,6 +3079,8 @@ function Segmented({ label, options, value, onChange, showLabel = true, sizing, 
     : h('div', { className: 'su-seg' }, items.map(item => h('button', { key: item.id, type: 'button', 'aria-pressed': item.id === String(value), onClick: () => pick(item.id) }, item.label)));
   return h('div', { className: `su-control ${className}`.trim(), role: 'group', 'aria-label': label }, showLabel ? h('span', { className: 'su-control-label', 'aria-hidden': true }, label) : null, control);
 }
+// Banked-reset redemptions by Source/profile and account. Each request mints a new upstream idempotency key, so a second request is a second spend: a confirmation while one is in flight joins it, and after an outcome that neither confirms nor refuses the reset the account waits, from the time of that outcome, for a newer limits read.
+const redeemsInFlight = new Map(), unsettledRedeems = new Map();
 function ScopedUsagePage({ ctx, scope, view }) {
   const client = useQueryClient(), shared = useUsagePreferences(ctx);
   // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made on the other page.
@@ -3099,16 +3101,39 @@ function ScopedUsagePage({ ctx, scope, view }) {
   // A longer lookback or past range refetches more history; the shorter one stays drawn meanwhile.
   const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHours), enabled: view === 'limits', placeholderData: previous => previous });
   const active = view === 'limits' ? limits : history;
-  // Spends one banked reset on one account, then reloads the limits so the page shows the restored allowance; any outcome that did not reset throws, which keeps the confirmation open with the reason.
-  const redeem = useCallback(async (provider, account) => {
-    if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh before using a reset.');
-    let result;
-    try { result = await ctx.rest('/usage/limits/redeem', { method: 'POST', body: { provider, account } }); }
-    catch (error) { throw new Error(`The reset could not be used: ${error?.message || 'request failed'}. Refresh to check whether it was spent.`); }
-    const failure = redeemFailure(result);
-    if (failure) throw new Error(failure);
-    await client.invalidateQueries({ queryKey: [...usageScopeKey(scope), 'limits'] });
-  }, [ctx, scope, client]);
+  const redeemScope = JSON.stringify([scope.connectionId, scope.profile]), limitsReadAt = useRef(0);
+  limitsReadAt.current = limits.dataUpdatedAt;
+  const [unsettledCount, setUnsettledCount] = useState(0);
+  const unsettled = useMemo(() => new Set([...(unsettledRedeems.get(redeemScope) || [])].filter(([, at]) => !(limits.dataUpdatedAt > at)).map(([id]) => id)), [redeemScope, limits.dataUpdatedAt, unsettledCount]);
+  // Spends one banked reset on one account, then reloads the limits so the page shows the restored allowance; any outcome that did not reset throws, which keeps the confirmation open with the reason. `opened` is when the confirmation was opened: after an unknown outcome only one opened later, once the limits were read again, may spend.
+  const redeem = useCallback((provider, account, opened = 0) => {
+    const id = JSON.stringify([provider, account]), flight = JSON.stringify([redeemScope, id]);
+    if (redeemsInFlight.has(flight)) return redeemsInFlight.get(flight);
+    const marks = unsettledRedeems.get(redeemScope) ?? new Map(), at = marks.get(id);
+    if (at !== undefined) {
+      if (!(limitsReadAt.current > at && opened > at)) return Promise.reject(new Error(UNCONFIRMED_REDEEM));
+      marks.delete(id);
+    }
+    // Recorded under the Source/profile rather than this page, so a page opened again or reached through another activation still waits for a newer read.
+    const unsettle = () => { unsettledRedeems.set(redeemScope, marks.set(id, Date.now())); setUnsettledCount(count => count + 1); };
+    const reload = () => client.invalidateQueries({ queryKey: [...usageScopeKey(scope), 'limits'] });
+    // An answer for a Source/profile no longer shown is never reported as a success here: it may have spent a credit there.
+    const moved = 'Source/profile changed before the reset was confirmed. Refresh to check whether it was spent.';
+    const run = (async () => {
+      if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh before using a reset.');
+      let result;
+      try { result = await ctx.rest('/usage/limits/redeem', { method: 'POST', body: { provider, account } }); }
+      catch (error) { unsettle(); void reload(); throw new Error(`The reset could not be used: ${error?.message || 'request failed'}. Refresh to check whether it was spent.`); }
+      if (!sameScope(scope, captureScope())) { unsettle(); throw new Error(moved); }
+      const failure = redeemFailure(result);
+      if (failure === UNCONFIRMED_REDEEM) { unsettle(); void reload(); }
+      if (failure) throw new Error(failure);
+      await reload();
+      if (!sameScope(scope, captureScope())) throw new Error(moved);
+    })().finally(() => redeemsInFlight.delete(flight));
+    redeemsInFlight.set(flight, run);
+    return run;
+  }, [ctx, scope, client, redeemScope]);
   const toolbar = h(Fragment, null,
     h('span', { className: 'su-spacer' }),
     // A refetch behind data already on screen spins the refresh icon instead of adding text; screen readers hear the busy state.
@@ -3121,7 +3146,7 @@ function ScopedUsagePage({ ctx, scope, view }) {
         toolbar)),
       h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs, setDays: days => update({ days }) }))))
       // The shared projection controls head the Limits page, so its refresh control sits at the end of that row.
-      : h(LimitsView, { query: limits, prefs, update, toolbar, redeem }));
+      : h(LimitsView, { query: limits, prefs, update, toolbar, redeem, unsettled }));
 }
 function UsageState({ error = false, children }) { return h('div', { className: 'su-state', role: error ? 'alert' : 'status' }, children); }
 function QueryProblem({ query, what }) {
@@ -3238,7 +3263,7 @@ function resetTime(seconds, now) {
   return formatAt(seconds, seconds - now < 6 * DAY_S ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 // Overview of every provider on one scrollable page: one controls bar applies the lookback and window to all charts, then one section per provider, logged-out ones last as a compact row, and the shared footnotes once at the bottom. The past and future ranges are set beside each chart's x axis but are page-wide too: a change applies to every chart of the same window group.
-function LimitsView({ query, prefs, update, toolbar, redeem }) {
+function LimitsView({ query, prefs, update, toolbar, redeem, unsettled }) {
   const data = query.data;
   // Countdowns and the Now line follow successful polls rather than a separate timer.
   const now = useMemo(() => Date.now() / 1000, [query.dataUpdatedAt]);
@@ -3262,7 +3287,7 @@ function LimitsView({ query, prefs, update, toolbar, redeem }) {
       query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
       providers.length ? null : h(UsageState, null, 'No subscription limits recorded yet.'),
       providers.map(provider => provider.auth === 'logged_out' ? h(LoggedOutProvider, { key: provider.provider, provider })
-        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange, setLookback, redeem })),
+        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange, setLookback, redeem, unsettled })),
       h(LimitsFootnotes, { providers: active, sampler: data.sampler, now }))));
 }
 // Hermes knows the provider but has no usable credential, so there is nothing to sample or project: one muted row instead of a chart.
@@ -3273,7 +3298,7 @@ function LoggedOutProvider({ provider }) {
       provider.auth_reason ? h('span', { className: 'su-muted su-logged-out-reason' }, provider.auth_reason) : null));
 }
 // Memoized: its props only change with the data, the clock, the preferences or the window, so a page render for anything else (the toolbar's fetching state, the preference echo) skips the charts.
-const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange, setLookback, redeem }) {
+const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange, setLookback, redeem, unsettled }) {
   const name = provider.label || provider.provider;
   // The verdict always looks a week ahead whatever range the chart shows, so it reads the same as the sidebar footer.
   const verdict = useMemo(() => limitsVerdict(provider, { lookback: prefs.lookback, window: prefs.window }, now), [provider, prefs.lookback, prefs.window, now]);
@@ -3281,11 +3306,11 @@ const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs
     h('h2', { className: 'su-provider-head' }, providerMark(provider.provider), h('span', null, name)),
     windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, range: prefs.range[rangeGroup(windowKey)], lookback: prefs.lookback, setLookback, onRange: (side, hours) => setRange(rangeGroup(windowKey), side, hours) })
       : h(UsageState, null, 'No limit windows reported for this provider.'),
-    h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open), redeem }));
+    h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open), redeem, unsettled }));
 });
 // Per-account rows (plan, priority, banked resets, window bars) are detail under each chart, folded until asked for; the fold is remembered per provider.
 // The fold is a card whose whole header row is the toggle and which holds the account cards once open: a bare text toggle was easy to miss under the chart.
-function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem }) {
+function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem, unsettled }) {
   const id = `su-accounts-${provider.provider.replace(/[^A-Za-z0-9_-]/g, '_')}`, count = provider.accounts.length;
   // While folded, the account names preview what the card holds; once open, the cards themselves name them.
   const names = open ? '' : provider.accounts.map(account => account.label || account.id).join(' · ');
@@ -3295,7 +3320,7 @@ function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem }
       h('span', { className: 'su-disclosure-label' }, 'Accounts'), h('span', { className: 'su-disclosure-count' }, count),
       names ? h('span', { className: 'su-disclosure-names', title: names }, names) : null),
     open ? h('div', { className: 'su-accounts', id }, h(CurrentBankedResets, { credits: provider.current_banked_credits, now }),
-      count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now, redeem }))
+      count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now, redeem, unsettled }))
         : h(UsageState, null, 'No accounts in this provider pool.')) : null);
 }
 // The expiries Hermes's signed request returned for the account it uses now, ahead of the account cards because the response does not name the pool entry. No redeem button: a reset is spent on a chosen account, from its own card.
@@ -3728,7 +3753,7 @@ function Badge({ tone, title, children }) { return h('span', { className: 'su-ba
 function SplitBadge({ kind, tone, title, subject, detail }) {
   return h('span', { className: 'su-badge su-badge-split', 'data-badge': kind, title }, h('span', null, subject), h('span', { className: 'su-badge-half', 'data-tone': tone }, detail));
 }
-function LimitAccount({ provider, account, selected, now, redeem }) {
+function LimitAccount({ provider, account, selected, now, redeem, unsettled }) {
   const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
   // The plan label and the capacity this account adds to the pool in the selected window; T3 Code's names, not the raw enum.
   const label = planLabel(provider, account.plan), units = planWeight(provider, account.plan, selected || 'weekly'), assumed = planAssumed(provider, account.plan);
@@ -3745,7 +3770,7 @@ function LimitAccount({ provider, account, selected, now, redeem }) {
     account.error ? h('div', { className: 'su-account-error', role: 'alert' }, String(account.error)) : null,
     windows.length ? h('div', { className: 'su-windows' }, windows.map(win => h(LimitWindowRow, { key: win.key, win, now, selected: win.key === selected })))
       : h('div', { className: 'su-muted' }, 'No limit windows reported.'),
-    h(BankedResets, { provider, account, windows, now, redeem }));
+    h(BankedResets, { provider, account, windows, now, redeem, unsettled: unsettled?.has(JSON.stringify([provider, account.id])) === true }));
 }
 // OpenAI lets a banked reset be redeemed manually once any allowance it covers has less than 80% left (help.openai.com/en/articles/20001498). The account-wide windows shown are exactly the covered ones (weekly on Pro, 5-hour and weekly on Plus/Business), so the rule applies to the whole account. Codex's own applicable_available_count follows the assistant's stricter 10% rule and would call a manually redeemable reset unusable.
 const BANKED_REDEEM_BELOW_PERCENT = 80;
@@ -3766,18 +3791,19 @@ export function redeemLoss(provider, account, windows) {
   return { win, percent, units: planWeight(provider, account.plan, win.key) * percent / 100 };
 }
 // Statuses from the backend's redeem route (Hermes's own outcome codes): the reasons a confirmed reset did not happen, or null when it did.
+const UNCONFIRMED_REDEEM = 'Codex could not confirm the reset. Refresh to check whether it was spent.';
 export function redeemFailure(result) {
   const status = result?.status;
   if (status === 'reset' || status === 'already_redeemed') return null;
   if (status === 'nothing_to_reset' || status === 'not_exhausted') return 'Codex refused: no allowance is below 80% left yet. The banked reset was not spent.';
   if (status === 'no_credit' || status === 'no_credits_banked') return 'Codex reports no banked reset on this account.';
-  return 'Codex could not confirm the reset. Refresh to check whether it was spent.';
+  return UNCONFIRMED_REDEEM;
 }
 // One line per banked reset credit under the account's bars, soonest expiry first (a credit expiring within a day turns orange, its countdown grey like the bars' reset times), and on their right one button spanning the list: Codex picks the credit, so the action belongs to the account, not to a line.
 const bankedCreditLine = (credit, index, now) => h('li', { key: `${credit.expires_at}:${index}`, className: 'su-banked-credit', 'data-soon': credit.expires_at !== null && credit.expires_at - now < DAY_S },
   credit.expires_at === null ? 'Banked reset · no expiry reported' : [`Banked reset · expires ${resetTime(credit.expires_at, now)} `, h('span', { key: 'in', className: 'su-banked-in' }, `in ${formatDurationShort(credit.expires_at - now)}`)]);
-function BankedResets({ provider, account, windows, now, redeem }) {
-  const [confirming, setConfirming] = useState(false);
+function BankedResets({ provider, account, windows, now, redeem, unsettled = false }) {
+  const [confirming, setConfirming] = useState(false), opened = useRef(0);
   const credits = (account.banked_credits?.credits || []).filter(credit => credit.expires_at === null || credit.expires_at > now);
   const count = credits.length || (Number.isInteger(account.banked_resets) && account.banked_resets > 0 ? account.banked_resets : 0);
   if (!count) return null;
@@ -3787,13 +3813,16 @@ function BankedResets({ provider, account, windows, now, redeem }) {
   const label = account.label || account.id, loss = canRedeem ? redeemLoss(provider, account, windows) : null;
   return h('div', { className: 'su-banked-row' },
     h('ul', { className: 'su-banked', 'aria-label': 'Banked resets' }, lines),
-    canRedeem ? h(RedeemButton, { usable: bankedRedeemable(windows), onClick: () => setConfirming(true) }) : null,
+    canRedeem ? h(RedeemButton, { usable: bankedRedeemable(windows), unsettled, onClick: () => { opened.current = Date.now(); setConfirming(true); } }) : null,
     canRedeem ? h(sdk.ConfirmDialog, { open: confirming, onClose: () => setConfirming(false), title: `Use one banked reset on ${label}?`,
       confirmLabel: 'Use reset', busyLabel: 'Using reset…', doneLabel: 'Reset used', destructive: !!loss?.percent,
-      onConfirm: () => redeem(provider, account.id) }, h(RedeemLoss, { loss })) : null);
+      onConfirm: () => redeem(provider, account.id, opened.current) }, h(RedeemLoss, { loss })) : null);
 }
 // Usable: an outline in the success green. Refused: still names the reset, but dashed and padlocked so it reads as unavailable rather than dangerous, with the scope of the refusal (every bar) on a second line.
-function RedeemButton({ usable, onClick }) {
+function RedeemButton({ usable, unsettled, onClick }) {
+  // While an earlier attempt's outcome is unknown the reset is unavailable for another reason than the 80% rule, so the lock keeps the attempt's own message instead of that rule.
+  if (unsettled) return h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true, title: UNCONFIRMED_REDEEM },
+    h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one'));
   if (usable === false) return h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true,
     title: `Codex only accepts a banked reset once an allowance has less than ${BANKED_REDEEM_BELOW_PERCENT}% left; every one here has ${BANKED_REDEEM_BELOW_PERCENT}% or more.` },
     h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one'), h('small', null, `all ≥${BANKED_REDEEM_BELOW_PERCENT}% left`));
