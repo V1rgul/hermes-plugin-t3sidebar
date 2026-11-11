@@ -107,3 +107,18 @@ test('destroy removes a container and its own data directory', async () => {
   assert.equal(existsSync(join(repo, '.t3webapp')), false);
   assertScratchVolumes(result.calls);
 });
+
+const gitignore = readFileSync(fileURLToPath(new URL('../.gitignore', import.meta.url)), 'utf8');
+const tarList = async archive => (await run('tar', ['-tf', archive])).stdout.split('\n').filter(Boolean).sort();
+
+test('sync copies tracked and unignored project files with their uncommitted edits, and nothing ignored or development-only', async () => {
+  const repo = await checkout({ '.gitignore': gitignore, '__init__.py': '', 'desktop/plugin.js': 'committed', 'tests/a.test.mjs': '', 'docs/a.md': '', 'harness/app.mjs': '', 'AGENTS.md': '', 'artifacts/notes.txt': '', 'gone.py': '' });
+  write(join(repo, 'desktop/plugin.js'), 'uncommitted edit');
+  rmSync(join(repo, 'gone.py'));
+  for (const path of ['new_module.py', 'name with space.py', 'odd \'"$name\n.py', '.scratch/capture.json', 'usage.sqlite3', '.venv/lib.py', '__pycache__/x.pyc', '.t3webapp/shots/a.png', 'node_modules/react/index.js', '.worktrees/other/plugin.yaml']) write(join(repo, path), 'x');
+  const result = await rig(repo, ['sync'], { STUB_RUNNING: 't3demo' });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(await tarList(join(root, 'sync.tar')), ['.gitignore', '__init__.py', 'desktop/plugin.js', 'name with space.py', 'new_module.py', 'odd \'"$name\\n.py', 'plugin.yaml']);
+  assert.equal((await run('tar', ['-xOf', join(root, 'sync.tar'), 'desktop/plugin.js'])).stdout, 'uncommitted edit');
+  assertScratchVolumes(result.calls);
+});

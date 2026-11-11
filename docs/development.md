@@ -31,7 +31,7 @@ Test changes in the real Hermes Webapp running in a container. It runs the actua
 ```sh
 tools/test-webapp/t3webapp.sh setup   # creates the container, or reuses an existing one with its data, then installs and enables the plugin
 tools/test-webapp/t3webapp.sh seed    # invented projects, 78 antedated sessions for Usage, 10 days of pooled Limits samples
-tools/test-webapp/t3webapp.sh sync    # after each change: copies the working tree, uncommitted edits included, and restarts the container
+tools/test-webapp/t3webapp.sh sync    # after each change: copies the plugin's files that Git tracks or does not ignore, uncommitted edits included, and restarts the container
 tools/test-webapp/t3webapp.sh browser # starts the checkout's test browser if needed and signs it in
 tools/test-webapp/t3webapp.sh drive 'return await shot("now")'  # one step in that browser (Playwright: page, context, shot)
 tools/test-webapp/t3webapp.sh browser-reset  # only on request: stops the test browser and erases its profile

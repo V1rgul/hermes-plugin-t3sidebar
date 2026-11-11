@@ -128,11 +128,18 @@ restart_box() {
 	follow
 }
 
-# Copies the working tree (uncommitted changes included, development files and the main checkout's linked worktrees excluded) over the installed plugin.
+# The project's own files, NUL-separated: tracked ones and untracked ones Git does not ignore, so ignored scratch material, environments and databases never enter the container; development-only paths are left out too. A tracked file deleted in the working tree is skipped.
+project_files() {
+	git -C "$REPO" ls-files -z -c -o --exclude-standard -- . ':(exclude).worktrees' ':(exclude).t3webapp' ':(exclude)node_modules' ':(exclude,glob)**/__pycache__/**' \
+		':(exclude)artifacts' ':(exclude)harness' ':(exclude)tests' ':(exclude)docs' ':(exclude)tools' ':(exclude)AGENTS.md' \
+		| (cd "$REPO" && xargs -0 sh -c 'for f; do if [ -e "$f" ] || [ -L "$f" ]; then printf "%s\0" "$f"; fi; done' sh)
+}
+
+# Copies the project files of the working tree (uncommitted changes included) over the installed plugin.
 sync_plugin() {
 	"$RUNTIME" exec "$NAME" rm -rf "$PLUGIN"
 	"$RUNTIME" exec "$NAME" mkdir -p "$PLUGIN"
-	tar -C "$REPO" --exclude=.git --exclude=.worktrees --exclude=.t3webapp --exclude=node_modules --exclude=__pycache__ --exclude=artifacts --exclude=harness --exclude=tests --exclude=docs --exclude=tools --exclude=AGENTS.md -cf - . \
+	project_files | tar -C "$REPO" --null -T - -cf - \
 		| "$RUNTIME" exec -i "$NAME" tar -C "$PLUGIN" -xf -
 	"$RUNTIME" exec "$NAME" chown -R hermes:hermes "$PLUGIN"
 	# A browser keeps the Desktop half's on/off choice, and a new browser profile starts with it off: this container-only plugin turns it on there (see enable-sidebar.js).
