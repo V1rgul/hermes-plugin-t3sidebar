@@ -138,3 +138,27 @@ test('sync keeps the installed plugin when the archive cannot be built, and leav
   assert.deepEqual(plugin.slice(0, 3), ['exec t3demo rm -rf', 'exec t3demo mkdir -p', 'exec -i t3demo tar']);
   assert.deepEqual(readdirSync(join(root, 'tmp')), []);
 });
+
+// A linked worktree of a fresh scratch checkout: its first setup clones the shared container's data.
+async function worktree() {
+  const main = await checkout({ '__init__.py': '' });
+  const path = join(root, `worktree-${checkouts}`, 'feature');
+  assert.equal((await git(main, 'worktree', 'add', '-q', path)).code, 0);
+  write(join(shared, 'data/state.db'), 'shared');
+  return path;
+}
+const pauses = calls => calls.filter(call => call[0] === 'pause' || call[0] === 'unpause').map(call => call.join(' '));
+
+test('an interrupted worktree setup unpauses the shared container it paused, and only that', async () => {
+  const interrupted = await rig(await worktree(), ['setup'], { STUB_RUNNING: 't3demo', STUB_INTERRUPT: '1' });
+  assert.equal(interrupted.code, 143, interrupted.stderr);
+  assert.deepEqual(pauses(interrupted.calls), ['pause t3demo', 'unpause t3demo']);
+  const completed = await rig(await worktree(), ['setup'], { STUB_RUNNING: 't3demo' });
+  assert.equal(completed.code, 0, completed.stderr);
+  assert.deepEqual(pauses(completed.calls), ['pause t3demo', 'unpause t3demo']);
+  const stopped = await rig(await worktree(), ['setup'], { STUB_RUNNING: '', STUB_INTERRUPT: '1' });
+  // Nothing was paused, so nothing intercepts the signal: the run simply ends with it.
+  assert.notEqual(stopped.code, 0);
+  assert.deepEqual(pauses(stopped.calls), []);
+  for (const result of [interrupted, completed, stopped]) assertScratchVolumes(result.calls);
+});

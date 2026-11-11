@@ -169,13 +169,19 @@ with open(path, "w") as file:
 	yaml.dump(config, file)'
 }
 
-# Starts a worktree container from the shared container's seeded data and test-account login, so it needs neither seed nor an interactive login. A running shared container is paused during the copy so its databases are not caught mid-write.
+# Starts a worktree container from the shared container's seeded data and test-account login, so it needs neither seed nor an interactive login. A running shared container is paused during the copy so its databases are not caught mid-write; an interruption meanwhile still unpauses it, and only a container this run paused is unpaused.
 clone_main_data() {
 	paused=
-	if running "$MAIN_NAME"; then "$RUNTIME" pause "$MAIN_NAME" >/dev/null && paused=1; fi
+	if running "$MAIN_NAME" && "$RUNTIME" pause "$MAIN_NAME" >/dev/null; then
+		paused=1
+		on_exit '"$RUNTIME" unpause "$MAIN_NAME" >/dev/null'
+	fi
 	rc=0
 	as_root -v "$MAIN_DIR/data:/src:ro" -v "$DIR/data:/dst" --entrypoint sh "$IMAGE" -c 'cp -a /src/. /dst/ && sed -i "s|^\( *public_url:\).*|\1 \"http://127.0.0.1:$1\"|" /dst/config.yaml' sh "$PORT" || rc=$?
-	[ -z "$paused" ] || "$RUNTIME" unpause "$MAIN_NAME" >/dev/null
+	if [ -n "$paused" ]; then
+		"$RUNTIME" unpause "$MAIN_NAME" >/dev/null
+		release
+	fi
 	return "$rc"
 }
 
