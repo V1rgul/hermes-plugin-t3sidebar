@@ -179,6 +179,8 @@ class CompletionObserver:
 		self.clock = clock
 		self._lock = RLock()
 		self._receipts = OrderedDict()
+		# Conversation root -> receipt key of the turn that began there last. It decides which turn is current whether or not that turn's start reached the ledger, and lives no longer than that receipt.
+		self._latest = {}
 		self._closed = False
 		self._ttl = 24 * 60 * 60
 		self._capacity = 4096
@@ -193,6 +195,10 @@ class CompletionObserver:
 				self._receipts.pop(key, None)
 		while len(self._receipts) > self._capacity:
 			self._receipts.popitem(last=False)
+		# Receipts leave oldest first, so a turn still holding its receipt never loses a newer turn's entry.
+		for root, key in list(self._latest.items()):
+			if key not in self._receipts:
+				del self._latest[root]
 
 	@staticmethod
 	def _key(task_id, turn_id):
@@ -222,6 +228,8 @@ class CompletionObserver:
 				self._prune(now)
 				if (not self._closed and self._same_home() and now - started <= self._ttl
 						and self._receipts.get(key) is pending):
+					if snapshot is not None:
+						self._latest[snapshot.root] = key
 					# Viewing/resume construction never invokes this turn hook. Only a
 					# real pre-loop activity receipt may restore deliberate archives.
 					# Fence late workers before any write, not just before Done admission.
@@ -289,8 +297,9 @@ class CompletionObserver:
 					or not after.delegations <= before.delegations):
 				return None
 			with self._lock:
-				if not self._closed and self._same_home():
-					# A turn whose start was recorded yields to any turn that started after it; without that start the ledger proves nothing either way, so Done stays independent of timer writes.
+				# A turn that began after this one in the same conversation replaced it, whether or not either start reached the ledger, so Done stays independent of timer writes.
+				if not self._closed and self._same_home() and self._latest.get(after.root, key) == key:
+					# A turn whose start was recorded also yields to a turn the ledger names instead, such as one another process began.
 					self.store.record(after.root, turn_id, current_only=receipt[2])
 		except Exception as exc:
 			# Observation must never break a turn or return injectable context.
@@ -301,6 +310,7 @@ class CompletionObserver:
 		with self._lock:
 			self._closed = True
 			self._receipts.clear()
+			self._latest.clear()
 
 
 def register_completion_hooks(ctx):
