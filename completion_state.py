@@ -61,6 +61,8 @@ class CompletionStore:
         """)
         if "pending" not in {row[1] for row in connection.execute("PRAGMA table_info(session_runs)")}:
             connection.execute("ALTER TABLE session_runs ADD COLUMN pending INTEGER NOT NULL DEFAULT 0 CHECK (pending IN (0, 1))")
+        # A turn's end names only its turn, and every end hook looks it up under the writer lock.
+        connection.execute("CREATE INDEX IF NOT EXISTS session_runs_turn ON session_runs (turn_id)")
 
     @staticmethod
     def read(connection):

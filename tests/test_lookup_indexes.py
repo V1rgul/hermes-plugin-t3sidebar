@@ -69,5 +69,28 @@ class DraftMarkerPurgeIndex(unittest.TestCase):
 		self.assertIn("session_drafts_marker_age", indexes(self.path))
 
 
+class TurnEndIndex(unittest.TestCase):
+	def setUp(self):
+		self.temp = tempfile.TemporaryDirectory(prefix="t3-lookup-indexes-")
+		self.addCleanup(self.temp.cleanup)
+		self.path = Path(self.temp.name) / "state.sqlite3"
+		self.ledger = backend.CompletionStore(self.path, lambda: NOW)
+		for index in range(3):
+			self.ledger.begin_run(f"root-{index}", f"turn-{index}", NOW - 10)
+
+	def test_a_turn_end_finds_its_run_through_a_turn_index(self):
+		updates = [sql for sql in traced(self.ledger.end_run, "turn-1") if sql.lstrip().upper().startswith("UPDATE")]
+		self.assertEqual(len(updates), 1)
+		self.assertIn("USING INDEX session_runs_turn", plan(self.path, updates[0]))
+		self.assertEqual(self.ledger.end_run("turn-1"), False)
+
+	def test_a_store_from_before_the_index_gets_it_on_its_next_write(self):
+		with closing(sqlite3.connect(self.path)) as connection:
+			connection.execute("DROP INDEX IF EXISTS session_runs_turn")
+			connection.commit()
+		self.assertTrue(self.ledger.end_run("turn-2"))
+		self.assertIn("session_runs_turn", indexes(self.path))
+
+
 if __name__ == "__main__":
 	unittest.main()
