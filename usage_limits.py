@@ -7,10 +7,10 @@ Read-only toward credentials, by construction, except that an expired Claude Cod
 - Each account is read by Hermes's public ``fetch_account_usage(read_only=True)`` with that entry's own token and an ``identity_id``, one thread per account, exactly as Hermes's model picker reads its pool: the Codex read-only fetcher reports a 401 instead of refreshing or rotating, the Anthropic fetcher with an explicit token never resolves or refreshes one, and a reading with an ``identity_id`` lands only in that account's slot of Hermes's cache, never in its single-account gauge. The provider-wide ``refresh_account_usage_async`` is deliberately not used because its Codex path resolves runtime credentials with ``refresh_if_expiring`` and force-refreshes on 401.
 - Only providers in ``VETTED_PROVIDERS`` are refreshed: plugin usage hooks are arbitrary code and OpenRouter issues two GETs.
 - Anthropic falls back to Claude Code's own login when Hermes's anthropic pool is empty: Claude sessions that run through the Claude Code CLI (claude-subscription-directsdk) consume that login's account, not a Hermes pool entry. Its access token is sent once per sample to Hermes's public ``fetch_account_usage`` (a single GET, whose reading Hermes also keeps as its in-memory Anthropic gauge) and to Anthropic's OAuth profile for the plan, and never stored; an expired one is refreshed by calling ``fetch_account_usage("anthropic")`` without a token, which resolves one through Hermes's Claude Code resolver and writes the new pair back to Claude Code's credentials, then read again.
-- Anthropic's model-scoped limits (a weekly cap on one model, such as Fable) come only in the usage response's ``limits`` list, which Hermes neither maps nor passes on (its Anthropic snapshot has no ``raw``). So after Hermes's own fetch with an account's token returned windows, the sampler sends that token once more to the same URL Hermes just used, keeps only the scoped entries and drops the body; Hermes's windows win on any shared key. Once a snapshot carries the response in ``raw``, the list is read from it and no second GET is sent.
+- Anthropic's model-scoped limits (a weekly cap on one model, such as Fable) come only in the usage response's ``limits`` list, and its limit resets (such as a Fable reset) only in the ``cedar_ember`` block the same URL adds when asked with ``cedar_ember=1``; Hermes maps neither nor passes them on (its Anthropic snapshot has no ``raw``). So after Hermes's own fetch with an account's token returned windows, the sampler sends that token once more to that URL, keeps the scoped entries and the resets (id, kind, count, expiry, what they clear) and drops the body; Hermes's windows win on any shared key. Anthropic lists resets only to Claude Code, so this one read names itself as the Claude Code CLI installed on the host (``claude-cli/<version> (external, cli)``, as T3 Code does); without an installed CLI it goes out under httpx's own name and the resets read as none. Once a snapshot carries both in ``raw``, they are read from it and no second GET is sent.
 - Codex banked reset credit expiries (the usage payload only carries their count) are read at most every ``CREDITS_INTERVAL_S``. By default one GET for the account Hermes currently uses goes through ``credentialed_provider_request``: Hermes attaches its own Codex sign-in, refreshing it like any chat request would, and the plugin never sees it; the list is shown for that account without naming it. The experimental ``experimental_pool_credits`` setting (kept in this store, set from the plugin's settings page) instead lists every pool account with its own token through Hermes's private Codex helpers, falling back to the default when those helpers are gone; a 401 or any failure there keeps the previous list and never refreshes the token.
 
-Nothing secret is stored or logged: tokens, identities and base URLs stay in local variables of one collection; the store keeps pool entry id + label, plan, window numbers, banked reset count, banked credit status/grant/expiry times and a closed set of error classes.
+Nothing secret is stored or logged: tokens, identities and base URLs stay in local variables of one collection; the store keeps pool entry id + label, plan, window numbers, banked reset count, banked credit status/grant/expiry times, Anthropic limit resets (Anthropic's reset id, kind, count, expiry, usability and the limit names they clear) and a closed set of error classes.
 """
 
 from contextlib import closing, contextmanager
@@ -74,7 +74,19 @@ _CODEX_LABEL_BY_SECONDS = {18000: "Session", 604800: "Weekly"}
 _ANTHROPIC_SECONDS_BY_KEY = {key: seconds for seconds, key in _SECONDS_KEYS.items()}
 # The URL Hermes's Anthropic fetcher reads; its ``limits`` list is the only place model-scoped caps such as Fable's weekly appear.
 ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+# The same body with the account's limit resets added, as Claude Code asks for it; skip_spend leaves out the spend block nothing here reads.
+ANTHROPIC_RESETS_URL = ANTHROPIC_USAGE_URL + "?cedar_ember=1&skip_spend=1"
 ANTHROPIC_HEADERS = {"Accept": "application/json", "anthropic-beta": "oauth-2025-04-20"}
+# Anthropic offers resets only to Claude Code, which it recognises by this User-Agent; the version is the installed CLI's, read from `claude --version`.
+CLAUDE_VERSION_TTL_S = 6 * 3600.0
+_CLAUDE_VERSION = {"checked": float("-inf"), "version": None}
+_CLAUDE_VERSION_LOCK = threading.Lock()
+# Reset kinds as Claude Code groups its grants: one that gives back weekly usage is a Fable reset, else its declared type, else what it clears.
+RESET_KINDS = ("session", "weekly", "fable", "full")
+_GRANT_ID_PATTERN = re.compile(r"^[a-z0-9_-]{1,40}$")
+_SLUG_PATTERN = re.compile(r"^[a-z0-9_]{1,40}$")
+MAX_GRANTS = 16
+_BLOCKED_REASONS = {"five_hour": "blocked_five_hour", "seven_day": "blocked_seven_day", "seven_day_opus": "blocked_opus", "seven_day_sonnet": "blocked_sonnet"}
 # A ``limits`` entry's group names its period; the period word makes ``window_key`` give the same key Hermes's own labels would.
 _ANTHROPIC_GROUP_PERIODS = {"weekly": "week", "session": "session"}
 MAX_SCOPED_LIMITS = 16
@@ -316,22 +328,97 @@ def anthropic_scoped_windows(payload):
 	return windows
 
 
+def _reset_kind(grant):
+	if grant.get("gives_back_weekly") is True:
+		return "fable"
+	if grant.get("type") in ("session", "weekly", "full"):
+		return grant["type"]
+	clears = grant.get("clears") if isinstance(grant.get("clears"), list) else []
+	session = "five_hour" in clears
+	other = any(limit != "five_hour" for limit in clears)
+	return "session" if session and not other else "weekly" if other and not session else "full"
+
+
+def anthropic_reset_grants(payload):
+	"""The account's limit resets from the ``cedar_ember`` block of Anthropic's usage body, or None when the body has no such block (asked without it, or a failed read).
+
+	An ineligible account has none. Paused grants and ones with nothing left are dropped; one that cannot be used now (most need a limit reached first) is kept with ``usable`` false and Anthropic's reason. ``weekly_share_used`` is how much of the weekly limit model-scoped usage took, which a Fable reset gives back.
+	"""
+	block = payload.get("cedar_ember") if isinstance(payload, dict) else None
+	if not isinstance(block, dict):
+		return None
+	shares = payload.get("weekly_scoped_shares")
+	used = [share.get("used_percent_of_weekly") for share in shares[:MAX_SCOPED_LIMITS] if isinstance(share, dict)] if isinstance(shares, list) else []
+	used = [_finite(value) for value in used if _finite(value) is not None and 0 <= value <= 100]
+	result = {"grants": [], "weekly_share_used": min(100.0, sum(used)) if used else None}
+	if block.get("eligible") is not True:
+		return result
+	cooling = isinstance(block.get("cooldown_until"), str) and bool(block["cooldown_until"])
+	for grant in (block.get("grants") if isinstance(block.get("grants"), list) else [])[:MAX_GRANTS]:
+		if not isinstance(grant, dict) or not isinstance(grant.get("id"), str) or not _GRANT_ID_PATTERN.fullmatch(grant["id"]):
+			continue
+		left = grant.get("resets_left")
+		if grant.get("paused") is True or not isinstance(left, int) or isinstance(left, bool) or not 0 < left <= 1000:
+			continue
+		clears = [limit for limit in grant.get("clears") or [] if isinstance(limit, str) and _SLUG_PATTERN.fullmatch(limit)][:8] if isinstance(grant.get("clears"), list) else []
+		reason = grant.get("unavailable_reason") if grant.get("usable_now") is not True else None
+		if grant.get("usable_now") is not True and not isinstance(reason, str):
+			# Claude Code's own fallback when Anthropic names no reason: a cooldown, then a limit that blocks this reset, then whether it needs a limit reached first.
+			blocking = [limit for limit in grant.get("blocking") or [] if isinstance(limit, str)] if isinstance(grant.get("blocking"), list) else []
+			reason = "cooldown" if cooling else _BLOCKED_REASONS.get(blocking[0], "blocked_other") if blocking else "needs_limit" if grant.get("use_requires_limit") is not False else "unavailable"
+		result["grants"].append({
+			"id": grant["id"], "kind": _reset_kind(grant), "resets_left": left, "ends_at": _iso_epoch(grant.get("ends_at")),
+			"usable": grant.get("usable_now") is True, "reason": reason if isinstance(reason, str) and _SLUG_PATTERN.fullmatch(reason) else None, "clears": clears,
+		})
+	return result
+
+
+def claude_cli_version(clock=time.monotonic, runner=None):
+	"""The installed Claude Code CLI's version (``2.1.318``), from ``claude --version`` at most every six hours; None without a CLI."""
+	with _CLAUDE_VERSION_LOCK:
+		if clock() - _CLAUDE_VERSION["checked"] < CLAUDE_VERSION_TTL_S:
+			return _CLAUDE_VERSION["version"]
+		_CLAUDE_VERSION["checked"] = clock()
+		version = None
+		try:
+			if runner is None:
+				import shutil
+				import subprocess
+				path = shutil.which("claude")
+				output = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL).stdout if path else ""
+			else:
+				output = runner()
+			match = re.match(r"\s*(\d{1,4}\.\d{1,4}\.\d{1,6})\b", output or "")
+			version = match.group(1) if match else None
+		except Exception:
+			version = None
+		_CLAUDE_VERSION["version"] = version
+		return version
+
+
+def claude_headers(token, version=None):
+	"""Headers of an Anthropic OAuth request that names itself as the installed Claude Code CLI, or as httpx without one."""
+	version = claude_cli_version() if version is None else version
+	return {"Authorization": f"Bearer {token}", **ANTHROPIC_HEADERS, **({"User-Agent": f"claude-cli/{version} (external, cli)"} if version else {})}
+
+
 def _fetch_anthropic_usage(token):
-	"""Anthropic's usage body read with the account's token, the same single GET Hermes's fetcher sends; None on any failure (a 401 is not retried or refreshed)."""
+	"""Anthropic's usage body with the account's resets, read with its token; None on any failure (a 401 is not retried or refreshed)."""
 	import httpx
 	try:
 		with httpx.Client(timeout=CREDITS_TIMEOUT_S, follow_redirects=False) as client:
-			response = client.get(ANTHROPIC_USAGE_URL, headers={"Authorization": f"Bearer {token}", **ANTHROPIC_HEADERS})
+			response = client.get(ANTHROPIC_RESETS_URL, headers=claude_headers(token))
 		return response.json() if response.status_code == 200 else None
 	except Exception:
 		return None
 
 
-def _add_scoped_windows(snapshot, raw, token, fetcher):
-	"""Append an Anthropic account's model-scoped windows to its normalized snapshot, from Hermes's ``raw`` body when it carries one, else from one GET with the token Hermes just read the account with. A failure leaves Hermes's windows as they are, and Hermes's own window wins on a shared key."""
+def _add_anthropic_extras(snapshot, raw, token, fetcher):
+	"""Append an Anthropic account's model-scoped windows and its limit resets to its normalized snapshot, from Hermes's ``raw`` body when it carries both, else from one GET with the token Hermes just read the account with. A failure leaves Hermes's windows as they are and the resets unread (``reset_grants`` None), and Hermes's own window wins on a shared key."""
 	try:
-		payload = raw if isinstance(raw, dict) and "limits" in raw else fetcher(token)
+		payload = raw if isinstance(raw, dict) and "limits" in raw and "cedar_ember" in raw else fetcher(token)
 		scoped = anthropic_scoped_windows(payload) or ()
+		snapshot["reset_grants"] = anthropic_reset_grants(payload)
 	except Exception:
 		return
 	keys = {window["key"] for window in snapshot["windows"]}
@@ -432,7 +519,7 @@ def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=
 		if snapshot is None or not snapshot["windows"]:
 			account["error"] = "refresh_failed"
 		else:
-			_add_scoped_windows(snapshot, getattr(native, "raw", None), login["token"], scoped_fetcher or _fetch_anthropic_usage)
+			_add_anthropic_extras(snapshot, getattr(native, "raw", None), login["token"], scoped_fetcher or _fetch_anthropic_usage)
 			# Neither the credentials file (its plan fields are often absent) nor Hermes's usage fetch names the allowance; the profile's tier does.
 			snapshot["plan"] = profile_fetcher(login["token"])
 			account["snapshot"] = snapshot
@@ -587,7 +674,7 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 				account["error"] = "no_data"
 			elif scoped_token is not None:
 				# Only once Hermes's own read with this token answered, so the token goes nowhere Hermes did not just send it.
-				_add_scoped_windows(account["snapshot"], getattr(snapshot, "raw", None), scoped_token, anthropic_fetcher or _fetch_anthropic_usage)
+				_add_anthropic_extras(account["snapshot"], getattr(snapshot, "raw", None), scoped_token, anthropic_fetcher or _fetch_anthropic_usage)
 		# Credit lists are read after the usage fetches, so a merged duplicate is never asked; a failure only skips this hour's update.
 		fetch_credits = credits_fetcher or (lambda base_url, token: _fetch_codex_credits(symbols, base_url, token))
 		for account, reading, _host, credit, _scoped in slots:
@@ -717,6 +804,16 @@ class LimitsStore:
 				PRIMARY KEY (provider, account_id)
 			)
 		""")
+		connection.execute("""
+			CREATE TABLE IF NOT EXISTS limit_reset_grants (
+				provider TEXT NOT NULL,
+				account_id TEXT NOT NULL,
+				fetched_at REAL NOT NULL,
+				grants_json TEXT NOT NULL,
+				weekly_share_used REAL,
+				PRIMARY KEY (provider, account_id)
+			)
+		""")
 		connection.execute("CREATE TABLE IF NOT EXISTS limit_settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
 		connection.execute("""
 			CREATE TABLE IF NOT EXISTS limit_sampler_status (
@@ -778,6 +875,8 @@ class LimitsStore:
 				"DELETE FROM limit_credits WHERE account_id != ? AND NOT EXISTS "
 				"(SELECT 1 FROM limit_samples WHERE limit_samples.provider = limit_credits.provider AND limit_samples.account_id = limit_credits.account_id)",
 				(CURRENT_CREDITS_ID,))
+			# A reset list is shown only while fresh, so an older one is never offered again.
+			connection.execute("DELETE FROM limit_reset_grants WHERE fetched_at < ?", (checked_at - STALE_AFTER_S,))
 		return inserted
 
 	@staticmethod
@@ -823,6 +922,16 @@ class LimitsStore:
 				"INSERT INTO limit_credits (provider, account_id, credits_fetched_at, credits_json) VALUES (?, ?, ?, ?) "
 				"ON CONFLICT(provider, account_id) DO UPDATE SET credits_fetched_at = excluded.credits_fetched_at, credits_json = excluded.credits_json",
 				(provider, account_id, checked_at, json.dumps(clean, separators=(",", ":"))))
+		grants = snapshot.get("reset_grants") if isinstance(snapshot, dict) and fetched_at else None
+		if isinstance(grants, dict):
+			# Re-cleaned on write so a direct caller cannot store anything beyond the reset fields.
+			clean = [grant for grant in map(_clean_grant, (grants.get("grants") or [])[:MAX_GRANTS] if isinstance(grants.get("grants"), list) else []) if grant]
+			share = _finite(grants.get("weekly_share_used"))
+			connection.execute(
+				"INSERT INTO limit_reset_grants (provider, account_id, fetched_at, grants_json, weekly_share_used) VALUES (?, ?, ?, ?, ?) "
+				"ON CONFLICT(provider, account_id) DO UPDATE SET fetched_at = excluded.fetched_at, grants_json = excluded.grants_json, weekly_share_used = excluded.weekly_share_used "
+				"WHERE excluded.fetched_at >= limit_reset_grants.fetched_at",
+				(provider, account_id, fetched_at, json.dumps(clean, separators=(",", ":")), share if share is not None and 0 <= share <= 100 else None))
 		windows = [w for w in (snapshot or {}).get("windows") or () if isinstance(w, dict) and w.get("key")] if fetched_at else []
 		if windows:
 			(last,) = connection.execute(
@@ -905,6 +1014,28 @@ class LimitsStore:
 			statuses = {provider: error for provider, error in connection.execute("SELECT provider, error FROM limit_provider_status")}
 		return rows, statuses
 
+	def read_account_extras(self):
+		"""(credits, reset grants) through one connection, as ``read_credits`` and ``read_reset_grants`` return them; a table missing from an older store reads empty."""
+		with self._reader() as connection:
+			if connection is None:
+				return {}, {}
+
+			def rows(sql):
+				# One statement each: a store created before a table existed fails the read instead of being checked first.
+				try:
+					return connection.execute(sql).fetchall()
+				except sqlite3.OperationalError:
+					return []
+			credits = {(provider, account_id): (fetched, text, applicable) for provider, account_id, fetched, text, applicable in rows(
+				"SELECT provider, account_id, credits_fetched_at, credits_json, applicable_count FROM limit_credits")}
+			grants = {(provider, account_id): (fetched, text, share) for provider, account_id, fetched, text, share in rows(
+				"SELECT provider, account_id, fetched_at, grants_json, weekly_share_used FROM limit_reset_grants")}
+		return credits, grants
+
+	def read_reset_grants(self):
+		"""{(provider, account_id): (fetched_at, grants_json, weekly_share_used)}; empty for a store created before the table existed."""
+		return self.read_account_extras()[1]
+
 	def read_credits(self):
 		"""{(provider, account_id): (credits_fetched_at, credits_json, applicable_count)}; empty for a store created before the table existed."""
 		with self._reader() as connection:
@@ -953,6 +1084,35 @@ def _credits_block(row, now):
 	return {"fetched_at": fetched_at, "applicable_count": applicable, "credits": [{"status": "available", "expires_at": c.get("expires_at"), "granted_at": c.get("granted_at")} for c in available]}
 
 
+def _clean_grant(grant):
+	"""One reset as stored and sent: only its id, kind, count, expiry, usability, reason and what it clears."""
+	if not isinstance(grant, dict) or not isinstance(grant.get("id"), str) or not _GRANT_ID_PATTERN.fullmatch(grant["id"]) or grant.get("kind") not in RESET_KINDS:
+		return None
+	left = grant.get("resets_left")
+	if not isinstance(left, int) or isinstance(left, bool) or not 0 < left <= 1000:
+		return None
+	reason = grant.get("reason")
+	clears = grant.get("clears") if isinstance(grant.get("clears"), list) else []
+	return {"id": grant["id"], "kind": grant["kind"], "resets_left": left, "ends_at": _finite(grant.get("ends_at")), "usable": grant.get("usable") is True,
+		"reason": reason if isinstance(reason, str) and _SLUG_PATTERN.fullmatch(reason) else None,
+		"clears": [limit for limit in clears if isinstance(limit, str) and _SLUG_PATTERN.fullmatch(limit)][:8]}
+
+
+def _grants_block(row, now):
+	"""An account's limit resets that have not expired, soonest expiry first, or None when never read or older than the freshness limit: a stale list could offer a reset already spent elsewhere."""
+	if row is None:
+		return None
+	fetched_at, text, share = row
+	if fetched_at is None or not 0 <= now - fetched_at <= STALE_AFTER_S:
+		return None
+	try:
+		grants = [grant for grant in map(_clean_grant, json.loads(text)) if grant and (grant["ends_at"] is None or grant["ends_at"] > now)]
+	except (ValueError, TypeError):
+		return None
+	grants.sort(key=lambda grant: (grant["ends_at"] is None, grant["ends_at"] or 0.0, RESET_KINDS.index(grant["kind"])))
+	return {"fetched_at": fetched_at, "weekly_share_used": share, "grants": grants}
+
+
 def _history_number(value, digits=0):
 	"""Rounded for the wire: whole seconds for times, one decimal for percentages; whole numbers lose their ``.0``."""
 	if value is None:
@@ -981,7 +1141,7 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 		raise ValueError("now must be a finite epoch timestamp")
 	since = now - hours * 3600.0
 	rows, statuses = store.read_rows(since)
-	credit_rows = store.read_credits()
+	credit_rows, grant_rows = store.read_account_extras()
 	providers = {}
 
 	def provider_block(slug):
@@ -1019,6 +1179,7 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 			accounts.append({
 				"id": account_id, "label": label, "priority": priority, "plan": plan, "banked_resets": banked,
 				"banked_credits": _credits_block(credit_rows.get((slug, account_id)), now),
+				"reset_grants": _grants_block(grant_rows.get((slug, account_id)), now),
 				"fetched_at": fetched_at, "stale": age is None or age < 0 or age > STALE_AFTER_S, "error": error,
 				"windows": [{
 					# Samples stored before durations were inferred carry none; window_seconds fills them in the same way.

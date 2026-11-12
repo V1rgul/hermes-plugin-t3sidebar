@@ -96,3 +96,104 @@ class RedeemTests(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+ORG = "11111111-2222-3333-4444-555555555555"
+
+
+class FakeAnthropic:
+	"""Answers the profile read and the reset claim; records every request."""
+
+	def __init__(self, answers, profile=200):
+		self.answers, self.profile, self.requests = list(answers), profile, []
+
+	def __call__(self):
+		return self
+
+	def __enter__(self):
+		return self
+
+	def __exit__(self, *exc):
+		return False
+
+	def get(self, url, headers):
+		self.requests.append(("GET", url, headers, None))
+		return SimpleNamespace(status_code=self.profile, json=lambda: {"organization": {"uuid": ORG}})
+
+	def post(self, url, headers, json):
+		self.requests.append(("POST", url, headers, json))
+		answer = self.answers.pop(0)
+		if isinstance(answer, Exception):
+			raise answer
+		status, body = answer
+		return SimpleNamespace(status_code=status, json=lambda: body)
+
+
+class AnthropicRedeemTests(unittest.TestCase):
+	def setUp(self):
+		banked._PENDING_CLAIMS.clear()
+		self.addCleanup(banked._PENDING_CLAIMS.clear)
+		self.pool = {"anthropic": [{"id": "a00001", "priority": 0, "access_token": "tok-a"}, {"id": "dead01", "priority": 1, "access_token": "tok-d", "last_status": "dead"}]}
+
+	def redeem(self, account_id, grant_id, client, version="2.1.318", lock=None):
+		symbols = collector_tests.CollectorTests.symbols(collector_tests.CollectorTests(), self.pool)
+		return banked.redeem_anthropic(account_id, grant_id, limits=limits, symbols=symbols, client_factory=client, lock=lock or threading.Lock(), version=version)
+
+	def test_claims_the_named_reset_with_the_accounts_token_as_the_installed_claude_code_cli(self):
+		client = FakeAnthropic([(200, {"result": "reset", "resets_left": 0, "cleared": ["seven_day"]})])
+		self.assertEqual(self.redeem("a00001", "grant_fable_1", client), {"status": "reset", "resets_left": 0})
+		(profile, claim) = client.requests
+		self.assertEqual(profile[1], "https://api.anthropic.com/api/oauth/profile")
+		self.assertEqual(claim[1], f"https://api.anthropic.com/api/organizations/{ORG}/reset_rate_limits")
+		self.assertEqual((claim[2]["Authorization"], claim[2]["User-Agent"], claim[2]["anthropic-beta"]), ("Bearer tok-a", "claude-cli/2.1.318 (external, cli)", "oauth-2025-04-20"))
+		self.assertEqual((claim[3]["program"], claim[3]["grant_id"]), ("cedar_ember", "grant_fable_1"))
+		self.assertEqual(banked._PENDING_CLAIMS, {}, "a settled claim forgets its request id")
+
+	def test_an_unanswered_claim_is_retried_with_the_same_request_id(self):
+		client = FakeAnthropic([OSError("connection reset"), (200, {"result": "unavailable"}), (200, {"result": "already_used", "resets_left": 0})])
+		self.assertEqual(self.redeem("a00001", "grant_fable_1", client)["status"], "unknown")
+		# Anthropic's own `unavailable` is unconfirmed too.
+		self.assertEqual(self.redeem("a00001", "grant_fable_1", client)["status"], "unknown")
+		self.assertEqual(self.redeem("a00001", "grant_fable_1", client), {"status": "already_used", "resets_left": 0})
+		ids = [request[3]["request_id"] for request in client.requests if request[0] == "POST"]
+		self.assertEqual((len(ids), len(set(ids))), (3, 1))
+		# Another reset of the same account gets its own id.
+		other = FakeAnthropic([(200, {"result": "reset"})])
+		self.redeem("a00001", "grant_session", other)
+		self.assertNotEqual(other.requests[-1][3]["request_id"], ids[0])
+
+	def test_refusals_are_reported_and_nothing_is_sent_without_a_token_version_or_organization(self):
+		for answer, status in (((200, {"result": "not_limited"}), "not_limited"), ((200, {"result": "cooldown"}), "cooldown"), ((200, {"result": "ineligible"}), "ineligible"),
+				((429, {}), "rate_limited"), ((401, {}), "signed_out"), ((500, {"error": "boom"}), "unknown")):
+			self.assertEqual(self.redeem("a00001", "grant_fable_1", FakeAnthropic([answer]))["status"], status, answer)
+			if status != "unknown":
+				self.assertEqual(banked._PENDING_CLAIMS, {}, status)
+		never = FakeAnthropic([])
+		self.assertEqual(self.redeem("a00001", "grant_fable_1", never, version="")["status"], "unavailable")
+		self.assertEqual(self.redeem("dead01", "grant_fable_1", never)["status"], "signed_out")
+		self.assertEqual(self.redeem("a00001", "grant_fable_1", FakeAnthropic([], profile=403))["status"], "signed_out")
+		self.assertEqual([request[0] for request in never.requests], [])
+		with self.assertRaises(LookupError):
+			self.redeem("nobody", "grant_fable_1", never)
+		with self.assertRaises(LookupError):
+			self.redeem("a00001", "../grant", never)
+		held = threading.Lock()
+		held.acquire()
+		with self.assertRaises(banked.Busy):
+			self.redeem("a00001", "grant_fable_1", never, lock=held)
+
+	def test_claude_code_login_uses_its_own_organization_and_never_refreshes(self):
+		import json as jsonlib
+		import tempfile
+		with tempfile.TemporaryDirectory() as temp:
+			Path(temp, ".claude.json").write_text(jsonlib.dumps({"oauthAccount": {"organizationUuid": ORG}}), encoding="utf-8")
+			Path(temp, ".credentials.json").write_text(jsonlib.dumps({"claudeAiOauth": {"accessToken": "tok-cc", "expiresAt": 4102444800000}}), encoding="utf-8")
+			with patch.dict(limits.os.environ, {"CLAUDE_CONFIG_DIR": temp}):
+				client = FakeAnthropic([(200, {"result": "reset"})])
+				self.assertEqual(self.redeem("claude-code", "grant_fable_1", client)["status"], "reset")
+				self.assertEqual([request[0] for request in client.requests], ["POST"], "the organization comes from Claude Code's own config, no profile read")
+				self.assertEqual(client.requests[0][2]["Authorization"], "Bearer tok-cc")
+				Path(temp, ".credentials.json").write_text(jsonlib.dumps({"claudeAiOauth": {"accessToken": "tok-cc", "expiresAt": 1000}}), encoding="utf-8")
+				never = FakeAnthropic([])
+				self.assertEqual(self.redeem("claude-code", "grant_fable_1", never)["status"], "signed_out")
+				self.assertEqual(never.requests, [])

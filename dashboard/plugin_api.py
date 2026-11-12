@@ -159,9 +159,10 @@ class ExperimentalToggle(BaseModel):
 class BankedResetRedeem(BaseModel):
 	model_config = ConfigDict(extra="forbid", strict=True)
 
-	# Only Codex banks resets; the account is a credential-pool entry id as listed by /usage/limits.
-	provider: Literal["openai-codex"]
+	# The account is an id as listed by /usage/limits. Codex picks which banked credit is spent; an Anthropic reset is named by its grant id.
+	provider: Literal["openai-codex", "anthropic"]
 	account: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,64}$")
+	grant: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,40}$")
 
 
 class DraftChange(BaseModel):
@@ -1246,10 +1247,10 @@ async def native_rename(request, profile, session_id, body):
 	return {"ok": True, "profile": profile, "session_id": session_id, "title": title}
 
 
-def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None, history_db_path=None, limits_path=None, limits_sampler=None, limits_redeemer=None, pool_credits_available=None) -> APIRouter:
+def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None, history_db_path=None, limits_path=None, limits_sampler=None, limits_redeemer=None, anthropic_redeemer=None, pool_credits_available=None) -> APIRouter:
 	"""Inject a temporary path and clock for tests; production accepts neither over HTTP.
 
-	``limits_sampler`` is a zero-argument starter returning the running sampler. Only the module-level production router passes one, so routers built by tests never sample live provider limits. ``limits_redeemer`` replaces the banked-reset redemption, so tests never reach Codex.
+	``limits_sampler`` is a zero-argument starter returning the running sampler. Only the module-level production router passes one, so routers built by tests never sample live provider limits. ``limits_redeemer`` replaces the banked-reset redemption and ``anthropic_redeemer`` the Anthropic reset claim, so tests never reach Codex or Anthropic.
 	"""
 	api = APIRouter()
 	# Exposed so tests can assert which router samples without starting it.
@@ -1507,9 +1508,15 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 	async def redeem_banked_reset(body: BankedResetRedeem, request: Request, response: Response):
 		response.headers["Cache-Control"] = "no-store"
 		profile = listing_profile(request)
+		if (body.provider == "anthropic") != (body.grant is not None):
+			raise HTTPException(422, "grant_mismatch")
 		try:
-			# Hermes's redemption makes two blocking HTTP calls to Codex.
-			value = await asyncio.to_thread(limits_redeemer or (lambda account: banked_reset.redeem(account, limits=usage_limits)), body.account)
+			if body.provider == "anthropic":
+				# A profile read and the claim, both blocking HTTP calls to Anthropic.
+				value = await asyncio.to_thread(anthropic_redeemer or (lambda account, grant: banked_reset.redeem_anthropic(account, grant, limits=usage_limits)), body.account, body.grant)
+			else:
+				# Hermes's redemption makes two blocking HTTP calls to Codex.
+				value = await asyncio.to_thread(limits_redeemer or (lambda account: banked_reset.redeem(account, limits=usage_limits)), body.account)
 		except LookupError as exc:
 			raise HTTPException(404, "account_not_found") from exc
 		except banked_reset.Busy as exc:
@@ -1517,7 +1524,7 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		except Exception as exc:
 			raise HTTPException(503, "redeem_unavailable") from exc
 		running = sampler()
-		if value.get("status") in banked_reset.REDEEMED and running is not None:
+		if value.get("status") in (banked_reset.ANTHROPIC_REDEEMED if body.provider == "anthropic" else banked_reset.REDEEMED) and running is not None:
 			try:
 				# Record the account's new reading now, so the page's next read shows the reset instead of waiting for the five-minute tick.
 				await asyncio.to_thread(running.run_once)

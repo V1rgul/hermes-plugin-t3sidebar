@@ -162,6 +162,26 @@ class UsageRouteTests(unittest.TestCase):
 			self.assertEqual(response.status_code, code, response.text)
 			self.assertNotIn("boom", response.text)
 
+	def test_anthropic_redeem_passes_the_named_reset_and_records_a_fresh_reading_after_it(self):
+		claimed, runs = [], []
+		class Sampler(FakeSampler):
+			def run_once(self):
+				runs.append(1)
+		def claim(account_id, grant_id, status="reset"):
+			claimed.append((account_id, grant_id))
+			return {"status": status, "resets_left": 0}
+		body = {"provider": "anthropic", "account": "claude-code", "grant": "grant_fable_1"}
+		response = self.client(anthropic_redeemer=claim, limits_redeemer=lambda account: self.fail("not Codex"), limits_sampler=Sampler).post(f"{PREFIX}/usage/limits/redeem?profile=default", json=body)
+		self.assertEqual(response.status_code, 200, response.text)
+		self.assertEqual(response.json(), {"status": "reset", "resets_left": 0, "profile": "default"})
+		self.assertEqual((claimed, runs), ([("claude-code", "grant_fable_1")], [1]))
+		refused = self.client(anthropic_redeemer=lambda account, grant: claim(account, grant, "not_limited"), limits_sampler=Sampler).post(f"{PREFIX}/usage/limits/redeem", json=body)
+		self.assertEqual((refused.json()["status"], runs), ("not_limited", [1]))
+		# A Codex body never names a grant, and an Anthropic one always does.
+		client = self.client(anthropic_redeemer=lambda account, grant: self.fail("not sent"), limits_redeemer=lambda account: self.fail("not sent"))
+		for bad in ({"provider": "openai-codex", "account": "7ad3ca", "grant": "grant_fable_1"}, {"provider": "anthropic", "account": "claude-code", "grant": "Bad!"}):
+			self.assertEqual(client.post(f"{PREFIX}/usage/limits/redeem", json=bad).status_code, 422, bad)
+
 	def test_redeem_validates_its_body_and_profile(self):
 		calls = []
 		client = self.client(limits_redeemer=lambda account_id: calls.append(account_id))
