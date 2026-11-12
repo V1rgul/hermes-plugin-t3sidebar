@@ -16,6 +16,8 @@ const DRAFT_SYNC_MS = 30_000;
 const DRAFT_FOCUS_MS = 2000;
 // Received drafts a client keeps; deletion markers, the oldest first, are forgotten beyond it.
 const DRAFT_STATE_LIMIT = 500;
+// Characters of a draft shown in its session's action menu; the line fades out long before this.
+const DRAFT_PREVIEW_LENGTH = 200;
 // The companion's request limits: DraftSync.changes in dashboard/plugin_api.py, and session_drafts.MAX_TEXT_LENGTH, which counts code points.
 const DRAFT_SYNC_BATCH = 200;
 const DRAFT_TEXT_LIMIT = 200_000;
@@ -27,6 +29,10 @@ const tokenFormatter = Intl.NumberFormat('en', { useGrouping: false, maximumFrac
 const millionTokenFormatter = Intl.NumberFormat('en', { useGrouping: false, minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const shortDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'short' });
 const shortTime = new Intl.DateTimeFormat(undefined, { timeStyle: 'short' });
+// Snooze day buttons: a short weekday then the day number under each word (Sat 14 in every locale, where en-US alone would write 14 Sat), the full date in the tooltip.
+const shortWeekday = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
+const dayLabel = { format: date => `${shortWeekday.format(date)} ${date.getDate()}` };
+const longDay = new Intl.DateTimeFormat(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
 const SNOOZE_TIME_KEY = ['hermes-t3sidebar-preferences', 'snooze-time'];
 const validSnoozeTime = value => typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
 function readSnoozeTime(ctx) {
@@ -358,16 +364,20 @@ export function snoozePreciseRemaining(wakeAt, now = Date.now() / 1000) {
   const first = units.findIndex(([value], index) => value > 0 || index === units.length - 1);
   return `${units.slice(first).map(([value, unit]) => `${value}${unit}`).join(' ')} left`;
 }
+// The snooze menu's two rows: hours from now, then days at the configured preset time.
 export function snoozePresets(now = Date.now(), presetTime = '09:00') {
   const [hour, minute] = (validSnoozeTime(presetTime) ? presetTime : '09:00').split(':').map(Number);
   const labelTime = `${hour}:${String(minute).padStart(2, '0')}`;
-  const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(hour, minute, 0, 0);
   // Calendar arithmetic preserves the configured local time across daylight-saving changes.
-  const monday = new Date(now); monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7)); monday.setHours(hour, minute, 0, 0);
-  return [{ label: 'In 1 hour', icon: 'ClockHour1', wake_at: Math.floor(now / 1000) + 3600 },
-    { label: 'In 3 hours', icon: 'ClockHour3', wake_at: Math.floor(now / 1000) + 10800 },
-    { label: `Tomorrow at ${labelTime}`, icon: 'Sun', wake_at: Math.floor(tomorrow.getTime() / 1000) },
-    { label: `Next Monday at ${labelTime}`, codicon: 'calendar', wake_at: Math.floor(monday.getTime() / 1000) }];
+  const day = offset => { const date = new Date(now); date.setDate(date.getDate() + offset); date.setHours(hour, minute, 0, 0); return date; };
+  // Next Monday is never today and never tomorrow: on a Sunday it is eight days away, so it never repeats the Tomorrow button.
+  const mondayOffset = (8 - new Date(now).getDay()) % 7 || 7;
+  const days = [['Tomorrow', 1], ['Monday', mondayOffset === 1 ? 8 : mondayOffset], ['Next week', 7]].map(([label, offset]) => {
+    const date = day(offset);
+    return { label, date, wake_at: Math.floor(date.getTime() / 1000) };
+  });
+  const relative = [1, 2, 4].map(hours => ({ label: `+${hours}h`, name: `In ${hours} hour${hours > 1 ? 's' : ''}`, wake_at: Math.floor(now / 1000) + hours * 3600 }));
+  return { labelTime, relative, days };
 }
 export function parseLocalWake(value, now = Date.now()) {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) throw new Error('Choose a local date and time.');
@@ -637,6 +647,22 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         });
         return ownerMatches() && present;
       } catch (_) { check(scope); return false; }
+    },
+    // The start of a session's draft for its action menu, read when the menu opens. It goes to that menu's own state only, never to the query cache.
+    async draftPreview(scope, row) {
+      check(scope);
+      const state = draftState(scope), id = row.resolved_id || row.id;
+      // The composer is the newest copy; the synced state answers for a session without one (a draft-only card, another client's draft).
+      // The composer getter is ID-addressed, so a focused session owned by another source or profile is not read, as in hasDraft.
+      const foreign = hasAlias(row, env.host.state?.focusedStoredSessionId?.get()) && !ownsFocus(scope);
+      const local = row._draftOnly || foreign ? null : await readComposer(scope, id);
+      check(scope);
+      let text = local?.trim() && !deletedCopy(state, id, local) ? local : null;
+      for (const alias of text ? [] : aliases(row)) {
+        const pending = state.pending.get(alias), stored = pending ? pending.text : state.known.get(alias)?.text;
+        if (stored?.trim()) { text = stored; break; }
+      }
+      return text ? text.replace(/\s+/g, ' ').trim().slice(0, DRAFT_PREVIEW_LENGTH) : null;
     },
     async list(scope) {
       const ticket = generation;
@@ -1267,17 +1293,25 @@ const CSS = `
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-row .sf-project{gap:4px}/* Start the glyph at the title's left edge; Codicons also carry a 1/16em side bearing. */.sf-row .sf-project-icon{width:auto;min-width:13px;justify-content:flex-start}.sf-row .sf-project-icon>.codicon{margin-left:calc(-1em / 16)}/* Outranks the Working time color: a snoozed card can still be running. */
 .sf-row .sf-time.sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--sf-purple);font-weight:400}.sf-snooze-time svg{width:16px;height:16px;flex-shrink:0;stroke-width:1.6}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
-.sf-menu button.sf-snooze-info:disabled{display:flex;gap:12px;width:100%;white-space:nowrap;color:var(--sf-purple);opacity:1;font-weight:400;cursor:default}.sf-snooze-remaining{margin-left:auto;text-align:right}.sf-menu .sf-custom-snooze{padding:0 8px}.sf-menu .sf-custom-snooze,.sf-menu .sf-snooze-info,.sf-menu .sf-snooze-action{padding-left:8px;padding-right:8px}
+/* Snooze menu: an existing snooze on one purple line ending with Unsnooze, then rows that lead with their icon outside the buttons (hours from now, days at the preset time written under the calendar), and the custom field aligned with the buttons. */.sf-menu.sf-snooze-menu{box-sizing:border-box;width:300px;max-width:calc(100vw - 18px)}.sf-menu .sf-snooze-info{display:flex;flex-direction:row;align-items:center;gap:6px;padding-left:2px;color:var(--sf-purple);font-size:12px;white-space:nowrap}.sf-snooze-info-mark{display:inline-flex}.sf-snooze-info-mark svg{width:14px;height:14px}.sf-snooze-remaining{margin-left:auto;text-align:right}.sf-menu .sf-snooze-info .sf-unsnooze{color:var(--ui-green,#1f8a65)}
+.sf-menu .sf-snooze-grid,.sf-menu .sf-snooze-custom{display:grid;grid-template-columns:28px repeat(3,minmax(0,1fr));gap:4px;align-items:center}.sf-menu .sf-snooze-custom{grid-template-columns:28px minmax(0,1fr) auto}.sf-snooze-lead{display:flex;flex-direction:column;align-items:center;gap:2px;color:var(--ui-text-secondary)}.sf-snooze-lead svg{width:16px;height:16px}.sf-snooze-lead small{font-size:10px;line-height:1;font-variant-numeric:tabular-nums}.sf-menu .sf-snooze-choice{justify-content:center;min-width:0;height:26px;padding:0 4px;background:color-mix(in srgb,var(--ui-text-primary) 6%,transparent);font-variant-numeric:tabular-nums}.sf-menu .sf-snooze-choice:hover:not(:disabled){background:var(--ui-control-hover-background,color-mix(in srgb,var(--ui-text-primary) 12%,transparent))}.sf-menu .sf-snooze-day{display:flex;flex-direction:column;align-items:center;height:auto;padding:4px 2px;gap:0;line-height:1.2}.sf-snooze-day-name,.sf-snooze-day-date{display:block;white-space:nowrap}.sf-snooze-day-name{font-size:12px}.sf-snooze-day-date{font-size:11px;color:var(--ui-text-secondary)}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}.sf-project-choice[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-project-picker .sf-project-choice[aria-pressed=true]{background:color-mix(in srgb,var(--ui-text-primary) 10%,transparent);color:var(--ui-text-primary)}
 .sf-project-picker{box-sizing:border-box;width:min(440px,calc(100vw - 18px));min-width:0;max-width:none;max-height:min(720px,calc(100dvh - 24px),calc(var(--radix-popover-content-available-height,100dvh) - 2px));overflow:hidden}.sf-project-picker>strong,.sf-project-picker>input{flex-shrink:0}.sf-project-picker>input{box-sizing:border-box;min-width:0}.sf-menu.sf-project-picker>.sf-project-options{gap:0;overflow-y:auto;overscroll-behavior:contain;min-height:0}.sf-project-picker .sf-project-choice{box-sizing:border-box;flex-shrink:0;width:100%;height:24px;min-height:24px;padding:4px 8px;font-size:12px;line-height:16px;gap:8px;border:0}.sf-project-picker .sf-project-icon{width:14px;height:14px}.sf-project-details{display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left}.sf-project-details>.sf-project-name,.sf-project-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.sf-project-details>.sf-project-name{max-width:55%}.sf-project-path{flex:1;margin-left:auto;text-align:right;font-size:11px;font-weight:400;line-height:16px;color:var(--ui-text-tertiary)}
 .sf-project-group{display:flex;flex-direction:column;gap:0;flex-shrink:0}.sf-project-picker .sf-project-folder{padding-left:30px}.sf-project-folder .sf-project-path{text-align:left;margin-left:0}.sf-project-heading .sf-project-name{max-width:100%}.sf-project-heading[aria-disabled=true]{opacity:1;cursor:default}
 .sf-menu .sf-menu-action{display:flex;align-items:center;gap:8px}.sf-menu-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex-shrink:0}.sf-menu-icon svg{width:14px;height:14px}.sf-menu button.sf-menu-action[data-destructive=true]{color:var(--ui-red)}
 .sf-menu-label{display:flex;align-items:center;flex:1;min-width:0}
-.sf-menu>div:not(.sf-menu-title),.sf-menu form{display:flex;flex-direction:column;gap:4px}
-.sf-project-submenu{box-sizing:border-box;width:508px;max-width:calc(100vw - 18px);max-height:min(calc(100vh - 32px),var(--radix-popover-content-available-height,100vh));overflow:auto}.sf-project-submenu fieldset{border:0;padding:0;margin:4px 0;min-width:0}.sf-project-submenu legend{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:7px}.sf-project-submenu fieldset:disabled{opacity:.5}
-.sf-project-colors{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));gap:4px;width:476px;max-width:100%;padding:3px;box-sizing:border-box}.sf-project-colors button{display:block;box-sizing:border-box;width:100%;aspect-ratio:1/1.618033989;padding:0;border:0;border-radius:4px;cursor:pointer}.sf-project-colors button:hover{box-shadow:0 0 0 1px var(--ui-text-primary)}.sf-project-colors button[aria-pressed=true],.sf-project-colors button:focus-visible{outline:2px solid var(--ui-text-primary);outline-offset:1px}
-.sf-project-icon-categories{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px}.sf-project-submenu .sf-project-icon-category{margin:0}.sf-project-submenu .sf-project-icon-category legend{font-size:10px;margin-bottom:4px}.sf-project-icons{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:2px}.sf-project-icons button{display:flex;align-items:center;justify-content:center;height:25px;min-width:0;padding:3px;border:0;border-radius:4px;background:transparent;color:var(--sf-project-color)}.sf-project-icons button:hover,.sf-project-icons button[aria-pressed=true]{background:var(--ui-control-hover-background);color:var(--sf-project-color)}.sf-submenu-arrow{display:inline-flex;margin-left:auto}
-@media(max-width:520px){.sf-project-icon-categories{grid-template-columns:minmax(0,1fr)}}
+:where(.sf-menu>div:not(.sf-menu-title)),:where(.sf-menu form){display:flex;flex-direction:column;gap:4px}
+/* Session and project menus: a heading line with icon-only actions at its end, grey monospace detail lines (session ID, project folders) with Copy, the draft line, then a toolbar sharing the width. */
+.sf-menu.sf-session-menu,.sf-menu.sf-project-submenu{box-sizing:border-box;width:520px;max-width:calc(100vw - 18px)}.sf-menu .sf-menu-line{display:flex;flex-direction:row;align-items:center;gap:2px;min-width:0}.sf-menu-heading{flex:1;min-width:0;padding-left:2px;font-size:13px;font-weight:500;color:var(--ui-text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sf-menu-id,.sf-menu-path{flex:1;min-width:0;padding-left:2px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:16px;color:var(--ui-text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sf-menu .sf-menu-edit{display:flex;flex-direction:row;align-items:center;gap:4px;flex:1;min-width:0}.sf-menu-edit input{flex:1;min-width:0}
+.sf-menu-tool-wrap{display:inline-flex;flex-direction:row;flex:none}.sf-menu .sf-menu-tool{justify-content:center;flex-shrink:0;width:24px;height:24px;padding:0;color:var(--ui-text-primary)}.sf-menu .sf-menu-tool svg{flex-shrink:0;width:14px;height:14px}.sf-menu .sf-menu-tool[data-destructive=true]{color:var(--ui-red)}.sf-menu .sf-menu-tool.sf-copied{color:var(--ui-green,#1f8a65)}.sf-menu .sf-menu-tool[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary))}
+.sf-menu .sf-menu-draft{display:flex;flex-direction:row;align-items:center;gap:6px;min-width:0;padding-left:2px}.sf-menu-draft-mark{display:inline-flex;color:var(--ui-orange,#db704b)}.sf-menu-draft-mark svg{width:13px;height:13px}.sf-menu-draft-text{flex:1;min-width:0;font-size:11px;color:var(--ui-text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sf-menu .sf-menu-separator{height:1px;margin:2px -8px;background:var(--ui-stroke-secondary)}.sf-menu .sf-menu-toolbar{flex-direction:row;align-items:center;gap:0}.sf-menu-toolbar>.sf-menu-tool-wrap{flex:1}.sf-menu .sf-menu-toolbar .sf-menu-tool{width:100%}.sf-menu-toolbar-divider{flex:none;width:1px;height:16px;margin:0 2px;background:var(--ui-stroke-secondary)}
+.sf-project-submenu{max-height:min(calc(100vh - 32px),var(--radix-popover-content-available-height,100vh));overflow:auto}.sf-project-submenu fieldset{border:0;padding:0;margin:4px 0;min-width:0}.sf-project-submenu legend{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:7px}.sf-project-submenu fieldset:disabled{opacity:.5}
+/* The glyph column holds the project mark on the name line, then each folder's Filter. Under it, a tall reset button left of the palette and of the icon grid. */.sf-menu .sf-project-head{display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:1px 4px}.sf-project-head-mark{display:flex;justify-content:center}.sf-project-head .sf-menu-heading,.sf-project-head .sf-menu-path{padding-left:0}.sf-menu .sf-project-head .sf-menu-edit{grid-column:2 / 4}
+.sf-project-submenu .sf-project-choices{display:flex;align-items:stretch;gap:6px}.sf-project-choices>.sf-project-colors,.sf-project-choices>.sf-project-icon-categories{flex:1;min-width:0}.sf-project-submenu .sf-project-reset{flex:none;display:flex;align-items:center;justify-content:center;width:30px;padding:0;border:1px dashed color-mix(in srgb,var(--ui-text-tertiary) 55%,transparent);border-radius:6px;background:transparent;color:var(--ui-text-secondary);cursor:pointer}.sf-project-submenu .sf-project-reset:hover{background:var(--ui-control-hover-background);color:var(--ui-text-primary);border-style:solid}.sf-project-submenu .sf-project-reset[aria-pressed=true]{border-style:solid;border-color:color-mix(in srgb,var(--ui-text-primary) 45%,transparent);color:var(--ui-text-primary)}
+.sf-project-colors{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));gap:4px;padding:3px;box-sizing:border-box}.sf-project-colors button{display:block;box-sizing:border-box;width:100%;aspect-ratio:1/1.618033989;padding:0;border:0;border-radius:4px;cursor:pointer}.sf-project-colors button:hover{box-shadow:0 0 0 1px var(--ui-text-primary)}.sf-project-colors button[aria-pressed=true],.sf-project-colors button:focus-visible{outline:2px solid var(--ui-text-primary);outline-offset:1px}
+.sf-project-icon-categories{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px 10px}.sf-project-submenu .sf-project-icon-category{margin:0}.sf-project-submenu .sf-project-icon-category{min-width:0}.sf-project-submenu .sf-project-icon-category legend{font-size:10px;margin-bottom:2px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sf-project-icons{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px}.sf-project-icons button{display:flex;align-items:center;justify-content:center;height:25px;min-width:0;padding:3px;border:0;border-radius:4px;background:transparent;color:var(--sf-project-color)}.sf-project-icons button:hover,.sf-project-icons button[aria-pressed=true]{background:var(--ui-control-hover-background);color:var(--sf-project-color)}
+@media(max-width:520px){.sf-project-icon-categories{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .sf-status{font-weight:600}
 .sf-project,.sf-time{color:var(--ui-text-secondary)}.sf-status{display:inline-flex;align-items:center;gap:4px}.sf-status svg{width:13px;height:13px;flex-shrink:0}.sf-status[data-status=done]{color:var(--ui-green,#1f8a65)}.sf-status[data-status=woke]{color:var(--sf-purple)}.sf-status[data-status=input]{color:var(--ui-orange,#db704b)}.sf-status[data-status=working]{color:var(--sf-blue)}.sf-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.sf-working-duration{font-variant-numeric:tabular-nums}/* The subagent count touches the ring, so the ring and count read as one group apart from the elapsed time. */.sf-subagents{margin-left:-4px;font-weight:400;font-variant-numeric:tabular-nums}.sf-row[data-unread=true] .sf-row-title{font-weight:600}
 /* Folding moves only the section edge: pinned lists keep their size and slide under a fade at that edge instead of resizing (and toggling scrollbars) every frame. */
@@ -1306,7 +1340,7 @@ const CSS = `
 @media(prefers-reduced-motion:reduce){.sf-empty,.sf-skeleton-meta,.sf-skeleton-title{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 
 /* Last, so it overrides the ellipsis each rule above keeps for older clients. */
-${shortFade(':is(.sf-row-title,.sf-project-name,.sf-project-details>.sf-project-name,.sf-strip-summary,.sf-menu-title,.sf-project-path,.sf-limit-name)')}
+${shortFade(':is(.sf-row-title,.sf-project-name,.sf-project-details>.sf-project-name,.sf-strip-summary,.sf-menu-title,.sf-project-path,.sf-limit-name,.sf-menu-heading,.sf-menu-id,.sf-menu-path,.sf-menu-draft-text)')}
 /* While a hover scrolls a cut title (useTitleReveal), its left edge fades in as the text starts moving, and its right edge fades out as the end arrives; both return as the title glides back. */
 @supports(animation-timeline:scroll()){.sf-row-title{transition:--sf-fade-start .3s ease,--sf-fade-end .3s ease}.sf-row-title[data-reveal]{--sf-fade-start:1.5em}.sf-row-title[data-reveal=end]{--sf-fade-end:0px}}
 `;
@@ -1398,8 +1432,8 @@ const BUNDLED_ICONS = {
   Ticket: ['M15 5l0 2', 'M15 11l0 2', 'M15 17l0 2', 'M5 5h14a2 2 0 0 1 2 2v3a2 2 0 0 0 0 4v3a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-3a2 2 0 0 0 0 -4v-3a2 2 0 0 1 2 -2'],
   // Derived: the ticket's outline cut open at its lower-right corner, which holds Tabler lock's body and shackle at about two thirds size, so a refused reset still reads as the same ticket.
   TicketLocked: ['M15 5l0 2', 'M11 19h-6a2 2 0 0 1 -2 -2v-3a2 2 0 0 0 0 -4v-3a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v2', 'M14 16h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1', 'M15 16v-2a2.5 2.5 0 0 1 5 0v2'],
-  ClockHour1: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 7v5', 'M12 12l2 -3'],
-  ClockHour3: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 12h3.5', 'M12 7v5'],
+  // Tabler v3.44.0 calendar: the snooze menu's day row, beside its preset time.
+  Calendar: ['M4 7a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12z', 'M16 3v4', 'M8 3v4', 'M4 11h16'],
   CalendarTime: ['M11.795 21h-6.795a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v4', 'M14 18a4 4 0 1 0 8 0a4 4 0 1 0 -8 0', 'M15 3v4', 'M7 3v4', 'M3 11h16', 'M18 16.496v1.504l1 1'],
   FolderCog: ['M12.5 19h-7.5a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v3', 'M17.001 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M19.001 15.5v1.5', 'M19.001 21v1.5', 'M22.032 17.25l-1.299 .75', 'M17.27 20l-1.3 .75', 'M15.97 17.25l1.3 .75', 'M20.733 20l1.3 .75'],
   FolderSymlink: ['M3 21v-4a3 3 0 0 1 3 -3h5', 'M8 17l3 -3l-3 -3', 'M3 11v-5a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8'],
@@ -1477,6 +1511,20 @@ function MenuAction({ name, codicon, className = '', destructive = false, childr
   return h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', ...props, className: `sf-menu-action ${className}`.trim(), 'data-destructive': destructive || undefined },
     h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, codicon ? h(sdk.Codicon, { name: codicon, size: 14 }) : icon(name)), h('span', { className: 'sf-menu-label' }, children));
 }
+// An icon-only menu button. A disabled button takes no pointer events, so its wrapper carries the tooltip, with the reason it is unavailable; the button keeps that reason as its description. trigger wraps the button itself, for a popover trigger.
+function MenuIcon({ label, name, glyph, reason, className = '', destructive = false, tipSide = 'top', trigger = button => button, ...props }) {
+  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-xs', ...props, className: `sf-icon sf-menu-tool ${className}`.trim(), 'aria-label': label,
+    'aria-description': props.disabled && reason || undefined, 'data-destructive': destructive || undefined }, icon(name, glyph));
+  return h('span', { className: 'sf-tip-wrap sf-menu-tool-wrap', ...sharedTip(props.disabled && reason ? `${label}\n${reason}` : label, tipSide) }, trigger(button));
+}
+// Copy buttons answer with a check mark for a moment instead of closing the menu.
+const COPIED_MS = 1500;
+function useCopied() {
+  const [copied, setCopied] = useState(null), timer = useRef(null);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const flash = useCallback(key => { clearTimeout(timer.current); setCopied(key); timer.current = setTimeout(() => setCopied(null), COPIED_MS); }, []);
+  return [copied, flash];
+}
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
 // One line for every problem instead of a stacked box each: the most important summary with a count of the others, Retry when a feed can be read again, and the complete messages behind a disclosure. Errors announce as an alert, neutral states (checking, read-only listing) as a status.
 function StatusStrip({ problems, onRetry }) {
@@ -1520,7 +1568,7 @@ function Settings({ ctx }) {
   // The host already supplies the page title and gutters; behavior notes live in docs/behavior.md.
   return h('div', null, h('style', null, SETTINGS_CSS), h(sdk.ListRow ?? SettingsRow, {
     title: 'Snooze preset time',
-    description: 'Tomorrow and Next Monday wake at this local time. Existing snoozes keep their time.',
+    description: 'Tomorrow, Monday and Next week wake at this local time. Existing snoozes keep their time.',
     action: h(sdk.Input, { type: 'time', step: 60, value: presetTime, className: 'sf-snooze-time', 'aria-label': 'Snooze preset time', 'aria-invalid': error ? true : undefined, onChange: event => save(event.target.value) }),
     below: error ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, error) : null
   }), h(sdk.ListRow ?? SettingsRow, {
@@ -1561,7 +1609,7 @@ export const PROJECT_ICON_GROUPS = [
   { label: 'Projects & workspaces', icons: ['folder-library', 'folder', 'folder-opened', 'repo', 'project', 'home', 'organization', 'briefcase'] },
   { label: 'Code & development', icons: ['code', 'terminal', 'file-code', 'git-branch', 'git-merge', 'extensions', 'bug', 'json'] },
   { label: 'Hardware & robotics', icons: ['circuit-board', 'chip', 'tools', 'wrench', 'settings-gear', 'device-desktop', 'device-mobile', 'robot'] },
-  { label: 'Infrastructure & networks', icons: ['server', 'server-process', 'cloud', 'database', 'globe', 'broadcast', 'remote', 'plug'] },
+  { label: 'Infra & networks', icons: ['server', 'server-process', 'cloud', 'database', 'globe', 'broadcast', 'remote', 'plug'] },
   { label: 'Research & analysis', icons: ['beaker', 'telescope', 'lightbulb', 'search', 'inspect', 'graph', 'pulse', 'symbol-ruler'] },
   { label: 'Documents & legal', icons: ['book', 'library', 'file-text', 'file-pdf', 'notebook', 'note', 'law', 'shield'] },
   { label: 'Planning & business', icons: ['calendar', 'checklist', 'target', 'milestone', 'dashboard', 'credit-card', 'key', 'package'] },
@@ -1622,11 +1670,21 @@ function projectMenuKeyDown(event, close) {
   const editing = ['INPUT', 'TEXTAREA'].includes(event.target.tagName) || event.target.isContentEditable;
   if (event.key === 'Escape' || event.key === 'ArrowLeft' && !editing) { event.preventDefault(); event.stopPropagation(); close(); }
 }
+// A project's folders from the native project tree, its menu's own folder first; until the tree answers, that folder alone.
+function projectFolders(project, tree) {
+  if (project?.is_home) return [null];
+  const own = typeof project?.cwd === 'string' && project.cwd ? [project.cwd] : [];
+  const listed = (tree?.projects || EMPTY_ROWS).filter(choice => !choice.isNoProject && choice.projectId === project?.id).map(choice => choice.path);
+  return [...new Set([...own, ...listed])];
+}
 export function ProjectActions({ row, scope, controller, filterProject, close }) {
   const [renaming, setRenaming] = useState(false), [name, setName] = useState(row.project?.name || ''), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const [copied, flashCopied] = useCopied();
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const project = row.project, editable = !!(project?.id && project.cwd && !project.is_home && !row._limited);
+  const tree = useQuery({ queryKey: [...scopeKey(scope), 'projects'], queryFn: () => controller.projects(scope), retry: false, staleTime: 0, enabled: !!project?.id && !project.is_home && !row._limited });
+  const folders = row._limited ? [] : projectFolders(project, tree.data);
   const perform = async work => {
     if (busy) return;
     setBusy(true); setError('');
@@ -1634,28 +1692,43 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
     catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); }
     finally { if (alive.current) setBusy(false); }
   };
+  const copyPath = path => {
+    setError('');
+    Promise.resolve().then(() => controller.copyProjectPath(scope, { ...project, cwd: path }))
+      .then(() => { if (alive.current) flashCopied(path); }, err => { if (alive.current && sameScope(scope, captureScope())) setError(err.message); });
+  };
   const update = patch => void perform(() => controller.updateProject(scope, project, patch));
+  // A tall button left of the palette or of the icon grid, as tall as the choices it resets.
+  const reset = (label, pressed, content, onClick) => h('button', { type: 'button', className: 'sf-project-reset', 'aria-label': label, 'aria-pressed': pressed, ...sharedTip(label, 'top'), onClick }, content);
   return h('div', { className: 'sf-menu sf-project-submenu', style: { '--sf-project-color': project?.color || 'var(--ui-text-tertiary)' } },
-    h('div', { className: 'sf-menu-title' }, project?.name || 'Project unavailable'),
-    h(MenuAction, { name: 'Pencil', disabled: busy || !editable, onClick: () => { if (!renaming) setName(project?.name || ''); setRenaming(true); } }, 'Rename'),
-    renaming ? h('form', { onSubmit: event => { event.preventDefault(); update({ name }); } },
-      h('span', { className: 'sf-custom-time' },
+    // The glyph column holds the project mark on the name line, then a Filter button on each folder line.
+    h('div', { className: 'sf-project-head' },
+      h('span', { className: 'sf-project-head-mark', 'aria-hidden': true, style: { color: project?.color || undefined } }, projectMark(project)),
+      renaming ? h('form', { className: 'sf-menu-edit', onSubmit: event => { event.preventDefault(); update({ name }); } },
         h('input', { value: name, autoFocus: true, 'aria-label': 'Project name', disabled: busy, onChange: event => setName(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
-        h(IconButton, { type: 'submit', label: 'Save project rename', name: 'Check', glyph: '✓', disabled: busy || !name.trim() }))) : null,
-    h(MenuAction, { name: 'Copy', disabled: busy || !project?.cwd || project.is_home || row._limited || row._multiplePaths, onClick: () => void perform(() => controller.copyProjectPath(scope, project)) }, 'Copy path'),
-    h(MenuAction, { name: 'ListFilter', disabled: busy || row._limited || row._multiplePaths || typeof row.cwd !== 'string' && !project?.is_home,
-      onClick: () => void perform(() => filterProject(row.cwd || '')) }, 'Filter for'),
+        h(IconButton, { type: 'submit', label: 'Save project rename', name: 'Check', glyph: '✓', disabled: busy || !name.trim() }))
+        : h('span', { className: 'sf-menu-heading' }, project?.name || 'Project unavailable'),
+      renaming ? null : h(MenuIcon, { label: 'Rename project', name: 'Pencil', glyph: '✎', disabled: busy || !editable, reason: 'Project editing requires a named project with a known folder.',
+        onClick: () => { setName(project?.name || ''); setRenaming(true); } }),
+      ...folders.flatMap(path => [
+        h(MenuIcon, { key: `filter:${path}`, label: path ? `Filter for ${path}` : 'Filter for Home', name: 'ListFilter', glyph: '≡', disabled: busy,
+          onClick: () => void perform(() => filterProject(path ?? row.cwd ?? '')) }),
+        h('span', { key: `path:${path}`, className: 'sf-menu-path', ...sharedTip(path, 'top') }, path ?? 'Home'),
+        h(MenuIcon, { key: `copy:${path}`, label: copied === path ? 'Copied' : 'Copy path', name: copied === path ? 'Check' : 'Copy', glyph: copied === path ? '✓' : '⧉', className: copied === path ? 'sf-copied' : '',
+          disabled: busy || !path, reason: 'Home has no project folder to copy.', onClick: () => copyPath(path) })])),
+    tree.isError ? h('p', null, `Other folders unavailable: ${tree.error.message}`) : null,
     !editable ? h('p', null, 'Project editing requires a named project with a known folder.') : null,
-    h('fieldset', { disabled: busy || !editable, 'aria-label': 'Project color' }, h('legend', null, 'Color'),
+    h('div', { className: 'sf-menu-separator', role: 'separator' }),
+    h('fieldset', { className: 'sf-project-choices', disabled: busy || !editable, 'aria-label': 'Project color' },
+      reset('No color', !project?.color, h(sdk.Codicon, { name: 'circle-slash', size: 16 }), () => update({ color: null })),
       h('div', { className: 'sf-project-colors' }, ...PROJECT_PALETTE.map(color => h('button', { key: color.value, type: 'button', 'aria-label': `Project color: ${color.name}`, ...sharedTip(color.name, 'top'),
-        'aria-pressed': project?.color?.toLowerCase() === color.value, style: { backgroundColor: color.value }, onClick: () => update({ color: color.value }) }))),
-      h(MenuAction, { codicon: 'circle-slash', onClick: () => update({ color: null }) }, 'No color')),
-    h('fieldset', { disabled: busy || !editable, 'aria-label': 'Project icon' }, h('legend', null, 'Icon'),
+        'aria-pressed': project?.color?.toLowerCase() === color.value, style: { backgroundColor: color.value }, onClick: () => update({ color: color.value }) })))),
+    h('fieldset', { className: 'sf-project-choices', disabled: busy || !editable, 'aria-label': 'Project icon' },
+      reset('Default icon', !project?.icon, projectMark({ is_home: project?.is_home }), () => update({ icon: null })),
       h('div', { className: 'sf-project-icon-categories' }, ...PROJECT_ICON_GROUPS.map(group => h('fieldset', { key: group.label, className: 'sf-project-icon-category' },
-        h('legend', null, group.label), h('div', { className: 'sf-project-icons' }, ...group.icons.map(icon => h('button', { key: icon, type: 'button', 'aria-label': `Project icon: ${icon}`, ...sharedTip(icon, 'top'),
+        h('legend', sharedTip(group.label, 'top'), group.label), h('div', { className: 'sf-project-icons' }, ...group.icons.map(icon => h('button', { key: icon, type: 'button', 'aria-label': `Project icon: ${icon}`, ...sharedTip(icon, 'top'),
           'aria-pressed': project?.icon === icon,
-          onClick: () => update({ icon: project?.icon === icon ? null : icon }) }, projectMark({ icon }))))))),
-      h(MenuAction, { name: 'FolderOpen', onClick: () => update({ icon: null }) }, 'Default icon')),
+          onClick: () => update({ icon: project?.icon === icon ? null : icon }) }, projectMark({ icon })))))))),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
 function MoveProjectActions({ row, scope, controller, close }) {
@@ -1682,13 +1755,69 @@ function MoveProjectActions({ row, scope, controller, close }) {
     projects.isLoading ? h('p', null, 'Loading projects…') : !choices.length && !projects.isError ? h('p', null, 'No project folders available.') : null,
     projects.isError || error ? h('div', { role: 'alert', className: 'sf-error' }, error || projects.error.message) : null);
 }
-function RowActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, snoozeOnly = false, presetTime, snoozeDetail }) {
-  const [value, setValue] = useState(''), [error, setError] = useState(''), [renaming, setRenaming] = useState(false), [title, setTitle] = useState(row.title || ''), [busy, setBusy] = useState(false);
-  const [projectOpen, setProjectOpen] = useState(false), [moveOpen, setMoveOpen] = useState(false);
-  const autotitler = useQuery({ queryKey: [...scopeKey(scope), 'autotitler'], queryFn: () => controller.autotitlerAvailable(scope), enabled: !snoozeOnly, retry: false, staleTime: 60_000 });
+// The draft line of a session's action menu: the start of its text, read once when the menu opens, fading out at the edge.
+function DraftLine({ row, scope, controller, disabled, onDiscard }) {
+  const [text, setText] = useState(null);
+  useEffect(() => {
+    let live = true;
+    controller.draftPreview(scope, row).then(value => { if (live) setText(value); }, () => {});
+    return () => { live = false; };
+  }, [controller, scope, row.key]);
+  return h('div', { className: 'sf-menu-draft' },
+    h('span', { className: 'sf-menu-draft-mark', role: 'img', 'aria-label': 'Unsent draft' }, icon('Pencil', '✎')),
+    h('span', { className: 'sf-menu-draft-text' }, text || 'Unsent draft'),
+    h(MenuIcon, { label: 'Discard draft', name: 'X', glyph: '×', destructive: true, disabled, onClick: onDiscard }));
+}
+function SnoozeActions({ row, mutate, disabled, close, presetTime, snoozeDetail, title }) {
+  const [value, setValue] = useState(''), [error, setError] = useState('');
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
-  const snoozeDisabled = row.archived === true;
+  const off = disabled || row.archived === true;
+  const run = payload => { void mutate(row, payload).then(ok => { if (ok && alive.current) close(); }); };
+  // An empty field is never valid; submitting validates again, so an invalid value can still be submitted to explain what is wrong.
+  const customValid = !!value && (() => { try { parseLocalWake(value); return true; } catch (_) { return false; } })();
+  const custom = event => {
+    event.preventDefault();
+    try { const wake_at = parseLocalWake(value); setError(''); run({ action: 'snooze', wake_at }); } catch (err) { setError(err.message); }
+  };
+  const presets = snoozePresets(Date.now(), presetTime), wake = new Date(row.meta.wake_at * 1000);
+  const at = date => `${longDay.format(date)}, ${shortTime.format(date)}`;
+  return h('div', { className: 'sf-menu sf-snooze-menu' }, title,
+    h('form', { onSubmit: custom },
+      // An existing snooze: its wake time and what is left on one line, then Unsnooze at the end of it.
+      row.meta.state === 'snoozed' ? h('div', { className: 'sf-snooze-info' },
+        h('span', { className: 'sf-snooze-info-mark', 'aria-hidden': true }, icon('AlarmSnooze', '◷')),
+        h('span', { className: 'sf-snooze-date' }, `${shortDate.format(wake)} ${shortTime.format(wake)}`),
+        h('span', { className: 'sf-snooze-remaining' }, snoozeDetail),
+        h(MenuIcon, { label: 'Unsnooze', name: 'AlarmOff', glyph: '⏰', className: 'sf-unsnooze', disabled: off, onClick: () => run({ action: 'restore' }) })) : null,
+      row.meta.state === 'snoozed' ? h('div', { className: 'sf-menu-separator', role: 'separator' }) : null,
+      // Each row leads with its icon outside the buttons: hours from now, then days at the preset time written under the calendar.
+      h('div', { className: 'sf-snooze-grid' },
+        h('span', { className: 'sf-snooze-lead', 'aria-hidden': true }, icon('Clock', '◷')),
+        ...presets.relative.map(preset => h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-choice', disabled: off, 'aria-label': preset.name,
+          ...sharedTip(at(new Date(preset.wake_at * 1000)), 'top'), onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
+        h('span', { className: 'sf-snooze-lead sf-snooze-lead-day' }, h('span', { 'aria-hidden': true }, icon('Calendar', '▦')), h('small', null, presets.labelTime)),
+        ...presets.days.map(preset => h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-choice sf-snooze-day', disabled: off,
+          'aria-label': `${preset.label} at ${presets.labelTime}`, 'aria-description': `Wakes ${at(preset.date)}`, ...sharedTip(at(preset.date), 'top'), onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) },
+          h('span', { className: 'sf-snooze-day-name' }, preset.label), h('span', { className: 'sf-snooze-day-date' }, dayLabel.format(preset.date))))),
+      // Custom time: a calendar with a clock in the same icon column, the field aligned with the buttons above, and its checkmark, green once the value is a valid future local time.
+      h('label', { className: 'sf-snooze-custom sf-custom-time' }, h('span', { className: 'sf-snooze-lead', 'aria-hidden': true }, icon('CalendarTime')),
+        h('input', { type: 'datetime-local', value, disabled: off, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
+        h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: off || !value, 'data-valid': customValid }))),
+    error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
+}
+function RowActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, snoozeOnly = false, presetTime, snoozeDetail, hasDraft = false }) {
+  const title = h('div', { className: 'sf-menu-title' }, sessionTitle(row));
+  if (snoozeOnly) return h(SnoozeActions, { row, mutate, disabled, close, presetTime, snoozeDetail, title });
+  return h(SessionActions, { row, scope, controller, filterProject, deleteSession, mutate, disabled, close, hasDraft });
+}
+function SessionActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, hasDraft }) {
+  const [error, setError] = useState(''), [renaming, setRenaming] = useState(false), [title, setTitle] = useState(row.title || ''), [busy, setBusy] = useState(false);
+  const [projectOpen, setProjectOpen] = useState(false), [moveOpen, setMoveOpen] = useState(false);
+  const [copied, flashCopied] = useCopied();
+  const autotitler = useQuery({ queryKey: [...scopeKey(scope), 'autotitler'], queryFn: () => controller.autotitlerAvailable(scope), retry: false, staleTime: 60_000 });
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const autotitlerReason = autotitler.data === true ? null : autotitler.isLoading ? 'Checking for the AutoTitler plugin…' : 'The AutoTitler plugin is not available on this backend.';
   const run = payload => { void mutate(row, payload).then(ok => { if (ok && alive.current) close(); }); };
   const perform = async work => {
@@ -1697,52 +1826,45 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
     catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); }
     finally { if (alive.current) setBusy(false); }
   };
-  const action = (text, name, payload) => h(MenuAction, { key: text, name, disabled: disabled || busy, onClick: () => run(payload) }, text);
-
-  // Only the snooze menu shows the custom field, and an empty one is never valid; submitting validates again.
-  const customValid = snoozeOnly && !!value && (() => { try { parseLocalWake(value); return true; } catch (_) { return false; } })();
-  const custom = event => {
-    event.preventDefault();
-    try { const wake_at = parseLocalWake(value); setError(''); run({ action: 'snooze', wake_at }); } catch (err) { setError(err.message); }
+  const copyId = () => {
+    setError('');
+    Promise.resolve().then(() => controller.copyId(scope, row))
+      .then(() => { if (alive.current) flashCopied('id'); }, err => { if (alive.current && sameScope(scope, captureScope())) setError(err.message); });
   };
-  return h('div', { className: 'sf-menu' }, h('div', { className: 'sf-menu-title' }, sessionTitle(row)),
-    snoozeOnly ? h('form', { onSubmit: custom },
-      row.meta.state === 'snoozed' ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-info', disabled: true },
-        h('span', { className: 'sf-snooze-date' }, `${shortDate.format(new Date(row.meta.wake_at * 1000))} ${shortTime.format(new Date(row.meta.wake_at * 1000))}`),
-        h('span', { className: 'sf-snooze-remaining' }, snoozeDetail)) : null,
-      row.meta.state === 'snoozed' ? h(MenuAction, { name: 'AlarmOff', className: 'sf-unsnooze sf-snooze-action', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'restore' }) }, 'Unsnooze') : null,
-      ...snoozePresets(Date.now(), presetTime).map(preset => h(MenuAction, { key: preset.label, name: preset.icon, codicon: preset.codicon, className: 'sf-snooze-action', disabled: disabled || snoozeDisabled, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
-      // Custom time: a calendar in the preset icon column, then the field and its checkmark, which turns green once the value is a
-      // valid future local time. An invalid value can still be submitted, to explain what is wrong.
-      h('label', { className: 'sf-custom-snooze sf-custom-time' }, h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, icon('CalendarTime')),
-        h('input', { type: 'datetime-local', value, disabled: disabled || snoozeDisabled, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
-        h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value, 'data-valid': customValid })))
-      : h('div', null,
-        row.archived !== true ? action(row.meta.pinned ? 'Unpin' : 'Pin', 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
-        // The field starts from the title current now, not when the menu opened; once editing, a poll never replaces the typed text.
-        h(MenuAction, { name: 'Pencil', disabled: busy || (row._liveOnly && !row.runtimeId), onClick: () => { if (!renaming) setTitle(row.title || ''); setRenaming(true); } }, 'Rename'),
-        renaming ? h('form', { onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
-          h('span', { className: 'sf-custom-time' },
-          h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
-          h(IconButton, { type: 'submit', label: 'Save rename', name: 'Check', glyph: '✓', disabled: busy || !title.trim() }))) : null,
-        // A disabled button takes no pointer events, so its wrapper carries the reason's tooltip; the button keeps it as its description.
-        h('span', { className: 'sf-tip-wrap', ...sharedTip(autotitlerReason) },
-          h(MenuAction, { name: 'PencilAi', disabled: busy || row._liveOnly || autotitler.data !== true, 'aria-description': autotitlerReason || undefined,
-            onClick: () => void perform(() => controller.autotitlerRename(scope, row)) }, 'Autotitler: rename now')),
-        h(MenuAction, { name: 'Copy', disabled: busy, onClick: () => void perform(() => controller.copyId(scope, row)) }, 'Copy session ID'),
-        h(MenuAction, { name: 'Trash2', destructive: true, disabled: disabled || busy || row.status !== 'idle' || row._liveOnly || typeof sdk.ConfirmDialog !== 'function', onClick: () => { controller.check(scope); deleteSession(row); close(); } }, 'Delete session'),
-        row.drafted ? h(MenuAction, { name: 'X', destructive: true, disabled: busy, onClick: () => void perform(() => controller.discardDraft(scope, row)) }, 'Discard draft') : null,
-        row._draftOnly ? h('p', null, 'Opening this draft starts a new session in its folder.')
-          : row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null,
-        h(sdk.Popover, { open: moveOpen, onOpenChange: setMoveOpen },
-          h(sdk.PopoverTrigger, { asChild: true }, h(MenuAction, { name: 'FolderSymlink', 'aria-label': 'Move to project', disabled: disabled || busy || row.status !== 'idle' || row._liveOnly,
-            onKeyDown: event => { if (event.key === 'ArrowRight') { event.preventDefault(); setMoveOpen(true); } } }, 'Move to project', h('span', { className: 'sf-submenu-arrow', 'aria-hidden': true }, icon('ChevronRight', '›')))),
-          h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Move to project',
-            onKeyDown: event => projectMenuKeyDown(event, () => setMoveOpen(false)) }, h(MoveProjectActions, { row, scope, controller, close }))),
-        h(sdk.Popover, { open: projectOpen, onOpenChange: setProjectOpen },
-          h(sdk.PopoverTrigger, { asChild: true }, h(MenuAction, { name: 'FolderCog', 'aria-label': 'Project', disabled: busy, onKeyDown: event => { if (event.key === 'ArrowRight') { event.preventDefault(); setProjectOpen(true); } } }, 'Project', h('span', { className: 'sf-submenu-arrow', 'aria-hidden': true }, icon('ChevronRight', '›')))),
-          h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
-            onKeyDown: event => projectMenuKeyDown(event, () => setProjectOpen(false)) }, h(ProjectActions, { row, scope, controller, filterProject, close })))),
+  const idle = row.status === 'idle' && !row._liveOnly;
+  const notIdle = row._liveOnly ? 'Unsaved sessions must be closed through the native session controls.' : 'Available once the session is idle.';
+  // ArrowRight opens a submenu from its toolbar button, as from the former menu rows.
+  const submenu = (open, setOpen, label, name, props, content) => h(sdk.Popover, { open, onOpenChange: setOpen },
+    h(MenuIcon, { label, name, ...props, 'aria-expanded': open, onKeyDown: event => { if (event.key === 'ArrowRight') { event.preventDefault(); setOpen(true); } },
+      trigger: button => h(sdk.PopoverTrigger, { asChild: true }, button) }),
+    h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': label === 'Project' ? 'Project actions' : label,
+      onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, content()));
+  return h('div', { className: 'sf-menu sf-session-menu' },
+    h('div', { className: 'sf-menu-line' },
+      // The field starts from the title current now, not when the menu opened; once editing, a poll never replaces the typed text.
+      renaming ? h('form', { className: 'sf-menu-edit', onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
+        h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
+        h(IconButton, { type: 'submit', label: 'Save rename', name: 'Check', glyph: '✓', disabled: busy || !title.trim() }))
+        : h('span', { className: 'sf-menu-heading' }, sessionTitle(row)),
+      renaming ? null : h(MenuIcon, { label: 'Rename', name: 'Pencil', glyph: '✎', disabled: busy || (row._liveOnly && !row.runtimeId), reason: 'This unsaved session cannot be renamed yet.',
+        onClick: () => { setTitle(row.title || ''); setRenaming(true); } }),
+      renaming ? null : h(MenuIcon, { label: 'Rename with AutoTitler', name: 'PencilAi', glyph: '✎', disabled: busy || row._liveOnly || autotitler.data !== true,
+        reason: row._liveOnly ? 'This unsaved session has no stored history to title yet.' : autotitlerReason, onClick: () => void perform(() => controller.autotitlerRename(scope, row)) })),
+    h('div', { className: 'sf-menu-line' },
+      h('span', { className: 'sf-menu-id' }, durableId(row)),
+      h(MenuIcon, { label: copied === 'id' ? 'Copied' : 'Copy session ID', name: copied === 'id' ? 'Check' : 'Copy', glyph: copied === 'id' ? '✓' : '⧉', className: copied === 'id' ? 'sf-copied' : '', disabled: busy, onClick: copyId })),
+    hasDraft || row.drafted ? h(DraftLine, { row, scope, controller, disabled: busy, onDiscard: () => void perform(() => controller.discardDraft(scope, row)) }) : null,
+    row._draftOnly ? h('p', null, 'Opening this draft starts a new session in its folder.')
+      : row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null,
+    h('div', { className: 'sf-menu-separator', role: 'separator' }),
+    // Pin, Delete and Move act on this session; Project, past the divider, opens its project's own menu.
+    h('div', { className: 'sf-menu-toolbar', role: 'toolbar', 'aria-label': 'Session actions' },
+      row.archived !== true ? h(MenuIcon, { label: row.meta.pinned ? 'Unpin' : 'Pin', name: 'Pin', glyph: '♧', disabled: disabled || busy, onClick: () => run({ action: row.meta.pinned ? 'unpin' : 'pin' }) }) : null,
+      h(MenuIcon, { label: 'Delete session', name: 'Trash2', glyph: '🗑', destructive: true, disabled: disabled || busy || !idle || typeof sdk.ConfirmDialog !== 'function', reason: !idle ? notIdle : typeof sdk.ConfirmDialog !== 'function' ? 'Deletion is unavailable in this Desktop version.' : null,
+        onClick: () => { controller.check(scope); deleteSession(row); close(); } }),
+      submenu(moveOpen, setMoveOpen, 'Move to project', 'FolderSymlink', { glyph: '↪', disabled: disabled || busy || !idle, reason: idle ? null : notIdle }, () => h(MoveProjectActions, { row, scope, controller, close })),
+      h('span', { className: 'sf-menu-toolbar-divider', 'aria-hidden': true }),
+      submenu(projectOpen, setProjectOpen, 'Project', 'FolderCog', { glyph: '⚙', disabled: busy }, () => h(ProjectActions, { row, scope, controller, filterProject, close }))),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
 export function cardStatus(row, active = false) {
@@ -1878,7 +2000,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   useEffect(() => () => setMenu(current => current?.key === row.key ? null : current), [setMenu, row.key]);
   // The held popover wraps the trigger, which then toggles it; a bare trigger opens it.
   const withMenu = (kind, trigger, content) => menu?.kind !== kind ? trigger : h(sdk.Popover, { open: menu.open, onOpenChange: setOpen(kind) },
-    h(sdk.PopoverTrigger, { asChild: true }, trigger), h(sdk.PopoverContent, { align: 'start', side: 'right', style: { padding: 0 }, 'aria-label': kind === 'snooze' ? 'Snooze session' : 'Session actions' }, content()));
+    h(sdk.PopoverTrigger, { asChild: true }, trigger), h(sdk.PopoverContent, { align: 'start', side: 'right', style: PROJECT_MENU_STYLE, 'aria-label': kind === 'snooze' ? 'Snooze session' : 'Session actions' }, content()));
   const bare = kind => menu?.kind === kind ? {} : { onClick: () => openMenu(kind) };
   const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
   const draft = useSessionDraft({ row, active, hidden: hidden || row.newSession, controller, scope });
@@ -1927,7 +2049,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
         onClick: () => void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive' }) }, icon(row.archived === true ? 'ArchiveRestore' : 'Archive', '▤'), row.archived === true ? 'Unarchive' : 'Archive')),
     // Visually hidden: it only carries the keyboard menu, so it needs no tooltip.
     withMenu('actions', h(IconButton, { className: 'sf-context-trigger', label: `Actions for ${sessionTitle(row)}`, title: null, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog', 'aria-expanded': menuOpen, ...bare('actions') }),
-      () => h(RowActions, { row, scope, controller, filterProject, deleteSession, mutate, disabled, close: () => setOpen('actions')(false) })));
+      () => h(RowActions, { row, scope, controller, filterProject, deleteSession, mutate, disabled, hasDraft, close: () => setOpen('actions')(false) })));
 }
 // Query structural sharing preserves nested native/project/metadata values. The
 // derived row and its lineage array can be new without changing a card. Compare

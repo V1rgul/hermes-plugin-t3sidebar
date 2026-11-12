@@ -99,9 +99,11 @@ for (const mode of ['filter', 'new']) {
 			const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
 			await act(async () => heading.querySelector('.sf-project-name').dispatchEvent(event)); await tick();
 			assert.equal(fallbackMenus, 0); assert.equal(event.defaultPrevented, true);
-			assert.equal(document.querySelector('[aria-label="Project actions"] .sf-menu-title').textContent, 'Multi');
-			assert.equal([...document.querySelectorAll('.sf-menu-action')].find(node => node.textContent === 'Copy path').disabled, true);
-			assert.equal([...document.querySelectorAll('.sf-menu-action')].find(node => node.textContent === 'Filter for').disabled, true);
+			assert.equal(document.querySelector('[aria-label="Project actions"] .sf-menu-heading').textContent, 'Multi');
+			// Every folder gets its own Filter and Copy instead of both being disabled for the whole project.
+			const paths = [...document.querySelectorAll('[aria-label="Project actions"] .sf-menu-path')].map(node => node.textContent);
+			assert.ok(paths.length > 1, paths.join());
+			for (const path of paths) assert.equal(button(`Filter for ${path}`).disabled, false);
 			await click(button('Project icon: rocket'));
 			const write = mock.calls.find(call => call[2] === 'projects.update');
 			assert.deepEqual(write[3], { id: 'p_multi', icon: 'rocket' });

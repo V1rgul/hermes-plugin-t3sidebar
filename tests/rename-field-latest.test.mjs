@@ -47,8 +47,7 @@ test('session rename starts from the title current when Rename is chosen and kee
 	await type(field(), 'My own title');
 	await poll(row => ({ ...row, title: 'Renamed again' }));
 	assert.equal(field().value, 'My own title');
-	await click(button(dialog('Session actions'), 'Rename'));
-	assert.equal(field().value, 'My own title', 'choosing Rename again does not reset the field');
+	assert.equal(button(dialog('Session actions'), 'Rename'), undefined, 'the field replaces the title and its Rename button while editing');
 });
 
 test('project rename starts from the project name current when Rename is chosen and keeps the typed text across polls', async () => {
@@ -56,7 +55,7 @@ test('project rename starts from the project name current when Rename is chosen 
 	await click(button(dialog('Session actions'), 'Project'));
 	assert.ok(dialog('Project actions'));
 	await poll(row => ({ ...row, project: { ...row.project, name: 'Renamed project' } }));
-	await click(button(dialog('Project actions'), 'Rename'));
+	await click(button(dialog('Project actions'), 'Rename project'));
 	const field = () => dialog('Project actions').querySelector('input[aria-label="Project name"]');
 	assert.equal(field().value, 'Renamed project');
 	await type(field(), 'My project');

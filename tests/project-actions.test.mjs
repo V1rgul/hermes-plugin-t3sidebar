@@ -225,19 +225,24 @@ test('Copy path copies the project root, checks clipboard failure and fences sta
   assert.equal(mock.calls.length, count);
 });
 
-test('Project submenu is last; actions have leading icons and selectors persist native changes', async () => {
+test('Project menu: name line with Rename, one line per folder with Filter and Copy; tall resets and selectors persist native changes', async () => {
   controller = createController(mock.ctx);
   root = createRoot(document.getElementById('app'));
   await act(async () => root.render(React.createElement(QueryClientProvider, { client: mock.queryClient }, React.createElement(HermesT3Sidebar, { ctx: mock.ctx, controller }))));
   await tick(); await tick();
   const open = async () => { await click(button('Actions for Sidebar layout')); await click(button('Project')); assert.ok(dialog()); };
   await open();
-  const actions = [...dialog().querySelectorAll('.sf-menu-action')];
-  assert.deepEqual(actions.slice(0, 3).map(action => action.textContent), ['Rename', 'Copy path', 'Filter for']);
-  assert.ok(actions.slice(0, 3).every(action => action.firstElementChild.className === 'sf-menu-icon' && action.firstElementChild.querySelector('svg')));
+  // The glyph column: the project mark on the name line, then each folder's Filter, its path and Copy.
+  const head = dialog().querySelector('.sf-project-head');
+  assert.deepEqual([...head.children].map(node => node.querySelector('button')?.getAttribute('aria-label') ?? node.className),
+    ['sf-project-head-mark', 'sf-menu-heading', 'Rename project', 'Filter for /projects/hermes-t3sidebar', 'sf-menu-path', 'Copy path']);
+  assert.equal(head.querySelector('.sf-menu-heading').textContent, 'hermes-t3sidebar');
+  assert.equal(head.querySelector('.sf-menu-path').textContent, '/projects/hermes-t3sidebar');
   assert.equal(dialog().querySelectorAll('.sf-project-icons button').length, 64);
+  // The 48 swatches, plus No color as a tall button left of them; Default icon likewise left of the icon grid.
   assert.equal(dialog().querySelectorAll('[aria-label="Project color"] button').length, 49);
-  await click(button('Rename', dialog()));
+  assert.deepEqual([...dialog().querySelectorAll('.sf-project-choices')].map(set => set.firstElementChild.getAttribute('aria-label')), ['No color', 'Default icon']);
+  await click(button('Rename project', dialog()));
   const nameInput = dialog().querySelector('[aria-label="Project name"]');
   await act(async () => nameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })));
   assert.ok(dialog()); assert.equal(dialog().querySelector('[aria-label="Project name"]'), nameInput);
@@ -252,7 +257,8 @@ test('Project submenu is last; actions have leading icons and selectors persist 
   assert.equal(mock.control.rows.find(row => row.id === 'design').project.icon, null);
   await open(); await click(button('Copy path', dialog()));
   assert.deepEqual(mock.calls.find(call => call[0] === 'clipboard'), ['clipboard', '/projects/hermes-t3sidebar']);
-  await open(); await click(button('Filter for', dialog()));
+  assert.ok(button('Copied', dialog()), 'Copy answers with a check mark and keeps the menu open');
+  await click(button('Filter for /projects/hermes-t3sidebar', dialog()));
   assert.equal(dialog(), null);
   assert.equal(document.querySelector('[data-session-id="readme"]'), null);
 });
@@ -298,6 +304,18 @@ test('active filter keeps native project name and icon when that project has no 
   assert.ok(!mock.calls.some(call => call[2] === 'session.create' || call[0] === 'open'));
 });
 
+test('a multi-folder project lists each folder with its own Filter and Copy', async () => {
+  mock.control.projects.push({ id: 'p_multi', label: 'Multi', path: '/multi/first', repos: [{ path: '/multi/first' }, { path: '/multi/second' }] });
+  await mountSidebar();
+  await click(button('Filter sessions')); await context(button('Project Multi'));
+  assert.deepEqual([...dialog().querySelectorAll('.sf-menu-path')].map(node => node.textContent), ['/multi/first', '/multi/second']);
+  await click(button('Copy path', dialog().querySelectorAll('.sf-project-head > .sf-menu-tool-wrap')[4]));
+  assert.ok(mock.calls.some(call => call[0] === 'clipboard' && call[1] === '/multi/second'));
+  await click(button('Filter for /multi/second', dialog()));
+  assert.equal(dialog(), null);
+  assert.ok(!mock.calls.some(call => ['open', 'newChat'].includes(call[0]) || call[2] === 'session.create'));
+});
+
 test('shared native project names leave multi-folder move targets distinguishable', async () => {
   mock.control.projects.push({ id: 'p_multi', label: 'Multi', path: '/multi/first', repos: [{ path: '/multi/first' }, { path: '/multi/second' }] });
   await mountSidebar();
@@ -311,7 +329,7 @@ test('filter project right-click opens the same appearance menu without selectin
   await mountSidebar();
   await click(button('Filter sessions')); await context(button('Filter by docs'));
   assert.ok(dialog());
-  assert.equal(dialog().querySelector('.sf-menu-title').textContent, 'docs');
+  assert.equal(dialog().querySelector('.sf-menu-heading').textContent, 'docs');
   assert.equal(dialog().querySelectorAll('.sf-project-colors button').length, 48);
   assert.deepEqual([...dialog().querySelectorAll('.sf-project-icon-category legend')].map(node => node.textContent), approved.iconGroups.map(group => group.label));
   assert.equal(document.querySelector('[aria-label="All projects"]').getAttribute('aria-pressed'), 'true');
@@ -377,7 +395,7 @@ test('filter project context menu owns its gesture before the native window capt
     await context(choice.querySelector('.sf-project-name'));
     assert.equal(fallbackMenus, 0);
     assert.ok(dialog());
-    assert.equal(dialog().querySelector('.sf-menu-title').textContent, 'docs');
+    assert.equal(dialog().querySelector('.sf-menu-heading').textContent, 'docs');
     assert.equal(button('All projects').getAttribute('aria-pressed'), 'true');
   } finally { window.removeEventListener('contextmenu', coordinator, true); }
 });

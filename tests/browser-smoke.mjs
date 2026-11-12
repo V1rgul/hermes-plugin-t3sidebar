@@ -21,7 +21,7 @@ const errors = [];
 const checks = [];
 const check = (label, condition) => { assert.ok(condition, label); checks.push(label); console.log(`PASS ${label}`); };
 // Every truncating text fades instead of ending in an ellipsis, and its fade applies only while the text is actually cut.
-const FADE_SITES = ['.sf-row-title', '.sf-project-name', '.sf-strip-summary', '.sf-menu-title', '.sf-project-path', '.sf-limit-name', '.su-tip-row>span:nth-child(2)', '.su-disclosure-names', '.su-measure-text', '.su-window-label'];
+const FADE_SITES = ['.sf-row-title', '.sf-project-name', '.sf-strip-summary', '.sf-menu-title', '.sf-menu-heading', '.sf-menu-id', '.sf-menu-path', '.sf-menu-draft-text', '.sf-project-path', '.sf-limit-name', '.su-tip-row>span:nth-child(2)', '.su-disclosure-names', '.su-measure-text', '.su-window-label'];
 const fadeSites = target => target.evaluate(sites => sites.map(selector => {
   const els = [...document.querySelectorAll(selector)], isCut = el => el.scrollWidth > el.clientWidth;
   const bad = els.filter(el => { const style = getComputedStyle(el); return style.textOverflow !== 'clip' || style.maskImage === 'none' || style.getPropertyValue('--sf-cut') !== (isCut(el) ? '1' : '0'); });
@@ -39,8 +39,8 @@ try {
   const deleteIsRed = locator => locator.evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-red)'; el.append(probe);
     const red = getComputedStyle(probe).color; probe.remove();
-    const label = el.querySelector('.sf-menu-label'), icon = el.querySelector('.sf-menu-icon svg');
-    return !!label && !!icon && el.getAttribute('data-destructive') === 'true' && getComputedStyle(el).color === red && getComputedStyle(label).color === red && getComputedStyle(icon).color === red && getComputedStyle(icon).stroke === red;
+    const icon = el.querySelector('svg');
+    return !!icon && el.getAttribute('data-destructive') === 'true' && getComputedStyle(el).color === red && getComputedStyle(icon).color === red && getComputedStyle(icon).stroke === red;
   });
   const buttonStyle = locator => locator.evaluate(el => {
     const style = getComputedStyle(el);
@@ -319,13 +319,22 @@ try {
   await snooze.click();
   await page.getByRole('dialog', { name: 'Snooze session', exact: true }).waitFor();
   const snoozeDialog = page.getByRole('dialog', { name: 'Snooze session', exact: true });
+  // Every row leads with its icon in one column outside the buttons; the custom field starts where the buttons do.
   const customTimeAligned = () => snoozeDialog.locator('form').evaluate(form => {
-    const preset = form.querySelector('.sf-snooze-action'), icon = preset.querySelector('.sf-menu-icon').getBoundingClientRect(), label = preset.querySelector('.sf-menu-label').getBoundingClientRect();
-    const custom = form.querySelector('.sf-custom-snooze'), calendar = custom.querySelector('.sf-menu-icon').getBoundingClientRect();
-    const input = custom.querySelector('input').getBoundingClientRect();
-    return !/Custom|local time/.test(custom.textContent) && custom.querySelector('[data-icon=CalendarTime]') && Math.abs(calendar.left - icon.left) < 1 && Math.abs(input.left - label.left) < 1;
+    const leads = [...form.querySelectorAll('.sf-snooze-lead svg')].map(el => el.getBoundingClientRect()), centre = r => r.left + r.width / 2;
+    const custom = form.querySelector('.sf-snooze-custom'), input = custom.querySelector('input').getBoundingClientRect();
+    const firsts = [...form.querySelectorAll('.sf-snooze-grid > .sf-snooze-choice')].filter((_, index) => index % 3 === 0).map(el => el.getBoundingClientRect());
+    return !/Custom|local time/.test(custom.textContent) && custom.querySelector('[data-icon=CalendarTime]') && leads.length === 3 && leads.every(r => r.width === 16 && Math.abs(centre(r) - centre(leads[0])) < .5)
+      && firsts.length === 2 && firsts.every(r => Math.abs(r.left - input.left) < .5) && leads.every(r => r.right < input.left);
   });
-  check('custom time has a calendar in the preset icon column and its field starts at the preset labels, without a text label', await customTimeAligned());
+  check('custom time has a calendar-clock in the row icon column and its field starts where the buttons do, without a text label', await customTimeAligned());
+  check('snooze rows: three equal buttons each, the day buttons under the hour buttons, 9:00 under the calendar', await snoozeDialog.locator('.sf-snooze-grid').evaluate(grid => {
+    const choices = [...grid.querySelectorAll('.sf-snooze-choice')].map(el => el.getBoundingClientRect());
+    const sameColumn = (a, b) => Math.abs(a.left - b.left) < .5 && Math.abs(a.width - b.width) < .5;
+    const day = grid.querySelector('.sf-snooze-lead-day'), icon = day.querySelector('svg').getBoundingClientRect(), time = day.querySelector('small').getBoundingClientRect();
+    return choices.length === 6 && [0, 1, 2].every(i => sameColumn(choices[i], choices[i + 3]) && Math.abs(choices[i].width - choices[0].width) < .5)
+      && day.querySelector('small').textContent === '9:00' && time.top >= icon.bottom - .5 && Math.abs(time.left + time.width / 2 - icon.left - icon.width / 2) < 1;
+  }));
   const check_ = snoozeDialog.getByRole('button', { name: 'Apply custom snooze', exact: true });
   const green = await check_.evaluate(el => { const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; });
   await snoozeDialog.locator('input[type=datetime-local]').fill('2020-01-01T12:00');
@@ -368,7 +377,7 @@ try {
   const worker = page.locator('[data-session-id="root"]');
   await worker.click({ button: 'right' });
   const disabledDelete = page.getByRole('button', { name: 'Delete session', exact: true });
-  check('working session Delete remains disabled and has a leading icon', await disabledDelete.isDisabled() && await disabledDelete.locator('.sf-menu-icon svg').count() === 1);
+  check('working session Delete remains disabled, icon-only, and its tooltip says why', await disabledDelete.isDisabled() && await disabledDelete.locator('svg').count() === 1 && await disabledDelete.textContent() === '' && await disabledDelete.evaluate(el => el.closest('.sf-menu-tool-wrap').dataset.sfTip === 'Delete session\nAvailable once the session is idle.'));
   check('disabled Delete icon and text retain the red theme color and dimming', await deleteIsRed(disabledDelete) && await disabledDelete.evaluate(el => Number(getComputedStyle(el).opacity) < 1));
   await page.getByRole('button', { name: 'Pin', exact: true }).click();
   await page.locator('section[aria-label="Pinned"] [data-session-id="root"]').waitFor();
@@ -379,7 +388,7 @@ try {
     return el.dataset.working === 'true' && el.dataset.dimmed === 'false' && getComputedStyle(el).opacity === '1' && /^Working\d+m$/.test(el.querySelector('[data-status=working]')?.textContent) && getComputedStyle(el.querySelector('.sf-time')).color === blue;
   }));
   await worker.click({ button: 'right' });
-  check('Unpin has a leading decorative icon', await page.getByRole('button', { name: 'Unpin', exact: true }).locator('.sf-menu-icon[aria-hidden=true] svg').count() === 1);
+  check('Unpin is an icon button with a decorative icon', await page.getByRole('button', { name: 'Unpin', exact: true }).locator('svg[aria-hidden=true]').count() === 1);
   await page.getByRole('button', { name: 'Unpin', exact: true }).click();
   await page.locator('section[aria-label="Working"] [data-session-id="root"]').waitFor();
   check('unpinning a running session restores the Working shelf', await worker.getAttribute('data-dimmed') === 'true');
@@ -422,37 +431,34 @@ try {
   check('snooze does not stop or alter the live worker', await page.evaluate(() => window.hermesT3SidebarHarness.control.live.find(item => item.id === 'runtime-worker').status === 'working'));
   await worker.hover(); await worker.getByRole('button', { name: 'Snooze session', exact: true }).click();
   const unsnooze = snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true });
-  check('Unsnooze is the first enabled Snooze menu action and uses theme green', await snoozeDialog.locator('form > button:not(:disabled)').first().textContent() === 'Unsnooze' && await unsnooze.evaluate(el => {
+  check('Unsnooze is the first enabled Snooze menu action and uses theme green', await snoozeDialog.locator('form button:not(:disabled)').first().getAttribute('aria-label') === 'Unsnooze' && await unsnooze.evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe);
     const green = getComputedStyle(probe).color; probe.remove();
     return getComputedStyle(el).color === green;
   }));
-  check('snoozed menu starts with one disabled purple info row before Unsnooze', await snoozeDialog.locator('form').evaluate(form => {
-    const [info, unsnooze] = form.children;
+  check('snoozed menu starts with one purple line ending with Unsnooze', await snoozeDialog.locator('form').evaluate(form => {
+    const info = form.firstElementChild, unsnooze = info.querySelector('button');
     const probe = document.createElement('span'); probe.style.color = 'var(--sf-purple)'; form.append(probe);
     const purple = getComputedStyle(probe).color; probe.remove();
-    return info.disabled && /^(\d+d \d+h |\d+h )?\d+min left$/.test(info.querySelector('.sf-snooze-remaining').textContent) && unsnooze.textContent === 'Unsnooze' && getComputedStyle(info).color === purple && getComputedStyle(info).opacity === '1';
+    return info.classList.contains('sf-snooze-info') && /^(\d+d \d+h |\d+h )?\d+min left$/.test(info.querySelector('.sf-snooze-remaining').textContent) && unsnooze.getAttribute('aria-label') === 'Unsnooze' && info.lastElementChild.contains(unsnooze)
+      && getComputedStyle(info).color === purple && getComputedStyle(info.querySelector('.sf-snooze-info-mark svg')).color === purple && getComputedStyle(info).opacity === '1';
   }));
   check('wake date uses local short date and time separated by a space, without a comma', await snoozeDialog.locator('.sf-snooze-date').textContent() === await page.evaluate(() => {
     const date = new Date(window.hermesT3SidebarHarness.control.metadata.sessions.root.wake_at * 1000);
     return `${new Intl.DateTimeFormat(undefined, { dateStyle: 'short' }).format(date)} ${new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }).format(date)}`;
   }));
-  check('date/time and remaining time share a line, with remaining time aligned to the right content edge', await snoozeDialog.locator('.sf-snooze-info').evaluate(el => {
-    const date = el.querySelector('.sf-snooze-date').getBoundingClientRect(), remaining = el.querySelector('.sf-snooze-remaining').getBoundingClientRect();
-    const r = el.getBoundingClientRect(), style = getComputedStyle(el);
-    return Math.abs(date.top - remaining.top) < 1 && date.right < remaining.left && Math.abs(remaining.right - r.right + parseFloat(style.paddingRight) + parseFloat(style.borderRightWidth)) < 1 && el.scrollWidth <= el.clientWidth;
+  check('date/time, remaining time and Unsnooze share a line, with Unsnooze at the right content edge', await snoozeDialog.locator('.sf-snooze-info').evaluate(el => {
+    const date = el.querySelector('.sf-snooze-date').getBoundingClientRect(), remaining = el.querySelector('.sf-snooze-remaining').getBoundingClientRect(), button = el.querySelector('button').getBoundingClientRect();
+    const r = el.getBoundingClientRect(), middle = box => box.top + box.height / 2;
+    return Math.abs(middle(date) - middle(remaining)) < 1 && Math.abs(middle(remaining) - middle(button)) < 1 && date.right < remaining.left && remaining.right < button.left && Math.abs(button.right - r.right) < 1 && el.scrollWidth <= el.clientWidth;
   }));
   check('custom calendar and field also align with the presets in an existing snooze menu', await customTimeAligned());
   await snoozeDialog.screenshot({ path: join(screenshotDir, 'snoozed-menu.png') });
-  check('Snooze actions use AlarmOff, ClockHour1, ClockHour3, Sun and calendar as aligned leading icons', await snoozeDialog.locator('.sf-menu-action').evaluateAll(actions => {
-    const names = actions.map(el => el.querySelector('[data-codicon]')?.dataset.codicon || el.querySelector('[data-icon]')?.dataset.icon);
-    return JSON.stringify(names) === JSON.stringify(['AlarmOff', 'ClockHour1', 'ClockHour3', 'Sun', 'calendar']) && actions.every(el => {
-      const icon = el.querySelector('.sf-menu-icon'), label = el.querySelector('.sf-menu-label');
-      const i = icon.getBoundingClientRect(), l = label.getBoundingClientRect();
-      return el.firstElementChild === icon && icon.getAttribute('aria-hidden') === 'true' && i.width === 14 && i.right < l.left && Math.abs(i.top + i.height / 2 - l.top - l.height / 2) < 1;
-    });
+  check('snooze rows lead with Clock, Calendar and CalendarTime, each centred on its row', await snoozeDialog.locator('form').evaluate(form => {
+    const leads = [...form.querySelectorAll('.sf-snooze-lead')], names = leads.map(el => el.querySelector('svg')?.dataset.icon), middle = box => box.top + box.height / 2;
+    const rows = [form.querySelector('.sf-snooze-grid > .sf-snooze-choice'), form.querySelectorAll('.sf-snooze-grid > .sf-snooze-choice')[3], form.querySelector('.sf-snooze-custom input')];
+    return JSON.stringify(names) === JSON.stringify(['Clock', 'Calendar', 'CalendarTime']) && leads.every((lead, i) => !lead.closest('button') && Math.abs(middle(lead.getBoundingClientRect()) - middle(rows[i].getBoundingClientRect())) < 1);
   }));
-  check('combined disabled snooze information row remains completely icon-free', await snoozeDialog.locator('.sf-snooze-info').evaluateAll(rows => rows.length === 1 && rows.every(el => el.disabled && !el.querySelector('.sf-menu-icon,svg,[data-codicon]'))));
   check('Unsnooze alarm-off icon inherits the green action color', await unsnooze.evaluate(el => getComputedStyle(el.querySelector('[data-icon=AlarmOff]')).color === getComputedStyle(el).color));
   await unsnooze.hover();
   check('Unsnooze stays green on hover', await unsnooze.evaluate(el => {
@@ -479,17 +485,19 @@ try {
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('Unpin returns the session to Ready without any Undo toast', await noUndo());
   await design.hover(); await snooze.click();
-  check('Next Monday at 9:00 is the fourth preset, without redundant Snooze prefixes', JSON.stringify(await snoozeDialog.locator('form > button').allTextContents()) === JSON.stringify(['In 1 hour', 'In 3 hours', 'Tomorrow at 9:00', 'Next Monday at 9:00']) && !/Custom snooze/.test(await snoozeDialog.innerText()));
+  check('snooze offers +1h/+2h/+4h, then Tomorrow, Monday and Next week with their dates, without redundant Snooze prefixes', await snoozeDialog.locator('.sf-snooze-choice').evaluateAll(nodes => JSON.stringify(nodes.map(node => [node.getAttribute('aria-label'), node.querySelector('.sf-snooze-day-name')?.textContent ?? node.textContent])) === JSON.stringify([['In 1 hour', '+1h'], ['In 2 hours', '+2h'], ['In 4 hours', '+4h'], ['Tomorrow at 9:00', 'Tomorrow'], ['Monday at 9:00', 'Monday'], ['Next week at 9:00', 'Next week']])
+    && nodes.slice(3).every(node => /\d/.test(node.querySelector('.sf-snooze-day-date').textContent))) && !/Custom snooze/.test(await snoozeDialog.innerText()));
   const expectedMonday = await page.evaluate(() => {
-    const monday = new Date();
-    monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7));
+    const monday = new Date(), offset = (8 - monday.getDay()) % 7 || 7;
+    // On a Sunday, Monday is tomorrow: the Monday button moves on a week.
+    monday.setDate(monday.getDate() + (offset === 1 ? 8 : offset));
     monday.setHours(9, 0, 0, 0);
     return monday.getTime() / 1000;
   });
   const mondayCallStart = await page.evaluate(() => window.hermesT3SidebarHarness.calls.length);
-  await snoozeDialog.getByRole('button', { name: 'Next Monday at 9:00', exact: true }).click();
+  await snoozeDialog.getByRole('button', { name: 'Monday at 9:00', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
-  check('fourth Snooze preset sends next calendar Monday 09:00 in client local time and lands in Snoozed without a toast', await page.evaluate(({ expectedMonday, mondayCallStart }) => {
+  check('Monday Snooze preset sends next calendar Monday 09:00 in client local time and lands in Snoozed without a toast', await page.evaluate(({ expectedMonday, mondayCallStart }) => {
     const fixture = window.hermesT3SidebarHarness;
     return fixture.calls.slice(mondayCallStart).some(call => call[0] === 'rest' && call[1] === '/sessions/design' && call[2]?.body?.action === 'snooze' && call[2].body.wake_at === expectedMonday) && fixture.control.metadata.sessions.design.wake_at === expectedMonday;
   }, { expectedMonday, mondayCallStart }) && await noUndo());
@@ -515,13 +523,21 @@ try {
   await page.mouse.move(1100, 850);
   check('open row context menu retains row highlight, actions and hidden metadata off hover', await design.getAttribute('data-menu-open') === 'true' && await design.evaluate(el => getComputedStyle(el).backgroundColor) === rowHoverBackground && await snooze.isVisible() && await archive.isVisible() && await design.locator('.sf-provider,.sf-token,.sf-time').evaluateAll(els => els.every(el => getComputedStyle(el).visibility === 'hidden')));
   check('context menu omits archive and snooze actions', !await context.getByRole('button', { name: /^(?:Unarchive|Archive|Snooze)/ }).count());
-  check('context menu offers Rename, Copy session ID and Project last instead of the old filter action', await context.getByRole('button', { name: 'Rename', exact: true }).count() === 1 && await context.getByRole('button', { name: 'Copy session ID', exact: true }).count() === 1 && !await context.getByRole('button', { name: /^Filter by / }).count() && await context.locator('.sf-menu-action').last().getAttribute('aria-label') === 'Project');
-  check('each context action aligns a decorative icon before its text', await context.locator('.sf-menu-action').evaluateAll(actions => actions.length === 7 && actions.every(action => {
-    const icon = action.querySelector('.sf-menu-icon'), label = action.querySelector('.sf-menu-label');
-    if (!icon?.querySelector('svg') || !label || icon.getAttribute('aria-hidden') !== 'true' || action.firstElementChild !== icon) return false;
-    const i = icon.getBoundingClientRect(), l = label.getBoundingClientRect();
-    return i.width === 14 && i.right < l.left && Math.abs(i.top + i.height / 2 - l.top - l.height / 2) < 1;
-  })));
+  check('context menu offers Rename, Copy session ID and Project last instead of the old filter action', await context.getByRole('button', { name: 'Rename', exact: true }).count() === 1 && await context.getByRole('button', { name: 'Copy session ID', exact: true }).count() === 1 && !await context.getByRole('button', { name: /^Filter by / }).count() && await context.locator('[role=toolbar] button').last().getAttribute('aria-label') === 'Project');
+  // Desktop's PopoverContent carries Tailwind w-72 (288px): without an inline max-content width, the 520px menu spills past the popover's background.
+  check('session menu popover sizes itself to the menu, overriding Desktop w-72', await context.evaluate(el => el.style.width === 'max-content' && el.getBoundingClientRect().width >= el.querySelector('.sf-session-menu').getBoundingClientRect().width));
+  check('session menu is 520px wide: title with Rename and AutoTitler at its end, ID with Copy, then Pin, Delete, Move | Project sharing the width', await context.locator('.sf-session-menu').evaluate(menu => {
+    const lines = [...menu.querySelectorAll(':scope > .sf-menu-line')], r = menu.getBoundingClientRect();
+    const tools = [...menu.querySelectorAll('[role=toolbar] .sf-menu-tool')], boxes = tools.map(el => el.getBoundingClientRect());
+    const divider = menu.querySelector('.sf-menu-toolbar-divider').getBoundingClientRect(), ends = lines.map(line => line.lastElementChild.getBoundingClientRect());
+    const icons = [...menu.querySelectorAll('.sf-menu-tool svg')].map(el => el.getBoundingClientRect()), head = [...lines[0].querySelectorAll('button')].map(el => el.getAttribute('aria-label'));
+    // Each line holds its text and buttons side by side on one row.
+    const oneRow = line => { const boxes = [...line.children].map(el => el.getBoundingClientRect()), middle = box => box.top + box.height / 2; return boxes.every(box => Math.abs(middle(box) - middle(boxes[0])) < 1.5) && boxes.every((box, i) => !i || box.left >= boxes[i - 1].right - .5); };
+    return Math.round(r.width) === 520 && lines.length === 2 && lines.every(oneRow) && JSON.stringify(head) === JSON.stringify(['Rename', 'Rename with AutoTitler']) && Math.abs(ends[0].right - ends[1].right) < .5
+      && JSON.stringify(tools.map(el => el.getAttribute('aria-label'))) === JSON.stringify(['Pin', 'Delete session', 'Move to project', 'Project'])
+      && boxes.every(box => Math.abs(box.width - boxes[0].width) < 1 && box.height === 24 && box.width > 100) && boxes[2].right <= divider.left && divider.right <= boxes[3].left
+      && icons.every(icon => icon.width === 14 && icon.height === 14) && tools.every(el => el.textContent === '');
+  }));
   const menuDelete = context.getByRole('button', { name: 'Delete session', exact: true });
   check('Delete icon and text use the red theme color', await deleteIsRed(menuDelete));
   await menuDelete.hover();
@@ -535,18 +551,36 @@ try {
   check('stored-only Rename is enabled without an inline disclaimer', !await context.getByRole('button', { name: 'Rename', exact: true }).isDisabled() && !/live runtime/i.test(await context.innerText()));
   await context.getByRole('button', { name: 'Copy session ID', exact: true }).click();
   check('Copy session ID uses the public clipboard with the durable ID', await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'clipboard' && call[1] === 'design')));
+  check('Copy session ID answers with a green check mark and keeps the menu open', await context.isVisible() && await context.getByRole('button', { name: 'Copied', exact: true }).evaluate(el => {
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe); const green = getComputedStyle(probe).color; probe.remove();
+    return el.querySelector('svg')?.dataset.icon === 'Check' && getComputedStyle(el).color === green;
+  }));
   if (!await context.count()) await design.click({ button: 'right' });
   await context.getByRole('button', { name: 'Project', exact: true }).click();
   const projectMenu = page.getByRole('dialog', { name: 'Project actions', exact: true });
   await projectMenu.waitFor();
-  check('Project submenu keeps leading icons on Rename, Copy path and Filter for', await projectMenu.locator('.sf-menu-action').evaluateAll(actions => actions.slice(0, 3).map(action => action.querySelector('.sf-menu-label').textContent).join('|') === 'Rename|Copy path|Filter for' && actions.slice(0, 3).every(action => action.firstElementChild.className === 'sf-menu-icon' && action.firstElementChild.querySelector('svg'))));
+  check('Project menu: the glyph column holds the project mark then each folder Filter; Rename and Copy end their lines', await projectMenu.locator('.sf-project-head').evaluate(head => {
+    const mark = head.querySelector('.sf-project-head-mark').getBoundingClientRect(), centre = r => r.left + r.width / 2;
+    const tools = [...head.querySelectorAll(':scope > .sf-menu-tool-wrap')].map(el => [el.querySelector('button').getAttribute('aria-label'), el.getBoundingClientRect()]);
+    const [rename, filter, copy] = tools;
+    return tools.map(tool => tool[0]).join('|') === 'Rename project|Filter for /projects/hermes-t3sidebar|Copy path' && Math.abs(centre(filter[1]) - centre(mark)) < 1 && Math.abs(rename[1].right - copy[1].right) < .5
+      && head.querySelector('.sf-menu-path').textContent === '/projects/hermes-t3sidebar' && Math.round(head.closest('.sf-project-submenu').getBoundingClientRect().width) === 520;
+  }));
+  check('No color and Default icon are tall buttons left of the palette and of the icon grid, exactly as tall', await projectMenu.locator('.sf-project-choices').evaluateAll(sets => sets.length === 2 && sets.map(set => set.firstElementChild.getAttribute('aria-label')).join('|') === 'No color|Default icon' && sets.every(set => {
+    const reset = set.firstElementChild.getBoundingClientRect(), grid = set.lastElementChild.getBoundingClientRect();
+    const style = getComputedStyle(set.firstElementChild);
+    return reset.right < grid.left && Math.abs(reset.top - grid.top) < 1 && Math.abs(reset.bottom - grid.bottom) < 1 && reset.width === 30 && style.borderTopWidth === '1px' && /dashed|solid/.test(style.borderTopStyle);
+  })));
+  check('icon categories sit in four columns of 4×2 icons, two category rows', await projectMenu.locator('.sf-project-icon-categories').evaluate(grid => {
+    const categories = [...grid.querySelectorAll('.sf-project-icon-category')].map(el => el.getBoundingClientRect());
+    const icons = [...grid.querySelector('.sf-project-icons').children].map(el => el.getBoundingClientRect());
+    return categories.length === 8 && new Set(categories.map(r => Math.round(r.top))).size === 2 && new Set(categories.map(r => Math.round(r.left))).size === 4 && new Set(icons.map(r => Math.round(r.top))).size === 2 && new Set(icons.map(r => Math.round(r.left))).size === 4;
+  }));
   check('Project submenu includes all 48 approved colors and 64 categorized icons', await projectMenu.getByRole('group', { name: 'Project color' }).getByRole('button').count() === 49 && await projectMenu.locator('.sf-project-icons button').count() === 64);
-  check('Project submenu is visible and fits the viewport', await projectMenu.evaluate(el => { const rect = el.getBoundingClientRect(); return rect.right <= innerWidth && rect.bottom <= innerHeight && rect.top >= 0 && rect.height > 300; }));
+  check('Project submenu is visible and fits the viewport', await projectMenu.evaluate(el => { const rect = el.getBoundingClientRect(); return rect.right <= innerWidth && rect.bottom <= innerHeight && rect.top >= 0 && rect.height > 250; }));
   await projectMenu.getByRole('button', { name: 'Copy path', exact: true }).click();
-  check('Project Copy path uses the public clipboard', await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'clipboard' && call[1] === '/projects/hermes-t3sidebar')));
-  await design.click({ button: 'right' });
-  await context.getByRole('button', { name: 'Project', exact: true }).click();
-  await projectMenu.getByRole('button', { name: 'Filter for', exact: true }).click();
+  check('Project Copy path uses the public clipboard and keeps the menu open', await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'clipboard' && call[1] === '/projects/hermes-t3sidebar')) && await projectMenu.getByRole('button', { name: 'Copied', exact: true }).count() === 1);
+  await projectMenu.getByRole('button', { name: 'Filter for /projects/hermes-t3sidebar', exact: true }).click();
   check('row project shortcut filters without grouping or changing native workspace', !await page.locator('[data-session-id="readme"]').count() && await page.locator('[data-session-id="design"]').count() === 1 && !await page.locator('.sf-group').count());
   check('active project filter replaces toolbar filter glyph with project icon', await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'true' && await page.getByRole('button', { name: 'Filter sessions', exact: true }).locator('[data-codicon="extensions"]').count() === 1);
   await checkPersistentTrigger('Filter sessions', 'Session filters');
@@ -565,7 +599,7 @@ try {
   check('All projects clears active icon and closes filter picker', !await filters.count() && await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'false');
   const openProject = async () => { await design.click({ button: 'right' }); await context.getByRole('button', { name: 'Project', exact: true }).click(); await projectMenu.waitFor(); };
   await openProject();
-  await projectMenu.getByRole('button', { name: 'Rename', exact: true }).click();
+  await projectMenu.getByRole('button', { name: 'Rename project', exact: true }).click();
   await projectMenu.getByRole('textbox', { name: 'Project name', exact: true }).fill('Renamed test project');
   await projectMenu.getByRole('textbox', { name: 'Project name', exact: true }).press('ArrowLeft');
   check('Left Arrow moves the rename caret without closing the Project submenu or losing its draft', await projectMenu.getByRole('textbox', { name: 'Project name', exact: true }).inputValue() === 'Renamed test project' && await projectMenu.getByRole('textbox', { name: 'Project name', exact: true }).evaluate(el => el.selectionStart === el.value.length - 1));
@@ -576,7 +610,7 @@ try {
     return f.calls.some(call => call[0] === 'requestProfile' && call[2] === 'projects.update' && call[3].name === 'Renamed test project') && f.calls.some(call => call[0] === 'requestProfile' && call[2] === 'projects.get');
   }) && await page.locator('[data-session-id="approval"] .sf-project-name').innerText() === 'Renamed test project');
   await openProject();
-  await projectMenu.getByRole('button', { name: 'Rename', exact: true }).click();
+  await projectMenu.getByRole('button', { name: 'Rename project', exact: true }).click();
   await projectMenu.getByRole('textbox', { name: 'Project name', exact: true }).fill('hermes-t3sidebar');
   await projectMenu.getByRole('button', { name: 'Save project rename', exact: true }).click();
   await design.locator('.sf-project-name').filter({ hasText: 'hermes-t3sidebar' }).waitFor();
@@ -589,7 +623,7 @@ try {
     const probe = document.createElement('span'); probe.style.color = el.style.getPropertyValue('--sf-project-color'); el.append(probe);
     const color = getComputedStyle(probe).color; probe.remove();
     const glyphs = [...el.querySelectorAll('.sf-project-icons [data-codicon]')];
-    return glyphs.length === 64 && glyphs.every(icon => getComputedStyle(icon).color === color) && [...el.querySelectorAll('.sf-menu-icon > *')].every(icon => getComputedStyle(icon).color !== color);
+    return glyphs.length === 64 && glyphs.every(icon => getComputedStyle(icon).color === color) && [...el.querySelectorAll('.sf-menu-tool svg')].every(icon => getComputedStyle(icon).color !== color);
   }));
   await projectMenu.getByRole('button', { name: 'Project icon: chip', exact: true }).hover();
   check('project glyph hover retains the chosen color', await projectMenu.getByRole('button', { name: 'Project icon: chip', exact: true }).evaluate(el => getComputedStyle(el).color === 'rgb(120, 195, 24)'));
@@ -597,7 +631,7 @@ try {
     const buttons = [...el.querySelectorAll('button')], bright = buttons.slice(0, 24), dark = buttons.slice(24), rect = node => node.getBoundingClientRect();
     return buttons.length === 48 && !el.innerText.trim() && buttons.every(button => Math.abs(rect(button).height / rect(button).width - (1 + Math.sqrt(5)) / 2) < .01) && dark.every((button, i) => Math.abs(rect(button).x - rect(bright[i]).x) < .1 && rect(button).y > rect(bright[i]).y);
   }));
-  check('icon category headings retain all approved groups', await projectMenu.locator('.sf-project-icon-category legend').allTextContents().then(labels => labels.join('|') === 'Projects & workspaces|Code & development|Hardware & robotics|Infrastructure & networks|Research & analysis|Documents & legal|Planning & business|Personal & creative'));
+  check('icon category headings retain all approved groups', await projectMenu.locator('.sf-project-icon-category legend').allTextContents().then(labels => labels.join('|') === 'Projects & workspaces|Code & development|Hardware & robotics|Infra & networks|Research & analysis|Documents & legal|Planning & business|Personal & creative'));
   await projectMenu.screenshot({ path: join(screenshotDir, 'project-appearance.png') });
   await page.setViewportSize({ width: 480, height: 400 });
   await projectMenu.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -622,8 +656,8 @@ try {
   await filters.getByRole('button', { name: 'Filter by docs', exact: true }).click({ button: 'right' });
   await projectMenu.waitFor();
   check('filter right-click claims ownership before the native capture-phase fallback', await page.evaluate(() => window.fixtureFallbackMenus === 0));
-  await checkFades('project menu', page, ['.sf-menu-title']);
-  check('filter project right-click opens the shared menu without selecting a filter', await projectMenu.locator('.sf-menu-title').textContent() === 'docs' && await filters.getByRole('button', { name: 'All projects', exact: true }).getAttribute('aria-pressed') === 'true' && await design.count() === 1);
+  await checkFades('project menu', page, ['.sf-menu-heading', '.sf-menu-path']);
+  check('filter project right-click opens the shared menu without selecting a filter', await projectMenu.locator('.sf-menu-heading').textContent() === 'docs' && await filters.getByRole('button', { name: 'All projects', exact: true }).getAttribute('aria-pressed') === 'true' && await design.count() === 1);
   await projectMenu.getByRole('button', { name: 'Project icon: law', exact: true }).click();
   await page.locator('[data-session-id="readme"] [data-codicon="law"]').waitFor();
   check('filter project icon edit saves to the intended project only', !await design.locator('[data-codicon="law"]').count());
@@ -631,7 +665,7 @@ try {
   const docsChoice = filters.getByRole('button', { name: 'Filter by docs', exact: true });
   await docsChoice.focus(); await page.keyboard.press('Shift+F10'); await projectMenu.waitFor();
   check('filter project keyboard context shortcut opens the same categorized picker', await projectMenu.locator('.sf-project-icons button').count() === 64);
-  await projectMenu.getByRole('button', { name: 'Rename', exact: true }).click();
+  await projectMenu.getByRole('button', { name: 'Rename project', exact: true }).click();
   const projectName = projectMenu.getByRole('textbox', { name: 'Project name', exact: true });
   await projectName.fill('Docs renamed'); await projectName.press('ArrowLeft');
   check('filter project rename preserves text caret navigation', await projectName.evaluate(el => el.selectionStart === el.value.length - 1));
@@ -639,7 +673,7 @@ try {
   await page.locator('[data-session-id="readme"] .sf-project-name').filter({ hasText: 'Docs renamed' }).waitFor();
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   await filters.getByRole('button', { name: 'Filter by Docs renamed', exact: true }).click({ button: 'right' }); await projectMenu.waitFor();
-  await projectMenu.getByRole('button', { name: 'Rename', exact: true }).click();
+  await projectMenu.getByRole('button', { name: 'Rename project', exact: true }).click();
   await projectName.fill('docs'); await projectName.press('Enter');
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   await filters.getByRole('button', { name: 'Filter by docs', exact: true }).click({ button: 'right' }); await projectMenu.waitFor();
@@ -663,7 +697,7 @@ try {
   await design.locator('[data-codicon="folder"]').waitFor();
   check('reselecting the chosen icon clears to the default glyph', !await design.locator('[data-codicon="rocket"]').count());
   await design.click({ button: 'right' }); await context.getByRole('button', { name: 'Project', exact: true }).focus(); await page.keyboard.press('ArrowRight');
-  await projectMenu.waitFor(); await projectMenu.getByRole('button', { name: 'Rename', exact: true }).focus(); await page.keyboard.press('ArrowLeft');
+  await projectMenu.waitFor(); await projectMenu.getByRole('button', { name: 'Rename project', exact: true }).focus(); await page.keyboard.press('ArrowLeft');
   check('Project submenu opens with Right and closes with Left without dismissing session actions', !await projectMenu.count() && await context.count() === 1);
   await page.keyboard.press('Escape');
   await design.hover(); await archive.click();
@@ -1248,7 +1282,7 @@ try {
   await presetSetting.fill('14:35');
   const settingsDesign = page.locator('[data-session-id="design"]');
   await settingsDesign.hover(); await settingsDesign.getByRole('button', { name: 'Snooze session', exact: true }).click();
-  check('settings change updates both calendar snooze choices without a reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Next Monday at 14:35', exact: true }).count() === 1);
+  check('settings change updates both calendar snooze choices without a reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Monday at 14:35', exact: true }).count() === 1);
   const configuredTomorrow = await page.evaluate(() => { const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(14, 35, 0, 0); return tomorrow.getTime() / 1000; });
   await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).click();
   await page.waitForFunction(expected => window.hermesT3SidebarHarness.control.metadata.sessions.design?.wake_at === expected, configuredTomorrow);
@@ -1258,7 +1292,7 @@ try {
   check('configured preset time persists across actual browser reload', await presetSetting.inputValue() === '14:35');
   await page.locator('[data-session-id="design"]').hover();
   await page.locator('[data-session-id="design"]').getByRole('button', { name: 'Snooze session', exact: true }).click();
-  check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Next Monday at 14:35', exact: true }).count() === 1);
+  check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Monday at 14:35', exact: true }).count() === 1);
   await page.keyboard.press('Escape');
   await presetSetting.fill('09:00');
   const detailsGroup = page.getByRole('group', { name: 'Working indicator', exact: true });
@@ -1292,7 +1326,10 @@ try {
   check('viewing an archive preserves native archival', await page.evaluate(() => window.hermesT3SidebarHarness.control.rows.find(row => row.id === 'archived').archived === true));
   await settingsDesign.click({ button: 'right' });
   const moveMenu = page.getByRole('dialog', { name: 'Session actions', exact: true });
-  check('Move to project is directly above final Project submenu', await moveMenu.locator('.sf-menu-action').evaluateAll(items => items.at(-2).getAttribute('aria-label') === 'Move to project' && items.at(-1).getAttribute('aria-label') === 'Project'));
+  check('Move to project sits just before the divider and the final Project button', await moveMenu.locator('[role=toolbar]').evaluate(bar => {
+    const items = [...bar.children];
+    return items.at(-3).querySelector('button').getAttribute('aria-label') === 'Move to project' && items.at(-2).classList.contains('sf-menu-toolbar-divider') && items.at(-1).querySelector('button').getAttribute('aria-label') === 'Project';
+  }));
   await moveMenu.getByRole('button', { name: 'Move to project', exact: true }).click();
   const moveDialog = page.getByRole('dialog', { name: 'Move to project', exact: true });
   await moveDialog.getByRole('button', { name: 'Move to Move target', exact: true }).click();
@@ -1342,7 +1379,8 @@ try {
     check(`${trigger} multi-path heading cannot select by mouse or keyboard`, await picker.isVisible() && await heading.getAttribute('aria-disabled') === 'true' && await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'false' && await page.evaluate(() => window.hermesT3SidebarHarness.calls.filter(call => call[2] === 'session.create').length) === beforeCreate);
     await heading.locator('.sf-project-name').click({ button: 'right', force: true });
     await projectMenu.waitFor();
-    check(`${trigger} non-selectable heading still opens its project menu`, await projectMenu.locator('.sf-menu-title').textContent() === 'Multi workspace' && await projectMenu.getByRole('button', { name: 'Rename', exact: true }).isEnabled() && await projectMenu.getByRole('button', { name: 'Copy path', exact: true }).isDisabled() && await projectMenu.getByRole('button', { name: 'Filter for', exact: true }).isDisabled());
+    check(`${trigger} non-selectable heading still opens its project menu, with Filter and Copy on each folder`, await projectMenu.locator('.sf-menu-heading').textContent() === 'Multi workspace' && await projectMenu.getByRole('button', { name: 'Rename project', exact: true }).isEnabled()
+      && await projectMenu.locator('.sf-project-head').evaluate(head => { const paths = [...head.querySelectorAll('.sf-menu-path')]; return paths.length > 1 && paths.every(path => !path.previousElementSibling.querySelector('button').disabled && !path.nextElementSibling.querySelector('button').disabled); }));
     await page.keyboard.press('Escape');
     await picker.getByRole('searchbox', { name: 'Search projects' }).fill('~/second');
     check(`${trigger} path search preserves the non-selectable parent and matching folder only`, await picker.locator('.sf-project-folder').count() === 1 && await heading.count() === 1 && !await picker.getByRole('button', { name: `${prefix} Single workspace`, exact: true }).count());

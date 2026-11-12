@@ -16,7 +16,8 @@ test('calendar snooze presets use configurable local times, defaulting to 09:00 
 				['2026-10-22T17:00:00', '2026-10-26T09:00:00'],
 				['2026-10-23T17:00:00', '2026-10-26T09:00:00'],
 				['2026-10-24T17:00:00', '2026-10-26T09:00:00'],
-				['2026-10-25T23:59:59', '2026-10-26T09:00:00'],
+				// On a Sunday, Monday is tomorrow: the Monday button moves on a week so it never repeats Tomorrow.
+				['2026-10-25T23:59:59', '2026-11-02T09:00:00'],
 				['2026-10-26T08:59:59', '2026-11-02T09:00:00'],
 				['2026-03-27T23:45:59', '2026-03-30T09:00:00'],
 				['2026-03-06T17:00:00', '2026-03-09T09:00:00'],
@@ -25,23 +26,24 @@ test('calendar snooze presets use configurable local times, defaulting to 09:00 
 				['2028-02-29T17:00:00', '2028-03-06T09:00:00']
 			]) {
 				const now = new Date(input).getTime(), presets = snoozePresets(now);
-				assert.deepEqual(presets.map(preset => preset.label), ['In 1 hour', 'In 3 hours', 'Tomorrow at 9:00', 'Next Monday at 9:00']);
-				assert.equal(presets[0].wake_at, now / 1000 + 3600);
-				assert.equal(presets[1].wake_at, now / 1000 + 10800);
-				const wake = new Date(presets[3].wake_at * 1000);
+				assert.equal(presets.labelTime, '9:00');
+				assert.deepEqual(presets.relative.map(preset => [preset.label, preset.name, preset.wake_at]),
+					[['+1h', 'In 1 hour', now / 1000 + 3600], ['+2h', 'In 2 hours', now / 1000 + 7200], ['+4h', 'In 4 hours', now / 1000 + 14400]]);
+				assert.deepEqual(presets.days.map(preset => preset.label), ['Tomorrow', 'Monday', 'Next week']);
+				const wake = new Date(presets.days[1].wake_at * 1000);
 				assert.equal(wake.getTime(), new Date(expected).getTime(), `${timezone}: ${input}`);
 				assert.equal(wake.getDay(), 1); assert.equal(wake.getHours(), 9);
 				assert.equal(wake.getMinutes(), 0); assert.equal(wake.getSeconds(), 0);
 				assert.ok(wake.getTime() > now);
+				assert.notEqual(presets.days[1].wake_at, presets.days[0].wake_at);
 				for (const time of ['00:00', '07:15', '14:35', '23:59']) {
 					const [hour, minute] = time.split(':').map(Number), custom = snoozePresets(now, time);
-					const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(hour, minute, 0, 0);
+					const at = days => { const date = new Date(now); date.setDate(date.getDate() + days); date.setHours(hour, minute, 0, 0); return date.getTime() / 1000; };
 					const monday = new Date(expected); monday.setHours(hour, minute, 0, 0);
-					assert.equal(custom[2].wake_at, tomorrow.getTime() / 1000);
-					assert.equal(custom[3].wake_at, monday.getTime() / 1000);
-					assert.equal(custom[2].label, `Tomorrow at ${hour}:${String(minute).padStart(2, '0')}`);
-					assert.equal(custom[3].label, `Next Monday at ${hour}:${String(minute).padStart(2, '0')}`);
-					assert.deepEqual(custom.slice(0, 2), presets.slice(0, 2));
+					assert.deepEqual(custom.days.map(preset => preset.wake_at), [at(1), monday.getTime() / 1000, at(7)]);
+					assert.deepEqual(custom.days.map(preset => preset.date.getTime() / 1000), custom.days.map(preset => preset.wake_at));
+					assert.equal(custom.labelTime, `${hour}:${String(minute).padStart(2, '0')}`);
+					assert.deepEqual(custom.relative, presets.relative);
 				}
 			}
 		}

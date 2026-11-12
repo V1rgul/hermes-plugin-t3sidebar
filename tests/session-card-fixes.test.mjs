@@ -69,11 +69,11 @@ function target() {
 	return { id: 'p_target:/target', name: 'Target', path: '/target', isNoProject: false };
 }
 
-test('Move to project submenu sits directly above Project and moves without opening a session', async () => {
+test('Move to project sits just before the divider and Project, and moves without opening a session', async () => {
 	target(); await mount(); await click(button('Actions for Sidebar layout'));
 	const menu = document.querySelector('[aria-label="Session actions"]');
-	const actions = [...menu.querySelectorAll('.sf-menu-action')].map(node => node.getAttribute('aria-label') || node.textContent);
-	assert.deepEqual(actions.slice(-2), ['Move to project', 'Project']);
+	const actions = [...menu.querySelector('[role=toolbar]').children].map(node => node.querySelector('button')?.getAttribute('aria-label') ?? '|');
+	assert.deepEqual(actions.slice(-3), ['Move to project', '|', 'Project']);
 	await click(button('Move to project', menu));
 	await click(button('Move to Target'));
 	assert.equal(mock.control.rows.find(row => row.id === 'design').cwd, '/target');
