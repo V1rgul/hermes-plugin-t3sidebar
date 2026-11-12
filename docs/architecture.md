@@ -17,7 +17,7 @@ hermes-t3sidebar/
 
 The Desktop half is plain ESM: no bundle, compile step or Hermes source changes. The companion stores organization metadata and synced composer drafts in the active Hermes profile’s `plugin-data/hermes-t3sidebar/state.sqlite3` and reads that profile’s native rich session list and authoritative runtime status. It uses Hermes’s authenticated plugin namespace, `/api/plugins/hermes-t3sidebar`.
 
-The UI uses the supported Desktop SDK. The companion’s native session readers reuse **version-sensitive Hermes internals** for authenticated authority resolution and read-only rich listing; compatibility failures become explicit unavailable/unknown state rather than falling back to a process-wide runtime registry. A standalone dashboard without a native session authority cannot provide the Working/Waiting split.
+The UI uses the supported Desktop SDK. The companion’s native session readers reuse **version-sensitive Hermes internals** for authenticated authority resolution and read-only rich listing; compatibility failures become explicit unavailable/unknown state rather than falling back to a process-wide runtime registry. Without a native session authority, as in a standalone dashboard, Working/Waiting comes from that dashboard process's own loaded session server for the active profile's exact home, another version-sensitive seam; a hosted plugin process without native actor context reports runtime as unavailable, never as idle. The remaining Home and hosted-context limits are listed under [Limitations and compatibility](behavior.md#limitations-and-compatibility).
 
 ## Performance
 
