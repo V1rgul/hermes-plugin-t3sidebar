@@ -417,8 +417,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       (change.discarded === undefined || typeof change.discarded === 'string');
     // settled: the focused session once its composer has been reconciled; until then it is being entered, and an empty composer there is
     // a copy not restored yet, never a deletion. unsaved / unshown: changed since last stored / since the cards last got the view.
-    // reads: counts the reads of the focused composer, so that only the latest one applies. deleted: sessions whose deletion was verified,
-    // which a sync answered or a composer read before it can no longer give a draft.
+    // reads: counts the reads of the focused composer, so that only the latest one applies.
+    // deleted: sessions whose deletion was verified here, kept for the controller's life so that nothing begun before the deletion (a sync answer, even one the companion handled afterwards, a composer read, the leave hook) can bring their draft back; the accepted cost is that a draft another client writes for one of them afterwards is not shown here, though it stays on the companion and on that client.
     const state = { key, running: null, settled: null, unsaved: false, unshown: false, reads: 0, deleted: new Set(),
       cursor: Number.isSafeInteger(stored?.cursor) && stored.cursor >= 0 ? stored.cursor : 0,
       known: new Map(entries(stored?.known).filter(([, entry]) => validKnown(entry))),
