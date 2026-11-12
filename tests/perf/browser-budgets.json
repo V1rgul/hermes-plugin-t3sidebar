@@ -190,10 +190,10 @@
       "componentRenders": 119
     },
     "limits/limits:hover": {
-      "ms": 17,
+      "ms": 16,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 31
+      "componentRenders": 4
     },
     "limits/limits:lookback": {
       "ms": 19,
