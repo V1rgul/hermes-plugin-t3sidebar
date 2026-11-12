@@ -806,7 +806,7 @@ class AnthropicScopedLimitsTests(NoNetworkTestCase):
 			account = reading["accounts"][0]
 			self.assertEqual((account["error"], [w["key"] for w in account["snapshot"]["windows"]]), (None, ["weekly"]))
 
-	def test_default_read_sends_the_token_to_hermes_url_without_posing_as_another_client(self):
+	def test_default_read_asks_for_resets_as_the_installed_claude_code_cli(self):
 		calls = []
 
 		class Client:
@@ -823,11 +823,93 @@ class AnthropicScopedLimitsTests(NoNetworkTestCase):
 				calls.append(("get", url, headers))
 				return SimpleNamespace(status_code=200, json=lambda: SCOPED_BODY)
 
-		with patch("httpx.Client", Client):
-			self.assertEqual(REAL_FETCH_ANTHROPIC_USAGE("tok"), SCOPED_BODY)
-		(_, client), (_, url, headers) = calls
-		self.assertEqual((url, headers["Authorization"], client["follow_redirects"]), ("https://api.anthropic.com/api/oauth/usage", "Bearer tok", False))
-		self.assertNotIn("User-Agent", headers)
+		for version, agent in (("2.1.318", "claude-cli/2.1.318 (external, cli)"), ("", None)):
+			calls.clear()
+			with patch("httpx.Client", Client), patch.object(limits, "claude_cli_version", return_value=version):
+				self.assertEqual(REAL_FETCH_ANTHROPIC_USAGE("tok"), SCOPED_BODY)
+			(_, client), (_, url, headers) = calls
+			self.assertEqual((url, headers["Authorization"], client["follow_redirects"]), ("https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1", "Bearer tok", False))
+			# Without an installed CLI there is no version to name, so the read goes out under httpx's own name.
+			self.assertEqual(headers.get("User-Agent"), agent)
+
+	def test_claude_cli_version_is_read_from_the_cli_and_kept_for_six_hours(self):
+		saved = dict(limits._CLAUDE_VERSION)
+		self.addCleanup(limits._CLAUDE_VERSION.update, saved)
+		clock, runs = [0.0], []
+		run = lambda output: (lambda: runs.append(output) or output)
+		limits._CLAUDE_VERSION.update(checked=float("-inf"), version=None)
+		self.assertEqual(limits.claude_cli_version(clock=lambda: clock[0], runner=run("2.1.318 (Claude Code)\n")), "2.1.318")
+		clock[0] = limits.CLAUDE_VERSION_TTL_S - 1
+		self.assertEqual(limits.claude_cli_version(clock=lambda: clock[0], runner=run("9.9.9")), "2.1.318")
+		clock[0] = limits.CLAUDE_VERSION_TTL_S + 1
+		self.assertIsNone(limits.claude_cli_version(clock=lambda: clock[0], runner=run("command not found")))
+		self.assertEqual(runs, ["2.1.318 (Claude Code)\n", "command not found"])
+		clock[0] = 3 * limits.CLAUDE_VERSION_TTL_S
+		self.assertIsNone(limits.claude_cli_version(clock=lambda: clock[0], runner=lambda: (_ for _ in ()).throw(OSError("no claude"))))
+
+
+# A live /api/oauth/usage?cedar_ember=1 body's reset block (field names as Anthropic sends them; ids and values invented).
+def resets_body(*grants, eligible=True, shares=({"limit_index": 2, "used_percent_of_weekly": 12, "allowance_percent_of_weekly": 50},)):
+	return {**SCOPED_BODY, "weekly_scoped_shares": list(shares), "cedar_ember": {"eligible": eligible, "ineligible_reason": None if eligible else "surface", "at_limit": False,
+		"exhausted": [], "grants": list(grants), "next_grant_id": None, "weekly_resets_at": None, "cooldown_until": None, "event_props": None}}
+
+
+def grant(grant_id="grant_fable_1", **fields):
+	return {"id": grant_id, "label": "Fable reset", "resets_total": 1, "resets_left": 1, "starts_at": None, "ends_at": "2026-11-19T00:00:00+00:00", "clears": [],
+		"paused": False, "usable_now": True, "use_requires_limit": False, "percent_used": {}, "blocking": [], "gives_back_weekly": False, "unavailable_reason": None, **fields}
+
+
+class AnthropicResetTests(NoNetworkTestCase):
+	def test_grants_take_claude_codes_kinds_and_keep_unusable_ones_with_their_reason(self):
+		body = resets_body(
+			grant("grant_fable_1", gives_back_weekly=True, type="weekly"),
+			grant("grant_session", type="session", usable_now=False, unavailable_reason="needs_limit"),
+			grant("grant_blocked", type="weekly", usable_now=False, blocking=["five_hour"]),
+			grant("grant_clears_week", clears=["seven_day"]),
+			grant("grant_full", clears=["five_hour", "seven_day"], resets_left=2),
+			grant("grant_paused", type="weekly", paused=True),
+			grant("grant_spent", type="weekly", resets_left=0),
+			grant("Bad Id!", type="weekly"))
+		result = limits.anthropic_reset_grants(body)
+		self.assertEqual([(g["id"], g["kind"], g["resets_left"], g["usable"], g["reason"]) for g in result["grants"]], [
+			("grant_fable_1", "fable", 1, True, None), ("grant_session", "session", 1, False, "needs_limit"), ("grant_blocked", "weekly", 1, False, "blocked_five_hour"),
+			("grant_clears_week", "weekly", 1, True, None), ("grant_full", "full", 2, True, None)])
+		self.assertEqual((result["grants"][0]["ends_at"], result["weekly_share_used"]), (dt_epoch("2026-11-19T00:00:00+00:00"), 12.0))
+		# Anthropic answers other clients as ineligible: no resets, which also clears an earlier list. A body asked without the block says nothing about resets.
+		self.assertEqual(limits.anthropic_reset_grants(resets_body(grant(), eligible=False))["grants"], [])
+		self.assertIsNone(limits.anthropic_reset_grants(SCOPED_BODY))
+		self.assertIsNone(limits.anthropic_reset_grants(None))
+
+	def test_collected_resets_are_stored_and_offered_only_while_fresh_and_unexpired(self):
+		later = NOW + 86400
+		iso = lambda epoch: dt(epoch).isoformat()
+		body = resets_body(grant("grant_fable_1", gives_back_weekly=True, ends_at=iso(later + 6 * 86400)), grant("grant_soon", type="session", ends_at=iso(later + 300)))
+		reading = lambda at, scoped: collect_claude({}, lambda clock: {"token": "tok", "expired": False},
+			lambda **kw: SimpleNamespace(fetched_at=dt(at), plan=None, raw=None, windows=(SimpleNamespace(label="Current week", used_percent=40.0, reset_at=None, scope="account"),)), scoped=scoped)
+		with tempfile.TemporaryDirectory() as temp:
+			store = limits.LimitsStore(Path(temp) / "limits.sqlite3")
+			store.record(reading(later, lambda token: body), checked_at=later)
+			resets = lambda now: limits.limits_payload(store, hours=1, now=now)["providers"][0]["accounts"][0]["reset_grants"]
+			self.assertEqual(resets(later), {"fetched_at": later, "weekly_share_used": 12.0, "grants": [
+				{"id": "grant_soon", "kind": "session", "resets_left": 1, "ends_at": later + 300, "usable": True, "reason": None, "clears": []},
+				{"id": "grant_fable_1", "kind": "fable", "resets_left": 1, "ends_at": later + 6 * 86400, "usable": True, "reason": None, "clears": []}]})
+			# A failed read (no reset block) keeps the last list rather than emptying it; an expired reset drops out.
+			store.record(reading(later + 60, lambda token: None), checked_at=later + 60)
+			self.assertEqual([g["id"] for g in resets(later + 600)["grants"]], ["grant_fable_1"])
+			# Past the freshness limit the list is never offered: the reset may have been spent elsewhere meanwhile.
+			self.assertIsNone(resets(later + limits.STALE_AFTER_S + 1))
+			# An ineligible answer empties it.
+			store.record(reading(later + 120, lambda token: resets_body(grant(), eligible=False)), checked_at=later + 120)
+			self.assertEqual(resets(later + 130)["grants"], [])
+
+	def test_hermes_raw_body_supplies_the_resets_only_when_it_carries_them(self):
+		raw = resets_body(grant(gives_back_weekly=True))
+		hermes = lambda raw: lambda **kw: SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=raw, windows=(SimpleNamespace(label="Current week", used_percent=40.0, reset_at=None, scope="account"),))
+		(reading,) = collect_claude({}, lambda clock: {"token": "tok", "expired": False}, hermes(raw), scoped=lambda token: self.fail("no second GET when Hermes passes both"))
+		self.assertEqual(reading["accounts"][0]["snapshot"]["reset_grants"]["grants"][0]["kind"], "fable")
+		sent = []
+		collect_claude({}, lambda clock: {"token": "tok", "expired": False}, hermes(SCOPED_BODY), scoped=lambda token: sent.append(token) or raw)
+		self.assertEqual(sent, ["tok"])
 
 
 class ClaudeCodeFallbackTests(NoNetworkTestCase):

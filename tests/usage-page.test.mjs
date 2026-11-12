@@ -1352,6 +1352,73 @@ test('hovering or focusing a usable reset shows in green what it would give back
   assert.equal(gains('spare'), 'five_hour=-,weekly=-', 'a locked reset gives nothing back, so it previews nothing');
 });
 
+// An Anthropic account built by hand: Claude Code's login at `week` percent weekly left, Fable's own window at `fable`, holding the given limit resets.
+const resetsPool = (now, { week = 40, five = 70, fable = 30, share = 12, grants }) => ({ generated_at: now, sampler: null, providers: [{ provider: 'anthropic', label: 'Anthropic', auth: 'ok', history: [], accounts: [{
+  id: 'claude-code', label: 'Claude Code', priority: 0, plan: 'default_claude_max_5x', fetched_at: now - 60, stale: false, error: null,
+  reset_grants: { fetched_at: now - 60, weekly_share_used: share, grants },
+  windows: [{ key: 'five_hour', label: 'Current session', window_seconds: 18000, remaining_percent: five, resets_at: now + H }, { key: 'weekly', label: 'Current week', window_seconds: 604800, remaining_percent: week, resets_at: now + 3 * D },
+    { key: 'weekly:fable', label: 'Fable week', scope: 'model', model: 'fable', window_seconds: 604800, remaining_percent: fable, resets_at: now + 3 * D }] }] }] });
+const resetGrant = (now, fields) => ({ id: 'grant_fable_1', kind: 'fable', resets_left: 1, ends_at: now + 6 * D, usable: true, reason: null, clears: [], ...fields });
+
+test('each Anthropic limit reset gets a line and its own button, previewing on hover what it gives back', async () => {
+  const now = Date.now() / 1000;
+  mock.control.usageLimits = resetsPool(now, { grants: [resetGrant(now), resetGrant(now, { id: 'grant_session', kind: 'session', ends_at: now + 2 * H, usable: false, reason: 'needs_limit' }), resetGrant(now, { id: 'grant_gone', kind: 'weekly', ends_at: now - 60 })] });
+  plugin.register(mock.ctx); await render(limitsPage()); await click($('.su-disclosure'));
+  const lines = $$('.su-reset-line');
+  assert.deepEqual(lines.map(line => `${line.dataset.reset}|${line.dataset.soon}`), ['session|true', 'fable|false'], 'soonest expiry first; an expired reset is not offered');
+  assert.match(lines[1].querySelector('.su-reset-label').textContent, /^Fable reset · expires .+ in 5d 23h$/);
+  const [locked, usable] = lines.map(line => line.querySelector('.su-redeem-use'));
+  assert.deepEqual([locked.dataset.state, locked.getAttribute('aria-disabled'), usable.dataset.state, usable.querySelector('svg')?.dataset.icon], ['locked', 'true', 'usable', 'Ticket']);
+  // Padlocked like Codex's refused button, with the reason on its second line.
+  assert.deepEqual([locked.querySelector('svg')?.dataset.icon, locked.querySelector('small')?.textContent, locked.dataset.size], ['TicketLocked', 'at a limit only', undefined]);
+  assert.match(locked.title || locked.dataset.sfTip, /only once you reach a limit it refills/);
+  const gains = () => $$('.su-account .su-window').map(row => `${row.dataset.window}=${row.querySelector('.su-bar-gain')?.dataset.gain ?? '-'}`).join();
+  const pointer = async (node, type) => { await act(async () => node.dispatchEvent(new window.MouseEvent(type, { bubbles: true, relatedTarget: document.body }))); await tick(); };
+  await pointer(usable, 'pointerover');
+  // Fable's own window refills; the weekly one gets back only the 12% Fable took of it.
+  assert.equal(gains(), 'five_hour=-,weekly=12,weekly:fable=70');
+  await pointer(usable, 'pointerout');
+  await pointer(locked, 'pointerover');
+  assert.equal(gains(), 'five_hour=-,weekly=-,weekly:fable=-', 'a reset Anthropic would refuse previews nothing');
+  await click(locked);
+  assert.equal(dialog() === null, true);
+});
+
+test('using an Anthropic reset confirms the loss on the window it refills and posts that reset', async () => {
+  const now = Date.now() / 1000;
+  mock.control.usageLimits = resetsPool(now, { fable: 30, grants: [resetGrant(now)] });
+  mock.control.redeemResult = { status: 'reset', resets_left: 0 };
+  plugin.register(mock.ctx); await render(limitsPage()); await click($('.su-disclosure'));
+  await click($('.su-reset-line .su-redeem-use'));
+  assert.equal(dialog().getAttribute('aria-label'), 'Use one fable reset on Claude Code?');
+  assert.deepEqual([dialog().querySelector('.su-redeem-lost').textContent, dialog().querySelector('.su-redeem-gain').textContent], ['30%of the fable week allowance lost · 30 units', '+70%']);
+  await click([...dialog().querySelectorAll('button')].find(node => node.textContent === 'Use reset')); await tick();
+  assert.deepEqual(mock.calls.filter(call => call[0] === 'rest' && call[1] === '/usage/limits/redeem').map(call => call[2].body), [{ provider: 'anthropic', account: 'claude-code', grant: 'grant_fable_1' }]);
+  assert.equal(dialog() === null, true);
+  // A refusal keeps the dialog open with Anthropic's reason; an unconfirmed claim locks the account's resets until a newer reading.
+  mock.control.redeemResult = { status: 'not_limited', resets_left: 1 };
+  await click($('.su-reset-line .su-redeem-use'));
+  await click([...dialog().querySelectorAll('button')].find(node => node.textContent === 'Use reset')); await tick();
+  assert.match(dialog().textContent, /only works once you reach a limit it refills\. It was not used\./);
+  assert.deepEqual([usage.redeemFailure({ status: 'already_used' }, 'anthropic'), usage.redeemFailure({ status: 'signed_out' }, 'anthropic') !== null, usage.redeemFailure({ status: 'unknown' }, 'anthropic')],
+    [null, true, 'Anthropic could not confirm the reset. Refresh to check whether it was used.']);
+});
+
+test('reset previews follow what each Anthropic reset kind clears', () => {
+  const win = (key, remaining, extra = {}) => ({ key, remaining_percent: remaining, ...extra });
+  const five = win('five_hour', 70), week = win('weekly', 40), fable = win('weekly:fable', 30, { scope: 'model', model: 'fable' }), opus = win('weekly:opus', 10, { scope: 'model', model: 'opus' });
+  const gains = (grant, share = 12) => [five, week, fable, opus].map(item => usage.anthropicResetGain({ clears: [], ...grant }, item, share));
+  assert.deepEqual(gains({ kind: 'session' }), [30, 0, 0, 0]);
+  assert.deepEqual(gains({ kind: 'weekly' }), [0, 60, 0, 0]);
+  assert.deepEqual(gains({ kind: 'full' }), [30, 60, 0, 0]);
+  assert.deepEqual(gains({ kind: 'fable' }), [0, 12, 70, 0]);
+  assert.deepEqual(gains({ kind: 'fable' }, null), [0, 0, 70, 0], 'without Fable\'s weekly share the weekly gain is not guessed');
+  assert.deepEqual(gains({ kind: 'weekly', clears: ['seven_day_opus'] }), [0, 0, 0, 90], 'a reset naming what it clears refills exactly that');
+  assert.deepEqual(usage.validResetGrants({ fetched_at: 1, weekly_share_used: 140, grants: [{ id: 'g1', kind: 'fable', resets_left: 1, ends_at: null }, { id: 'g2', kind: 'monthly', resets_left: 1 }, { id: 'Bad!', kind: 'fable', resets_left: 1 }, { id: 'g3', kind: 'session', resets_left: 0 }] }),
+    { fetched_at: 1, weekly_share_used: 100, grants: [{ id: 'g1', kind: 'fable', resets_left: 1, ends_at: null, usable: false, reason: null, clears: [] }] });
+  assert.equal(usage.validResetGrants(undefined), null);
+});
+
 test('using a reset confirms the weekly loss, posts the account and reloads the limits', async () => {
   const now = Date.now() / 1000;
   mock.control.usageLimits = redeemPool(now, [{ id: 'codex-pro', left: 59 }, { id: 'codex-team', plan: 'team', left: 0, five: 100, credits: 1 }]);

@@ -437,7 +437,7 @@ function simulateLimitPool(accounts, { from, fetched, since, scaleAt, seed = 0 }
       ...(account.fiveReset === null ? [] : [{ t, account: account.id, window: 'five_hour', remaining_percent: fiveLeft(account), resets_at: account.fiveReset }]),
       { t, account: account.id, window: 'weekly', remaining_percent: percent(account), resets_at: account.weekReset });
   }
-  const snapshot = account => ({ id: account.id, label: account.label, priority: account.priority, plan: account.plan, ...(Number.isFinite(account.banked_resets) ? { banked_resets: account.banked_resets } : {}), banked_credits: account.banked_credits ?? null,
+  const snapshot = account => ({ id: account.id, label: account.label, priority: account.priority, plan: account.plan, ...(Number.isFinite(account.banked_resets) ? { banked_resets: account.banked_resets } : {}), banked_credits: account.banked_credits ?? null, ...(account.reset_grants ? { reset_grants: account.reset_grants } : {}),
     fetched_at: fetched, stale: false, error: null, windows: [
       ...(account.fiveReset === null ? [] : [{ key: 'five_hour', label: '5-hour', window_seconds: LIMIT_FIVE_HOURS, scope: 'account', model: null, used_percent: round(100 - fiveLeft(account)), remaining_percent: fiveLeft(account), resets_at: account.fiveReset }]),
       { key: 'weekly', label: 'Weekly', window_seconds: LIMIT_WEEK, scope: 'account', model: null, used_percent: round(100 - percent(account)), remaining_percent: percent(account), resets_at: account.weekReset }
@@ -476,7 +476,9 @@ export function syntheticUsageLimits(hours = 168, scenario = 'mixed', { compact 
   ]), { from, fetched, since, scaleAt: t => t >= now - 12 * 3600 ? shape.burst : shape.base });
   // Max 20x as Anthropic's usage endpoint names it (rateLimitTier), which the plugin maps to 200 weekly plan units.
   const claude = simulateLimitPool(prepare([
-    { id: 'acct-claude', label: 'claude-max', priority: 0, plan: 'default_claude_max_20x', units: 200, weekly: now + shape.claudeReset * 86400, five: now + 2.2 * 3600, left: shape.claude }
+    { id: 'acct-claude', label: 'claude-max', priority: 0, plan: 'default_claude_max_20x', units: 200, weekly: now + shape.claudeReset * 86400, five: now + 2.2 * 3600, left: shape.claude,
+      // One Fable reset, as Anthropic's usage body lists it once the sampler reads it as Claude Code does; Fable took 12% of the weekly limit.
+      reset_grants: { fetched_at: fetched, weekly_share_used: 12, grants: [{ id: 'grant_fable_1', kind: 'fable', resets_left: 1, ends_at: now + 6.4 * 86400, usable: true, reason: null, clears: [] }] } }
   ]), { from, fetched, since, scaleAt: () => shape.claudeLoad, seed: 5 });
   return { generated_at: now, sampler: { interval_s: 300, started_at: now - 10 * 86400, last_run_at: fetched, last_error: null }, providers: [
     { provider: 'openai-codex', label: 'OpenAI Codex', history: (compact ? compactLimitHistory : limitSeries)(codex.history), accounts: codex.accounts },

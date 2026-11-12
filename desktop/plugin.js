@@ -2704,7 +2704,7 @@ export function validUsageLimits(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.providers)) throw new Error('Unsupported usage limits response.');
   const providers = value.providers.filter(item => item && typeof item.provider === 'string').map(item => placeCurrentCredits({
     // Only an explicit logged_out marks a provider without a usable credential; anything else keeps the normal view.
-    ...item, auth: item.auth === 'logged_out' ? 'logged_out' : 'ok', auth_reason: typeof item.auth_reason === 'string' && item.auth_reason ? item.auth_reason : null, accounts: Array.isArray(item.accounts) ? item.accounts.filter(account => account && typeof account.id === 'string').map(account => ({ ...account, windows: Array.isArray(account.windows) ? account.windows.filter(win => win && typeof win.key === 'string') : [], banked_credits: validBankedCredits(account.banked_credits) })) : [],
+    ...item, auth: item.auth === 'logged_out' ? 'logged_out' : 'ok', auth_reason: typeof item.auth_reason === 'string' && item.auth_reason ? item.auth_reason : null, accounts: Array.isArray(item.accounts) ? item.accounts.filter(account => account && typeof account.id === 'string').map(account => ({ ...account, windows: Array.isArray(account.windows) ? account.windows.filter(win => win && typeof win.key === 'string') : [], banked_credits: validBankedCredits(account.banked_credits), reset_grants: validResetGrants(account.reset_grants) })) : [],
     history: limitHistoryRows(item.history), current_banked_credits: validBankedCredits(item.current_banked_credits)
   }));
   return { ...value, providers, sampler: value.sampler && typeof value.sampler === 'object' ? value.sampler : null };
@@ -2719,6 +2719,20 @@ export function placeCurrentCredits(provider) {
 // Accounts whose banked credits feed the chart's expiry flags, the provider-level current-account list included under its own label.
 export const bankedSources = provider => provider.current_banked_credits
   ? [...provider.accounts, { id: CURRENT_CREDITS_ID, label: 'Current account', banked_credits: provider.current_banked_credits }] : provider.accounts;
+// Anthropic limit resets: null when never read (or the reading went stale), else the well-formed ones by expiry. A kind outside Claude Code's four is dropped rather than shown under a guessed name.
+export const RESET_KIND_LABELS = { session: '5-hour reset', weekly: 'Weekly reset', fable: 'Fable reset', full: 'Full reset' };
+export function validResetGrants(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const grants = (Array.isArray(value.grants) ? value.grants : []).flatMap(grant => {
+    if (!grant || typeof grant !== 'object' || typeof grant.id !== 'string' || !/^[a-z0-9_-]{1,40}$/.test(grant.id) || !Object.hasOwn(RESET_KIND_LABELS, grant.kind)) return [];
+    const ends = optionalTime(grant.ends_at);
+    if (ends === undefined || !Number.isInteger(grant.resets_left) || grant.resets_left < 1) return [];
+    return [{ id: grant.id, kind: grant.kind, resets_left: grant.resets_left, ends_at: ends, usable: grant.usable === true, reason: typeof grant.reason === 'string' ? grant.reason : null,
+      clears: Array.isArray(grant.clears) ? grant.clears.filter(item => typeof item === 'string') : [] }];
+  }).sort((a, b) => (a.ends_at === null) - (b.ends_at === null) || (a.ends_at ?? 0) - (b.ends_at ?? 0));
+  const share = finiteOrNull(value.weekly_share_used);
+  return { fetched_at: finiteOrNull(value.fetched_at), weekly_share_used: share === null ? null : clamp(share, 0, 100), grants };
+}
 // Banked reset credits: null when never read, else the well-formed available credits by expiry (no expiry last). Malformed entries are dropped rather than shown, and an applicable count that is not a whole number reads as unknown.
 const optionalTime = value => value == null ? null : Number.isFinite(value) ? value : undefined;
 export function validBankedCredits(value) {
@@ -3396,7 +3410,7 @@ function ScopedUsagePage({ ctx, scope, view }) {
   const waiting = JSON.stringify([...(unsettledRedeems.get(redeemScope) || [])].filter(([, mark]) => !(limitsRead > mark)).map(([id]) => id));
   const unsettled = useMemo(() => new Set(JSON.parse(waiting)), [waiting]);
   // Spends one banked reset on one account, then reloads the limits so the page shows the restored allowance; any outcome that did not reset throws, which keeps the confirmation open with the reason. `opened` is the number the confirmation took when it was opened: after an unknown outcome only one opened later, once a limits read started later has arrived, may spend.
-  const redeem = useCallback((provider, account, opened = 0) => {
+  const redeem = useCallback((provider, account, opened = 0, grant = null) => {
     const id = JSON.stringify([provider, account]), flight = JSON.stringify([redeemScope, id]);
     if (redeemsInFlight.has(flight)) return redeemsInFlight.get(flight);
     const marks = unsettledRedeems.get(redeemScope) ?? new Map(), mark = marks.get(id);
@@ -3419,11 +3433,11 @@ function ScopedUsagePage({ ctx, scope, view }) {
     const run = (async () => {
       if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh before using a reset.');
       let result;
-      try { result = await ctx.rest('/usage/limits/redeem', { method: 'POST', body: { provider, account } }); }
+      try { result = await ctx.rest('/usage/limits/redeem', { method: 'POST', body: grant === null ? { provider, account } : { provider, account, grant } }); }
       catch (error) { unsettle(); throw new Error(`The reset could not be used: ${error?.message || 'request failed'}. Refresh to check whether it was spent.`); }
       if (!sameScope(scope, captureScope())) { unsettle(); throw new Error(moved); }
-      const failure = redeemFailure(result);
-      if (failure === UNCONFIRMED_REDEEM) unsettle();
+      const failure = redeemFailure(result, provider);
+      if (failure === UNCONFIRMED_REDEEM || failure === UNCONFIRMED_ANTHROPIC) unsettle();
       if (failure) throw new Error(failure);
       await reload();
       if (!sameScope(scope, captureScope())) throw new Error(moved);
@@ -4063,8 +4077,9 @@ function SplitBadge({ kind, tone, title, subject, detail }) {
   return pageTipped(title, h('span', { className: 'su-badge su-badge-split', 'data-badge': kind }, h('span', null, subject), h('span', { className: 'su-badge-half', 'data-tone': tone }, detail)));
 }
 function LimitAccount({ provider, account, selected, now, redeem, unsettled }) {
-  // While a reset button is hovered or focused, the bars it would refill show what it gives back, hatched in the bar's own colour.
-  const [previewing, setPreviewing] = useState(false);
+  // While a reset button is hovered or focused, the bars it would refill show what it gives back, hatched in the bar's own colour: `preview` maps a window to the percentage that reset would add.
+  const [preview, setPreview] = useState(null);
+  const setPreviewing = useCallback(on => setPreview(on ? () => codexResetGain : null), []);
   const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
   // The plan label and the capacity this account adds to the pool in the selected window; T3 Code's names, not the raw enum.
   const label = planLabel(provider, account.plan), units = planWeight(provider, account.plan, selected || 'weekly'), assumed = planAssumed(provider, account.plan);
@@ -4079,9 +4094,10 @@ function LimitAccount({ provider, account, selected, now, redeem, unsettled }) {
       h('span', { className: 'su-spacer' }),
       h('span', { className: 'su-muted' }, Number.isFinite(account.fetched_at) ? `read ${formatDurationShort(now - account.fetched_at)} ago` : 'never read')),
     account.error ? h('div', { className: 'su-account-error', role: 'alert' }, String(account.error)) : null,
-    windows.length ? h('div', { className: 'su-windows' }, windows.map(win => h(LimitWindowRow, { key: win.key, win, now, selected: win.key === selected, gain: previewing && win.scope !== 'model' })))
+    windows.length ? h('div', { className: 'su-windows' }, windows.map(win => h(LimitWindowRow, { key: win.key, win, now, selected: win.key === selected, gain: preview ? preview(win) : 0 })))
       : h('div', { className: 'su-muted' }, 'No limit windows reported.'),
-    h(BankedResets, { provider, account, windows, now, redeem, unsettled: unsettled?.has(JSON.stringify([provider, account.id])) === true, setPreviewing }));
+    h(BankedResets, { provider, account, windows, now, redeem, unsettled: unsettled?.has(JSON.stringify([provider, account.id])) === true, setPreviewing }),
+    h(LimitResets, { provider, account, windows, now, redeem, unsettled: unsettled?.has(JSON.stringify([provider, account.id])) === true, setPreview }));
 }
 // OpenAI lets a banked reset be redeemed manually once any allowance it covers has less than 80% left (help.openai.com/en/articles/20001498). The account-wide windows shown are exactly the covered ones (weekly on Pro, 5-hour and weekly on Plus/Business), so the rule applies to the whole account. Codex's own applicable_available_count follows the assistant's stricter 10% rule and would call a manually redeemable reset unusable.
 const BANKED_REDEEM_BELOW_PERCENT = 80;
@@ -4097,16 +4113,26 @@ export function redeemWindow(windows) {
   return account.find(win => win.key === 'weekly') || [...account].sort((a, b) => (b.window_seconds ?? 0) - (a.window_seconds ?? 0))[0] || null;
 }
 // What one redeemed reset loses: the share of that window still left now, which expires unused like at a normal reset, and the units it stands for on this plan.
-export function redeemLoss(provider, account, windows) {
-  const win = redeemWindow(windows);
+export function redeemLoss(provider, account, windows, win = redeemWindow(windows)) {
   if (!win || !Number.isFinite(win.remaining_percent)) return win ? { win, percent: null, units: null } : null;
   const percent = clamp(Math.round(win.remaining_percent), 0, 100);
   return { win, percent, units: planWeight(provider, account.plan, win.key) * percent / 100 };
 }
 // Statuses from the backend's redeem route (Hermes's own outcome codes): the reasons a confirmed reset did not happen, or null when it did.
 const UNCONFIRMED_REDEEM = 'Codex could not confirm the reset. Refresh to check whether it was spent.';
-export function redeemFailure(result) {
+const UNCONFIRMED_ANTHROPIC = 'Anthropic could not confirm the reset. Refresh to check whether it was used.';
+// Anthropic's claim outcomes (and the backend's own reasons for sending nothing): the reason a confirmed reset did not happen, or null when it did.
+const ANTHROPIC_FAILURES = {
+  not_limited: 'Anthropic refused: this reset only works once you reach a limit it refills. It was not used.',
+  cooldown: 'Anthropic asks to wait before using another reset. It was not used; try again in a minute.',
+  rate_limited: 'Anthropic is limiting reset requests. It was not used; try again soon.',
+  ineligible: 'Anthropic refused this reset for this account. It was not used.',
+  signed_out: 'The account\'s Claude login is missing or expired, so the reset was not used. Sign in to Claude Code again.',
+  unavailable: 'Using a reset needs the Claude Code CLI installed on the Hermes host. Nothing was sent.'
+};
+export function redeemFailure(result, provider = 'openai-codex') {
   const status = result?.status;
+  if (provider === 'anthropic') return status === 'reset' || status === 'already_used' ? null : ANTHROPIC_FAILURES[status] ?? UNCONFIRMED_ANTHROPIC;
   if (status === 'reset' || status === 'already_redeemed') return null;
   if (status === 'nothing_to_reset' || status === 'not_exhausted') return 'Codex refused: no allowance is below 80% left yet. The banked reset was not spent.';
   if (status === 'no_credit' || status === 'no_credits_banked') return 'Codex reports no banked reset on this account.';
@@ -4145,6 +4171,70 @@ function RedeemButton({ usable, unsettled, onClick, setPreviewing }) {
     h('span', { className: 'su-redeem-use-row' }, icon('Ticket', '◇'), 'Use one')));
 }
 // The confirmation's only content: how much of the weekly allowance the reset throws away, as a figure and as a bar whose hatched part is lost and whose plain part is restored.
+// What a Codex reset gives back: every account-wide window refills.
+export const codexResetGain = win => win.scope === 'model' || !Number.isFinite(win.remaining_percent) ? 0 : 100 - clamp(win.remaining_percent, 0, 100);
+// What one Anthropic reset gives back on one window, as Claude Code reads a grant: the limits it clears refill, and a Fable reset refills Fable's own window and gives back only what Fable took of the weekly one.
+const RESET_KIND_CLEARS = { session: ['five_hour'], weekly: ['seven_day'], full: ['five_hour', 'seven_day'], fable: [] };
+export function anthropicResetGain(grant, win, weeklyShare = null) {
+  if (!grant || !Number.isFinite(win?.remaining_percent)) return 0;
+  const missing = 100 - clamp(win.remaining_percent, 0, 100), base = win.key.split(':')[0];
+  const period = base === 'five_hour' ? 'five_hour' : base === 'weekly' ? 'seven_day' : null;
+  const claim = period && (win.scope === 'model' ? (win.model ? `${period}_${win.model}` : null) : period);
+  if (grant.kind === 'fable') {
+    if (win.scope === 'model' && win.model === 'fable') return missing;
+    if (win.scope !== 'model' && claim === 'seven_day') return Number.isFinite(weeklyShare) ? Math.min(missing, weeklyShare) : 0;
+  }
+  const clears = grant.clears.length ? grant.clears : RESET_KIND_CLEARS[grant.kind] || [];
+  return claim !== null && clears.includes(claim) ? missing : 0;
+}
+// The window a confirmation weighs an Anthropic reset by: Fable's own window for a Fable reset, the 5-hour one for a 5-hour reset, else the weekly one.
+export function resetWindow(grant, windows) {
+  const find = test => (windows || []).find(test) || null;
+  if (grant.kind === 'fable') return find(win => win.scope === 'model' && win.model === 'fable') || find(win => win.key === 'weekly');
+  if (grant.kind === 'session') return find(win => win.key === 'five_hour');
+  return find(win => win.key === 'weekly');
+}
+// Why Anthropic would refuse a reset now, as Claude Code words it: the short line under the padlocked button, like Codex's `all ≥80% left`, and the tip's sentence.
+const RESET_UNUSABLE = {
+  needs_limit: ['at a limit only', 'Anthropic accepts this reset only once you reach a limit it refills.'],
+  cooldown: ['wait a minute', 'Anthropic asks to wait a moment before using another reset.'],
+  blocked_five_hour: ['5-hour limit hit', 'Anthropic does not accept this reset while your 5-hour limit is reached.'],
+  blocked_seven_day: ['weekly limit hit', 'Anthropic does not accept this reset while your weekly limit is reached.'],
+  cannot_clear: ['does not refill yours', 'This reset does not refill the limit you have reached.']
+};
+const RESET_UNUSABLE_DEFAULT = ['not accepted now', 'Anthropic does not accept this reset right now.'];
+// One line per Anthropic limit reset under the account's bars, formatted like Codex's banked resets, each with its own Use button the height of its line: unlike Codex, Anthropic spends the reset named.
+function LimitResets({ provider, account, windows, now, redeem, unsettled = false, setPreview }) {
+  const grants = (account.reset_grants?.grants || []).filter(grant => grant.ends_at === null || grant.ends_at > now);
+  if (provider !== 'anthropic' || !grants.length) return null;
+  return h('ul', { className: 'su-banked su-resets', 'aria-label': 'Limit resets' },
+    grants.map(grant => h(LimitResetLine, { key: grant.id, provider, account, grant, windows, now, redeem, unsettled, setPreview, weeklyShare: account.reset_grants.weekly_share_used })));
+}
+function LimitResetLine({ provider, account, grant, windows, now, redeem, unsettled, setPreview, weeklyShare }) {
+  const [confirming, setConfirming] = useState(false), opened = useRef(0);
+  const name = RESET_KIND_LABELS[grant.kind], count = grant.resets_left > 1 ? ` ×${grant.resets_left}` : '';
+  const canRedeem = typeof redeem === 'function' && typeof sdk.ConfirmDialog === 'function';
+  const loss = canRedeem ? redeemLoss(provider, account, windows, resetWindow(grant, windows)) : null;
+  const locked = unsettled || !grant.usable;
+  const preview = on => setPreview?.(on && !locked ? () => win => anthropicResetGain(grant, win, weeklyShare) : null);
+  const [short, why] = RESET_UNUSABLE[grant.reason] ?? RESET_UNUSABLE_DEFAULT;
+  // Locked exactly as Codex's button is: padlocked and dashed, the reason on a second line; while an earlier attempt's outcome is unknown, that attempt's message instead.
+  const button = unsettled
+    ? pageTipped(UNCONFIRMED_ANTHROPIC, h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true }, h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one')))
+    : locked ? pageTipped(why, h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true },
+      h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one'), h('small', null, short)))
+    : pageTipped(`Use this ${name.toLowerCase()} now.`, h('button', { type: 'button', className: 'su-redeem-use', 'data-size': 'line', 'data-state': 'usable', 'aria-haspopup': 'dialog',
+      onClick: () => { opened.current = nextUsageOrder(); setConfirming(true); },
+      onPointerEnter: () => preview(true), onPointerLeave: () => preview(false), onFocus: () => preview(true), onBlur: () => preview(false) },
+      h('span', { className: 'su-redeem-use-row' }, icon('Ticket', '◇'), 'Use one')));
+  return h('li', { className: 'su-reset-line', 'data-reset': grant.kind, 'data-soon': grant.ends_at !== null && grant.ends_at - now < DAY_S },
+    h('span', { className: 'su-reset-label' }, grant.ends_at === null ? `${name}${count} · no expiry reported`
+      : [`${name}${count} · expires ${resetTime(grant.ends_at, now)} `, h('span', { key: 'in', className: 'su-banked-in' }, `in ${formatDurationShort(grant.ends_at - now)}`)]),
+    canRedeem ? button : null,
+    canRedeem ? h(sdk.ConfirmDialog, { open: confirming, onClose: () => setConfirming(false), title: `Use one ${name.toLowerCase()} on ${account.label || account.id}?`,
+      confirmLabel: 'Use reset', busyLabel: 'Using reset…', doneLabel: 'Reset used', destructive: !!loss?.percent,
+      onConfirm: () => redeem(provider, account.id, opened.current, grant.id) }, h(RedeemLoss, { loss })) : null);
+}
 function RedeemLoss({ loss }) {
   if (!loss) return null;
   const name = (loss.win.label || loss.win.key).toLowerCase();
@@ -4157,7 +4247,7 @@ function RedeemLoss({ loss }) {
       h('span', { className: 'su-redeem-lose', style: { width: `${loss.percent}%` } }),
       restored ? h('span', { className: 'su-redeem-gain' }, `+${restored}%`) : null));
 }
-function LimitWindowRow({ win, now, selected, gain = false }) {
+function LimitWindowRow({ win, now, selected, gain = 0 }) {
   const remaining = Number.isFinite(win.remaining_percent) ? clamp(win.remaining_percent, 0, 100) : null;
   const pace = paceRemainingPercent(win, now);
   const resets = Number.isFinite(win.resets_at) ? win.resets_at > now ? `resets in ${formatDurationShort(win.resets_at - now)}` : 'reset due' : '—';
@@ -4167,7 +4257,7 @@ function LimitWindowRow({ win, now, selected, gain = false }) {
     pageTipped(pace === null ? summary : `${summary}. The tick marks where an even spend would be.`, h('div', { className: 'su-bar', role: 'img', 'aria-label': summary },
       h('span', { className: 'su-bar-track' }),
       // Under the fill, so the fill's rounded end sits on the green rather than leaving a notch.
-      gain && remaining !== null && remaining < 100 ? h('span', { className: 'su-bar-gain', 'data-gain': Math.round(100 - remaining), style: { left: 0, right: 0 } }) : null,
+      gain > 0 && remaining !== null && remaining < 100 ? h('span', { className: 'su-bar-gain', 'data-gain': Math.round(Math.min(gain, 100 - remaining)), style: { left: 0, width: `${Math.min(100, remaining + gain)}%` } }) : null,
       remaining ? h('span', { className: 'su-bar-fill', style: { width: `${remaining}%` } }) : null,
       pace === null ? null : h('span', { className: 'su-pace', style: { left: `clamp(1px, ${pace}%, calc(100% - 1px))` } }))),
     h('span', { className: 'su-window-value' }, remaining === null ? '—' : `${Math.round(remaining)}% left`),
@@ -4363,7 +4453,11 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-redeem-use:hover:not([aria-disabled=true]){background:color-mix(in srgb,var(--su-redeem) 14%,transparent)}
 .su-redeem-use[data-state=unknown]{--su-redeem:var(--ui-text-secondary)}
 .su-redeem-use[aria-disabled=true]{--su-redeem:var(--dt-destructive,#cf2d56);border-style:dashed;cursor:not-allowed}
-.su-redeem-use-row{display:inline-flex;align-items:center;gap:6px}.su-redeem-use svg{width:13px;height:13px;flex:none}.su-redeem-use small{font-size:10px;opacity:.85}
+.su-redeem-use-row{display:inline-flex;align-items:center;gap:6px}
+.su-resets{margin-top:8px;gap:4px}
+.su-reset-line{display:flex;align-items:center;gap:10px;min-height:20px}.su-reset-line[data-soon=true]{color:var(--ui-orange,#db704b)}
+.su-reset-label{flex:1;min-width:0}
+.su-redeem-use[data-size=line]{flex-direction:row;min-width:0;padding:1px 10px}.su-redeem-use svg{width:13px;height:13px;flex:none}.su-redeem-use small{font-size:10px;opacity:.85}
 /* The confirmation renders in a portal outside .su, so these rules use theme tokens directly. */
 .su-redeem-lost{display:flex;align-items:baseline;gap:8px;margin:0 0 8px;font-size:12px;color:var(--ui-text-secondary)}
 .su-redeem-lost b{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ui-orange,#db704b)}.su-redeem-lost b[data-zero=true]{color:var(--ui-green,#1f8a65)}
