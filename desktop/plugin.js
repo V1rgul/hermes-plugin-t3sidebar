@@ -2773,18 +2773,24 @@ export function niceScale(peak, count = 4, integer = false) {
   return { max: steps * step, ticks: Array.from({ length: steps + 1 }, (_, index) => index * step) };
 }
 // Stable hues per series key. Known providers keep a recognizable hue; other keys hash into the palette, probing past hues close to ones already taken. Mixing with the theme's primary text darkens the swatch in light themes and lightens it in dark ones.
-const PROVIDER_HUES = { 'openai-codex': 160, openai: 160, 'openai-api': 160, anthropic: 45, 'claude-subscription-directsdk-experimental': 45, copilot: 285, 'copilot-acp': 285, gemini: 250, google: 250, openrouter: 330, nous: 200, deepseek: 265, xai: 95, 'xai-oauth': 95, zai: 130, kimi: 15, 'kimi-coding': 15, alibaba: 300, minimax: 350 };
+const PROVIDER_HUES = { anthropic: 45, 'claude-subscription-directsdk-experimental': 45, copilot: 285, 'copilot-acp': 285, gemini: 250, google: 250, openrouter: 330, nous: 200, deepseek: 265, xai: 95, 'xai-oauth': 95, zai: 130, kimi: 15, 'kimi-coding': 15, alibaba: 300, minimax: 350 };
 const SERIES_HUES = [255, 45, 160, 330, 95, 200, 290, 15, 130, 230, 65, 350];
-const providerHueColor = key => usageHueColor(Object.hasOwn(PROVIDER_HUES, key) ? PROVIDER_HUES[key] : SERIES_HUES[hashKey(key) % SERIES_HUES.length]);
+// OpenAI's own brand is black and white, so its providers draw in a light grey rather than a hue; it takes no hue from the palette.
+const NEUTRAL_PROVIDERS = new Set(['openai-codex', 'openai', 'openai-api']);
+const NEUTRAL_COLOR = 'color-mix(in oklab, oklch(0.8 0 0) 85%, var(--ui-text-primary))';
+const providerHueColor = key => NEUTRAL_PROVIDERS.has(key) ? NEUTRAL_COLOR : usageHueColor(Object.hasOwn(PROVIDER_HUES, key) ? PROVIDER_HUES[key] : SERIES_HUES[hashKey(key) % SERIES_HUES.length]);
 // Yellows and greens need more lightness than blues and purples to read as distinct hues rather than olive at equal chroma.
 const hueLightness = hue => hue >= 70 && hue <= 135 ? 0.8 : hue >= 220 && hue <= 300 ? 0.67 : 0.72;
 export const usageHueColor = hue => `color-mix(in oklab, oklch(${hueLightness(hue)} 0.15 ${hue}) 85%, var(--ui-text-primary))`;
 function hashKey(key) { let value = 2166136261; for (const char of key) { value ^= char.codePointAt(0); value = Math.imul(value, 16777619) >>> 0; } return value; }
 export function seriesColors(series, split) {
   const providerHue = key => split === 'provider' && Object.hasOwn(PROVIDER_HUES, key.toLowerCase()) ? PROVIDER_HUES[key.toLowerCase()] : null;
-  const keys = [...new Set(series.map(item => item.key))].sort((a, b) => (providerHue(a) === null) - (providerHue(b) === null) || a.localeCompare(b));
+  const neutral = key => split === 'provider' && NEUTRAL_PROVIDERS.has(key.toLowerCase());
+  const known = key => providerHue(key) !== null || neutral(key);
+  const keys = [...new Set(series.map(item => item.key))].sort((a, b) => known(b) - known(a) || a.localeCompare(b));
   const used = new Set(), colors = new Map();
   for (const key of keys) {
+    if (neutral(key)) { colors.set(key, NEUTRAL_COLOR); continue; }
     let hue = providerHue(key);
     if (hue === null) {
       // Start at the key's hashed hue and take the first one well away from every hue in use, relaxing the gap only when the palette runs out.
@@ -3300,6 +3306,11 @@ export function sharedWindowCatalog(providers) {
   for (const provider of providers || []) if (provider?.auth !== 'logged_out') for (const item of windowCatalog(provider)) if (!found.has(item.key)) found.set(item.key, item);
   return [...found.values()].sort((a, b) => windowRank(a.key) - windowRank(b.key) || (a.seconds ?? 0) - (b.seconds ?? 0) || a.key.localeCompare(b.key));
 }
+// The Window selector's buttons: model-scoped windows (keys `<period>:<model>`) are numbered in catalog order rather than named, so the bar stays short; the account bars still name each model.
+export function windowOptions(windows) {
+  let model = 0;
+  return windows.map(item => ({ id: item.key, label: item.key.includes(':') ? `Model limit #${++model}` : item.label }));
+}
 // A provider without the chosen window charts its weekly one, else its first.
 export const chartWindow = (windows, key) => windows.find(item => item.key === key) || windows.find(item => item.key === 'weekly') || windows[0] || null;
 // T3's pace mark: share of the window still to run, which is where an even spend would leave the remaining bar.
@@ -3567,7 +3578,7 @@ function LimitsView({ query, prefs, update, toolbar, redeem, unsettled }) {
   // The lookback is edited from each chart's averaging label rather than this bar; it is still one shared preference.
   const setLookback = useCallback(lookback => update({ lookback }), [update]);
   const controls = h('div', { className: 'su-top' }, h('header', { className: 'su-header su-limits-controls' },
-    windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windows.map(item => ({ id: item.key, label: item.label })), value: selected.key, onChange: value => update({ window: value }) }) : null,
+    windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windowOptions(windows), value: selected.key, onChange: value => update({ window: value }) }) : null,
     toolbar));
   if (!data) return h(Fragment, null, controls, h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…'))));
   return h(Fragment, null, controls, h('div', { className: 'su-scroll' },
@@ -4052,6 +4063,8 @@ function SplitBadge({ kind, tone, title, subject, detail }) {
   return pageTipped(title, h('span', { className: 'su-badge su-badge-split', 'data-badge': kind }, h('span', null, subject), h('span', { className: 'su-badge-half', 'data-tone': tone }, detail)));
 }
 function LimitAccount({ provider, account, selected, now, redeem, unsettled }) {
+  // While a reset button is hovered or focused, the bars it would refill show what it gives back, hatched in the bar's own colour.
+  const [previewing, setPreviewing] = useState(false);
   const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
   // The plan label and the capacity this account adds to the pool in the selected window; T3 Code's names, not the raw enum.
   const label = planLabel(provider, account.plan), units = planWeight(provider, account.plan, selected || 'weekly'), assumed = planAssumed(provider, account.plan);
@@ -4066,9 +4079,9 @@ function LimitAccount({ provider, account, selected, now, redeem, unsettled }) {
       h('span', { className: 'su-spacer' }),
       h('span', { className: 'su-muted' }, Number.isFinite(account.fetched_at) ? `read ${formatDurationShort(now - account.fetched_at)} ago` : 'never read')),
     account.error ? h('div', { className: 'su-account-error', role: 'alert' }, String(account.error)) : null,
-    windows.length ? h('div', { className: 'su-windows' }, windows.map(win => h(LimitWindowRow, { key: win.key, win, now, selected: win.key === selected })))
+    windows.length ? h('div', { className: 'su-windows' }, windows.map(win => h(LimitWindowRow, { key: win.key, win, now, selected: win.key === selected, gain: previewing && win.scope !== 'model' })))
       : h('div', { className: 'su-muted' }, 'No limit windows reported.'),
-    h(BankedResets, { provider, account, windows, now, redeem, unsettled: unsettled?.has(JSON.stringify([provider, account.id])) === true }));
+    h(BankedResets, { provider, account, windows, now, redeem, unsettled: unsettled?.has(JSON.stringify([provider, account.id])) === true, setPreviewing }));
 }
 // OpenAI lets a banked reset be redeemed manually once any allowance it covers has less than 80% left (help.openai.com/en/articles/20001498). The account-wide windows shown are exactly the covered ones (weekly on Pro, 5-hour and weekly on Plus/Business), so the rule applies to the whole account. Codex's own applicable_available_count follows the assistant's stricter 10% rule and would call a manually redeemable reset unusable.
 const BANKED_REDEEM_BELOW_PERCENT = 80;
@@ -4102,7 +4115,7 @@ export function redeemFailure(result) {
 // One line per banked reset credit under the account's bars, soonest expiry first (a credit expiring within a day turns orange, its countdown grey like the bars' reset times), and on their right one button spanning the list: Codex picks the credit, so the action belongs to the account, not to a line.
 const bankedCreditLine = (credit, index, now) => h('li', { key: `${credit.expires_at}:${index}`, className: 'su-banked-credit', 'data-soon': credit.expires_at !== null && credit.expires_at - now < DAY_S },
   credit.expires_at === null ? 'Banked reset · no expiry reported' : [`Banked reset · expires ${resetTime(credit.expires_at, now)} `, h('span', { key: 'in', className: 'su-banked-in' }, `in ${formatDurationShort(credit.expires_at - now)}`)]);
-function BankedResets({ provider, account, windows, now, redeem, unsettled = false }) {
+function BankedResets({ provider, account, windows, now, redeem, unsettled = false, setPreviewing }) {
   const [confirming, setConfirming] = useState(false), opened = useRef(0);
   const credits = (account.banked_credits?.credits || []).filter(credit => credit.expires_at === null || credit.expires_at > now);
   const count = credits.length || (Number.isInteger(account.banked_resets) && account.banked_resets > 0 ? account.banked_resets : 0);
@@ -4113,20 +4126,22 @@ function BankedResets({ provider, account, windows, now, redeem, unsettled = fal
   const label = account.label || account.id, loss = canRedeem ? redeemLoss(provider, account, windows) : null;
   return h('div', { className: 'su-banked-row' },
     h('ul', { className: 'su-banked', 'aria-label': 'Banked resets' }, lines),
-    canRedeem ? h(RedeemButton, { usable: bankedRedeemable(windows), unsettled, onClick: () => { opened.current = nextUsageOrder(); setConfirming(true); } }) : null,
+    canRedeem ? h(RedeemButton, { usable: bankedRedeemable(windows), unsettled, onClick: () => { opened.current = nextUsageOrder(); setConfirming(true); }, setPreviewing }) : null,
     canRedeem ? h(sdk.ConfirmDialog, { open: confirming, onClose: () => setConfirming(false), title: `Use one banked reset on ${label}?`,
       confirmLabel: 'Use reset', busyLabel: 'Using reset…', doneLabel: 'Reset used', destructive: !!loss?.percent,
       onConfirm: () => redeem(provider, account.id, opened.current) }, h(RedeemLoss, { loss })) : null);
 }
 // Usable: an outline in the success green. Refused: still names the reset, but dashed and padlocked so it reads as unavailable rather than dangerous, with the scope of the refusal (every bar) on a second line.
-function RedeemButton({ usable, unsettled, onClick }) {
+function RedeemButton({ usable, unsettled, onClick, setPreviewing }) {
   // While an earlier attempt's outcome is unknown the reset is unavailable for another reason than the 80% rule, so the lock keeps the attempt's own message instead of that rule.
   if (unsettled) return pageTipped(UNCONFIRMED_REDEEM, h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true },
     h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one')));
   if (usable === false) return pageTipped(`Codex only accepts a banked reset once an allowance has less than ${BANKED_REDEEM_BELOW_PERCENT}% left; every one here has ${BANKED_REDEEM_BELOW_PERCENT}% or more.`,
     h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true },
       h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one'), h('small', null, `all ≥${BANKED_REDEEM_BELOW_PERCENT}% left`)));
-  return pageTipped('Use one banked reset now. Codex picks which credit is spent.', h('button', { type: 'button', className: 'su-redeem-use', 'data-state': usable ? 'usable' : 'unknown', 'aria-haspopup': 'dialog', onClick },
+  return pageTipped('Use one banked reset now. Codex picks which credit is spent.', h('button', { type: 'button', className: 'su-redeem-use', 'data-state': usable ? 'usable' : 'unknown', 'aria-haspopup': 'dialog', onClick,
+    // A Codex reset refills every account-wide window; a locked one (above) gives nothing back, so it previews nothing.
+    onPointerEnter: () => setPreviewing?.(true), onPointerLeave: () => setPreviewing?.(false), onFocus: () => setPreviewing?.(true), onBlur: () => setPreviewing?.(false) },
     h('span', { className: 'su-redeem-use-row' }, icon('Ticket', '◇'), 'Use one')));
 }
 // The confirmation's only content: how much of the weekly allowance the reset throws away, as a figure and as a bar whose hatched part is lost and whose plain part is restored.
@@ -4142,7 +4157,7 @@ function RedeemLoss({ loss }) {
       h('span', { className: 'su-redeem-lose', style: { width: `${loss.percent}%` } }),
       restored ? h('span', { className: 'su-redeem-gain' }, `+${restored}%`) : null));
 }
-function LimitWindowRow({ win, now, selected }) {
+function LimitWindowRow({ win, now, selected, gain = false }) {
   const remaining = Number.isFinite(win.remaining_percent) ? clamp(win.remaining_percent, 0, 100) : null;
   const pace = paceRemainingPercent(win, now);
   const resets = Number.isFinite(win.resets_at) ? win.resets_at > now ? `resets in ${formatDurationShort(win.resets_at - now)}` : 'reset due' : '—';
@@ -4151,6 +4166,8 @@ function LimitWindowRow({ win, now, selected }) {
     pageTipped(win.label || win.key, h('span', { className: 'su-window-label' }, win.label || win.key)),
     pageTipped(pace === null ? summary : `${summary}. The tick marks where an even spend would be.`, h('div', { className: 'su-bar', role: 'img', 'aria-label': summary },
       h('span', { className: 'su-bar-track' }),
+      // Under the fill, so the fill's rounded end sits on the green rather than leaving a notch.
+      gain && remaining !== null && remaining < 100 ? h('span', { className: 'su-bar-gain', 'data-gain': Math.round(100 - remaining), style: { left: 0, right: 0 } }) : null,
       remaining ? h('span', { className: 'su-bar-fill', style: { width: `${remaining}%` } }) : null,
       pace === null ? null : h('span', { className: 'su-pace', style: { left: `clamp(1px, ${pace}%, calc(100% - 1px))` } }))),
     h('span', { className: 'su-window-value' }, remaining === null ? '—' : `${Math.round(remaining)}% left`),
@@ -4302,8 +4319,9 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-window-value{text-align:right;font-variant-numeric:tabular-nums}.su-window-reset{color:var(--ui-text-tertiary);white-space:nowrap;font-variant-numeric:tabular-nums}
 /* Weekly bars (and model-scoped weekly windows) are thick and the 5-hour bars thin, so the window the pool is judged on stands out; the pace tick overhangs each bar by 4px on both sides. */
 .su-bar{--su-bar:10px;position:relative;height:18px}.su-window[data-window^=five_hour] .su-bar{--su-bar:3px;height:16px}
-.su-bar-track,.su-bar-fill{position:absolute;left:0;top:calc(50% - var(--su-bar) / 2);height:var(--su-bar);border-radius:3px}
+.su-bar-track,.su-bar-fill,.su-bar-gain{position:absolute;left:0;top:calc(50% - var(--su-bar) / 2);height:var(--su-bar);border-radius:3px}
 .su-bar-track{right:0;background:color-mix(in srgb,var(--ui-text-primary) 12%,transparent)}.su-bar-fill{background:var(--su-color)}
+.su-bar-gain{background:repeating-linear-gradient(135deg,var(--su-color) 0 2px,transparent 2px 5px)}
 .su-pace{position:absolute;top:calc(50% - var(--su-bar) / 2 - 4px);width:2px;height:calc(var(--su-bar) + 8px);margin-left:-1px;border-radius:1px;background:var(--ui-text-primary)}
 /* Unit headline, verdict and the marks over the plot. */
 .su-verdict{display:flex;align-items:center;gap:6px;margin:-6px 0 0;font-size:12px;color:var(--ui-text-tertiary)}
