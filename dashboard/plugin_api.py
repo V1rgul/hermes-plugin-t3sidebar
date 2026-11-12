@@ -272,6 +272,32 @@ class HermesT3SidebarStore:
 				connection.close()
 		return self._transaction()
 
+	def organized_ids(self) -> tuple:
+		"""The sorted ids of organised and completed sessions, with the same schema and due-wake handling as state(), without building it."""
+		if self.path.is_file():
+			connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30, isolation_level=None)
+			try:
+				connection.execute("BEGIN")
+				try:
+					# woke_at and the run columns are probed, not used: a store that needs a migration still gets it from this request, as from state().
+					rows = connection.execute("SELECT session_id, state, wake_at, woke_at FROM session_metadata").fetchall()
+					completed = [sid for (sid,) in connection.execute("SELECT session_id FROM session_completions")]
+					connection.execute("SELECT started_at, ended_at, pending FROM session_runs LIMIT 0").fetchall()
+				except sqlite3.OperationalError as exc:
+					if not str(exc).startswith(("no such table:", "no such column:")):
+						raise
+				else:
+					now = float(self.clock())
+					if not math.isfinite(now):
+						raise ValueError("clock must return a finite UTC epoch timestamp")
+					if not any(state == "snoozed" and wake_at <= now for _sid, state, wake_at, _woke_at in rows):
+						connection.execute("COMMIT")
+						return tuple(sorted({sid for sid, *_ in rows} | set(completed)))
+			finally:
+				connection.close()
+		state = self._transaction()
+		return tuple(sorted(state["sessions"].keys() | state["completions"].keys()))
+
 	@staticmethod
 	def _state_rows(rows, completions, runs) -> dict:
 		result = {"version": 1, "sessions": {}, "completions": completions, "runs": runs}
@@ -1272,8 +1298,7 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		try:
 			profile = listing_profile(request, ("offset", "limit"))
 			if offset == 0:
-				state = store().state()
-				ids = tuple(sorted(state["sessions"].keys() | state["completions"].keys()))
+				ids = store().organized_ids()
 			else:
 				ids = ()
 			value = (sessions_reader or native_sessions)(profile, offset, limit, ids)
