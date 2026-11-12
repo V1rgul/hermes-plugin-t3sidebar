@@ -584,6 +584,17 @@ def forget_credit_reads():
 			del _CREDITS_READ[key]
 
 
+def forget_due_credit_reads(now):
+	"""Drop the active home's credit reads that are due at ``now`` anyway, so accounts that left the pool do not keep an entry for the life of the process."""
+	try:
+		home = _home_key(_default_home())
+	except Exception:
+		home = ""
+	with _CREDITS_LOCK:
+		for key in [key for key, read_at in _CREDITS_READ.items() if key[0] == home and now - read_at >= CREDITS_INTERVAL_S]:
+			del _CREDITS_READ[key]
+
+
 # ─── Store ───
 
 
@@ -690,6 +701,11 @@ class LimitsStore:
 					inserted += self._record_account(connection, provider, account, checked_at)
 			connection.execute("DELETE FROM limit_samples WHERE t < ?", (checked_at - RETENTION_S,))
 			connection.execute("DELETE FROM limit_provider_status WHERE checked_at < ?", (checked_at - RETENTION_S,))
+			# An account is shown only while it has samples, so its credit list goes with its last one; the current account's list follows the credit mode instead.
+			connection.execute(
+				"DELETE FROM limit_credits WHERE account_id != ? AND NOT EXISTS "
+				"(SELECT 1 FROM limit_samples WHERE limit_samples.provider = limit_credits.provider AND limit_samples.account_id = limit_credits.account_id)",
+				(CURRENT_CREDITS_ID,))
 		return inserted
 
 	@staticmethod
@@ -1131,6 +1147,7 @@ class LimitsSampler:
 				readings = self._collect()
 			except Exception as exc:
 				readings, error = None, f"collector_failed:{type(exc).__name__}"
+			forget_due_credit_reads(checked_at)
 			if readings is not None:
 				try:
 					inserted = self.store.record(readings, checked_at=checked_at)
