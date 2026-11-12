@@ -977,25 +977,36 @@ class _SamplerOwner:
 
 	def close(self):
 		with _OWNERS_LOCK:
-			if self.closed:
-				return
-			self.closed = True
-			if _OWNERS.get(self.key) is self:
-				del _OWNERS[self.key]
-			# Keep starts fenced until stop releases the process/home sampler slot. A currently collecting tick may finish, but no later tick will run.
-			if self.sampler is not None:
-				self.sampler.stop()
+			sampler = self._shut()
+		# Join outside the lock: an async /runtime poll takes it to start sampling, and a tick can take seconds to notice the stop.
+		if sampler is not None:
+			sampler.stop()
+
+	def _shut(self):
+		"""Under _OWNERS_LOCK: fence later starts and signal this owner's sampler; return it for the caller to join once the lock is released."""
+		if self.closed:
+			return None
+		self.closed = True
+		if _OWNERS.get(self.key) is self:
+			del _OWNERS[self.key]
+		# A currently collecting tick may finish, but no later tick will run, and a stopping sampler no longer holds the process/home sampler slot.
+		if self.sampler is not None:
+			self.sampler._stop.set()
+		return self.sampler
 
 
 def register_limits_sampler(ctx):
 	owner = _SamplerOwner(_default_home())
 	ctx.on_unload(owner.close)
+	stale = None
 	with _OWNERS_LOCK:
 		if not owner.closed:
 			previous = _OWNERS.get(owner.key)
 			if previous is not None:
-				previous.close()
+				stale = previous._shut()
 			_OWNERS[owner.key] = owner
+	if stale is not None:
+		stale.stop()
 
 
 def start_limits_sampler(store):
