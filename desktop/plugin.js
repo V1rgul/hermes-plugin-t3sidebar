@@ -3048,9 +3048,13 @@ async function readUsage(ctx, scope, path, validate) {
   if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load usage.');
   return validate(value);
 }
+// Orders limits reads, unknown banked-reset outcomes and reset confirmations by when each began. Numbers rather than times, so two events within one millisecond still compare.
+let usageOrder = 0;
+const nextUsageOrder = () => ++usageOrder;
 // The Limits page and the sidebar footer build the limits query the same way, so with equal preferences they share one cache entry and one five-minute poll instead of fetching the same history twice.
+// Each result carries, as `readNumber`, the number its read took before its request left, because the time the cache received a result says nothing about when the backend answered it. The number lives in the cache entry of its own Source/profile, activation and lookback and goes with it; being different for every read, it also keeps structural sharing from folding an equal answer into the previous object, which would carry the older number.
 const limitsQueryOptions = (ctx, scope, hours) => ({ queryKey: [...usageScopeKey(scope), 'limits', hours], staleTime: 60_000, refetchInterval: 300_000, retry: false,
-  queryFn: () => readUsage(ctx, scope, `/usage/limits?hours=${hours}`, validUsageLimits) });
+  queryFn: () => { const readNumber = nextUsageOrder(); return readUsage(ctx, scope, `/usage/limits?hours=${hours}`, value => ({ ...validUsageLimits(value), readNumber })); } });
 // Usage preferences live in plugin storage; this query mirrors them in memory so the footer follows a lookback or provider chosen on an open Limits page (storage itself has no change events).
 const USAGE_PREFERENCES_QUERY = ['hermes-t3sidebar-preferences', 'usage'];
 function useUsagePreferences(ctx) {
@@ -3086,10 +3090,8 @@ function Segmented({ label, options, value, onChange, showLabel = true, sizing, 
     : h('div', { className: 'su-seg' }, items.map(item => h('button', { key: item.id, type: 'button', 'aria-pressed': item.id === String(value), onClick: () => pick(item.id) }, item.label)));
   return h('div', { className: `su-control ${className}`.trim(), role: 'group', 'aria-label': label }, showLabel ? h('span', { className: 'su-control-label', 'aria-hidden': true }, label) : null, control);
 }
-// Banked-reset redemptions by Source/profile and account. Each request mints a new upstream idempotency key, so a second request is a second spend: a confirmation while one is in flight joins it, and after an outcome that neither confirms nor refuses the reset the account waits, from the time of that outcome, for a newer limits read.
+// Banked-reset redemptions by Source/profile and account. Each request mints a new upstream idempotency key, so a second request is a second spend: a confirmation while one is in flight joins it, and after an outcome that neither confirms nor refuses the reset the account waits for a limits read started after that outcome, whose number its mark holds.
 const redeemsInFlight = new Map(), unsettledRedeems = new Map();
-// Counts the recorded unknown outcomes, so a page other than the one that made the attempt (one opened again meanwhile) also shows the account waiting: the limits read the outcome starts again renders that page.
-let unsettledVersion = 0;
 function ScopedUsagePage({ ctx, scope, view }) {
   const client = useQueryClient(), shared = useUsagePreferences(ctx);
   // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made on the other page.
@@ -3111,27 +3113,26 @@ function ScopedUsagePage({ ctx, scope, view }) {
   // A longer lookback or past range refetches more history; the shorter one stays drawn meanwhile.
   const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHours), enabled: view === 'limits', placeholderData: previous => previous });
   const active = view === 'limits' ? limits : history;
-  const redeemScope = JSON.stringify([scope.connectionId, scope.profile]), limitsReadAt = useRef(0);
-  limitsReadAt.current = limits.dataUpdatedAt;
-  const [unsettledCount, setUnsettledCount] = useState(0);
-  const unsettled = useMemo(() => new Set([...(unsettledRedeems.get(redeemScope) || [])].filter(([, at]) => !(limits.dataUpdatedAt > at)).map(([id]) => id)), [redeemScope, limits.dataUpdatedAt, unsettledCount, unsettledVersion]);
-  // Spends one banked reset on one account, then reloads the limits so the page shows the restored allowance; any outcome that did not reset throws, which keeps the confirmation open with the reason. `opened` is when the confirmation was opened: after an unknown outcome only one opened later, once the limits were read again, may spend.
+  const redeemScope = JSON.stringify([scope.connectionId, scope.profile]), limitsRead = limits.data?.readNumber ?? 0, limitsReadRef = useRef(0);
+  limitsReadRef.current = limitsRead;
+  // Derived from the marks on every render, so any page of this Source/profile, one opened again meanwhile included, shows the account waiting once a render follows the outcome: the limits read the outcome starts renders every page that observes it. The set keeps its identity while the waiting accounts stay the same, sparing the memoised provider sections.
+  const waiting = JSON.stringify([...(unsettledRedeems.get(redeemScope) || [])].filter(([, mark]) => !(limitsRead > mark)).map(([id]) => id));
+  const unsettled = useMemo(() => new Set(JSON.parse(waiting)), [waiting]);
+  // Spends one banked reset on one account, then reloads the limits so the page shows the restored allowance; any outcome that did not reset throws, which keeps the confirmation open with the reason. `opened` is the number the confirmation took when it was opened: after an unknown outcome only one opened later, once a limits read started later has arrived, may spend.
   const redeem = useCallback((provider, account, opened = 0) => {
     const id = JSON.stringify([provider, account]), flight = JSON.stringify([redeemScope, id]);
     if (redeemsInFlight.has(flight)) return redeemsInFlight.get(flight);
-    const marks = unsettledRedeems.get(redeemScope) ?? new Map(), at = marks.get(id);
-    if (at !== undefined) {
-      if (!(limitsReadAt.current > at && opened > at)) return Promise.reject(new Error(UNCONFIRMED_REDEEM));
+    const marks = unsettledRedeems.get(redeemScope) ?? new Map(), mark = marks.get(id);
+    if (mark !== undefined) {
+      if (!(limitsReadRef.current > mark && opened > mark)) return Promise.reject(new Error(UNCONFIRMED_REDEEM));
       marks.delete(id);
     }
     // Recorded under the Source/profile rather than this page, so a page opened again or reached through another activation still waits for a newer read.
     // The map is looked up again here: another account's attempt may have recorded its own uncertainty under this Source/profile meanwhile, and replacing the map would forget it.
-    // A limits read already under way, in any activation of this Source/profile and with or without a page, may have been answered before the outcome, yet would finish after it: it is cancelled, so only a read started from here on can settle the account.
+    // Every limits read of this Source/profile, in any activation and with or without a page, is started again so the account is released promptly. Invalidation alone would join a first read still under way rather than start one, so reads under way are cancelled first; a read that cancellation cannot stop any more still carries its older number.
     const unsettle = () => {
       if (!unsettledRedeems.has(redeemScope)) unsettledRedeems.set(redeemScope, new Map());
-      unsettledRedeems.get(redeemScope).set(id, Date.now());
-      unsettledVersion += 1;
-      setUnsettledCount(count => count + 1);
+      unsettledRedeems.get(redeemScope).set(id, nextUsageOrder());
       const reads = { queryKey: [USAGE_ROOT, scope.connectionId, scope.profile], predicate: query => query.queryKey[4] === 'limits' };
       void client.cancelQueries(reads).then(() => client.invalidateQueries(reads));
     };
@@ -3844,7 +3845,7 @@ function BankedResets({ provider, account, windows, now, redeem, unsettled = fal
   const label = account.label || account.id, loss = canRedeem ? redeemLoss(provider, account, windows) : null;
   return h('div', { className: 'su-banked-row' },
     h('ul', { className: 'su-banked', 'aria-label': 'Banked resets' }, lines),
-    canRedeem ? h(RedeemButton, { usable: bankedRedeemable(windows), unsettled, onClick: () => { opened.current = Date.now(); setConfirming(true); } }) : null,
+    canRedeem ? h(RedeemButton, { usable: bankedRedeemable(windows), unsettled, onClick: () => { opened.current = nextUsageOrder(); setConfirming(true); } }) : null,
     canRedeem ? h(sdk.ConfirmDialog, { open: confirming, onClose: () => setConfirming(false), title: `Use one banked reset on ${label}?`,
       confirmLabel: 'Use reset', busyLabel: 'Using reset…', doneLabel: 'Reset used', destructive: !!loss?.percent,
       onConfirm: () => redeem(provider, account.id, opened.current) }, h(RedeemLoss, { loss })) : null);
