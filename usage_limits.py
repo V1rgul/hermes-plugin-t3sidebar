@@ -191,17 +191,19 @@ def _iso_epoch(value):
 
 
 def normalize_credits(payload):
-	"""Secret-free credit list from Codex's ``rate-limit-reset-credits`` body: status, grant and expiry only, or None when the body is not a credit list."""
+	"""Secret-free list of the still available credits in Codex's ``rate-limit-reset-credits`` body: status, grant and expiry only, or None when the body is not a credit list.
+
+	Only available credits are ever shown, so redeemed or malformed entries are dropped before ``MAX_CREDITS`` bounds the list; a long redeemed history cannot crowd out the credits after it.
+	"""
 	if not isinstance(payload, dict) or not isinstance(payload.get("credits"), list):
 		return None
 	credits = []
-	for credit in payload["credits"][:MAX_CREDITS]:
-		if not isinstance(credit, dict):
+	for credit in payload["credits"]:
+		if not isinstance(credit, dict) or credit.get("status") != "available":
 			continue
-		status = credit.get("status")
-		if not isinstance(status, str) or not re.fullmatch(r"[a-z_]{1,32}", status):
-			continue
-		credits.append({"status": status, "granted_at": _iso_epoch(credit.get("granted_at")), "expires_at": _iso_epoch(credit.get("expires_at"))})
+		credits.append({"status": "available", "granted_at": _iso_epoch(credit.get("granted_at")), "expires_at": _iso_epoch(credit.get("expires_at"))})
+		if len(credits) == MAX_CREDITS:
+			break
 	return credits
 
 

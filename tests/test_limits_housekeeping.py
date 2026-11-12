@@ -71,5 +71,19 @@ class CreditThrottleRetention(unittest.TestCase):
 		self.assertEqual(limits._CREDITS_READ, {(home, "openai-codex", "recent"): due + 1, ("another-home", "openai-codex", "removed"): due})
 
 
+class CreditListCap(unittest.TestCase):
+	def test_available_credits_after_a_long_history_are_kept(self):
+		history = [{"status": "redeemed", "expires_at": "2026-01-01T00:00:00Z"} for _ in range(limits.MAX_CREDITS + 10)]
+		junk = ["junk", {"status": "Bad Status!"}, {"expires_at": "2026-01-01T00:00:00Z"}] * limits.MAX_CREDITS
+		later = [{"status": "available", "expires_at": "2026-12-01T00:00:00Z"}, {"status": "available", "expires_at": None}, {"status": "available", "expires_at": "not a date"}]
+		credits = limits.normalize_credits({"credits": history + junk + later})
+		self.assertEqual([(credit["status"], credit["expires_at"]) for credit in credits], [("available", 1796083200.0), ("available", None), ("available", None)])
+
+	def test_the_cap_bounds_the_kept_credits(self):
+		listed = [{"status": "available", "expires_at": NOW + index} for index in range(limits.MAX_CREDITS + 5)]
+		credits = limits.normalize_credits({"credits": listed})
+		self.assertEqual([credit["expires_at"] for credit in credits], [NOW + index for index in range(limits.MAX_CREDITS)])
+
+
 if __name__ == "__main__":
 	unittest.main()

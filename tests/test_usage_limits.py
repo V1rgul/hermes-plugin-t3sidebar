@@ -654,8 +654,8 @@ class CreditTests(unittest.TestCase):
 		]}
 		credits = limits.normalize_credits(body)
 		self.assertEqual(credits[0], {"status": "available", "granted_at": dt_epoch("2026-09-29T18:58:39.740398+00:00"), "expires_at": dt_epoch("2026-10-29T18:58:39.740398+00:00")})
-		# Unparseable or zone-less times become None rather than being guessed in local time.
-		self.assertEqual([(c["status"], c["expires_at"]) for c in credits[1:]], [("redeemed", None), ("available", None)])
+		# Zone-less times become None rather than being guessed in local time; redeemed credits are never shown, so they are not kept.
+		self.assertEqual([(c["status"], c["expires_at"]) for c in credits[1:]], [("available", None)])
 		self.assertNotIn("secret", repr(credits))
 		self.assertIsNone(limits.normalize_credits({"available_count": 2}))
 		self.assertIsNone(limits.normalize_credits(None))
