@@ -205,7 +205,9 @@ test('prune stops only the browser whose profile argument is exactly the gone wo
   const gone = join(root, 'gone/wt.1'), data = join(root, 'gone-data');
   write(join(data, 'data/state.db'), 'x');
   const profiles = { target: `${gone}/.t3webapp/browser-profile`, longer: `${gone}/.t3webapp/browser-profile-other`, pattern: `${join(root, 'gone/wtx1')}/.t3webapp/browser-profile` };
-  const browsers = Object.fromEntries(Object.entries(profiles).map(([name, profile]) => [name, spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', `--user-data-dir=${profile}`], { stdio: 'ignore' })]));
+  // The last one has no such argument: its only one merely contains the target's between two newlines.
+  const args = { ...Object.fromEntries(Object.entries(profiles).map(([name, profile]) => [name, `--user-data-dir=${profile}`])), embedded: `not-a-profile\n--user-data-dir=${profiles.target}\nnot-a-profile` };
+  const browsers = Object.fromEntries(Object.entries(args).map(([name, arg]) => [name, spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', arg], { stdio: 'ignore' })]));
   const ended = Object.fromEntries(Object.entries(browsers).map(([name, child]) => [name, new Promise(resolve => child.once('exit', (code, signal) => resolve(signal)))]));
   try {
     for (const child of Object.values(browsers)) {
@@ -217,6 +219,7 @@ test('prune stops only the browser whose profile argument is exactly the gone wo
     assert.equal(await ended.target, 'SIGTERM');
     assert.equal(browsers.longer.exitCode === null && browsers.longer.signalCode === null, true);
     assert.equal(browsers.pattern.exitCode === null && browsers.pattern.signalCode === null, true);
+    assert.equal(browsers.embedded.exitCode === null && browsers.embedded.signalCode === null, true);
     assertScratchVolumes(result.calls);
   } finally {
     for (const child of Object.values(browsers)) child.kill('SIGKILL');

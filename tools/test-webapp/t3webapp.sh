@@ -98,8 +98,8 @@ follow() {
 	"$RUNTIME" exec -d --user hermes -e HERMES_HOME=/opt/data "$NAME" sh -c 'cd /opt/data/demo && exec /opt/hermes/.venv/bin/python seed_limits.py follow >> /opt/data/demo/limits-follow.log 2>&1' >/dev/null
 }
 
-# True when process $1 has exactly --user-data-dir=$2 among its arguments: the path is compared as a whole argument, never as a pattern, so a similar or longer profile path does not match.
-holds_profile() { { tr '\0' '\n' < "/proc/$1/cmdline"; } 2>/dev/null | grep -Fxq -- "--user-data-dir=$2"; }
+# True when process $1 has exactly --user-data-dir=$2 among its arguments: the path is compared as a whole argument, never as a pattern, so a similar or longer profile path does not match. The arguments are read as the kernel separates them, by NUL, so an argument holding newlines cannot pass for several.
+holds_profile() { grep -zFxq -- "--user-data-dir=$2" "/proc/$1/cmdline" 2>/dev/null; }
 
 # The pid file alone could name a recycled pid: the process must also hold this profile.
 browser_pid() {
