@@ -1,27 +1,45 @@
 // Chromium interaction benchmark for the real plugin React tree, built with production React on the synthetic SDK harness.
 // Deterministic work (card renders, mounted cards, component renders) is gated strictly because it does not depend on the machine; latency is gated against generous absolute budgets and, with a baseline git ref, against that ref measured interleaved on the same machine so load and CPU speed cancel out.
-// Usage: node tests/perf/browser-bench.mjs [--baseline <ref>|none] [--rounds N] [--warmup N] [--only suite,suite] [--cpu N] [--update-budgets]
+// Usage: node tests/perf/browser-bench.mjs [--baseline <ref>|none] [--rounds N] [--warmup N] [--only suite,suite] [--cpu N] [--update-budgets] [--budgets <path>]
 // These are synthetic fixtures in headless Chromium on Linux, not the Windows Electron client, its IPC or the network.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { access, copyFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { rmSync } from 'node:fs';
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { build } from 'esbuild';
 import { chromium } from 'playwright';
+import { mergeBudgets, missingBudgets, parseBudgets, selectSuites } from './browser-gates.mjs';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
-const budgetsPath = join(repo, 'tests/perf/browser-budgets.json');
 const work = join(process.env.TMPDIR || join(homedir(), '.hermes/cache/scratch'), 't3sidebar-perf');
 const { values: args } = parseArgs({ options: {
   baseline: { type: 'string' }, rounds: { type: 'string', default: '15' }, warmup: { type: 'string', default: '3' },
-  only: { type: 'string' }, cpu: { type: 'string', default: '1' }, 'update-budgets': { type: 'boolean', default: false }
+  only: { type: 'string' }, cpu: { type: 'string', default: '1' }, 'update-budgets': { type: 'boolean', default: false }, budgets: { type: 'string' }
 } });
 const rounds = Number(args.rounds), warmup = Number(args.warmup), cpu = Number(args.cpu);
 assert.ok(rounds >= 3 && warmup >= 0 && cpu >= 1, 'rounds >= 3, warmup >= 0 and cpu >= 1');
+const budgetsPath = args.budgets ? resolve(args.budgets) : join(repo, 'tests/perf/browser-budgets.json');
+
+const SIDEBAR = ['search-all:type', 'search-all:clear', 'search-narrow:type', 'search-narrow:clear', 'fold:archived', 'fold:archived', 'fold:working', 'fold:working', 'fold:snoozed', 'fold:snoozed',
+  'filter:open', 'filter:close', 'project:side', 'project:all', 'focus', 'focus', 'poll', 'scroll:down', 'scroll:up'];
+const ALL_SUITES = [
+  { name: 'sidebar', motion: 'reduce', large: true, ops: SIDEBAR },
+  // Ordinary motion keeps the fold transitions; the frame gap over the transition is what a user perceives as jank. Renders during a transition depend on frame timing (identical code measured 21 or 22 cards), so this suite reports its counts without gating them; the reduced-motion suite gates the same folds.
+  { name: 'sidebar-motion', motion: 'no-preference', large: true, ops: ['fold:archived', 'fold:archived', 'fold:working', 'fold:working'], observeMs: 450, countsGated: false },
+  { name: 'usage', motion: 'reduce', ops: ['usage:open', 'usage:period-right', 'usage:period-left', 'usage:mode', 'usage:mode', 'usage:split', 'usage:split', 'usage:hover', 'usage:hover', 'page:close'] },
+  { name: 'limits', motion: 'reduce', ops: ['limits:open', 'limits:hover', 'limits:hover', 'limits:lookback', 'limits:lookback', 'page:close'] }
+];
+// The selection and the budgets are checked before anything is built, so a typo fails in a second rather than after a run that gated nothing.
+let SUITES, budgets;
+try {
+  SUITES = selectSuites(ALL_SUITES, args.only);
+  budgets = parseBudgets(await readFile(budgetsPath, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw new Error(`unreadable budget file ${budgetsPath}: ${error.message}`); }), { path: budgetsPath, recording: args['update-budgets'] });
+} catch (error) { console.log(`FAIL ${error.message}`); process.exit(1); }
 
 const git = (...argv) => execFileSync('git', argv, { cwd: repo, encoding: 'utf8' }).trim();
 // Without an explicit ref, a feature branch compares against its merge base with main and uncommitted work on main against HEAD; a clean main has nothing to compare and relies on the absolute budgets.
@@ -40,20 +58,24 @@ async function bundle(source, out) {
     nodePaths: [join(repo, 'node_modules')], alias: { '@hermes/plugin-sdk': join(source, 'tests/sdk.mock.mjs') }, define: { 'process.env.NODE_ENV': '"production"' }, logLevel: 'warning' });
   await copyFile(join(source, 'harness/index.html'), join(out, 'index.html'));
 }
-const variants = { candidate: join(work, 'variants/candidate') };
-await rm(join(work, 'variants'), { recursive: true, force: true });
+// Each run builds and serves from its own directory and removes only that one, so runs from several checkouts can share the parent with the raw results.
+await mkdir(work, { recursive: true });
+const run = await mkdtemp(join(work, 'browser-run-'));
+process.once('exit', () => rmSync(run, { recursive: true, force: true }));
+for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) process.once(signal, () => process.exit(code));
+const variants = { candidate: join(run, 'variants/candidate') };
 await bundle(repo, variants.candidate);
 if (baselineSha) {
   // The baseline is the committed tree of the ref, extracted outside the checkout so the working tree is never touched.
-  const source = join(work, `src-${baselineSha.slice(0, 12)}`);
-  await rm(source, { recursive: true, force: true }); await mkdir(source, { recursive: true });
+  const source = join(run, `src-${baselineSha.slice(0, 12)}`);
+  await mkdir(source, { recursive: true });
   execFileSync('sh', ['-c', `git archive ${baselineSha} desktop harness tests | tar -x -C "${source}"`], { cwd: repo });
-  variants.baseline = join(work, 'variants/baseline');
+  variants.baseline = join(run, 'variants/baseline');
   await bundle(source, variants.baseline);
 }
 
 const server = createServer(async (request, response) => {
-  const root = join(work, 'variants');
+  const root = join(run, 'variants');
   try {
     const path = resolve(root, '.' + new URL(request.url, 'http://localhost').pathname);
     if (!path.startsWith(root + sep)) throw new Error('Invalid path');
@@ -203,18 +225,10 @@ function seedLarge() {
 
 // ---- Node side ----
 
-const SIDEBAR = ['search-all:type', 'search-all:clear', 'search-narrow:type', 'search-narrow:clear', 'fold:archived', 'fold:archived', 'fold:working', 'fold:working', 'fold:snoozed', 'fold:snoozed',
-  'filter:open', 'filter:close', 'project:side', 'project:all', 'focus', 'focus', 'poll', 'scroll:down', 'scroll:up'];
-const SUITES = [
-  { name: 'sidebar', motion: 'reduce', large: true, ops: SIDEBAR },
-  // Ordinary motion keeps the fold transitions; the frame gap over the transition is what a user perceives as jank. Renders during a transition depend on frame timing (identical code measured 21 or 22 cards), so this suite reports its counts without gating them; the reduced-motion suite gates the same folds.
-  { name: 'sidebar-motion', motion: 'no-preference', large: true, ops: ['fold:archived', 'fold:archived', 'fold:working', 'fold:working'], observeMs: 450, countsGated: false },
-  { name: 'usage', motion: 'reduce', ops: ['usage:open', 'usage:period-right', 'usage:period-left', 'usage:mode', 'usage:mode', 'usage:split', 'usage:split', 'usage:hover', 'usage:hover', 'page:close'] },
-  { name: 'limits', motion: 'reduce', ops: ['limits:open', 'limits:hover', 'limits:hover', 'limits:lookback', 'limits:lookback', 'page:close'] }
-].filter(suite => !args.only || args.only.split(',').includes(suite.name));
-
 const errors = [];
-const browser = await chromium.launch({ executablePath: await executable(), headless: true, args: ['--no-sandbox'] });
+// The server is already listening: a missing or failing Chromium must not leave it open.
+let browser;
+try { browser = await chromium.launch({ executablePath: await executable(), headless: true, args: ['--no-sandbox'] }); } catch (error) { server.close(); throw error; }
 async function openPage(variant, suite) {
   const context = await browser.newContext({ viewport: { width: 1300, height: 1000 }, deviceScaleFactor: 1, timezoneId: 'Europe/Paris', reducedMotion: suite.motion });
   await context.addInitScript(`(${installProbe})()`);
@@ -286,7 +300,6 @@ try {
 
 // ---- Gates ----
 
-const budgets = JSON.parse(await readFile(budgetsPath, 'utf8').catch(() => '{"ops":{},"steady":{}}'));
 const tolerance = { ratio: 1.25, floorMs: 3, renderRatio: 1.25, ...budgets.tolerance };
 const failures = [], warnings = [], rows = [];
 const summarize = entry => entry && entry.samples.length ? { median: median(entry.samples), p95: quantile(entry.samples, 0.95), maxGap: quantile(entry.gaps, 0.95), longTasks: entry.longTasks / entry.samples.length } : null;
@@ -313,6 +326,8 @@ for (const [suite, count] of Object.entries(steady.candidate)) {
   if (base !== undefined && suite.startsWith('sidebar') && count > base) failures.push(`${suite}: ${count} cards mounted at rest vs baseline ${base}`);
 }
 if (errors.length) failures.push(...errors.map(error => `page error ${error}`));
+if (!rows.length) failures.push('no operation was measured');
+if (!args['update-budgets']) failures.push(...missingBudgets(budgets, rows.map(row => row.key), Object.keys(steady.candidate)));
 
 const fmt = (value, digits = 1) => value === undefined || value === null ? '—' : value.toFixed(digits);
 const pad = (text, width, left = false) => left ? String(text).padEnd(width) : String(text).padStart(width);
@@ -329,19 +344,18 @@ console.log(`raw results: ${output}`);
 
 if (args['update-budgets']) {
   // Latency budgets stay generous so only a catastrophic regression trips them on a loaded machine; the baseline comparison catches the subtle ones. Work counts get a small slack for incidental renders such as an age label crossing a minute.
-  const next = { tolerance, ops: {}, steady: {} };
+  const measured = { tolerance, ops: {}, steady: {} };
   for (const row of rows) {
     const entry = { ms: Math.ceil(Math.max(row.median * 3, row.median + 15)) };
     if (/^sidebar-motion\//.test(row.key)) entry.maxGap = Math.ceil(Math.max(row.maxGap * 2, 60));
     for (const metric of ['cardRenders', 'mounted', 'componentRenders']) if (countsGated(row.key) && row.counts[metric] !== undefined) entry[metric] = row.counts[metric] + 2 + Math.ceil(row.counts[metric] * 0.1);
-    next.ops[row.key] = entry;
+    measured.ops[row.key] = entry;
   }
-  for (const [suite, count] of Object.entries(steady.candidate)) next.steady[suite] = { mountedRows: count + 2 + Math.ceil(count * 0.1) };
+  for (const [suite, count] of Object.entries(steady.candidate)) measured.steady[suite] = { mountedRows: count + 2 + Math.ceil(count * 0.1) };
+  const next = mergeBudgets(budgets, measured, ALL_SUITES.map(suite => suite.name), SUITES.map(suite => suite.name));
   await writeFile(budgetsPath, JSON.stringify(next, null, 2) + '\n');
   console.log(`budgets written: ${budgetsPath}`);
 }
-const unbudgeted = rows.filter(row => !budgets.ops?.[row.key]).map(row => row.key);
-if (unbudgeted.length && !args['update-budgets']) console.log(`WARN ${unbudgeted.length} operations have no budget yet (${unbudgeted.slice(0, 3).join(', ')}${unbudgeted.length > 3 ? ', …' : ''}); record them with --update-budgets`);
 for (const warning of warnings) console.log(`WARN ${warning}`);
 if (failures.length) { for (const failure of failures) console.log(`FAIL ${failure}`); process.exitCode = 1; }
 else console.log('PASS browser performance gates');

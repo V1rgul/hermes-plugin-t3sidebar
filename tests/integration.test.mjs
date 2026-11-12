@@ -1,22 +1,17 @@
 // Actual Python HTTP companion + actual frontend controller; SDK routing is a test adapter.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { QueryClient } from '@tanstack/react-query';
 import plugin, { createController, buildSections } from '../desktop/plugin.js';
+import { startFixture } from './child-fixture.mjs';
 
 test('frontend controller interoperates with real FastAPI and persistent SQLite metadata', { timeout: 15000 }, async () => {
-	const child = spawn(process.env.PYTHON || 'python', [new URL('./backend_fixture.py', import.meta.url).pathname], { stdio: ['ignore', 'pipe', 'pipe'] });
-	const exited = once(child, 'exit');
-	let stderr = '';
-	child.stderr.on('data', bytes => { stderr += bytes; });
-	const lines = createInterface({ input: child.stdout });
-	const timeout = setTimeout(() => child.kill('SIGTERM'), 14000);
+	const fixture = startFixture(process.env.PYTHON || 'python', [new URL('./backend_fixture.py', import.meta.url).pathname], { readyMs: 12000 });
+	// The test's own timeout abandons this function without running its finally; the watchdog still stops the fixture so the runner can exit.
+	const timeout = setTimeout(() => fixture.stop(), 14000);
 	try {
-		const [line] = await once(lines, 'line');
+		const line = await fixture.ready;
 		const base = `http://127.0.0.1:${Number(line)}/api/plugins/${plugin.id}`;
 		const rest = async (path, options = {}) => {
 			const url = new URL(base + path);
@@ -32,7 +27,7 @@ test('frontend controller interoperates with real FastAPI and persistent SQLite 
 		for (let attempt = 0; attempt < 40; attempt++) {
 			try { await rest('/state'); ready = true; break; } catch { await delay(50); }
 		}
-		assert.ok(ready, `HTTP fixture did not start: ${stderr}`);
+		assert.ok(ready, `HTTP fixture did not start: ${fixture.stderr()}`);
 		const scope = { connectionId: 'fixture', profile: 'default', epoch: 1 };
 		let cached;
 		const pageCache = new QueryClient();
@@ -129,8 +124,95 @@ test('frontend controller interoperates with real FastAPI and persistent SQLite 
 		pageCache.clear();
 	} finally {
 		clearTimeout(timeout);
-		lines.close();
-		child.kill('SIGTERM');
-		await exited;
+		await fixture.stop();
+	}
+});
+
+test('two clients sync one draft through the real HTTP companion: it appears, the newer edit wins and a deletion propagates', { timeout: 15000 }, async () => {
+	const fixture = startFixture(process.env.PYTHON || 'python', [new URL('./backend_fixture.py', import.meta.url).pathname], { readyMs: 12000 });
+	const timeout = setTimeout(() => fixture.stop(), 14000);
+	const clients = [];
+	try {
+		const port = await fixture.ready;
+		const base = `http://127.0.0.1:${port}/api/plugins/${plugin.id}`;
+		const posted = [];
+		const rest = async (path, options = {}) => {
+			const url = new URL(base + path);
+			url.searchParams.set('profile', 'default');
+			if (options.method === 'POST') posted.push(path);
+			const response = await fetch(url, { method: options.method || 'GET', headers: { 'content-type': 'application/json' }, ...(options.body ? { body: JSON.stringify(options.body) } : {}) });
+			const body = await response.json();
+			if (!response.ok) throw new Error(`${response.status}: ${JSON.stringify(body)}`);
+			return body;
+		};
+		let ready = false;
+		for (let attempt = 0; attempt < 40; attempt++) {
+			try { await rest('/state'); ready = true; break; } catch { await delay(50); }
+		}
+		assert.ok(ready, `HTTP fixture did not start: ${fixture.stderr()}`);
+		const scope = { connectionId: 'fixture', profile: 'default', epoch: 1 };
+		const route = { connectionId: 'fixture', profile: 'default', targetProfile: 'default' };
+		// One Desktop per client: its own plugin storage, query cache, composers (only a mounted one, present in `composers`, accepts text) and focused stored session.
+		const desktop = initialFocus => {
+			const storage = new Map(), composers = {}, cache = new QueryClient();
+			let focused = initialFocus;
+			const host = {
+				state: { focusedSessionOwner: { get: () => ({ connectionId: 'fixture', profile: 'default' }) }, focusedStoredSessionId: { get: () => focused } },
+				composer: {
+					getDraft: async id => composers[id] ?? null,
+					setDraft: async (id, text) => { if (!(id in composers)) return false; composers[id] = text; return true; }
+				}
+			};
+			const ctx = { rest, storage: { get: (key, fallback) => storage.has(key) ? structuredClone(storage.get(key)) : fallback, set: (key, value) => storage.set(key, structuredClone(value)) } };
+			const controller = createController(ctx, cache, { capture: () => scope, routes: async () => [route], host });
+			clients.push({ controller, cache });
+			return { controller, cache, composers, focus: id => { focused = id; } };
+		};
+		const a = desktop('recent-1'), b = desktop('recent-2');
+		const target = { key: 'recent-1', ids: ['recent-1'], address: 'recent-1', cwd: '/recent' };
+		const elsewhere = { key: 'recent-2', ids: ['recent-2'], address: 'recent-2', cwd: '/recent' };
+		const listed = view => view.map(draft => draft.session_id);
+
+		// Typed in A, focused on the session.
+		a.composers['recent-1'] = 'typed in A';
+		assert.deepEqual(listed(await a.controller.syncDrafts(scope, () => target)), ['recent-1']);
+		// B, focused elsewhere, learns that the session has a draft; entering it puts the text into its empty composer.
+		b.composers['recent-2'] = '';
+		const seen = await b.controller.syncDrafts(scope, () => elsewhere);
+		assert.deepEqual(listed(seen), ['recent-1']);
+		assert.equal(JSON.stringify(seen).includes('typed in A'), false, 'the card view carries presence, not text');
+		b.focus('recent-1');
+		b.composers['recent-1'] = '';
+		await b.controller.enterDraft(scope, target);
+		assert.equal(b.composers['recent-1'], 'typed in A');
+
+		// Both edit before either syncs; B's edit is the newer one and wins even though A sends last.
+		a.composers['recent-1'] = 'older edit in A';
+		await a.controller.noteDraft(scope, target);
+		await delay(100);
+		b.composers['recent-1'] = 'newer edit in B';
+		await b.controller.noteDraft(scope, target);
+		await b.controller.syncDrafts(scope, () => target);
+		await a.controller.syncDrafts(scope, () => target);
+		assert.equal(a.composers['recent-1'], 'newer edit in B', 'the losing composer takes the winning text');
+		await b.controller.syncDrafts(scope, () => target);
+		assert.equal(b.composers['recent-1'], 'newer edit in B');
+
+		// Cleared in B: the deletion reaches A, whose composer still held the synced text.
+		b.composers['recent-1'] = '';
+		assert.deepEqual(listed(await b.controller.syncDrafts(scope, () => target)), []);
+		assert.deepEqual(listed(await a.controller.syncDrafts(scope, () => target)), []);
+		assert.equal(a.composers['recent-1'], '');
+		assert.deepEqual(listed(await a.controller.syncDrafts(scope, () => target)), [], 'a cleared composer does not bring the draft back');
+
+		assert.deepEqual([...new Set(posted)], ['/drafts/sync'], 'syncing drafts writes nothing else');
+		for (const { cache } of clients) {
+			const cached = JSON.stringify(cache.getQueryCache().getAll().map(query => query.state.data));
+			assert.equal(/typed in A|edit in [AB]/.test(cached), false, 'no query cache holds draft text');
+		}
+	} finally {
+		for (const { controller, cache } of clients) { controller.dispose(); cache.clear(); }
+		clearTimeout(timeout);
+		await fixture.stop();
 	}
 });

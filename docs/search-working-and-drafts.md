@@ -1,5 +1,7 @@
 # Search, Working height and composer-draft refinements
 
+> Historical report from 2026-10-23 (`6bab7a0`). Its composer-text section predates draft sync (`0f5ec7c`, 2026-11-10): the plugin now keeps the text of unsent drafts in its own `ctx.storage` entry and companion store, exchanges it through `/drafts/sync`, and writes a synced draft into a mounted composer with `setDraft`. Card and query caches still hold only draft presence; see [Preserved contracts](performance.md#preserved-contracts) for the current boundary.
+
 ## Search and editing controls
 
 Search does not automatically unfold Snoozed or Archived. Their filtered counts remain in the headings, manual expansion works during search, and matching folded shelves do not generate a false no-results message. Working may still temporarily expand for matching searches without overwriting saved folds.

@@ -61,6 +61,8 @@ class CompletionStore:
         """)
         if "pending" not in {row[1] for row in connection.execute("PRAGMA table_info(session_runs)")}:
             connection.execute("ALTER TABLE session_runs ADD COLUMN pending INTEGER NOT NULL DEFAULT 0 CHECK (pending IN (0, 1))")
+        # A turn's end names only its turn, and every end hook looks it up under the writer lock.
+        connection.execute("CREATE INDEX IF NOT EXISTS session_runs_turn ON session_runs (turn_id)")
 
     @staticmethod
     def read(connection):
@@ -138,10 +140,11 @@ class CompletionStore:
             (session_id, done_token),
         ).rowcount == 1
 
-    def record(self, session_id, turn_id):
+    def record(self, session_id, turn_id, current_only=False):
         """Record once per turn, even after acknowledgement; return whether new.
 
         A new turn supersedes the current marker. Replayed old turns cannot overwrite newer markers or resurrect an acknowledged completion.
+        current_only states that this turn's start was recorded for session_id: if another turn has replaced it there since, that turn started later and this late one records nothing.
         """
         validate_session_id(session_id)
         validate_done_token(turn_id)
@@ -150,6 +153,11 @@ class CompletionStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             self.ensure_schema(connection)
+            if current_only:
+                latest = connection.execute("SELECT turn_id FROM session_runs WHERE session_id = ?", (session_id,)).fetchone()
+                if latest is not None and latest[0] != turn_id:
+                    connection.execute("COMMIT")
+                    return False
             inserted = connection.execute(
                 "INSERT INTO completion_receipts (session_id, turn_id) VALUES (?, ?) "
                 "ON CONFLICT(session_id, turn_id) DO NOTHING",

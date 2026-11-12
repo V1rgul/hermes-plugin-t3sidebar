@@ -8,7 +8,9 @@ import asyncio
 import dataclasses
 import importlib.util
 import json
+import logging
 import math
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -20,6 +22,9 @@ from typing import Annotated, Callable, Literal
 from types import SimpleNamespace
 from fastapi import APIRouter, HTTPException, Path as PathParameter, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+log = logging.getLogger(__name__)
 
 
 # Dashboard loads this file directly, without a reliable package name. Load exactly our fixed sibling ledger; no request or profile value controls code.
@@ -267,6 +272,32 @@ class HermesT3SidebarStore:
 				connection.close()
 		return self._transaction()
 
+	def organized_ids(self) -> tuple:
+		"""The sorted ids of organised and completed sessions, with the same schema and due-wake handling as state(), without building it."""
+		if self.path.is_file():
+			connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30, isolation_level=None)
+			try:
+				connection.execute("BEGIN")
+				try:
+					# woke_at and the run columns are probed, not used: a store that needs a migration still gets it from this request, as from state().
+					rows = connection.execute("SELECT session_id, state, wake_at, woke_at FROM session_metadata").fetchall()
+					completed = [sid for (sid,) in connection.execute("SELECT session_id FROM session_completions")]
+					connection.execute("SELECT started_at, ended_at, pending FROM session_runs LIMIT 0").fetchall()
+				except sqlite3.OperationalError as exc:
+					if not str(exc).startswith(("no such table:", "no such column:")):
+						raise
+				else:
+					now = float(self.clock())
+					if not math.isfinite(now):
+						raise ValueError("clock must return a finite UTC epoch timestamp")
+					if not any(state == "snoozed" and wake_at <= now for _sid, state, wake_at, _woke_at in rows):
+						connection.execute("COMMIT")
+						return tuple(sorted({sid for sid, *_ in rows} | set(completed)))
+			finally:
+				connection.close()
+		state = self._transaction()
+		return tuple(sorted(state["sessions"].keys() | state["completions"].keys()))
+
 	@staticmethod
 	def _state_rows(rows, completions, runs) -> dict:
 		result = {"version": 1, "sessions": {}, "completions": completions, "runs": runs}
@@ -276,6 +307,30 @@ class HermesT3SidebarStore:
 			metadata["pinned"] = bool(metadata["pinned"])
 			result["sessions"][key] = metadata
 		return result
+
+	def forget(self, session_ids) -> None:
+		"""Drop the organisation, Done marker and turn start of sessions whose native deletion was verified.
+
+		Delivery receipts stay, so a replayed end of their turns still cannot bring a Done back. Creates neither the store nor a table.
+		"""
+		if any(not isinstance(sid, str) or re.fullmatch(SESSION_ID_PATTERN, sid) is None for sid in session_ids):
+			raise ValueError("invalid session id")
+		if not session_ids or not self.path.is_file():
+			return
+		connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+		try:
+			connection.execute("BEGIN IMMEDIATE")
+			tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+			for table in ("session_metadata", "session_completions", "session_runs"):
+				if table in tables:
+					connection.executemany(f"DELETE FROM {table} WHERE session_id = ?", [(sid,) for sid in session_ids])
+			connection.execute("COMMIT")
+		except BaseException:
+			if connection.in_transaction:
+				connection.execute("ROLLBACK")
+			raise
+		finally:
+			connection.close()
 
 	def mutate(self, session_id: str, body: SessionAction) -> dict:
 		if not isinstance(session_id, str) or re.fullmatch(SESSION_ID_PATTERN, session_id) is None:
@@ -424,8 +479,9 @@ def standalone_subagent_count(server, row, snapshot, db, home):
 			session_db=owner_db, route=row["id"], include_fallback_evicted=True))
 		with server._sessions_lock:
 			return count if admitted_db() is owner_db else None
-	except Exception:
+	except Exception as exc:
 		# Older cores, stale objects and failed projections are unknown per row.
+		log.debug("Running subagent count unavailable (%s)", type(exc).__name__)
 		return None
 
 
@@ -678,9 +734,10 @@ def standalone_runtime(request, profile, actor):
 			metadata = runtime_display_metadata(server, captured, projects)
 			# Native legacy previews may contain pending prompts. Runtime needs
 			# liveness/identity only; do not return that text or any extra fields.
-			# Compaction is transparent: a turn's own compaction keeps its native start, and a manual one counts from when it was first seen.
-			item["turn_started_at"] = turn_starts.get(identity) or runtime_compression_started_at(
+			# Compaction is transparent: a turn's own compaction keeps its native start, and a manual one counts from when it was first seen. Called even under a native turn, so a compaction that ends meanwhile is forgotten.
+			compaction_started_at = runtime_compression_started_at(
 				home, row["id"], parents[identity][0], compressing.get(identity, False))
+			item["turn_started_at"] = turn_starts.get(identity) or compaction_started_at
 			item["awaiting_processes"] = awaiting.get(identity)
 			item["compacting"] = compacting.get(identity, False)
 			item["running_subagents"] = standalone_subagent_count(server, row,
@@ -775,11 +832,11 @@ async def native_runtime(request, profile):
 			projection = await read(connection, SessionRef(reader.profile_id, row["id"]),
 				{"session_id": row["id"], "profile": profile}, kind="subagents")
 			row["running_subagents"] = running_subagent_count(projection.get("subagents"))
-		except Exception:
+		except Exception as exc:
 			# Unsupported worker projections, stale generations, missing seams or
 			# authority failures cannot turn unknown into idle or retain an old count.
 			# Cancellation (BaseException) still cancels the request.
-			pass
+			log.debug("Subagent projection unavailable (%s)", type(exc).__name__)
 	return value
 
 
@@ -789,8 +846,6 @@ LIST_FIELDS = frozenset({"id", "source", "archived", "resolved_id", "title", "pr
 
 def card_projects(db):
 	"""Read this SessionDB's catalog once, without schema initialization or home lookup."""
-	from hermes_cli import projects_db
-
 	db_path = getattr(db, "db_path", None)
 	if db_path is None:
 		return []
@@ -798,10 +853,15 @@ def card_projects(db):
 	if not path.is_file():
 		return []
 	try:
+		from hermes_cli.projects_db import list_projects
+	except ImportError:
+		# A core without this helper still lists every chat, just without registered projects.
+		return []
+	try:
 		connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
 		try:
 			connection.row_factory = sqlite3.Row
-			return projects_db.list_projects(connection, include_archived=False)
+			return list_projects(connection, include_archived=False)
 		finally:
 			connection.close()
 	except sqlite3.Error:
@@ -809,18 +869,27 @@ def card_projects(db):
 		return []
 
 
-def card_project(cwd, projects):
-	from hermes_cli.projects_db import _normalize_path
+def project_owners(projects):
+	"""Every registered folder with its project, longest first, so the first owner of a path is the one project_for_path picks; prepare it once per request."""
+	# A stable sort keeps catalog order among equally long folders, as max() did.
+	return sorted(((folder.path, project) for project in projects for folder in project.folders), key=lambda owner: -len(owner[0]))
 
+
+def card_project(cwd, projects, owners=None):
+	"""``owners``, when given, is project_owners(projects) prepared by the caller for many cards."""
 	if not isinstance(cwd, str) or not cwd.strip():
 		return {"id": "__no_project__", "name": "Home", "icon": None, "color": None, "cwd": None, "is_home": True}
+	try:
+		from hermes_cli.projects_db import _normalize_path
+	except ImportError:
+		# Without Hermes's own normalizer no folder can be proven to own this one: show it unregistered rather than guess.
+		target = cwd.strip()
+		return {"id": target, "name": Path(target).name or target, "icon": None, "color": None, "cwd": target}
 	target = _normalize_path(cwd)
-	# Match project_for_path's longest owning folder, including secondary folders.
-	owners = [(folder.path, project) for project in projects for folder in project.folders
-		if target == folder.path or target.startswith(folder.path.rstrip("/\\") + "/")]
-	if owners:
-		folder, project = max(owners, key=lambda owner: len(owner[0]))
-		return {"id": project.id, "name": project.name, "icon": project.icon, "color": project.color, "cwd": folder}
+	# Match project_for_path's longest owning folder, including secondary folders, and its descendant test: either the OS separator or "/".
+	for folder, project in (project_owners(projects) if owners is None else owners):
+		if target == folder or any(target.startswith(folder.rstrip("/\\") + separator) for separator in (os.sep, "/")):
+			return {"id": project.id, "name": project.name, "icon": project.icon, "color": project.color, "cwd": folder}
 	return {"id": target, "name": Path(target).name or target, "icon": None, "color": None, "cwd": target}
 
 
@@ -908,13 +977,15 @@ def card_rows(db, rows):
 		for sid in [row["id"], *(row.get("_lineage_ids") or [])]}
 	billing = card_billing_providers(db, billing_ids) if billing_ids else {}
 	projects = card_projects(db) if rows else []
+	owners = project_owners(projects)
 	result = []
 	for row, tip, provider in zip(rows, tips, providers):
 		chain = list(dict.fromkeys([row["id"], *(row.get("_lineage_ids") or [])]))
+		chain_ids = set(chain)
 		compressed = bool(row.get("_lineage_ids"))
 		usage = [segments.get(sid, {}) for sid in chain] if compressed else [row]
 		# A subagent reached from several segments of this conversation counts once.
-		children = {sid: counts for seed in chain for sid, counts in subagents.get(seed, {}).items() if sid not in chain}
+		children = {sid: counts for seed in chain for sid, counts in subagents.get(seed, {}).items() if sid not in chain_ids}
 		if provider is None:
 			candidates = set().union(*(billing.get(sid, set()) for sid in chain))
 			evidence = {name for segment in usage for name in (card_provider(segment.get("model_config")), provider_name(segment.get("billing_provider"))) if name}
@@ -926,7 +997,7 @@ def card_rows(db, rows):
 			counts[key] = sum(values) if all(type(value) is int and value >= 0 for value in values) else None
 		item = {k: row[k] for k in LIST_FIELDS if k in row}
 		item["archived"] = bool(row.get("archived", False))
-		item.update(project=card_project(row.get("cwd"), projects), provider=provider,
+		item.update(project=card_project(row.get("cwd"), projects, owners), provider=provider,
 			model=tip.get("model"), source=tip.get("source", row.get("source")), **counts)
 		item["total_tokens"] = counts["input_tokens"] + counts["output_tokens"] if all(value is not None for value in counts.values()) else None
 		result.append(item)
@@ -1071,12 +1142,21 @@ def native_title(profile, session_id):
 def native_delete_snapshot(profile, session_id):
 	"""Exact read-only CAS counters/absence; never resolve titles, prefixes or aliases."""
 
+	return native_delete_snapshots(profile, [session_id])[0]
+
+
+def native_delete_snapshots(profile, session_ids):
+	"""native_delete_snapshot of each id, in order, through one opening of the store."""
+
 	db = open_session_db(profile, read_only=True)
 	try:
-		row = db.get_session(session_id)
-		return {"session_id": session_id, "exists": row is not None,
-			"runtime_revision": row["runtime_revision"] if row else 0,
-			"runtime_generation": row["runtime_generation"] if row else None}
+		snapshots = []
+		for session_id in session_ids:
+			row = db.get_session(session_id)
+			snapshots.append({"session_id": session_id, "exists": row is not None,
+				"runtime_revision": row["runtime_revision"] if row else 0,
+				"runtime_generation": row["runtime_generation"] if row else None})
+		return snapshots
 	finally:
 		db.close()
 
@@ -1111,10 +1191,10 @@ async def native_delete(request, profile, session_id, body):
 			or any(not isinstance(sid, str) or re.fullmatch(SESSION_ID_PATTERN, sid) is None for sid in deleted_ids)
 			or len(set(deleted_ids)) != len(deleted_ids)):
 			raise HTTPException(503, "native_delete_receipt_invalid")
-	for sid in deleted_ids:
-		snapshot = await asyncio.to_thread(native_delete_snapshot, profile, sid)
-		if snapshot["session_id"] != sid or snapshot["exists"] is not False:
-			raise HTTPException(503, "native_delete_verification_failed")
+	snapshots = await asyncio.to_thread(native_delete_snapshots, profile, deleted_ids)
+	if ([snapshot["session_id"] for snapshot in snapshots] != deleted_ids
+		or any(snapshot["exists"] is not False for snapshot in snapshots)):
+		raise HTTPException(503, "native_delete_verification_failed")
 	# Allowlist the response: no native session payloads/configuration escape.
 	value = {"ok": True, "profile": profile, "session_id": session_id,
 		"request_id": body.request_id, "operation": "delete", "deleted_ids": deleted_ids,
@@ -1136,7 +1216,8 @@ def native_drafts(profile, drafts):
 			db.close()
 	except Exception:
 		projects = []
-	return [{**draft, "project": card_project(draft["cwd"], projects) if draft["text"] is not None and draft["cwd"] else None} for draft in drafts]
+	owners = project_owners(projects)
+	return [{**draft, "project": card_project(draft["cwd"], projects, owners) if draft["text"] is not None and draft["cwd"] else None} for draft in drafts]
 
 
 async def native_rename(request, profile, session_id, body):
@@ -1185,8 +1266,9 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			return None
 		try:
 			return limits_sampler()
-		except Exception:
+		except Exception as exc:
 			# Sampling is best-effort telemetry; it must never fail the sidebar request that happened to start it.
+			log.debug("Limits sampler unavailable (%s)", type(exc).__name__)
 			return None
 
 	def listing_profile(request, allowed=()):
@@ -1224,8 +1306,7 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		try:
 			profile = listing_profile(request, ("offset", "limit"))
 			if offset == 0:
-				state = store().state()
-				ids = tuple(sorted(state["sessions"].keys() | state["completions"].keys()))
+				ids = store().organized_ids()
 			else:
 				ids = ()
 			value = (sessions_reader or native_sessions)(profile, offset, limit, ids)
@@ -1294,9 +1375,15 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise HTTPException(503, "native_delete_unavailable") from exc
 		try:
 			# A deleted session's draft would otherwise come back as a card that reopens it in a new session.
-			drafts().delete(value["deleted_ids"])
-		except Exception:
-			pass
+			await asyncio.to_thread(drafts().delete, value["deleted_ids"])
+		except Exception as exc:
+			# The verified deletion is still reported as such; the drafts left behind are only logged.
+			log.warning("Drafts of deleted sessions were not cleared (%s)", type(exc).__name__)
+		try:
+			# Otherwise read on every state poll, and kept as organised ids to backfill, for good.
+			await asyncio.to_thread(store().forget, value["deleted_ids"])
+		except Exception as exc:
+			log.warning("Metadata of deleted sessions was not cleared (%s)", type(exc).__name__)
 		return value
 
 	@api.post("/drafts/sync")
@@ -1324,8 +1411,9 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise HTTPException(503, "native_rename_unavailable") from exc
 
 	@api.get("/state", response_model=FlowState)
-	def get_state(response: Response):
+	def get_state(request: Request, response: Response):
 		response.headers["Cache-Control"] = "no-store"
+		listing_profile(request)
 		return store().state()
 
 	@api.post("/sessions/{session_id}", response_model=FlowState)

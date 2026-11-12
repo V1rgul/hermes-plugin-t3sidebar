@@ -85,18 +85,23 @@ def history_payload(db_path, *, days, tz, now, pricing=None):
 		try:
 			tables = _tables(conn)
 			marker = _change_marker(conn, tables)
+			# A published snapshot is never mutated, so it is copied after the lock that every history request takes is released.
 			with _cache_lock:
 				hit = _cache.get(key)
 				if hit is not None and hit[0] == marker:
 					_cache.move_to_end(key)
-					payload = copy.deepcopy(hit[1])
-					payload["generated_at"] = now
-					return payload
+				else:
+					hit = None
+			if hit is not None:
+				payload = copy.deepcopy(hit[1])
+				payload["generated_at"] = now
+				return payload
 			payload = _compute(conn, tables, days, tz, now, buckets, window_end, price, db_key)
 		finally:
 			conn.rollback()
+	snapshot = copy.deepcopy(payload)
 	with _cache_lock:
-		_cache[key] = (marker, copy.deepcopy(payload))
+		_cache[key] = (marker, snapshot)
 		_cache.move_to_end(key)
 		while len(_cache) > _CACHE_LIMIT:
 			_cache.popitem(last=False)
@@ -565,10 +570,14 @@ def _render(days, tz, now, buckets, window_end, series, missing):
 		label = provider or "unknown"
 		entry = {**arrays, "cost_usd": cost, "user_messages": users}
 		# The model view is split by model alone: one model billed through several providers (or an unrecorded one) is one series, naming its provider only while there is a single one. Both views sum the already-rounded (provider, model) series, so they always agree to the token.
-		model_bucket = models.setdefault(model, empty(model, model, label, model))
+		if model not in models:
+			models[model] = empty(model, model, label, model)
+		model_bucket = models[model]
 		if model_bucket["provider"] != label:
 			model_bucket["provider"] = None
-		for bucket in (model_bucket, providers.setdefault(label, empty(label, label, label, None))):
+		if label not in providers:
+			providers[label] = empty(label, label, label, None)
+		for bucket in (model_bucket, providers[label]):
 			for name in fields:
 				bucket[name] = [left + right for left, right in zip(bucket[name], entry[name])]
 			bucket["cost_usd"] = [left + right for left, right in zip(bucket["cost_usd"], cost)]

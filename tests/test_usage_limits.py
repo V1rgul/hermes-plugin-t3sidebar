@@ -458,7 +458,7 @@ class CollectorTests(unittest.TestCase):
 	def test_current_account_read_goes_through_hermes_signed_request(self):
 		import hermes_cli.plugin_provider_requests as requests
 		calls = []
-		body = {"credits": [{"status": "available", "granted_at": "2026-09-29T18:58:39Z", "expires_at": "2026-10-29T18:58:39Z", "id": "secret-id"}]}
+		body = {"credits": [{"status": "available", "granted_at": "2026-09-29T18:58:39Z", "expires_at": "2099-10-29T18:58:39Z", "id": "secret-id"}]}
 
 		def signed(provider, method, url, **kwargs):
 			calls.append((provider, method, url, kwargs))
@@ -639,10 +639,6 @@ class SamplerTests(unittest.TestCase):
 		self.assertEqual(payload["sampler"]["interval_s"], 300.0)
 
 
-if __name__ == "__main__":
-	unittest.main()
-
-
 class CreditTests(unittest.TestCase):
 	def test_normalizes_codex_credit_list_to_status_and_times(self):
 		body = {"available_count": 2, "total_earned_count": 9, "credits": [
@@ -654,8 +650,8 @@ class CreditTests(unittest.TestCase):
 		]}
 		credits = limits.normalize_credits(body)
 		self.assertEqual(credits[0], {"status": "available", "granted_at": dt_epoch("2026-09-29T18:58:39.740398+00:00"), "expires_at": dt_epoch("2026-10-29T18:58:39.740398+00:00")})
-		# Unparseable or zone-less times become None rather than being guessed in local time.
-		self.assertEqual([(c["status"], c["expires_at"]) for c in credits[1:]], [("redeemed", None), ("available", None)])
+		# Zone-less times become None rather than being guessed in local time; redeemed credits are never shown, so they are not kept.
+		self.assertEqual([(c["status"], c["expires_at"]) for c in credits[1:]], [("available", None)])
 		self.assertNotIn("secret", repr(credits))
 		self.assertIsNone(limits.normalize_credits({"available_count": 2}))
 		self.assertIsNone(limits.normalize_credits(None))
@@ -828,3 +824,7 @@ class ClaudeCodeFallbackTests(unittest.TestCase):
 
 def dt_epoch(text):
 	return datetime.fromisoformat(text).timestamp()
+
+
+if __name__ == "__main__":
+	unittest.main()

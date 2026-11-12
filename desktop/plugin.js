@@ -16,6 +16,10 @@ const DRAFT_SYNC_MS = 30_000;
 const DRAFT_FOCUS_MS = 2000;
 // Received drafts a client keeps; deletion markers, the oldest first, are forgotten beyond it.
 const DRAFT_STATE_LIMIT = 500;
+// The companion's request limits: DraftSync.changes in dashboard/plugin_api.py, and session_drafts.MAX_TEXT_LENGTH, which counts code points.
+const DRAFT_SYNC_BATCH = 200;
+const DRAFT_TEXT_LIMIT = 200_000;
+const draftFits = text => text.length <= DRAFT_TEXT_LIMIT || [...text].length <= DRAFT_TEXT_LIMIT;
 export const draftSyncKey = scope => ['hermes-t3sidebar-draft-sync', scope.connectionId, scope.profile, scope.epoch];
 const ARCHIVE_TAIL_STALE_MS = 30000;
 const HISTORY_PAGE_GC_MS = 300000;
@@ -180,8 +184,8 @@ export function compactTokens(row) {
   const thousands = Math.round(total / 1000);
   return thousands < 1000 ? `${tokenFormatter.format(thousands)}K` : `${millionTokenFormatter.format(total / 1000000)}M`;
 }
-export function isEmptySession(row, runtimes = []) {
-  if (aliases(row).length > 1) return false; // Native counts describe only the tip, not ancestor history.
+export function isEmptySession(row, runtimes = [], ids = aliases(row)) {
+  if (ids.length > 1) return false; // Native counts describe only the tip, not ancestor history.
   const knownCount = value => Number.isInteger(value) && value >= 0;
   const runtimeCounts = runtimes.map(item => item.message_count).filter(knownCount);
   const count = knownCount(row.message_count) ? row.message_count : runtimeCounts.includes(0) ? 0 : null;
@@ -314,7 +318,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
       : meta.state === 'snoozed' && !woke ? 'snoozed'
       : meta.pinned ? 'pinned'
       : observed === 'working' ? 'working' : 'active';
-    const newSession = isEmptySession(row, runtimeKnown ? matches : []);
+    const newSession = isEmptySession(row, runtimeKnown ? matches : [], ids);
     // A draft saved on the server, typed here or on another client: it keeps an empty session's card and tints any card.
     const drafted = !!draftIds?.size && ids.some(id => draftIds.has(id));
     if ((tokens.length || project !== '*') && !matchesFilters({ ...row, newSession }, tokens, project)) continue;
@@ -405,20 +409,30 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     let stored;
     try { stored = ctx.storage.get(key, null); } catch (_) { stored = null; }
     const entries = value => Object.entries(value && typeof value === 'object' ? value : {});
+    const optional = (value, type) => value == null || typeof value === type;
+    // Each record is checked whole and dropped alone when invalid, so one damaged entry cannot break the view or take the others with it.
+    const validKnown = entry => entry && (entry.text === null || typeof entry.text === 'string') && optional(entry.cwd, 'string') && Number.isFinite(entry.edited_at) &&
+      optional(entry.seen, 'string') && optional(entry.project, 'object') && !Array.isArray(entry.project);
+    const validPending = change => change && typeof change.text === 'string' && Number.isFinite(change.edited_at) && optional(change.cwd, 'string') &&
+      (change.discarded === undefined || typeof change.discarded === 'string');
     // settled: the focused session once its composer has been reconciled; until then it is being entered, and an empty composer there is
-    // a copy not restored yet, never a deletion.
-    const state = { key, running: null, settled: null,
+    // a copy not restored yet, never a deletion. unsaved / unshown: changed since last stored / since the cards last got the view.
+    // reads: counts the reads of the focused composer, so that only the latest one applies.
+    // deleted: sessions whose deletion was verified here, kept for the controller's life so that nothing begun before the deletion (a sync answer, even one the companion handled afterwards, a composer read, the leave hook) can bring their draft back; the accepted cost is that a draft another client writes for one of them afterwards is not shown here, though it stays on the companion and on that client.
+    const state = { key, running: null, settled: null, unsaved: false, unshown: false, reads: 0, deleted: new Set(),
       cursor: Number.isSafeInteger(stored?.cursor) && stored.cursor >= 0 ? stored.cursor : 0,
-      known: new Map(entries(stored?.known).filter(([, entry]) => entry && (entry.text === null || typeof entry.text === 'string'))),
-      pending: new Map(entries(stored?.pending).filter(([, change]) => change && typeof change.text === 'string' && Number.isFinite(change.edited_at))) };
+      known: new Map(entries(stored?.known).filter(([, entry]) => validKnown(entry))),
+      pending: new Map(entries(stored?.pending).filter(([, change]) => validPending(change))) };
     draftStates.set(key, state);
     return state;
   }
   function saveDraftState(state) {
-    for (const [id, entry] of state.known) {
-      if (state.known.size <= DRAFT_STATE_LIMIT) break;
-      if (entry.text === null) state.known.delete(id);
+    // A marker's edit time is when its draft was deleted; Map order is only when its session was first seen.
+    if (state.known.size > DRAFT_STATE_LIMIT) {
+      const markers = [...state.known].filter(([, entry]) => entry.text === null).sort((a, b) => a[1].edited_at - b[1].edited_at);
+      for (const [id] of markers.slice(0, state.known.size - DRAFT_STATE_LIMIT)) state.known.delete(id);
     }
+    state.unsaved = false;
     try { ctx.storage.set(state.key, { cursor: state.cursor, known: Object.fromEntries(state.known), pending: Object.fromEntries(state.pending) }); }
     catch (_) { /* Sync still works for this run. */ }
   }
@@ -427,12 +441,13 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     const view = [];
     for (const id of new Set([...state.known.keys(), ...state.pending.keys()])) {
       const known = state.known.get(id), pending = state.pending.get(id);
-      if (pending ? pending.text : known?.text) view.push({ session_id: id, cwd: pending?.cwd ?? known?.cwd ?? null, project: known?.project ?? null, edited_at: known?.edited_at ?? pending.edited_at });
+      if (pending ? pending.text : known?.text) view.push({ session_id: id, cwd: pending?.cwd ?? known?.cwd ?? null, project: known?.project ?? null, edited_at: pending?.edited_at ?? known.edited_at });
     }
     return view;
   }
   function publishDrafts(scope, state) {
     saveDraftState(state);
+    state.unshown = false;
     if (!disposed && sameScope(scope, env.capture())) client.setQueryData(draftSyncKey(scope), draftView(state));
   }
   // Cards' own draft markers, which only the focused card polls: rereads their composers once a draft was deleted or changed elsewhere.
@@ -444,31 +459,45 @@ export function createController(ctx, client = queryClient, env = { capture: cap
        without stored history, so the draft is put back (as it is into a composer that never held this draft);
      - any other difference is a local edit, kept as pending and sent with the next sync (blank text deletes the draft).
      Only a mounted composer is written. False means retry once it is: a failed write, or, when entering, a composer not mounted yet. */
-  async function reconcileDraft(scope, state, target, { mounted = false, entering = false } = {}) {
+  async function reconcileDraft(scope, state, target, { mounted = () => false, entering = false, current = () => true } = {}) {
     const raw = await readComposer(scope, target.address);
+    // A newer read has started since: it sees at least as recent a composer, and acts on it.
+    if (!current()) return true;
     if (raw === null) return !entering;
     const key = draftKeyFor(state, target), local = raw.trim() ? raw : '', localHash = draftHash(local);
+    if (state.deleted.has(key)) return true;
     const known = state.known.get(key), pending = state.pending.get(key);
     if (local === (pending ? pending.text : known?.text ?? '')) {
-      if (known && !pending) known.seen = localHash;
+      if (known && !pending && known.seen !== localHash) { known.seen = localHash; state.unsaved = true; }
       // Typed before its session was listed: the folder is known now.
-      if (pending && !pending.cwd && target.cwd) pending.cwd = target.cwd;
+      if (pending && !pending.cwd && target.cwd) { pending.cwd = target.cwd; state.unsaved = state.unshown = true; }
       return true;
     }
-    if (!pending && known && (known.seen === localHash || entering && known.text !== null && (!local || known.seen == null))) {
-      if (!mounted) return true;
+    // A composer without a fingerprint never matched any version of this draft: still empty, it last matched its absence.
+    if (!pending && known && (known.seen === localHash || known.seen == null && !local || entering && known.text !== null && (!local || known.seen == null))) {
+      if (!mounted()) return true;
       if (!(await writeComposer(scope, target.address, known.text ?? ''))) return false;
       known.seen = draftHash(known.text ?? '');
+      state.unsaved = true;
       return true;
     }
+    // The same prune can erase text not synced yet; a pending deletion has no text to put back.
+    if (entering && !local && pending?.text) return !mounted() || writeComposer(scope, target.address, pending.text);
+    // A copy of a draft discarded here whose deletion is not synced yet, as when its clear failed: cleared like one deleted elsewhere, never an edit.
+    if (local && pending?.discarded === localHash) return !mounted() || writeComposer(scope, target.address, '');
     state.pending.set(key, { text: local, cwd: target.cwd ?? pending?.cwd ?? known?.cwd ?? null, edited_at: Date.now() / 1000 });
+    state.unsaved = state.unshown = true;
     return true;
   }
   // The focused composer, by whichever reader comes first after a focus change (entry, the local poll or a sync).
+  // Focus can move to another session of the same scope while a read is in flight: the reader of the session it left then neither writes that composer nor marks it settled, which would make the session focused now count as entered again, and a clear there as a prune.
   async function reconcileFocused(scope, state, target) {
     if (!ownsFocus(scope)) return false;
-    const done = await reconcileDraft(scope, state, target, { mounted: true, entering: state.settled !== target.key });
-    if (done) state.settled = target.key;
+    const focused = () => ownsFocus(scope) && target.ids.includes(env.host.state?.focusedStoredSessionId?.get());
+    // Reads complete out of order, also across leaving and re-entering one session: a read of a session no longer focused supersedes none.
+    const ticket = focused() ? ++state.reads : state.reads, current = () => state.reads === ticket;
+    const done = await reconcileDraft(scope, state, target, { mounted: focused, entering: state.settled !== target.key, current });
+    if (done && focused() && current()) state.settled = target.key;
     return done;
   }
   // A composer still holding the exact text of a draft deleted since (discarded here, sent or cleared elsewhere), which Desktop keeps until that
@@ -478,10 +507,21 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     return pending ? pending.text === '' && pending.discarded === hash : known?.text === null && known.seen === hash;
   }
   // Deletes a draft with the next sync. Composers still holding its text are cleared when next focused, as for a draft sent elsewhere.
-  // local: the composer's text, for a draft this client has not synced yet.
+  // local: the composer's text when it was read; the copy it still holds, possibly typed since the last poll, is the one to retire.
   function dropDraft(state, id, cwd = null, local = null) {
-    const text = state.pending.get(id)?.text || state.known.get(id)?.text || local?.trim() && local;
+    const text = local?.trim() && local || state.pending.get(id)?.text || state.known.get(id)?.text;
     if (text) state.pending.set(id, { text: '', cwd, edited_at: Date.now() / 1000, discarded: draftHash(text) });
+  }
+  // A deleted session's draft goes with it, so no draft-only card brings it back and no pending edit is sent for it again; the companion marks its own row deleted.
+  function forgetDrafts(scope, ids) {
+    const state = draftState(scope);
+    for (const id of ids) {
+      state.deleted.add(id);
+      state.pending.delete(id);
+      const known = state.known.get(id);
+      if (known && known.text !== null) state.known.set(id, { ...known, text: null, edited_at: Date.now() / 1000 });
+    }
+    publishDrafts(scope, state);
   }
   const ownsFocus = scope => { const owner = env.host.state?.focusedSessionOwner?.get(); return owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile; };
   // Text of one composer, or null when nothing answers for it (an unmounted session falls back to Desktop's local copy until its prune).
@@ -576,6 +616,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       if (sessions.length !== data.sessions.length || sessions.some((row, i) => row !== data.sessions[i])) client.setQueryData(key, { ...data, sessions });
     }
   }
+  // Settings saves in flight, by save id. They outlive the settings page that started them, so a remounted page must still see them.
+  const savingSettings = sdk.atom([]);
   return {
     dispose() { disposed = true; generation++; pendingRoutes = null; archiveHead = null; deleteRequests.clear(); doneAcks.clear(); }, check,
     async hasDraft(scope, row) {
@@ -603,11 +645,11 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       readTicket(scope, ticket);
       const route = await routeFor(scope);
       try {
-        const value = qualified(await fenced(scope, () => ctx.rest('/sessions?offset=0&limit=500')), scope, route);
+        const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=0&limit=${HISTORY_PAGE_SIZE}`)), scope, route);
         readTicket(scope, ticket); return value;
       } catch (error) {
         readTicket(scope, ticket);
-        const value = await fenced(scope, () => env.host.listPersistedSessions(route, { profile: route?.targetProfile || scope.profile, limit: 500 }));
+        const value = await fenced(scope, () => env.host.listPersistedSessions(route, { profile: route?.targetProfile || scope.profile, limit: HISTORY_PAGE_SIZE }));
         readTicket(scope, ticket);
         return { ...value, capped: true, companionError: error.message };
       }
@@ -653,9 +695,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const route = await routeFor(scope), sessions = [];
       let has_more = true;
       for (let page = 1; page <= pages && has_more; page++) {
-        const offset = page * 500;
+        const offset = page * HISTORY_PAGE_SIZE;
         const value = await fenced(scope, () => client.fetchQuery({ queryKey: [...scopeKey(scope), 'page', offset], staleTime: Infinity, gcTime: HISTORY_PAGE_GC_MS,
-          queryFn: async () => { const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=${offset}&limit=500`)), scope, route); readTicket(scope, ticket); return value; } }));
+          queryFn: async () => { const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=${offset}&limit=${HISTORY_PAGE_SIZE}`)), scope, route); readTicket(scope, ticket); return value; } }));
         readTicket(scope, ticket);
         sessions.push(...value.sessions); has_more = value.has_more;
       }
@@ -687,11 +729,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           try {
             state = validState(await fenced(scope, () => ctx.rest('/state')));
             const meta = state.sessions[id];
-            const restore = payload.restoreMetadata;
-            const metadataPayload = restore ? (restore.state === 'snoozed' && restore.wake_at > Date.now() / 1000 ? { action: 'snooze', wake_at: restore.wake_at } : { action: restore.state === 'settled' ? 'settle' : 'restore' })
-              // Record an explicit Ready restoration even for external archives with no plugin metadata,
-              // so the companion's organized-row backfill retains an older unarchived conversation.
-              : !archived && (!meta || meta.state !== 'active') ? { action: 'restore' } : null;
+            // Record an explicit Ready restoration even for external archives with no plugin metadata,
+            // so the companion's organized-row backfill retains an older unarchived conversation.
+            const metadataPayload = !archived && (!meta || meta.state !== 'active') ? { action: 'restore' } : null;
             if (metadataPayload) {
               await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: metadataPayload }));
               state = verifyAction(validState(await fenced(scope, () => ctx.rest('/state'))), id, metadataPayload);
@@ -700,11 +740,17 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           check(scope); client.setQueryData(key, state);
           return { archived, before };
         }
-        if (['pin', 'snooze'].includes(payload.action)) {
-          const route = await routeFor(scope);
-          if (await archiveFlag(scope, route, id)) throw new Error('Unarchive this session before pinning or snoozing it.');
+        if (['pin', 'snooze'].includes(payload.action)) await routeFor(scope);
+        try { await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: payload })); }
+        catch (error) {
+          // The companion refuses pinning or snoozing an archived session itself (HTTP 409 native_session_archived); the transport reports it as "409: <body>".
+          // Only that exact refusal is translated; any other status, detail or unparsable body keeps its own error.
+          const body = /(?:^|error:\s*)409:\s*(\{.*\})\s*$/is.exec(String(error?.message ?? error))?.[1];
+          let detail;
+          try { detail = body && JSON.parse(body).detail; } catch (_) { /* not the companion's JSON error body */ }
+          if (['pin', 'snooze'].includes(payload.action) && detail === 'native_session_archived') throw new Error('Unarchive this session before pinning or snoozing it.');
+          throw error;
         }
-        await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: payload }));
         const value = verifyAction(validState(await fenced(scope, () => ctx.rest('/state'))), id, payload);
         await client.cancelQueries({ queryKey: key, exact: true }); check(scope);
         client.setQueryData(key, value);
@@ -761,38 +807,55 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     // client's cursor come back. Concurrent callers share the call in flight.
     async syncDrafts(scope, focus) {
       const state = draftState(scope);
-      if (state.running) return state.running;
+      // The state outlives an activation, but a call in flight is fenced to the one that started it.
+      if (state.running && sameScope(state.running.scope, scope)) return state.running.work;
       const work = (async () => {
         const target = focus?.();
         if (target) await reconcileFocused(scope, state, target);
         const route = await routeFor(scope);
-        const sent = [...state.pending];
-        const body = { since: state.cursor, sent_at: Date.now() / 1000,
-          changes: sent.map(([session_id, change]) => ({ session_id, text: change.text, edited_at: change.edited_at, ...(change.cwd ? { cwd: change.cwd } : {}) })) };
-        const value = await fenced(scope, () => ctx.rest('/drafts/sync', { method: 'POST', body }));
-        if (value?.profile !== (route?.targetProfile || scope.profile) || !Number.isSafeInteger(value.cursor) || value.cursor < 0 || typeof value.reset !== 'boolean' ||
-          !Array.isArray(value.drafts) || !value.drafts.every(validDraft)) throw new Error('Invalid current-profile drafts response.');
-        if (value.reset) {
+        // At most one batch per call, the rest in the calls that follow at once; a text the companion would refuse stays pending here without holding up the others.
+        const tried = new Set(), sendable = ([id, change]) => !tried.has(id) && draftFits(change.text);
+        let received = false, more;
+        do {
+          const sent = [...state.pending].filter(sendable).slice(0, DRAFT_SYNC_BATCH);
+          for (const [id] of sent) tried.add(id);
+          const body = { since: state.cursor, sent_at: Date.now() / 1000,
+            changes: sent.map(([session_id, change]) => ({ session_id, text: change.text, edited_at: change.edited_at, ...(change.cwd ? { cwd: change.cwd } : {}) })) };
+          const value = await fenced(scope, () => ctx.rest('/drafts/sync', { method: 'POST', body }));
+          if (value?.profile !== (route?.targetProfile || scope.profile) || !Number.isSafeInteger(value.cursor) || value.cursor < 0 || typeof value.reset !== 'boolean' ||
+            !Array.isArray(value.drafts) || !value.drafts.every(validDraft)) throw new Error('Invalid current-profile drafts response.');
+          // The companion returns the current row of every changed session, once: anything else is not an acknowledgment of what was sent.
           const listed = new Set(value.drafts.map(draft => draft.session_id));
-          for (const [id, entry] of state.known) if (entry.text !== null && !listed.has(id)) state.known.set(id, { ...entry, text: null });
-        }
-        for (const draft of value.drafts) {
-          state.known.set(draft.session_id, { text: draft.text, cwd: draft.cwd, project: draft.project ?? null, edited_at: draft.edited_at, seen: state.known.get(draft.session_id)?.seen ?? null });
-        }
-        for (const [id, change] of sent) {
-          // The composer held the sent text, so an edit that lost to a newer one is then replaced like any remote change.
-          const known = state.known.get(id);
-          if (known) known.seen = change.discarded ?? draftHash(change.text);
-          if (state.pending.get(id) === change) state.pending.delete(id);
-        }
-        state.cursor = value.cursor;
+          if (listed.size !== value.drafts.length || !sent.every(([id]) => listed.has(id)) || value.drafts.some(draft => draft.seq > value.cursor)) {
+            throw new Error('Invalid current-profile drafts response.');
+          }
+          if (value.reset) {
+            for (const [id, entry] of state.known) if (entry.text !== null && !listed.has(id)) state.known.set(id, { ...entry, text: null });
+          }
+          for (const draft of value.drafts) {
+            if (state.deleted.has(draft.session_id)) continue;
+            state.known.set(draft.session_id, { text: draft.text, cwd: draft.cwd, project: draft.project ?? null, edited_at: draft.edited_at, seen: state.known.get(draft.session_id)?.seen ?? null });
+          }
+          for (const [id, change] of sent) {
+            // The composer held the sent text, so an edit that lost to a newer one is then replaced like any remote change.
+            const known = state.known.get(id);
+            if (known) known.seen = change.discarded ?? draftHash(change.text);
+            if (state.pending.get(id) === change) state.pending.delete(id);
+          }
+          state.cursor = value.cursor;
+          received ||= value.drafts.length > 0;
+          more = [...state.pending].some(sendable);
+          if (more) saveDraftState(state);
+        } while (more);
         if (target) await reconcileFocused(scope, state, target);
         saveDraftState(state);
-        if (value.drafts.length) refreshCardDrafts(scope);
+        if (received) refreshCardDrafts(scope);
+        state.unshown = false;
         return draftView(state);
       })();
-      state.running = work;
-      try { return await work; } finally { if (state.running === work) state.running = null; }
+      const running = { scope: { ...scope }, work };
+      state.running = running;
+      try { return await work; } finally { if (state.running === running) state.running = null; }
     },
     localDrafts(scope) { return draftView(draftState(scope)); },
     flushDrafts(scope) { refresh(scope, { queryKey: draftSyncKey(scope) }); },
@@ -810,9 +873,11 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     // The focused composer between syncs: records a change so its card, and the edit time sent with the next sync, follow it within DRAFT_FOCUS_MS.
     async noteDraft(scope, target) {
       if (!ownsFocus(scope)) return;
-      const state = draftState(scope), before = JSON.stringify(draftView(state));
+      const state = draftState(scope);
       await reconcileFocused(scope, state, target);
-      if (JSON.stringify(draftView(state)) !== before) publishDrafts(scope, state);
+      // Pending text is stored as soon as it changes, so closing Desktop keeps it; the cards are only told when what they show changed.
+      if (state.unshown) publishDrafts(scope, state);
+      else if (state.unsaved) saveDraftState(state);
     },
     async leaveDraft(scope, target) {
       const state = draftState(scope);
@@ -826,6 +891,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const text = id && (state.pending.has(id) ? state.pending.get(id).text : state.known.get(id)?.text);
       if (!text) throw new Error('This draft is no longer saved. Refresh and retry.');
       const cwd = state.pending.get(id)?.cwd ?? state.known.get(id)?.cwd ?? null;
+      // The version copied is its text in its folder, where it reopens: a change to either during the handoff is newer content, and stays.
+      const source = () => JSON.stringify([state.pending.has(id) ? state.pending.get(id).text : state.known.get(id)?.text, state.pending.get(id)?.cwd ?? state.known.get(id)?.cwd ?? null]);
+      const copied = source();
       const route = await routeFor(scope); check(scope);
       let created = null;
       if (cwd) created = await this.newChat(scope, { id: cwd, path: cwd }, `hermes-t3sidebar:draft:${id}:${draftHash(text)}`);
@@ -836,7 +904,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       for (let attempt = 0; attempt < 20 && !(written = await writeComposer(scope, address, text)); attempt++) await new Promise(resolve => setTimeout(resolve, 100));
       if (!written) throw new Error('A new session opened, but the draft could not be put into its composer. It stays saved.');
       if (created) state.pending.set(created.stored_session_id, { text, cwd, edited_at: Date.now() / 1000 });
-      dropDraft(state, id, cwd);
+      // Only the version copied leaves: one received or typed during the handoff is newer, and stays.
+      if (source() === copied) dropDraft(state, id, cwd);
       publishDrafts(scope, state);
       this.flushDrafts(scope);
     },
@@ -914,6 +983,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         }
         check(scope);
         updateRows(scope, new Set(deletedIds), null);
+        forgetDrafts(scope, deletedIds);
         const owner = env.host.state?.focusedSessionOwner?.get();
         if (owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile && hasAlias(row, env.host.state?.focusedStoredSessionId?.get())) {
           await fenced(scope, () => env.host.newChat(route));
@@ -1090,7 +1160,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
 
     async newChat(scope, project, idempotencyKey) {
       const route = await routeFor(scope); check(scope);
-      if (project === undefined) return env.host.newChat(route); // Preserve archive-and-advance fallback.
+      if (project === undefined) return fenced(scope, () => env.host.newChat(route)); // Preserve archive-and-advance fallback.
       if (project.isNoProject || project.id === '__no_project__') throw new Error('Home creation is unavailable: the public Desktop SDK cannot select a detached workspace. No session was created. Use native Home new chat.');
       if (typeof project.path !== 'string' || !project.path || !idempotencyKey) throw new Error('Choose a project folder before creating a session.');
       const create = params => fenced(scope, () => env.host.requestProfile(route, 'session.create', params));
@@ -1114,6 +1184,14 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const info = await fenced(scope, () => env.host.requestProfile(route, 'session.cwd.set', { session_id: created.session_id, cwd: project.path }));
       if (info?.cwd !== project.path) throw new Error('The session workspace was not confirmed. Do not send a message until the native workspace is checked.');
       return created;
+    },
+    savingSettings,
+    // One save per id at a time, whichever page mount asks; the work itself fences its publication with check().
+    async saveSetting(id, work) {
+      if (savingSettings.get().includes(id)) return;
+      savingSettings.set([...savingSettings.get(), id]);
+      try { await work(); }
+      finally { savingSettings.set(savingSettings.get().filter(item => item !== id)); }
     }
   };
 }
@@ -1364,38 +1442,24 @@ function MenuAction({ name, codicon, className = '', destructive = false, childr
     h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, codicon ? h(sdk.Codicon, { name: codicon, size: 14 }) : icon(name)), h('span', { className: 'sf-menu-label' }, children));
 }
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
-function Settings({ ctx }) {
+function Settings({ ctx, controller }) {
   const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
   const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [linesError, setLinesError] = useState(''), [tokensError, setTokensError] = useState('');
+  // Write, exact readback, then publication to the mounted sidebar; a failure is reported under its own setting.
+  const savePreference = (storageKey, queryKey, value, message, setFailure) => {
+    try {
+      ctx.storage.set(storageKey, value);
+      if (ctx.storage.get(storageKey) !== value) throw new Error(message);
+      client.setQueryData(queryKey, value); setFailure('');
+    } catch (err) { setFailure(err.message); }
+  };
   const save = value => {
     if (!validSnoozeTime(value)) { setError('Choose a valid time.'); return; }
-    try {
-      ctx.storage.set('snooze-time', value);
-      if (ctx.storage.get('snooze-time') !== value) throw new Error('The snooze preset time was not saved.');
-      client.setQueryData(SNOOZE_TIME_KEY, value); setError('');
-    } catch (err) { setError(err.message); }
+    savePreference('snooze-time', SNOOZE_TIME_KEY, value, 'The snooze preset time was not saved.', setError);
   };
-  const saveDetails = on => {
-    try {
-      ctx.storage.set('working-details', on);
-      if (ctx.storage.get('working-details') !== on) throw new Error('The Working indicator setting was not saved.');
-      client.setQueryData(WORKING_DETAILS_KEY, on); setDetailsError('');
-    } catch (err) { setDetailsError(err.message); }
-  };
-  const saveLines = lines => {
-    try {
-      ctx.storage.set('pinned-lines', lines);
-      if (ctx.storage.get('pinned-lines') !== lines) throw new Error('The pinned session height setting was not saved.');
-      client.setQueryData(PINNED_LINES_KEY, lines); setLinesError('');
-    } catch (err) { setLinesError(err.message); }
-  };
-  const saveTokens = on => {
-    try {
-      ctx.storage.set('show-tokens', on);
-      if (ctx.storage.get('show-tokens') !== on) throw new Error('The token count setting was not saved.');
-      client.setQueryData(SHOW_TOKENS_KEY, on); setTokensError('');
-    } catch (err) { setTokensError(err.message); }
-  };
+  const saveDetails = on => savePreference('working-details', WORKING_DETAILS_KEY, on, 'The Working indicator setting was not saved.', setDetailsError);
+  const saveLines = lines => savePreference('pinned-lines', PINNED_LINES_KEY, lines, 'The pinned session height setting was not saved.', setLinesError);
+  const saveTokens = on => savePreference('show-tokens', SHOW_TOKENS_KEY, on, 'The token count setting was not saved.', setTokensError);
   // The host already supplies the page title and gutters; behavior notes live in docs/behavior.md.
   return h('div', null, h('style', null, SETTINGS_CSS), h(sdk.ListRow ?? SettingsRow, {
     title: 'Snooze preset time',
@@ -1417,10 +1481,17 @@ function Settings({ ctx }) {
     description: 'Show total input and output tokens on session cards.',
     checked: showTokens, onChange: saveTokens,
     below: tokensError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, tokensError) : null
-  }), h(ExperimentalSettings, { ctx }));
+  }), h(ExperimentalSettings, { ctx, controller }));
 }
 // Experimental features lean on Hermes internals. The backend reports, feature by feature, whether this Hermes still has them; a feature without them is off, its switch disabled and the reason shown under it, while the others keep working.
-const EXPERIMENTAL_KEY = ['hermes-t3sidebar-settings', 'experimental'];
+const experimentalKey = scope => ['hermes-t3sidebar-settings', scope.connectionId, scope.profile, scope.epoch, 'experimental'];
+// Each read and save belongs to the backend of the source and profile it started on; an answer arriving after a switch is dropped.
+async function experimentalRequest(ctx, scope, path, options) {
+  if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load this setting.');
+  const value = await ctx.rest(path, options);
+  if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load this setting.');
+  return validExperimental(value);
+}
 export const INCOMPATIBLE_HERMES = 'Incompatible with your Hermes version.';
 export const EXPERIMENTAL_FEATURES = [
   { id: 'pool_credits', label: 'Banked reset expiries for every Codex account',
@@ -1432,32 +1503,52 @@ export function validExperimental(value) {
   // A feature the backend does not report is treated as unavailable rather than guessed.
   return Object.fromEntries(EXPERIMENTAL_FEATURES.map(({ id }) => [id, { enabled: features[id]?.enabled === true, available: features[id]?.available === true }]));
 }
-function ExperimentalSettings({ ctx }) {
-  const query = useQuery({ queryKey: EXPERIMENTAL_KEY, queryFn: async () => validExperimental(await ctx.rest('/settings/experimental')), staleTime: 0, retry: false });
+function ExperimentalSettings({ ctx, controller }) {
+  const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
+  useValue(host.state.gateway);
+  useValue(activationEpoch);
+  const epoch = gatewayActivationEpoch();
+  const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
+  return h(ScopedExperimentalSettings, { key: JSON.stringify(experimentalKey(scope)), ctx, controller, scope });
+}
+function ScopedExperimentalSettings({ ctx, controller, scope }) {
+  const query = useQuery({ queryKey: experimentalKey(scope), queryFn: () => experimentalRequest(ctx, scope, '/settings/experimental'), staleTime: 0, retry: false });
   // Same heading as Desktop's own settings sections (SectionHeading, not exported by the SDK): icon and title, with the caveat right after the title.
   return h('section', { className: 'sf-experimental mt-6', 'aria-label': 'Experimental' },
     h('div', { className: 'mb-2.5 flex items-center gap-2 pt-2 text-[length:var(--conversation-text-font-size)] font-medium' },
       typeof sdk.Codicon === 'function' ? h(sdk.Codicon, { name: 'beaker', size: 16, className: 'shrink-0 text-muted-foreground' }) : null,
       h('span', null, 'Experimental'),
       h('span', { className: 'text-xs font-normal text-muted-foreground' }, 'May break with updates. Auto-disables in that case.')),
-    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, feature, state: query.data?.[feature.id], readError: query.isError })));
+    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, controller, scope, feature, state: query.data?.[feature.id], readError: query.isError })));
 }
-function ExperimentalFeature({ ctx, feature, state, readError }) {
+function ExperimentalFeature({ ctx, controller, scope, feature, state, readError }) {
   const client = useQueryClient(), [error, setError] = useState('');
-  const save = async enabled => {
+  const key = experimentalKey(scope), saveId = JSON.stringify([...key, feature.id]);
+  // One save at a time, even across a remount of this page: the switch stays disabled until the backend's readback of this save is published.
+  const saving = useValue(controller.savingSettings).includes(saveId);
+  const save = enabled => controller.saveSetting(saveId, async () => {
     try {
-      client.setQueryData(EXPERIMENTAL_KEY, validExperimental(await ctx.rest(`/settings/experimental/${feature.id}`, { method: 'PUT', body: { enabled } })));
+      // A background read started before or during the write could otherwise publish the state from before it.
+      await client.cancelQueries({ queryKey: key });
+      controller.check(scope);
+      const value = await experimentalRequest(ctx, scope, `/settings/experimental/${feature.id}`, { method: 'PUT', body: { enabled } });
+      if (value[feature.id].enabled !== enabled) throw new Error('The setting was not confirmed.');
+      await client.cancelQueries({ queryKey: key });
+      // After a source or profile switch, or once the plugin is disposed, the answer is dropped.
+      controller.check(scope);
+      client.setQueryData(key, value);
       setError('');
     } catch (_) {
+      try { controller.check(scope); } catch (_) { return; }
       setError('The setting was not saved.');
-      client.invalidateQueries({ queryKey: EXPERIMENTAL_KEY });
+      client.invalidateQueries({ queryKey: key });
     }
-  };
+  });
   const unavailable = state?.available === false;
   const note = unavailable ? INCOMPATIBLE_HERMES : error || (readError ? 'Could not read this setting from the plugin backend.' : '');
   return h(sdk.ToggleRow ?? SettingsToggleRow, {
     label: feature.label, description: feature.description,
-    checked: state?.enabled === true, disabled: !state || unavailable, onChange: save,
+    checked: state?.enabled === true, disabled: !state || unavailable || saving, onChange: save,
     below: note ? h('div', { role: unavailable ? undefined : 'alert', className: 'mt-1.5 text-xs text-destructive', 'data-feature': feature.id }, note) : null
   });
 }
@@ -1558,7 +1649,7 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
   const update = patch => void perform(() => controller.updateProject(scope, project, patch));
   return h('div', { className: 'sf-menu sf-project-submenu', style: { '--sf-project-color': project?.color || 'var(--ui-text-tertiary)' } },
     h('div', { className: 'sf-menu-title' }, project?.name || 'Project unavailable'),
-    h(MenuAction, { name: 'Pencil', disabled: busy || !editable, onClick: () => setRenaming(true) }, 'Rename'),
+    h(MenuAction, { name: 'Pencil', disabled: busy || !editable, onClick: () => { if (!renaming) setName(project?.name || ''); setRenaming(true); } }, 'Rename'),
     renaming ? h('form', { onSubmit: event => { event.preventDefault(); update({ name }); } },
       h('span', { className: 'sf-custom-time' },
         h('input', { value: name, autoFocus: true, 'aria-label': 'Project name', disabled: busy, onChange: event => setName(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
@@ -1619,7 +1710,8 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
   };
   const action = (text, name, payload) => h(MenuAction, { key: text, name, disabled: disabled || busy, onClick: () => run(payload) }, text);
 
-  const customValid = (() => { try { parseLocalWake(value); return true; } catch (_) { return false; } })();
+  // Only the snooze menu shows the custom field, and an empty one is never valid; submitting validates again.
+  const customValid = snoozeOnly && !!value && (() => { try { parseLocalWake(value); return true; } catch (_) { return false; } })();
   const custom = event => {
     event.preventDefault();
     try { const wake_at = parseLocalWake(value); setError(''); run({ action: 'snooze', wake_at }); } catch (err) { setError(err.message); }
@@ -1638,7 +1730,8 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
         h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value, 'data-valid': customValid })))
       : h('div', null,
         row.archived !== true ? action(row.meta.pinned ? 'Unpin' : 'Pin', 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
-        h(MenuAction, { name: 'Pencil', disabled: busy || (row._liveOnly && !row.runtimeId), onClick: () => setRenaming(true) }, 'Rename'),
+        // The field starts from the title current now, not when the menu opened; once editing, a poll never replaces the typed text.
+        h(MenuAction, { name: 'Pencil', disabled: busy || (row._liveOnly && !row.runtimeId), onClick: () => { if (!renaming) setTitle(row.title || ''); setRenaming(true); } }, 'Rename'),
         renaming ? h('form', { onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
           h('span', { className: 'sf-custom-time' },
           h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
@@ -1763,7 +1856,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   // The focused composer is read every 2 s, while its synced copy can lag one sync behind, so a focused card follows its composer alone.
   const hasDraft = (row.newSession ? draftPresent : draft.data === true && !draft.isError) || !active && row.drafted;
   const attention = row.status === 'waiting', snoozed = row.section === 'snoozed', badge = snoozed ? null : cardStatus(row, active);
-  const tokens = compactTokens(row), provider = providerMark(row.provider);
+  const tokens = showTokens ? compactTokens(row) : null, provider = providerMark(row.provider);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
     if (event.target !== event.currentTarget) return;
@@ -1987,13 +2080,13 @@ export function projectDisplayPath(path, home) {
   return value === prefix ? '~' : value.startsWith(`${prefix}/`) ? `~${path.slice(root.length)}` : path;
 }
 function prepareProjectGroups(entries, home) {
-  const groups = new Map(), paths = new Map(), text = new Map();
+  const groups = new Map(), seen = new Map(), paths = new Map(), text = new Map();
   for (const choice of entries) {
     if (choice.isNoProject || choice.id === '__no_project__' || typeof choice.path !== 'string' || !choice.path) continue;
     const id = choice.projectId || choice.id;
-    if (!groups.has(id)) groups.set(id, { id, name: choice.name, choices: [] });
-    const group = groups.get(id);
-    if (!group.choices.some(item => item.path === choice.path)) group.choices.push(choice);
+    if (!groups.has(id)) { groups.set(id, { id, name: choice.name, choices: [] }); seen.set(id, new Set()); }
+    // The first choice for a folder wins; a per-group set avoids rescanning the choices kept so far.
+    if (!seen.get(id).has(choice.path)) { seen.get(id).add(choice.path); groups.get(id).choices.push(choice); }
   }
   const ordered = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map(group => ({
     ...group, multiple: group.choices.length > 1,
@@ -2124,7 +2217,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const rich = sessions.data?.sessions || EMPTY_ROWS, extra = sessions.data?.capped ? EMPTY_ROWS : expanded.data?.sessions || EMPTY_ROWS;
   const archivedRows = archives.data?.sessions || EMPTY_ROWS;
   const serverDrafts = drafts.data || EMPTY_ROWS;
-  const rows = useMemo(() => withDraftRows(mergeRows(rich, extra, live, true, archivedRows), serverDrafts), [rich, extra, live, archivedRows, serverDrafts]);
+  // Draft-view changes (every focused composer check) reuse the merged history; only its own inputs merge it again.
+  const merged = useMemo(() => mergeRows(rich, extra, live, true, archivedRows), [rich, extra, live, archivedRows]);
+  const rows = useMemo(() => withDraftRows(merged, serverDrafts), [merged, serverDrafts]);
   const draftIds = useMemo(() => new Set(serverDrafts.map(draft => draft.session_id)), [serverDrafts]);
   const runtimeKnown = !!runtime.data, runtimeStale = runtimeKnown && runtime.isError;
   // Successful polls still advance ages and due snoozes when Query structural
@@ -2144,6 +2239,15 @@ function ScopedSidebar({ ctx, controller, scope }) {
   }, [snoozeDeadlines, now]);
   const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, liveCounts, { runtimeKnown, runtimeStale, now: classificationNow, draftIds }), [rows, metadata.data, liveCounts, runtimeKnown, runtimeStale, classificationNow, draftIds]);
   const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession && !row._draftOnly), [classified]);
+  // Search keystrokes and toolbar state do not touch these observers, which cover hidden empty sessions too.
+  const draftObservers = useMemo(() => emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
+    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId) })), [emptyCandidates, scope, controller, onDraftPresence, runtime.dataUpdatedAt, activeOwner, activeId]);
+  // An observer only reports while mounted: forget the presence of a session that gained history, left the list or changed identity.
+  useEffect(() => setEmptyDrafts(previous => {
+    if (!previous.size) return previous;
+    const ids = new Set(emptyCandidates.map(draftIdentity));
+    return [...previous].every(id => ids.has(id)) ? previous : new Set([...previous].filter(id => ids.has(id)));
+  }), [emptyCandidates]);
   const ownsActive = activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile;
   useDraftFocus({ controller, scope, rows, focusedId: ownsActive ? activeId : null, focus: draftFocus });
   const tokens = useMemo(() => searchTokens(query), [query]);
@@ -2162,6 +2266,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const selectProject = useCallback(cwd => { controller.check(scope); setProject(cwd); setFilterOpen(false); }, [controller, scope]);
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
   // A background acknowledgment notice describes one thread's marker; it is stale once a later acknowledgment succeeds or another thread is shown, and must not hide an unrelated action error.
+  const shownThread = useRef(activeId);
+  shownThread.current = activeId;
   const clearMarkerNotice = useCallback(() => {
     const message = markerNotice.current;
     markerNotice.current = null;
@@ -2169,6 +2275,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
   }, []);
   useEffect(clearMarkerNotice, [activeId, clearMarkerNotice]);
   useEffect(() => {
+    // Remember an acknowledged marker only while the metadata still carries it: an in-flight one is still there, and one that returns is acknowledged again.
+    if (metadata.data) for (const key of readMarkers.current) {
+      const [id, label, token] = JSON.parse(key);
+      if ((label === 'Woke' ? metadata.data.sessions[id]?.woke_at : metadata.data.completions?.[id]?.done_token) !== token) readMarkers.current.delete(key);
+    }
     if (!metadata.data || metadata.isError || mutation.isPending || !activeId || activeOwner?.connectionId !== (scope.connectionId ?? 'local') || activeOwner?.profile !== scope.profile) return;
     const row = rows.find(item => hasAlias(item, activeId));
     const meta = row && metadata.data.sessions[durableId(row)];
@@ -2190,8 +2301,12 @@ function ScopedSidebar({ ctx, controller, scope }) {
           // Another write finishing republishes metadata, which reruns this effect and retries silently.
           if (error instanceof WriterBusy) return;
           if (!sameScope(scope, captureScope())) return;
+          // By now another thread may be shown, or a foreground action error queued or shown: neither is replaced by this background notice.
+          if (shownThread.current !== activeId) return;
           const message = `Thread opened, but its ${marker.label} marker could not be acknowledged: ${error.message}`;
-          markerNotice.current = message; setActionError(message);
+          const previous = markerNotice.current;
+          markerNotice.current = message;
+          setActionError(current => !current || current === previous ? message : current);
         }
       }
     })();
@@ -2214,13 +2329,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
     } catch (error) { if (sameScope(scope, captureScope())) setActionError(error.message); return false; }
   }, [controller, scope, mutation.mutateAsync]);
   const navigate = useCallback((event, id) => {
-    const keys = latest.current.visible.map(row => row.key), index = keys.indexOf(id);
-    let target;
-    if (event.key === 'ArrowDown') target = keys[Math.min(keys.length - 1, index + 1)];
-    if (event.key === 'ArrowUp') target = keys[Math.max(0, index - 1)];
-    if (event.key === 'Home') target = keys[0];
-    if (event.key === 'End') target = keys.at(-1);
-    if (target) { event.preventDefault(); const row = latest.current.visible.find(row => row.key === target); navigators.current.get(row.section)?.(target); }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const visible = latest.current.visible, index = event.key === 'ArrowDown' || event.key === 'ArrowUp' ? visible.findIndex(row => row.key === id) : -1;
+    const target = event.key === 'Home' ? visible[0] : event.key === 'End' ? visible.at(-1)
+      : visible[event.key === 'ArrowDown' ? Math.min(visible.length - 1, index + 1) : Math.max(0, index - 1)];
+    if (target) { event.preventDefault(); navigators.current.get(target.section)?.(target.key); }
   }, []);
   useEffect(() => {
     // Only recover a card's own focus; blur relinquishes ownership to search, menus or the composer.
@@ -2278,12 +2391,12 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const knownTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0;
   const fallbackCount = knownTotal && total > 500 ? ` is capped at 500 of ${total}`
     : `: ${sessions.data?.sessions.length || 0} loaded${knownTotal ? ` of ${total} available` : ''}`;
-  const canExpand = !sessions.data?.capped && (limit === 0 ? sessions.data?.has_more : expanded.data?.has_more);
+  // Until the expansion has answered (a failed first request included), the first page's has_more keeps the button, which is then the retry.
+  const canExpand = !sessions.data?.capped && (limit === 0 || !expanded.data ? sessions.data?.has_more : expanded.data.has_more);
   return h('aside', { className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); search.current?.focus(); }
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
-  } }, ...emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
-    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId) })), h('style', null, CSS),
+  } }, ...draftObservers, h('style', null, CSS),
     h('header', { className: 'sf-header' },
       h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) }),
         query ? h(IconButton, { label: 'Clear search', name: 'X', glyph: '×', className: 'sf-clear', onClick: () => { setQuery(''); search.current?.focus(); } }) : null),
@@ -2755,17 +2868,18 @@ export function limitSamples(accounts, history, windowKey, provider = null) {
 const sampleUnits = sample => Number.isFinite(sample.units) ? sample.units : sample.value;
 // Pooled remaining over time: each account carries its last reading forward, and the pool sums the accounts seen so far.
 export function pooledHistory(samples) {
-  const last = new Map(), points = [];
-  for (const sample of [...samples].sort((a, b) => a.t - b.t)) {
+  const last = new Map(), points = [], sorted = [...samples].sort((a, b) => a.t - b.t);
+  // Summed once per distinct time, after its last reading (the point a same-time reading replaced anyway); a running total would drift from this sum in floating point.
+  sorted.forEach((sample, index) => {
     last.set(sample.account, sampleUnits(sample));
+    if (sorted[index + 1]?.t === sample.t) return;
     let value = 0;
     for (const item of last.values()) value += item;
-    const point = { t: sample.t, value, count: last.size };
-    if (points.length && points.at(-1).t === sample.t) points[points.length - 1] = point; else points.push(point);
-  }
+    points.push({ t: sample.t, value, count: last.size });
+  });
   return points;
 }
-// Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in units per hour (a drop on a 100-unit plan weighs five times a drop of the same percent on a 20-unit one), or null without at least 15 minutes of paired readings.
+// Pooled consumption over the lookback: the sum over accounts of every drop between consecutive readings, divided by the time those readings cover. With less history than the lookback the covered time is shorter, and the caller says so. The rate is in units per hour (a drop on a 100-unit plan weighs five times a drop of the same percent on a 20-unit one), or null when no account has two readings at different times reaching into the lookback (the last one before it pairs with the first one inside), however close together they are.
 // Readings at 0% remaining are left out: Hermes scales Anthropic's 1% used to 100% (anything at or below 1 is taken for a fraction), so a fresh window reads 100 → 0 → 98 remaining, and that drop to zero would count as a whole window consumed while the climb back looks like a reset. Only deltas matter here, so skipping zeros loses at most the last drop into a window that genuinely ran dry.
 export function drainStats(samples, now, lookbackS = 12 * HOUR_S) {
   const from = now - lookbackS, groups = new Map(), before = new Map();
@@ -2915,8 +3029,8 @@ export function resetMarkers(projection, from, to, minShare = 0.01) {
     return { t: group.t, accounts };
   }).filter(group => group.accounts.length);
 }
-// Past step-ups inside (from, to]: an account's reading rising, or its reset time moving later, means it reset between two readings, and the pooled past line steps up at the later reading. Accounts stepping up at the same reading stack in pool priority order below the pooled level after the step.
-export function pastResetMarkers(accounts, samples, from, to, provider = null) {
+// Past step-ups inside (from, to]: an account's reading rising, or its reset time moving later, means it reset between two readings, and the pooled past line steps up at the later reading. Accounts stepping up at the same reading stack in pool priority order below the pooled level after the step. A chart that already holds the pooled series of these samples passes it rather than having it rebuilt.
+export function pastResetMarkers(accounts, samples, from, to, provider = null, pooled = pooledHistory(samples || [])) {
   const info = new Map((accounts || []).map((account, index) => [account.id, { label: account.label || account.id, plan_label: planLabel(provider, account.plan), priority: Number.isFinite(account.priority) ? account.priority : Infinity, index }]));
   const previous = new Map(), steps = [];
   for (const sample of [...(samples || [])].sort((a, b) => a.t - b.t)) {
@@ -2927,8 +3041,9 @@ export function pastResetMarkers(accounts, samples, from, to, provider = null) {
     const gain = sampleUnits(sample) - sampleUnits(before);
     if (restarted && gain > 1e-9) steps.push({ t: sample.t, account: sample.account, gain, reset_at: before.resets_at !== null && before.resets_at <= sample.t ? before.resets_at : sample.t });
   }
-  const pooled = pooledHistory(samples || []);
-  const levelAt = t => { let value = 0; for (const point of pooled) { if (point.t > t) break; value = point.value; } return value; };
+  // The groups come in time order, so one cursor walks the pooled series once.
+  let cursor = 0, level = 0;
+  const levelAt = t => { while (cursor < pooled.length && !(pooled[cursor].t > t)) level = pooled[cursor++].value; return level; };
   const rank = id => info.get(id) ?? { priority: Infinity, index: Infinity };
   return resetGroups(steps, 0).map(group => {
     const ordered = [...group.items].sort((a, b) => rank(a.account).priority - rank(b.account).priority || rank(a.account).index - rank(b.account).index);
@@ -3046,9 +3161,13 @@ async function readUsage(ctx, scope, path, validate) {
   if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load usage.');
   return validate(value);
 }
+// Orders limits reads, unknown banked-reset outcomes and reset confirmations by when each began. Numbers rather than times, so two events within one millisecond still compare.
+let usageOrder = 0;
+const nextUsageOrder = () => ++usageOrder;
 // The Limits page and the sidebar footer build the limits query the same way, so with equal preferences they share one cache entry and one five-minute poll instead of fetching the same history twice.
+// Each result carries, as `readNumber`, the number its read took before its request left, because the time the cache received a result says nothing about when the backend answered it. The number lives in the cache entry of its own Source/profile, activation and lookback and goes with it; being different for every read, it also keeps structural sharing from folding an equal answer into the previous object, which would carry the older number.
 const limitsQueryOptions = (ctx, scope, hours) => ({ queryKey: [...usageScopeKey(scope), 'limits', hours], staleTime: 60_000, refetchInterval: 300_000, retry: false,
-  queryFn: () => readUsage(ctx, scope, `/usage/limits?hours=${hours}`, validUsageLimits) });
+  queryFn: () => { const readNumber = nextUsageOrder(); return readUsage(ctx, scope, `/usage/limits?hours=${hours}`, value => ({ ...validUsageLimits(value), readNumber })); } });
 // Usage preferences live in plugin storage; this query mirrors them in memory so the footer follows a lookback or provider chosen on an open Limits page (storage itself has no change events).
 const USAGE_PREFERENCES_QUERY = ['hermes-t3sidebar-preferences', 'usage'];
 function useUsagePreferences(ctx) {
@@ -3057,9 +3176,14 @@ function useUsagePreferences(ctx) {
 // Two pages can be open at once, so a change is merged into what is stored now rather than into one page's copy, which would overwrite the other page's later choices. A function patch derives nested values (the per-provider account folds) from whichever copy it is merged into.
 const resolvePatch = (patch, base) => typeof patch === 'function' ? patch(base) : patch;
 function updateUsagePreferences(ctx, client, patch) {
-  const stored = readUsagePreferences(ctx.storage);
-  writeUsagePreferences(ctx.storage, { ...stored, ...resolvePatch(patch, stored) });
-  client.setQueryData(USAGE_PREFERENCES_QUERY, previous => validUsagePreferences({ ...previous, ...resolvePatch(patch, validUsagePreferences(previous)) }));
+  // One base for the write and the in-memory copy, so the two never diverge. When storage cannot be read, the copy on screen stands in for it rather than the defaults, which would reset unrelated choices.
+  let base;
+  try { base = validUsagePreferences(ctx.storage.get(USAGE_PREFERENCES_KEY, null)); } catch (_) { base = validUsagePreferences(client.getQueryData(USAGE_PREFERENCES_QUERY)); }
+  const next = validUsagePreferences({ ...base, ...resolvePatch(patch, base) });
+  // A change that could not be stored is not published either, so every page keeps showing what storage holds; the caller learns it from the null.
+  if (!writeUsagePreferences(ctx.storage, next)) return null;
+  client.setQueryData(USAGE_PREFERENCES_QUERY, next);
+  return next;
 }
 // One component for both route pages; `view` picks the content and the only endpoint that page fetches.
 export function UsagePage({ ctx, view = 'usage' }) {
@@ -3079,6 +3203,8 @@ function Segmented({ label, options, value, onChange, showLabel = true, sizing, 
     : h('div', { className: 'su-seg' }, items.map(item => h('button', { key: item.id, type: 'button', 'aria-pressed': item.id === String(value), onClick: () => pick(item.id) }, item.label)));
   return h('div', { className: `su-control ${className}`.trim(), role: 'group', 'aria-label': label }, showLabel ? h('span', { className: 'su-control-label', 'aria-hidden': true }, label) : null, control);
 }
+// Banked-reset redemptions by Source/profile and account. Each request mints a new upstream idempotency key, so a second request is a second spend: a confirmation while one is in flight joins it, and after an outcome that neither confirms nor refuses the reset the account waits for a limits read started after that outcome, whose number its mark holds.
+const redeemsInFlight = new Map(), unsettledRedeems = new Map();
 function ScopedUsagePage({ ctx, scope, view }) {
   const client = useQueryClient(), shared = useUsagePreferences(ctx);
   // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made on the other page.
@@ -3086,8 +3212,9 @@ function ScopedUsagePage({ ctx, scope, view }) {
   // The shared copy echoes every local change a tick later as an equal but new object; keeping the current one then spares the charts a redundant render, which would otherwise land in the middle of a range glide.
   useEffect(() => { setPrefs(previous => JSON.stringify(previous) === JSON.stringify(shared) ? previous : shared); }, [shared]);
   const update = useCallback(patch => {
-    setPrefs(previous => validUsagePreferences({ ...previous, ...resolvePatch(patch, previous) }));
-    updateUsagePreferences(ctx, client, patch);
+    // The page shows the snapshot that was stored and published, and keeps its current choices when the write failed.
+    const saved = updateUsagePreferences(ctx, client, patch);
+    if (saved) setPrefs(saved);
   }, [ctx, client]);
   const tz = useMemo(() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (_) { return 'UTC'; } }, []);
   const key = usageScopeKey(scope);
@@ -3099,16 +3226,47 @@ function ScopedUsagePage({ ctx, scope, view }) {
   // A longer lookback or past range refetches more history; the shorter one stays drawn meanwhile.
   const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHours), enabled: view === 'limits', placeholderData: previous => previous });
   const active = view === 'limits' ? limits : history;
-  // Spends one banked reset on one account, then reloads the limits so the page shows the restored allowance; any outcome that did not reset throws, which keeps the confirmation open with the reason.
-  const redeem = useCallback(async (provider, account) => {
-    if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh before using a reset.');
-    let result;
-    try { result = await ctx.rest('/usage/limits/redeem', { method: 'POST', body: { provider, account } }); }
-    catch (error) { throw new Error(`The reset could not be used: ${error?.message || 'request failed'}. Refresh to check whether it was spent.`); }
-    const failure = redeemFailure(result);
-    if (failure) throw new Error(failure);
-    await client.invalidateQueries({ queryKey: [...usageScopeKey(scope), 'limits'] });
-  }, [ctx, scope, client]);
+  const redeemScope = JSON.stringify([scope.connectionId, scope.profile]), limitsRead = limits.data?.readNumber ?? 0, limitsReadRef = useRef(0);
+  limitsReadRef.current = limitsRead;
+  // Derived from the marks on every render, so any page of this Source/profile, one opened again meanwhile included, shows the account waiting once a render follows the outcome: the limits read the outcome starts renders every page that observes it. The set keeps its identity while the waiting accounts stay the same, sparing the memoised provider sections.
+  const waiting = JSON.stringify([...(unsettledRedeems.get(redeemScope) || [])].filter(([, mark]) => !(limitsRead > mark)).map(([id]) => id));
+  const unsettled = useMemo(() => new Set(JSON.parse(waiting)), [waiting]);
+  // Spends one banked reset on one account, then reloads the limits so the page shows the restored allowance; any outcome that did not reset throws, which keeps the confirmation open with the reason. `opened` is the number the confirmation took when it was opened: after an unknown outcome only one opened later, once a limits read started later has arrived, may spend.
+  const redeem = useCallback((provider, account, opened = 0) => {
+    const id = JSON.stringify([provider, account]), flight = JSON.stringify([redeemScope, id]);
+    if (redeemsInFlight.has(flight)) return redeemsInFlight.get(flight);
+    const marks = unsettledRedeems.get(redeemScope) ?? new Map(), mark = marks.get(id);
+    if (mark !== undefined) {
+      if (!(limitsReadRef.current > mark && opened > mark)) return Promise.reject(new Error(UNCONFIRMED_REDEEM));
+      marks.delete(id);
+    }
+    // Recorded under the Source/profile rather than this page, so a page opened again or reached through another activation still waits for a newer read.
+    // The map is looked up again here: another account's attempt may have recorded its own uncertainty under this Source/profile meanwhile, and replacing the map would forget it.
+    // Every limits read of this Source/profile, in any activation and with or without a page, is started again so the account is released promptly. Invalidation alone would join a first read still under way rather than start one, so reads under way are cancelled first; a read that cancellation cannot stop any more still carries its older number.
+    const unsettle = () => {
+      if (!unsettledRedeems.has(redeemScope)) unsettledRedeems.set(redeemScope, new Map());
+      unsettledRedeems.get(redeemScope).set(id, nextUsageOrder());
+      const reads = { queryKey: [USAGE_ROOT, scope.connectionId, scope.profile], predicate: query => query.queryKey[4] === 'limits' };
+      void client.cancelQueries(reads).then(() => client.invalidateQueries(reads));
+    };
+    const reload = () => client.invalidateQueries({ queryKey: [...usageScopeKey(scope), 'limits'] });
+    // An answer for a Source/profile no longer shown is never reported as a success here: it may have spent a credit there.
+    const moved = 'Source/profile changed before the reset was confirmed. Refresh to check whether it was spent.';
+    const run = (async () => {
+      if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh before using a reset.');
+      let result;
+      try { result = await ctx.rest('/usage/limits/redeem', { method: 'POST', body: { provider, account } }); }
+      catch (error) { unsettle(); throw new Error(`The reset could not be used: ${error?.message || 'request failed'}. Refresh to check whether it was spent.`); }
+      if (!sameScope(scope, captureScope())) { unsettle(); throw new Error(moved); }
+      const failure = redeemFailure(result);
+      if (failure === UNCONFIRMED_REDEEM) unsettle();
+      if (failure) throw new Error(failure);
+      await reload();
+      if (!sameScope(scope, captureScope())) throw new Error(moved);
+    })().finally(() => redeemsInFlight.delete(flight));
+    redeemsInFlight.set(flight, run);
+    return run;
+  }, [ctx, scope, client, redeemScope]);
   const toolbar = h(Fragment, null,
     h('span', { className: 'su-spacer' }),
     // A refetch behind data already on screen spins the refresh icon instead of adding text; screen readers hear the busy state.
@@ -3121,7 +3279,7 @@ function ScopedUsagePage({ ctx, scope, view }) {
         toolbar)),
       h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs, setDays: days => update({ days }) }))))
       // The shared projection controls head the Limits page, so its refresh control sits at the end of that row.
-      : h(LimitsView, { query: limits, prefs, update, toolbar, redeem }));
+      : h(LimitsView, { query: limits, prefs, update, toolbar, redeem, unsettled }));
 }
 function UsageState({ error = false, children }) { return h('div', { className: 'su-state', role: error ? 'alert' : 'status' }, children); }
 function QueryProblem({ query, what }) {
@@ -3238,7 +3396,7 @@ function resetTime(seconds, now) {
   return formatAt(seconds, seconds - now < 6 * DAY_S ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 // Overview of every provider on one scrollable page: one controls bar applies the lookback and window to all charts, then one section per provider, logged-out ones last as a compact row, and the shared footnotes once at the bottom. The past and future ranges are set beside each chart's x axis but are page-wide too: a change applies to every chart of the same window group.
-function LimitsView({ query, prefs, update, toolbar, redeem }) {
+function LimitsView({ query, prefs, update, toolbar, redeem, unsettled }) {
   const data = query.data;
   // Countdowns and the Now line follow successful polls rather than a separate timer.
   const now = useMemo(() => Date.now() / 1000, [query.dataUpdatedAt]);
@@ -3261,8 +3419,12 @@ function LimitsView({ query, prefs, update, toolbar, redeem }) {
     h('div', { className: 'su-body su-overview' },
       query.isError ? h(QueryProblem, { query, what: 'Latest limits' }) : null,
       providers.length ? null : h(UsageState, null, 'No subscription limits recorded yet.'),
-      providers.map(provider => provider.auth === 'logged_out' ? h(LoggedOutProvider, { key: provider.provider, provider })
-        : h(ProviderLimits, { key: provider.provider, provider, windowKey: chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, prefs, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange, setLookback, redeem })),
+      providers.map(provider => {
+        if (provider.auth === 'logged_out') return h(LoggedOutProvider, { key: provider.provider, provider });
+        // Each section gets only the preference values it draws, so unfolding one provider's accounts does not re-render every other provider's chart.
+        const windowKey = chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, range = windowKey ? prefs.range[rangeGroup(windowKey)] : null;
+        return h(ProviderLimits, { key: provider.provider, provider, windowKey, lookback: prefs.lookback, verdictWindow: prefs.window, past: range?.past, future: range?.future, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange, setLookback, redeem, unsettled });
+      }),
       h(LimitsFootnotes, { providers: active, sampler: data.sampler, now }))));
 }
 // Hermes knows the provider but has no usable credential, so there is nothing to sample or project: one muted row instead of a chart.
@@ -3272,20 +3434,20 @@ function LoggedOutProvider({ provider }) {
       h('span', { className: 'su-logged-out-text' }, `${provider.label || provider.provider} · logged out in Hermes — sign in to track limits`),
       provider.auth_reason ? h('span', { className: 'su-muted su-logged-out-reason' }, provider.auth_reason) : null));
 }
-// Memoized: its props only change with the data, the clock, the preferences or the window, so a page render for anything else (the toolbar's fetching state, the preference echo) skips the charts.
-const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, prefs, now, expanded, setExpanded, setRange, setLookback, redeem }) {
+// Memoized: its props only change with the data, the clock, the preferences it draws, its own fold or the window, so a page render for anything else (the toolbar's fetching state, the preference echo, another provider's fold) skips the charts.
+const ProviderLimits = memo(function ProviderLimits({ provider, windowKey, lookback, verdictWindow, past, future, now, expanded, setExpanded, setRange, setLookback, redeem, unsettled }) {
   const name = provider.label || provider.provider;
   // The verdict always looks a week ahead whatever range the chart shows, so it reads the same as the sidebar footer.
-  const verdict = useMemo(() => limitsVerdict(provider, { lookback: prefs.lookback, window: prefs.window }, now), [provider, prefs.lookback, prefs.window, now]);
+  const verdict = useMemo(() => limitsVerdict(provider, { lookback, window: verdictWindow }, now), [provider, lookback, verdictWindow, now]);
   return h('section', { className: 'su-provider-limits', 'data-provider': provider.provider, style: { '--su-color': providerHueColor(provider.provider) } },
     h('h2', { className: 'su-provider-head' }, providerMark(provider.provider), h('span', null, name)),
-    windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, range: prefs.range[rangeGroup(windowKey)], lookback: prefs.lookback, setLookback, onRange: (side, hours) => setRange(rangeGroup(windowKey), side, hours) })
+    windowKey ? h(PooledLimitChart, { provider, windowKey, now, verdict, range: { past, future }, lookback, setLookback, onRange: (side, hours) => setRange(rangeGroup(windowKey), side, hours) })
       : h(UsageState, null, 'No limit windows reported for this provider.'),
-    h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open), redeem }));
+    h(AccountsDisclosure, { provider, windowKey, now, open: expanded, onToggle: open => setExpanded(provider.provider, open), redeem, unsettled }));
 });
 // Per-account rows (plan, priority, banked resets, window bars) are detail under each chart, folded until asked for; the fold is remembered per provider.
 // The fold is a card whose whole header row is the toggle and which holds the account cards once open: a bare text toggle was easy to miss under the chart.
-function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem }) {
+function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem, unsettled }) {
   const id = `su-accounts-${provider.provider.replace(/[^A-Za-z0-9_-]/g, '_')}`, count = provider.accounts.length;
   // While folded, the account names preview what the card holds; once open, the cards themselves name them.
   const names = open ? '' : provider.accounts.map(account => account.label || account.id).join(' · ');
@@ -3295,7 +3457,7 @@ function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem }
       h('span', { className: 'su-disclosure-label' }, 'Accounts'), h('span', { className: 'su-disclosure-count' }, count),
       names ? h('span', { className: 'su-disclosure-names', title: names }, names) : null),
     open ? h('div', { className: 'su-accounts', id }, h(CurrentBankedResets, { credits: provider.current_banked_credits, now }),
-      count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now, redeem }))
+      count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now, redeem, unsettled }))
         : h(UsageState, null, 'No accounts in this provider pool.')) : null);
 }
 // The expiries Hermes's signed request returned for the account it uses now, ahead of the account cards because the response does not name the pool entry. No redeem button: a reset is spent on a chosen account, from its own card.
@@ -3474,9 +3636,10 @@ function BankedFlag({ flag, xPct, now }) {
     icon('Flag', '⚑'), count > 1 ? h('span', { className: 'su-flag-count', 'aria-hidden': true }, `×${count}`) : null));
 }
 // Everything drawn at a time x over the plot, as HTML so dots, arrowheads and labels keep their pixel size over the stretched SVG: waste measurements (vertical dimension lines from the level before a reset down by the units that expire, in the Now line's neutral colour), reset markers and banked-credit flags.
-function ChartMarks({ waste, resets, past, flags, xPct, cap, now }) {
+function ChartMarks({ waste, resets, past, flags, xPct, start, end, cap, now }) {
   const layer = useRef(null);
-  const signature = JSON.stringify([waste.map(mark => [mark.t, mark.before, mark.lost]), [...past, ...resets].map(group => [group.t, group.accounts.map(item => [item.id, item.base, item.gain])]), flags.map(flag => [flag.t, flag.credits.map(item => item.account).join()]), cap]);
+  // Placement depends on where the marks sit and on their label texts (a reset's weight and gain, a waste's loss): the displayed range moves marks without changing them, so it is a dependency of its own (the x mapping callback is new on every render and would place them each time).
+  const signature = JSON.stringify([waste.map(mark => [mark.t, mark.before, mark.lost]), [...past, ...resets].map(group => [group.t, group.accounts.map(item => [item.id, item.base, item.gain, item.weight])]), flags.map(flag => [flag.t, flag.credits.map(item => item.account).join()]), cap]);
   useLayoutEffect(() => {
     const node = layer.current;
     if (!node) return undefined;
@@ -3485,7 +3648,7 @@ function ChartMarks({ waste, resets, past, flags, xPct, cap, now }) {
     const observer = new ResizeObserver(() => placeMarkLabels(node));
     observer.observe(node);
     return () => observer.disconnect();
-  }, [signature]);
+  }, [signature, start, end]);
   if (!waste.length && !resets.length && !past.length && !flags.length) return null;
   const yPct = value => clamp(value / cap * 100, 0, 100);
   const group = (kind, item, lines) => h('div', { key: `${kind}${item.t}`, className: 'su-reset', 'data-kind': kind, 'data-t': Math.round(item.t), style: { left: `${xPct(item.t)}%` } },
@@ -3589,6 +3752,26 @@ function glideRange(grid, from, to, drawn, onEnd) {
   handle = frame(step);
   return { shown: () => shown, cancel: () => { if (handle) cancelFrame?.(handle); settle(); } };
 }
+// The pooled chart's plot holds the inspection state, so a pointer move or arrow key redraws only the crosshair and its tooltip; the chart drawn inside it comes in as children that keep their identity until the chart itself changes.
+function LimitPlot({ start, end, now, nowPct, cap, pastAt, projectedAt, children }) {
+  const [hover, setHover] = useState(null);
+  const hoverT = hover === null ? null : start + hover * (end - start);
+  const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
+  // Over a mark its own tooltip speaks, so the crosshair and its inline tooltip step aside.
+  const move = event => {
+    if (event.target?.closest?.('.su-reset-dot, .su-flag, .su-waste')) { setHover(null); return; }
+    const box = event.currentTarget.getBoundingClientRect();
+    if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1));
+  };
+  return h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota in units over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end), 'data-cap': cap,
+    onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null),
+    onKeyDown: event => { const step = { ArrowLeft: -0.02, ArrowRight: 0.02 }[event.key]; if (step) { event.preventDefault(); setHover(clamp((hover ?? nowPct / 100) + step, 0, 1)); } if (event.key === 'Escape') setHover(null); } },
+    ...children,
+    hoverValue === null ? null : h(Fragment, null,
+      h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
+      h('div', { className: 'su-tip su-tip-inline', style: hover > 0.6 ? { right: `calc(${100 - hover * 100}% + 10px)` } : { left: `calc(${hover * 100}% + 10px)` } },
+        `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${unitsText(hoverValue)} units left${hoverT > now ? ' (projected)' : ''}`)));
+}
 // "Business: 20, Pro 100: 100": what each account adds to the pool's capacity, an asterisk marking a guessed one.
 function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, setLookback, onRange }) {
   const lookbackS = lookback * HOUR_S, providerId = provider.provider, stops = LIMITS_RANGE_STOPS[rangeGroup(windowKey)];
@@ -3625,9 +3808,8 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
   useEffect(() => () => glide.current.run?.cancel(), []);
   const waste = useMemo(() => wasteMarks(projection).filter(mark => mark.t > now && mark.t < end), [projection, now, end]);
   const resets = useMemo(() => resetMarkers(projection, now, end), [projection, now, end]);
-  const pastResets = useMemo(() => pastResetMarkers(provider.accounts, samples, start, now, providerId), [provider, samples, start, now, providerId]);
+  const pastResets = useMemo(() => pastResetMarkers(provider.accounts, samples, start, now, providerId, past), [provider, samples, start, now, providerId, past]);
   const flags = useMemo(() => bankedFlags(bankedSources(provider), now, end), [provider, now, end]);
-  const [hover, setHover] = useState(null);
   // The axis tops out at the pool's capacity in units (or above it if an older reading held more, e.g. before a plan change).
   const cap = Math.max(projection.capacity || BASE_PLAN_UNITS, ...past.map(point => point.value));
   const ticks = unitTicks(cap);
@@ -3673,14 +3855,6 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
     if (bound !== null && (valueAt(from) - bound) * Math.sign(perS) > 0) from = now - (bound - projection.current) / perS;
     if (from < now) trendLine = `M${x(from).toFixed(2)},${y(valueAt(from)).toFixed(2)} L${x(now).toFixed(2)},${y(projection.current).toFixed(2)}`;
   }
-  const hoverT = hover === null ? null : start + hover * (end - start);
-  const hoverValue = hoverT === null ? null : hoverT <= now ? pastAt(hoverT) : projectedAt(hoverT);
-  // Over a mark its own tooltip speaks, so the crosshair and its inline tooltip step aside.
-  const move = event => {
-    if (event.target?.closest?.('.su-reset-dot, .su-flag, .su-waste')) { setHover(null); return; }
-    const box = event.currentTarget.getBoundingClientRect();
-    if (box.width > 0) setHover(clamp((event.clientX - box.left) / box.width, 0, 1));
-  };
   // Reset times now show as markers in the chart; the notes keep only what the chart cannot show.
   const notes = [
     projection.nextReset ? null : h('span', { key: 'none' }, 'No reset time reported'),
@@ -3695,9 +3869,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
     h('div', { className: 'su-limits-grid', ref: grid },
       // No unit caption (the headline already says units) and no 0 label, which would sit on the past range control under it; the 0 gridline stays.
       h('div', { className: 'su-yaxis su-yaxis-tall', 'aria-hidden': true }, ticks.filter(tick => tick > 0).map(tick => h('span', { key: tick, style: { bottom: `${tick / cap * 100}%` } }, unitsText(tick)))),
-      h('div', { className: 'su-plot su-plot-tall', tabIndex: 0, 'aria-label': 'Pooled remaining quota in units over time; use arrow keys to inspect', 'data-start': Math.round(start), 'data-end': Math.round(end), 'data-cap': cap,
-        onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null),
-        onKeyDown: event => { const step = { ArrowLeft: -0.02, ArrowRight: 0.02 }[event.key]; if (step) { event.preventDefault(); setHover(clamp((hover ?? nowPct / 100) + step, 0, 1)); } if (event.key === 'Escape') setHover(null); } },
+      h(LimitPlot, { start, end, now, nowPct, cap, pastAt, projectedAt },
         h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
           axis.midnights.map(t => h('line', { key: `d${t}`, className: 'su-day-grid', x1: x(t), x2: x(t), y1: 0, y2: VIEW_H })),
           ticks.map(tick => h('line', { key: tick, className: 'su-grid', x1: 0, x2: VIEW_W, y1: y(tick), y2: y(tick) })),
@@ -3707,12 +3879,8 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
           h('path', { className: 'su-area su-projected', d: projectedArea }),
           h('path', { className: 'su-line su-projected', d: projectedLine })),
         h('div', { className: 'su-now', style: { left: `${nowPct}%` } }, h('span', null, 'Now')),
-        h(ChartMarks, { waste, resets, past: pastResets, flags, xPct: t => x(t) / VIEW_W * 100, cap, now }),
-        emptyPct === null ? null : h('span', { className: 'su-empty-dot', title: emptyText, style: { left: `${emptyPct}%` } }),
-        hoverValue === null ? null : h(Fragment, null,
-          h('div', { className: 'su-cross', style: { left: `${hover * 100}%` } }),
-          h('div', { className: 'su-tip su-tip-inline', style: hover > 0.6 ? { right: `calc(${100 - hover * 100}% + 10px)` } : { left: `calc(${hover * 100}% + 10px)` } },
-            `${formatAt(hoverT, { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · ${unitsText(hoverValue)} units left${hoverT > now ? ' (projected)' : ''}`))),
+        h(ChartMarks, { waste, resets, past: pastResets, flags, xPct: t => x(t) / VIEW_W * 100, start, end, cap, now }),
+        emptyPct === null ? null : h('span', { className: 'su-empty-dot', title: emptyText, style: { left: `${emptyPct}%` } })),
       h(AxisRangeControl, { side: 'past', hours: range.past, stops, onChange: hours => onRange('past', hours) }),
       h('div', { className: 'su-xaxis' }, axis.times.map((t, index) => {
         const share = x(t) / VIEW_W * 100;
@@ -3728,7 +3896,7 @@ function Badge({ tone, title, children }) { return h('span', { className: 'su-ba
 function SplitBadge({ kind, tone, title, subject, detail }) {
   return h('span', { className: 'su-badge su-badge-split', 'data-badge': kind, title }, h('span', null, subject), h('span', { className: 'su-badge-half', 'data-tone': tone }, detail));
 }
-function LimitAccount({ provider, account, selected, now, redeem }) {
+function LimitAccount({ provider, account, selected, now, redeem, unsettled }) {
   const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
   // The plan label and the capacity this account adds to the pool in the selected window; T3 Code's names, not the raw enum.
   const label = planLabel(provider, account.plan), units = planWeight(provider, account.plan, selected || 'weekly'), assumed = planAssumed(provider, account.plan);
@@ -3745,13 +3913,15 @@ function LimitAccount({ provider, account, selected, now, redeem }) {
     account.error ? h('div', { className: 'su-account-error', role: 'alert' }, String(account.error)) : null,
     windows.length ? h('div', { className: 'su-windows' }, windows.map(win => h(LimitWindowRow, { key: win.key, win, now, selected: win.key === selected })))
       : h('div', { className: 'su-muted' }, 'No limit windows reported.'),
-    h(BankedResets, { provider, account, windows, now, redeem }));
+    h(BankedResets, { provider, account, windows, now, redeem, unsettled: unsettled?.has(JSON.stringify([provider, account.id])) === true }));
 }
 // OpenAI lets a banked reset be redeemed manually once any allowance it covers has less than 80% left (help.openai.com/en/articles/20001498). The account-wide windows shown are exactly the covered ones (weekly on Pro, 5-hour and weekly on Plus/Business), so the rule applies to the whole account. Codex's own applicable_available_count follows the assistant's stricter 10% rule and would call a manually redeemable reset unusable.
 const BANKED_REDEEM_BELOW_PERCENT = 80;
 export function bankedRedeemable(windows) {
-  const remaining = windows.filter(win => win.scope !== 'model' && Number.isFinite(win.remaining_percent)).map(win => win.remaining_percent);
-  return remaining.length ? remaining.some(value => value < BANKED_REDEEM_BELOW_PERCENT) : null;
+  // One known allowance below the threshold is enough; claiming every one is at or above it needs every account-wide reading.
+  const account = windows.filter(win => win.scope !== 'model');
+  if (account.some(win => Number.isFinite(win.remaining_percent) && win.remaining_percent < BANKED_REDEEM_BELOW_PERCENT)) return true;
+  return account.length && account.every(win => Number.isFinite(win.remaining_percent)) ? false : null;
 }
 // The window a redeemed reset is judged by: weekly, because once it is empty what is left of the 5-hour window has no value; plans without one fall back to their longest account-wide window instead.
 export function redeemWindow(windows) {
@@ -3766,18 +3936,19 @@ export function redeemLoss(provider, account, windows) {
   return { win, percent, units: planWeight(provider, account.plan, win.key) * percent / 100 };
 }
 // Statuses from the backend's redeem route (Hermes's own outcome codes): the reasons a confirmed reset did not happen, or null when it did.
+const UNCONFIRMED_REDEEM = 'Codex could not confirm the reset. Refresh to check whether it was spent.';
 export function redeemFailure(result) {
   const status = result?.status;
   if (status === 'reset' || status === 'already_redeemed') return null;
   if (status === 'nothing_to_reset' || status === 'not_exhausted') return 'Codex refused: no allowance is below 80% left yet. The banked reset was not spent.';
   if (status === 'no_credit' || status === 'no_credits_banked') return 'Codex reports no banked reset on this account.';
-  return 'Codex could not confirm the reset. Refresh to check whether it was spent.';
+  return UNCONFIRMED_REDEEM;
 }
 // One line per banked reset credit under the account's bars, soonest expiry first (a credit expiring within a day turns orange, its countdown grey like the bars' reset times), and on their right one button spanning the list: Codex picks the credit, so the action belongs to the account, not to a line.
 const bankedCreditLine = (credit, index, now) => h('li', { key: `${credit.expires_at}:${index}`, className: 'su-banked-credit', 'data-soon': credit.expires_at !== null && credit.expires_at - now < DAY_S },
   credit.expires_at === null ? 'Banked reset · no expiry reported' : [`Banked reset · expires ${resetTime(credit.expires_at, now)} `, h('span', { key: 'in', className: 'su-banked-in' }, `in ${formatDurationShort(credit.expires_at - now)}`)]);
-function BankedResets({ provider, account, windows, now, redeem }) {
-  const [confirming, setConfirming] = useState(false);
+function BankedResets({ provider, account, windows, now, redeem, unsettled = false }) {
+  const [confirming, setConfirming] = useState(false), opened = useRef(0);
   const credits = (account.banked_credits?.credits || []).filter(credit => credit.expires_at === null || credit.expires_at > now);
   const count = credits.length || (Number.isInteger(account.banked_resets) && account.banked_resets > 0 ? account.banked_resets : 0);
   if (!count) return null;
@@ -3787,13 +3958,16 @@ function BankedResets({ provider, account, windows, now, redeem }) {
   const label = account.label || account.id, loss = canRedeem ? redeemLoss(provider, account, windows) : null;
   return h('div', { className: 'su-banked-row' },
     h('ul', { className: 'su-banked', 'aria-label': 'Banked resets' }, lines),
-    canRedeem ? h(RedeemButton, { usable: bankedRedeemable(windows), onClick: () => setConfirming(true) }) : null,
+    canRedeem ? h(RedeemButton, { usable: bankedRedeemable(windows), unsettled, onClick: () => { opened.current = nextUsageOrder(); setConfirming(true); } }) : null,
     canRedeem ? h(sdk.ConfirmDialog, { open: confirming, onClose: () => setConfirming(false), title: `Use one banked reset on ${label}?`,
       confirmLabel: 'Use reset', busyLabel: 'Using reset…', doneLabel: 'Reset used', destructive: !!loss?.percent,
-      onConfirm: () => redeem(provider, account.id) }, h(RedeemLoss, { loss })) : null);
+      onConfirm: () => redeem(provider, account.id, opened.current) }, h(RedeemLoss, { loss })) : null);
 }
 // Usable: an outline in the success green. Refused: still names the reset, but dashed and padlocked so it reads as unavailable rather than dangerous, with the scope of the refusal (every bar) on a second line.
-function RedeemButton({ usable, onClick }) {
+function RedeemButton({ usable, unsettled, onClick }) {
+  // While an earlier attempt's outcome is unknown the reset is unavailable for another reason than the 80% rule, so the lock keeps the attempt's own message instead of that rule.
+  if (unsettled) return h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true, title: UNCONFIRMED_REDEEM },
+    h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one'));
   if (usable === false) return h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true,
     title: `Codex only accepts a banked reset once an allowance has less than ${BANKED_REDEEM_BELOW_PERCENT}% left; every one here has ${BANKED_REDEEM_BELOW_PERCENT}% or more.` },
     h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one'), h('small', null, `all ≥${BANKED_REDEEM_BELOW_PERCENT}% left`));
@@ -3869,7 +4043,7 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-plot-row{display:grid;grid-template-columns:56px minmax(0,1fr);margin-top:6px}
 .su-yaxis,.su-plot{position:relative;height:128px}.su-yaxis-tall,.su-plot-tall{height:200px}
 .su-yaxis span{position:absolute;right:8px;transform:translateY(50%);font-size:10px;line-height:1;color:var(--ui-text-quaternary);font-variant-numeric:tabular-nums;white-space:nowrap}
-.su-plot{min-width:0;touch-action:none;cursor:crosshair}.su-plot>svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.su-plot{min-width:0;touch-action:pan-y;cursor:crosshair}.su-plot>svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
 .su-grid{stroke:var(--ui-stroke-secondary);stroke-width:1;vector-effect:non-scaling-stroke}
 .su-line{fill:none;stroke-width:1.5;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .su-past.su-area{fill:var(--su-color);fill-opacity:.22}.su-past.su-line{stroke:var(--su-color)}
@@ -3925,7 +4099,7 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-range:focus-visible{outline:2px solid var(--ui-accent);outline-offset:2px;border-radius:4px}
 .su-empty-dot{position:absolute;bottom:0;width:9px;height:9px;margin:0 0 -4.5px -4.5px;border:2px solid var(--ui-red,var(--su-color));border-radius:50%;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));pointer-events:none}
 /* Pooled chart grid: y-axis | plot | a column as wide as the y-axis, then the x-axis between its two range controls and the measurement row under the plot column. */
-.su-limits-grid{display:grid;grid-template-columns:56px minmax(0,1fr) 56px;grid-template-rows:auto 16px 30px;margin-top:6px}
+.su-limits-grid{display:grid;grid-template-columns:56px minmax(0,1fr) 56px;grid-template-rows:auto 16px 30px;margin-top:22px}
 .su-limits-grid>.su-yaxis{grid-area:1/1}.su-limits-grid>.su-plot{grid-area:1/2}.su-limits-grid>.su-xaxis{grid-area:2/2;margin:0}
 /* Each range control sits against its end of the x axis, vertically centred on the axis labels. */
 .su-axis-range{display:inline-flex;align-items:center;margin-top:-1px;height:18px}
@@ -3964,8 +4138,6 @@ ${SEGMENTED_FALLBACK_CSS}
 /* The theme's primary (--ui-accent-secondary, #0053fd by default) mixed toward the base text as the sidebar's --sf-blue: the raw blue is about 3.3:1 on dark backgrounds. */
 .su{--su-primary:color-mix(in srgb,var(--ui-accent-secondary,#0053fd) 66%,var(--ui-base,var(--ui-text-primary)));--su-primary:oklch(from color-mix(in oklab,var(--ui-accent-secondary,#0053fd) 62%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.6) h)}
 .su-badge-half[data-tone=primary]{background:color-mix(in srgb,var(--su-primary) 14%,transparent);color:var(--su-primary)}
-.su-badge-half[data-tone=success]{background:color-mix(in srgb,var(--ui-green,#1f8a65) 16%,transparent);color:var(--ui-green,#1f8a65)}
-.su-badge-half[data-tone=warn]{background:color-mix(in srgb,var(--ui-orange,#db704b) 16%,transparent);color:var(--ui-orange,#db704b)}
 .su-badge[data-tone=warn]{background:color-mix(in srgb,var(--ui-orange,#db704b) 16%,transparent);color:var(--ui-orange,#db704b)}
 .su-badge[data-tone=error]{background:color-mix(in srgb,var(--ui-red,#e5534b) 16%,transparent);color:var(--ui-red,#e5534b)}
 .su-account-error{margin-bottom:6px;font-size:11px;color:var(--ui-red,var(--ui-text-primary))}
@@ -3984,7 +4156,6 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-verdict[data-status=short],.su-verdict[data-status=waste]{color:var(--ui-text-secondary)}
 .su-verdict-icon{display:inline-flex;flex-shrink:0;color:var(--ui-text-tertiary)}.su-verdict .su-verdict-icon svg{width:15px;height:15px}
 .su-verdict-icon[data-severity=caution]{color:var(--ui-yellow,#c08532)}.su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.su-verdict-icon[data-severity=high]{color:var(--dt-destructive,#cf2d56)}
-.su-limits-grid{margin-top:22px}
 .su-assumed{font-style:italic}
 .su-marks{position:absolute;inset:0;pointer-events:none}
 /* Same neutral as the Now line: the provider colour already fills the chart, and orange would read as a severity. */
@@ -4034,7 +4205,7 @@ export default {
     const controller = createController(ctx);
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
-    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx }) });
+    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx, controller }) });
     ctx.register({ id: 'usage', area: sdk.ROUTES_AREA ?? 'routes', title: 'Usage', data: { path: USAGE_ROUTE }, render: () => h(UsagePage, { ctx, view: 'usage' }) });
     ctx.register({ id: 'limits', area: sdk.ROUTES_AREA ?? 'routes', title: 'Limits', data: { path: LIMITS_ROUTE }, render: () => h(UsagePage, { ctx, view: 'limits' }) });
     let disposed = false, pending = null;
@@ -4066,6 +4237,6 @@ export default {
         return queryClient.invalidateQueries({ queryKey: scopeKey(scope), predicate: query => resources.includes(query.queryKey[4]), refetchType: 'active' }, { cancelRefetch: false });
       }).catch(() => { /* Query retains errors for the pane's normal recovery UI. */ });
     });
-    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-draft-sync', 'hermes-t3sidebar-preferences', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
+    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-draft-sync', 'hermes-t3sidebar-preferences', 'hermes-t3sidebar-settings', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
   }
 };
