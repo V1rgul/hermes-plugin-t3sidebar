@@ -85,18 +85,23 @@ def history_payload(db_path, *, days, tz, now, pricing=None):
 		try:
 			tables = _tables(conn)
 			marker = _change_marker(conn, tables)
+			# A published snapshot is never mutated, so it is copied after the lock that every history request takes is released.
 			with _cache_lock:
 				hit = _cache.get(key)
 				if hit is not None and hit[0] == marker:
 					_cache.move_to_end(key)
-					payload = copy.deepcopy(hit[1])
-					payload["generated_at"] = now
-					return payload
+				else:
+					hit = None
+			if hit is not None:
+				payload = copy.deepcopy(hit[1])
+				payload["generated_at"] = now
+				return payload
 			payload = _compute(conn, tables, days, tz, now, buckets, window_end, price, db_key)
 		finally:
 			conn.rollback()
+	snapshot = copy.deepcopy(payload)
 	with _cache_lock:
-		_cache[key] = (marker, copy.deepcopy(payload))
+		_cache[key] = (marker, snapshot)
 		_cache.move_to_end(key)
 		while len(_cache) > _CACHE_LIMIT:
 			_cache.popitem(last=False)

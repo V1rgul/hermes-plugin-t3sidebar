@@ -1,11 +1,15 @@
 """The history chart builds each model and provider bucket once, and the cache copies payloads outside its process-wide lock."""
 
+import copy
 import random
 import sys
-import threading
+import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from test_backend import backend
+from test_usage_history import Fixture, linear_price
 
 
 history = backend.usage_history
@@ -113,6 +117,39 @@ class RenderBuckets(unittest.TestCase):
 			with self.subTest(seed=seed):
 				expected = reference_render(7, "UTC", 1800000000.0, [1800000000.0 + 3600.0 * index for index in range(width)], 1800000000.0 + 3600.0 * width, series, {"x"})
 				self.assertEqual(render(series, width), expected)
+
+
+class CacheCopies(unittest.TestCase):
+	def setUp(self):
+		history.clear_cache()
+		self.addCleanup(history.clear_cache)
+		self.temp = tempfile.TemporaryDirectory(prefix="t3-history-cache-")
+		self.addCleanup(self.temp.cleanup)
+		self.db = Fixture(self.temp.name)
+		self.now = 1800000000.0
+		self.db.session("s1")
+		self.db.message("s1", "assistant", self.now - 3600, "x")
+		self.db.usage("s1", "m", "p", self.now - 3600, self.now - 3600, calls=1, input=10)
+
+	def payload(self, now):
+		return history.history_payload(self.db.path, days=7, tz="UTC", now=now, pricing=linear_price)
+
+	def test_payloads_are_copied_outside_the_cache_lock_and_stay_independent(self):
+		held = []
+		deepcopy = copy.deepcopy
+		def recording(value):
+			held.append(history._cache_lock.locked())
+			return deepcopy(value)
+		with patch.object(history, "copy", SimpleNamespace(deepcopy=recording)):
+			first = self.payload(self.now)
+			hit = self.payload(self.now + 60)
+		# One copy is published on the miss, one handed out on the hit; neither while every other request waits.
+		self.assertEqual(held, [False, False])
+		self.assertEqual((hit["generated_at"], hit["by_model"]), (self.now + 60, first["by_model"]))
+		first["by_model"][0]["input"][:] = [-1] * len(first["buckets"])
+		hit["by_model"][0]["input"][:] = [-2] * len(hit["buckets"])
+		again = self.payload(self.now + 120)
+		self.assertEqual(sum(again["by_model"][0]["input"]), 10)
 
 
 if __name__ == "__main__":
