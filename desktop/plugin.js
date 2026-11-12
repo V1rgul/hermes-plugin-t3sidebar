@@ -3088,6 +3088,8 @@ function Segmented({ label, options, value, onChange, showLabel = true, sizing, 
 }
 // Banked-reset redemptions by Source/profile and account. Each request mints a new upstream idempotency key, so a second request is a second spend: a confirmation while one is in flight joins it, and after an outcome that neither confirms nor refuses the reset the account waits, from the time of that outcome, for a newer limits read.
 const redeemsInFlight = new Map(), unsettledRedeems = new Map();
+// Counts the recorded unknown outcomes, so a page other than the one that made the attempt (one opened again meanwhile) also shows the account waiting: the limits read the outcome starts again renders that page.
+let unsettledVersion = 0;
 function ScopedUsagePage({ ctx, scope, view }) {
   const client = useQueryClient(), shared = useUsagePreferences(ctx);
   // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made on the other page.
@@ -3112,7 +3114,7 @@ function ScopedUsagePage({ ctx, scope, view }) {
   const redeemScope = JSON.stringify([scope.connectionId, scope.profile]), limitsReadAt = useRef(0);
   limitsReadAt.current = limits.dataUpdatedAt;
   const [unsettledCount, setUnsettledCount] = useState(0);
-  const unsettled = useMemo(() => new Set([...(unsettledRedeems.get(redeemScope) || [])].filter(([, at]) => !(limits.dataUpdatedAt > at)).map(([id]) => id)), [redeemScope, limits.dataUpdatedAt, unsettledCount]);
+  const unsettled = useMemo(() => new Set([...(unsettledRedeems.get(redeemScope) || [])].filter(([, at]) => !(limits.dataUpdatedAt > at)).map(([id]) => id)), [redeemScope, limits.dataUpdatedAt, unsettledCount, unsettledVersion]);
   // Spends one banked reset on one account, then reloads the limits so the page shows the restored allowance; any outcome that did not reset throws, which keeps the confirmation open with the reason. `opened` is when the confirmation was opened: after an unknown outcome only one opened later, once the limits were read again, may spend.
   const redeem = useCallback((provider, account, opened = 0) => {
     const id = JSON.stringify([provider, account]), flight = JSON.stringify([redeemScope, id]);
@@ -3128,6 +3130,7 @@ function ScopedUsagePage({ ctx, scope, view }) {
     const unsettle = () => {
       if (!unsettledRedeems.has(redeemScope)) unsettledRedeems.set(redeemScope, new Map());
       unsettledRedeems.get(redeemScope).set(id, Date.now());
+      unsettledVersion += 1;
       setUnsettledCount(count => count + 1);
       const reads = { queryKey: [USAGE_ROOT, scope.connectionId, scope.profile], predicate: query => query.queryKey[4] === 'limits' };
       void client.cancelQueries(reads).then(() => client.invalidateQueries(reads));
