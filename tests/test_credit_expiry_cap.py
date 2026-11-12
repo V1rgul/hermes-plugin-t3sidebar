@@ -34,16 +34,28 @@ class ExpiredCreditCap(unittest.TestCase):
 		with tempfile.TemporaryDirectory(prefix="t3-credit-expiry-") as temp:
 			store = limits.LimitsStore(Path(temp) / "limits.sqlite3")
 			listed = [EXPIRED] * limits.MAX_CREDITS + [LIVE]
-			store.record([{"provider": "openai-codex", "error": None, "credits_mode": "current", "current_credits": listed, "accounts": [sampled("pooled", NOW, credits=listed)]}], checked_at=NOW)
+			store.record([{"provider": "openai-codex", "error": None, "accounts": [sampled("pooled", NOW, credits=listed)]}], checked_at=NOW)
 			(provider,) = limits.limits_payload(store, hours=24, now=NOW)["providers"]
-			self.assertEqual([credit["expires_at"] for credit in provider["current_banked_credits"]["credits"]], [NOW + 86400])
 			self.assertEqual([credit["expires_at"] for credit in provider["accounts"][0]["banked_credits"]["credits"]], [NOW + 86400])
 
 	def test_a_fetched_list_drops_what_has_expired_before_bounding_it(self):
-		import hermes_cli.plugin_provider_requests as requests
 		body = {"credits": [{"status": "available", "expires_at": "2020-01-01T00:00:00Z"}] * limits.MAX_CREDITS + [{"status": "available", "expires_at": "2099-01-01T00:00:00Z"}]}
-		with patch.object(requests, "credentialed_provider_request", lambda *args, **kwargs: SimpleNamespace(status=200, json=lambda: body)):
-			credits = limits._fetch_current_codex_credits()
+
+		class Client:
+			def __init__(self, **kwargs):
+				pass
+
+			def __enter__(self):
+				return self
+
+			def __exit__(self, *exc):
+				return False
+
+			def get(self, url, headers):
+				return SimpleNamespace(status_code=200, json=lambda: body)
+		symbols = {"_codex_backend_urls": lambda base: (None, "https://example.invalid/credits", None), "_codex_headers": lambda token, account: {}}
+		with patch("httpx.Client", Client):
+			credits = limits._fetch_codex_credits(symbols, "https://example.invalid", "tok")
 		self.assertEqual([credit["expires_at"] for credit in credits], [4070908800.0])
 
 

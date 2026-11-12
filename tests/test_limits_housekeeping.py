@@ -32,15 +32,15 @@ class CreditRetention(unittest.TestCase):
 			return sorted(connection.execute("SELECT provider, account_id FROM limit_credits"))
 
 	def test_credit_lists_go_with_the_last_sample_of_their_account(self):
-		self.store.record([{"provider": "openai-codex", "error": None, "credits_mode": "current", "current_credits": [CREDIT], "accounts": [
+		self.store.record([{"provider": "openai-codex", "error": None, "accounts": [
 			sampled("kept", NOW, credits=[CREDIT]), sampled("removed", NOW, credits=[CREDIT])]}], checked_at=NOW)
 		later = NOW + limits.RETENTION_S - 60
 		# While its samples are retained a removed account still shows, with its credits.
 		self.store.record([{"provider": "openai-codex", "error": None, "accounts": [sampled("kept", later)]}], checked_at=later)
-		self.assertEqual(self.credit_keys(), [("openai-codex", limits.CURRENT_CREDITS_ID), ("openai-codex", "kept"), ("openai-codex", "removed")])
+		self.assertEqual(self.credit_keys(), [("openai-codex", "kept"), ("openai-codex", "removed")])
 		gone = NOW + limits.RETENTION_S + 60
 		self.store.record([{"provider": "openai-codex", "error": None, "accounts": [sampled("kept", gone)]}], checked_at=gone)
-		self.assertEqual(self.credit_keys(), [("openai-codex", limits.CURRENT_CREDITS_ID), ("openai-codex", "kept")])
+		self.assertEqual(self.credit_keys(), [("openai-codex", "kept")])
 		accounts = limits.limits_payload(self.store, hours=24, now=gone)["providers"][0]["accounts"]
 		self.assertEqual([(account["id"], [credit["expires_at"] for credit in account["banked_credits"]["credits"]]) for account in accounts], [("kept", [])])
 
@@ -63,7 +63,7 @@ class CreditThrottleRetention(unittest.TestCase):
 		due = NOW - limits.CREDITS_INTERVAL_S
 		limits._CREDITS_READ.update({
 			(home, "openai-codex", "removed"): due,
-			(home, "openai-codex", limits.CURRENT_CREDITS_ID): due - 86400,
+			(home, "openai-codex", "older"): due - 86400,
 			(home, "openai-codex", "recent"): due + 1,
 			("another-home", "openai-codex", "removed"): due,
 		})

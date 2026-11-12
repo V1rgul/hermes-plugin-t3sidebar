@@ -2,8 +2,6 @@ name: hermes-t3sidebar
 version: "0.2.1"
 requires_hermes: ">=0.23.0"
 description: "Hermes Desktop T3 Code-style session sidebar: status shelves, pins, snooze, unsent drafts, project picker, AutoTitler rename, token/cost Usage page and OpenAI Codex / Anthropic Claude rate-limit Limits page."
-requires_auth:
-  - openai-codex
 provides_hooks:
   - pre_llm_call
   - on_session_end

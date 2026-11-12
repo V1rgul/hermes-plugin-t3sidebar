@@ -616,8 +616,6 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       if (sessions.length !== data.sessions.length || sessions.some((row, i) => row !== data.sessions[i])) client.setQueryData(key, { ...data, sessions });
     }
   }
-  // Settings saves in flight, by save id. They outlive the settings page that started them, so a remounted page must still see them.
-  const savingSettings = sdk.atom([]);
   return {
     dispose() { disposed = true; generation++; pendingRoutes = null; archiveHead = null; deleteRequests.clear(); doneAcks.clear(); }, check,
     async hasDraft(scope, row) {
@@ -1184,14 +1182,6 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const info = await fenced(scope, () => env.host.requestProfile(route, 'session.cwd.set', { session_id: created.session_id, cwd: project.path }));
       if (info?.cwd !== project.path) throw new Error('The session workspace was not confirmed. Do not send a message until the native workspace is checked.');
       return created;
-    },
-    savingSettings,
-    // One save per id at a time, whichever page mount asks; the work itself fences its publication with check().
-    async saveSetting(id, work) {
-      if (savingSettings.get().includes(id)) return;
-      savingSettings.set([...savingSettings.get(), id]);
-      try { await work(); }
-      finally { savingSettings.set(savingSettings.get().filter(item => item !== id)); }
     }
   };
 }
@@ -1509,7 +1499,7 @@ function SkeletonCards() {
     h('span', { className: 'sf-sr' }, 'Loading sessions…'),
     [0, 1, 2].map(index => h('div', { key: index, className: 'sf-skeleton-card', 'aria-hidden': true }, h('span', { className: 'sf-skeleton-meta' }), h('span', { className: 'sf-skeleton-title' }))));
 }
-function Settings({ ctx, controller }) {
+function Settings({ ctx }) {
   const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
   const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [linesError, setLinesError] = useState(''), [tokensError, setTokensError] = useState('');
   // Write, exact readback, then publication to the mounted sidebar; a failure is reported under its own setting.
@@ -1548,76 +1538,7 @@ function Settings({ ctx, controller }) {
     description: 'Show total input and output tokens on session cards.',
     checked: showTokens, onChange: saveTokens,
     below: tokensError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, tokensError) : null
-  }), h(ExperimentalSettings, { ctx, controller }));
-}
-// Experimental features lean on Hermes internals. The backend reports, feature by feature, whether this Hermes still has them; a feature without them is off, its switch disabled and the reason shown under it, while the others keep working.
-const experimentalKey = scope => ['hermes-t3sidebar-settings', scope.connectionId, scope.profile, scope.epoch, 'experimental'];
-// Each read and save belongs to the backend of the source and profile it started on; an answer arriving after a switch is dropped.
-async function experimentalRequest(ctx, scope, path, options) {
-  if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load this setting.');
-  const value = await ctx.rest(path, options);
-  if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load this setting.');
-  return validExperimental(value);
-}
-export const INCOMPATIBLE_HERMES = 'Incompatible with your Hermes version.';
-export const EXPERIMENTAL_FEATURES = [
-  { id: 'pool_credits', label: 'Banked reset expiries for every Codex account',
-    description: 'Lists when each banked Codex reset expires for every account in Hermes\'s credential pool, using each account\'s own token. Off: only the account Hermes is using now.' },
-];
-export function validExperimental(value) {
-  const features = value?.features;
-  if (!features || typeof features !== 'object') throw new Error('Unsupported experimental settings response.');
-  // A feature the backend does not report is treated as unavailable rather than guessed.
-  return Object.fromEntries(EXPERIMENTAL_FEATURES.map(({ id }) => [id, { enabled: features[id]?.enabled === true, available: features[id]?.available === true }]));
-}
-function ExperimentalSettings({ ctx, controller }) {
-  const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
-  useValue(host.state.gateway);
-  useValue(activationEpoch);
-  const epoch = gatewayActivationEpoch();
-  const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
-  return h(ScopedExperimentalSettings, { key: JSON.stringify(experimentalKey(scope)), ctx, controller, scope });
-}
-function ScopedExperimentalSettings({ ctx, controller, scope }) {
-  const query = useQuery({ queryKey: experimentalKey(scope), queryFn: () => experimentalRequest(ctx, scope, '/settings/experimental'), staleTime: 0, retry: false });
-  // Same heading as Desktop's own settings sections (SectionHeading, not exported by the SDK): icon and title, with the caveat right after the title.
-  return h('section', { className: 'sf-experimental mt-6', 'aria-label': 'Experimental' },
-    h('div', { className: 'mb-2.5 flex items-center gap-2 pt-2 text-[length:var(--conversation-text-font-size)] font-medium' },
-      typeof sdk.Codicon === 'function' ? h(sdk.Codicon, { name: 'beaker', size: 16, className: 'shrink-0 text-muted-foreground' }) : null,
-      h('span', null, 'Experimental'),
-      h('span', { className: 'text-xs font-normal text-muted-foreground' }, 'May break with updates. Auto-disables in that case.')),
-    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, controller, scope, feature, state: query.data?.[feature.id], readError: query.isError })));
-}
-function ExperimentalFeature({ ctx, controller, scope, feature, state, readError }) {
-  const client = useQueryClient(), [error, setError] = useState('');
-  const key = experimentalKey(scope), saveId = JSON.stringify([...key, feature.id]);
-  // One save at a time, even across a remount of this page: the switch stays disabled until the backend's readback of this save is published.
-  const saving = useValue(controller.savingSettings).includes(saveId);
-  const save = enabled => controller.saveSetting(saveId, async () => {
-    try {
-      // A background read started before or during the write could otherwise publish the state from before it.
-      await client.cancelQueries({ queryKey: key });
-      controller.check(scope);
-      const value = await experimentalRequest(ctx, scope, `/settings/experimental/${feature.id}`, { method: 'PUT', body: { enabled } });
-      if (value[feature.id].enabled !== enabled) throw new Error('The setting was not confirmed.');
-      await client.cancelQueries({ queryKey: key });
-      // After a source or profile switch, or once the plugin is disposed, the answer is dropped.
-      controller.check(scope);
-      client.setQueryData(key, value);
-      setError('');
-    } catch (_) {
-      try { controller.check(scope); } catch (_) { return; }
-      setError('The setting was not saved.');
-      client.invalidateQueries({ queryKey: key });
-    }
-  });
-  const unavailable = state?.available === false;
-  const note = unavailable ? INCOMPATIBLE_HERMES : error || (readError ? 'Could not read this setting from the plugin backend.' : '');
-  return h(sdk.ToggleRow ?? SettingsToggleRow, {
-    label: feature.label, description: feature.description,
-    checked: state?.enabled === true, disabled: !state || unavailable || saving, onChange: save,
-    below: note ? h('div', { role: unavailable ? undefined : 'alert', className: 'mt-1.5 text-xs text-destructive', 'data-feature': feature.id }, note) : null
-  });
+  }));
 }
 // The settings page renders without the sidebar's stylesheet. Masking the native picker button keeps its click-to-open picker while drawing the same alarm as the hover Snooze control instead of a plain clock.
 const ALARM_MASK = `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>${BUNDLED_ICONS.Alarm.map(d => `<path d='${d}'/>`).join('')}</svg>`)}")`;
@@ -2750,23 +2671,13 @@ export function limitHistoryRows(history) {
 }
 export function validUsageLimits(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.providers)) throw new Error('Unsupported usage limits response.');
-  const providers = value.providers.filter(item => item && typeof item.provider === 'string').map(item => placeCurrentCredits({
+  const providers = value.providers.filter(item => item && typeof item.provider === 'string').map(item => ({
     // Only an explicit logged_out marks a provider without a usable credential; anything else keeps the normal view.
     ...item, auth: item.auth === 'logged_out' ? 'logged_out' : 'ok', auth_reason: typeof item.auth_reason === 'string' && item.auth_reason ? item.auth_reason : null, accounts: Array.isArray(item.accounts) ? item.accounts.filter(account => account && typeof account.id === 'string').map(account => ({ ...account, windows: Array.isArray(account.windows) ? account.windows.filter(win => win && typeof win.key === 'string') : [], banked_credits: validBankedCredits(account.banked_credits), reset_grants: validResetGrants(account.reset_grants) })) : [],
-    history: limitHistoryRows(item.history), current_banked_credits: validBankedCredits(item.current_banked_credits)
+    history: limitHistoryRows(item.history)
   }));
   return { ...value, providers, sampler: value.sampler && typeof value.sampler === 'object' ? value.sampler : null };
 }
-// Without the experimental per-account setting, banked credit expiries come only for the Codex account Hermes currently uses, and that read cannot say which pool entry it is. With a single account in the pool there is nothing to tell apart, so the list goes on that account; otherwise it stays a provider-level "current account" list.
-export const CURRENT_CREDITS_ID = '@current';
-export function placeCurrentCredits(provider) {
-  const current = provider.current_banked_credits;
-  if (!current || provider.accounts.length !== 1 || provider.accounts[0].banked_credits) return provider;
-  return { ...provider, accounts: [{ ...provider.accounts[0], banked_credits: current }], current_banked_credits: null };
-}
-// Accounts whose banked credits feed the chart's expiry flags, the provider-level current-account list included under its own label.
-export const bankedSources = provider => provider.current_banked_credits
-  ? [...provider.accounts, { id: CURRENT_CREDITS_ID, label: 'Current account', banked_credits: provider.current_banked_credits }] : provider.accounts;
 // Anthropic limit resets: null when never read (or the reading went stale), else the well-formed ones by expiry. A kind outside Claude Code's four is dropped rather than shown under a guessed name.
 export const RESET_KIND_LABELS = { session: '5-hour reset', weekly: 'Weekly reset', fable: 'Fable reset', full: 'Full reset' };
 export function validResetGrants(value) {
@@ -3684,18 +3595,9 @@ function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem, 
       h('span', { className: 'su-disclosure-chevron', 'aria-hidden': true }, icon('ChevronRight', '›')),
       h('span', { className: 'su-disclosure-label' }, 'Accounts'), h('span', { className: 'su-disclosure-count' }, count),
       names ? pageTipped(names, h('span', { className: 'su-disclosure-names' }, names)) : null),
-    open ? h('div', { className: 'su-accounts', id }, h(CurrentBankedResets, { credits: provider.current_banked_credits, now }),
+    open ? h('div', { className: 'su-accounts', id },
       count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now, redeem, unsettled }))
         : h(UsageState, null, 'No accounts in this provider pool.')) : null);
-}
-// The expiries Hermes's signed request returned for the account it uses now, ahead of the account cards because the response does not name the pool entry. No redeem button: a reset is spent on a chosen account, from its own card.
-function CurrentBankedResets({ credits, now }) {
-  const live = (credits?.credits || []).filter(credit => credit.expires_at === null || credit.expires_at > now);
-  if (!live.length) return null;
-  return h('div', { className: 'su-account', 'data-account': CURRENT_CREDITS_ID },
-    h('div', { className: 'su-account-head' }, h('strong', null, 'Current account'), h('span', { className: 'su-spacer' }),
-      pageTipped('Hermes reads this list with the Codex sign-in it is using now and does not say which pool account that is. The experimental per-account setting lists every account instead.', h('span', { className: 'su-muted' }, 'the account Hermes is using now'))),
-    h('div', { className: 'su-banked-row' }, h('ul', { className: 'su-banked', 'aria-label': 'Banked resets of the current account' }, live.map((credit, index) => bankedCreditLine(credit, index, now)))));
 }
 // Shared notes once under every section: how the samples and projections work, what a unit is, and which capacities are guessed.
 function LimitsFootnotes({ providers, sampler, now }) {
@@ -4037,7 +3939,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
   const waste = useMemo(() => wasteMarks(projection).filter(mark => mark.t > now && mark.t < end), [projection, now, end]);
   const resets = useMemo(() => resetMarkers(projection, now, end), [projection, now, end]);
   const pastResets = useMemo(() => pastResetMarkers(provider.accounts, samples, start, now, providerId, past), [provider, samples, start, now, providerId, past]);
-  const flags = useMemo(() => bankedFlags(bankedSources(provider), now, end), [provider, now, end]);
+  const flags = useMemo(() => bankedFlags(provider.accounts, now, end), [provider, now, end]);
   // The axis tops out at the pool's capacity in units (or above it if an older reading held more, e.g. before a plan change).
   const cap = Math.max(projection.capacity || BASE_PLAN_UNITS, ...past.map(point => point.value));
   const ticks = unitTicks(cap);
@@ -4522,7 +4424,7 @@ export default {
     const controller = createController(ctx);
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
-    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx, controller }) });
+    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx }) });
     ctx.register({ id: 'usage', area: sdk.ROUTES_AREA ?? 'routes', title: 'Usage', data: { path: USAGE_ROUTE }, render: () => h(UsagePage, { ctx, view: 'usage' }) });
     ctx.register({ id: 'limits', area: sdk.ROUTES_AREA ?? 'routes', title: 'Limits', data: { path: LIMITS_ROUTE }, render: () => h(UsagePage, { ctx, view: 'limits' }) });
     let disposed = false, pending = null;

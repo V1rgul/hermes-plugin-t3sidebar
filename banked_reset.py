@@ -1,6 +1,6 @@
 """Redeem one banked Codex reset credit, or use one Anthropic limit reset, on one account, on the user's explicit request from the Limits page.
 
-Kept apart from ``usage_limits``: the sampler module must never reference a path that spends credits, and reaches a token refresh only through the two exceptions its own docstring documents (an expired Claude Code login handed to Hermes's refresh, and the current account's credit list read through Hermes's credentialed request); its policy test enforces the rest. This module reuses the sampler's read-only pool and route helpers through the shared ``usage_limits`` instance passed in by the caller.
+Kept apart from ``usage_limits``: the sampler module must never reference a path that spends credits, and reaches a token refresh only through the one exception its own docstring documents (an expired Claude Code login handed to Hermes's refresh); its policy test enforces the rest. This module reuses the sampler's read-only pool and route helpers through the shared ``usage_limits`` instance passed in by the caller.
 """
 
 import json
@@ -152,7 +152,8 @@ def redeem_anthropic(account_id, grant_id, *, limits, symbols=None, client_facto
 		import httpx
 		headers = limits.claude_headers(token, version)
 		with (client_factory or (lambda: httpx.Client(timeout=_TIMEOUT_S, follow_redirects=False)))() as client:
-			organization = organization or _profile_organization(client, headers)
+			# The profile read needs no Claude Code CLI identity, so it is named as Hermes's own Anthropic reads are; only the claim names the CLI.
+			organization = organization or _profile_organization(client, limits.hermes_headers(token))
 			if organization is None:
 				return {"status": "signed_out", "resets_left": None}
 			request_id = _PENDING_CLAIMS.setdefault(key, str(uuid.uuid4()))

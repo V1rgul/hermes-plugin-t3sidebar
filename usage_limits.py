@@ -1,14 +1,14 @@
 """Provider limit history for the Usage page: a background sampler plus a plugin-owned SQLite store.
 
-Hermes keeps provider limit snapshots only in process memory and only fetches them on demand, so the page would have no history while Desktop is closed. A sampler therefore reads every account through Hermes's public per-credential fetch every few minutes and records the readings.
+Hermes keeps provider limit snapshots only in process memory and only fetches them on demand, so the page would have no history while Desktop is closed. A sampler therefore reads every account every few minutes, Codex through Hermes's public per-credential fetch and Anthropic with one read of its own, and records the readings.
 
 Read-only toward credentials, by construction, except that an expired Claude Code login is handed to Hermes's own refresh (below):
 - Pool rows come from ``read_credential_pool`` (a plain auth.json read), never ``load_pool`` (which can seed, heal and persist the store) or ``pool.select()``.
-- Each account is read by Hermes's public ``fetch_account_usage(read_only=True)`` with that entry's own token and an ``identity_id``, one thread per account, exactly as Hermes's model picker reads its pool: the Codex read-only fetcher reports a 401 instead of refreshing or rotating, the Anthropic fetcher with an explicit token never resolves or refreshes one, and a reading with an ``identity_id`` lands only in that account's slot of Hermes's cache, never in its single-account gauge. The provider-wide ``refresh_account_usage_async`` is deliberately not used because its Codex path resolves runtime credentials with ``refresh_if_expiring`` and force-refreshes on 401.
+- Each Codex account is read by Hermes's public ``fetch_account_usage(read_only=True)`` with that entry's own token and an ``identity_id``, one thread per account, exactly as Hermes's model picker reads its pool: the Codex read-only fetcher reports a 401 instead of refreshing or rotating, the Anthropic fetcher with an explicit token never resolves or refreshes one, and a reading with an ``identity_id`` lands only in that account's slot of Hermes's cache, never in its single-account gauge. The provider-wide ``refresh_account_usage_async`` is deliberately not used because its Codex path resolves runtime credentials with ``refresh_if_expiring`` and force-refreshes on 401.
 - Only providers in ``VETTED_PROVIDERS`` are refreshed: plugin usage hooks are arbitrary code and OpenRouter issues two GETs.
-- Anthropic falls back to Claude Code's own login when Hermes's anthropic pool is empty: Claude sessions that run through the Claude Code CLI (claude-subscription-directsdk) consume that login's account, not a Hermes pool entry. Its access token is sent once per sample to Hermes's public ``fetch_account_usage`` (a single GET, whose reading Hermes also keeps as its in-memory Anthropic gauge) and to Anthropic's OAuth profile for the plan, and never stored; an expired one is refreshed by calling ``fetch_account_usage("anthropic")`` without a token, which resolves one through Hermes's Claude Code resolver and writes the new pair back to Claude Code's credentials, then read again.
-- Anthropic's model-scoped limits (a weekly cap on one model, such as Fable) come only in the usage response's ``limits`` list, and its limit resets (such as a Fable reset) only in the ``cedar_ember`` block the same URL adds when asked with ``cedar_ember=1``; Hermes maps neither nor passes them on (its Anthropic snapshot has no ``raw``). So after Hermes's own fetch with an account's token returned windows, the sampler sends that token once more to that URL, keeps the scoped entries and the resets (id, kind, count, expiry, what they clear) and drops the body; Hermes's windows win on any shared key. Anthropic lists resets only to Claude Code, so this one read names itself as the Claude Code CLI installed on the host (``claude-cli/<version> (external, cli)``, as T3 Code does); without an installed CLI it goes out under httpx's own name and the resets read as none. Once a snapshot carries both in ``raw``, they are read from it and no second GET is sent.
-- Codex banked reset credit expiries (the usage payload only carries their count) are read at most every ``CREDITS_INTERVAL_S``. By default one GET for the account Hermes currently uses goes through ``credentialed_provider_request``: Hermes attaches its own Codex sign-in, refreshing it like any chat request would, and the plugin never sees it; the list is shown for that account without naming it. The experimental ``experimental_pool_credits`` setting (kept in this store, set from the plugin's settings page) instead lists every pool account with its own token through Hermes's private Codex helpers, falling back to the default when those helpers are gone; a 401 or any failure there keeps the previous list and never refreshes the token.
+- Each Anthropic account (pool entry or Claude Code login) is read with one GET of its own: Anthropic's usage URL with ``cedar_ember=1``, whose body carries the 5-hour and weekly windows Hermes maps, the model-scoped limits of its ``limits`` list (a weekly cap on one model, such as Fable) and the account's limit resets (the ``cedar_ember`` block), none of which Hermes passes on. Reading through Hermes as well sent the same GET twice. The token goes only to ``api.anthropic.com`` and only when it is OAuth-shaped, Hermes's own rule for that endpoint; it is never refreshed or stored, and the body is dropped once read. The reading no longer lands in Hermes's in-memory Anthropic gauge, which Hermes's own reads (model picker, ``/usage``) keep. Anthropic lists resets only to Claude Code, so this read names itself as the Claude Code CLI installed on the host (``claude-cli/<version> (external, cli)``, as T3 Code does); without an installed CLI it goes out as Hermes's own usage fetch does (``claude-code/2.1.0``) and the resets read as none. Every other Anthropic request names itself ``claude-code/2.1.0`` too, never httpx.
+- Anthropic falls back to Claude Code's own login when Hermes's anthropic pool is empty: Claude sessions that run through the Claude Code CLI (claude-subscription-directsdk) consume that login's account, not a Hermes pool entry. Its plan comes from Anthropic's OAuth profile, read at the sampler's first collection and then hourly (every ``PLAN_RETRY_S`` after a failure, keeping the last plan). An expired token is refreshed by calling ``fetch_account_usage("anthropic")`` without a token, which resolves one through Hermes's Claude Code resolver and writes the new pair back to Claude Code's credentials, then read again.
+- Codex banked reset credit expiries (the usage payload only carries their count) are read at most every ``CREDITS_INTERVAL_S``. Every pool account's list is read with its own token through Hermes's private Codex helpers (its URL and headers, so the request is named as Hermes names its Codex reads); a 401 or any failure keeps the previous list and never refreshes the token. Without those helpers no list is read, and the page shows only each account's banked reset count.
 
 Nothing secret is stored or logged: tokens, identities and base URLs stay in local variables of one collection; the store keeps pool entry id + label, plan, window numbers, banked reset count, banked credit status/grant/expiry times, Anthropic limit resets (Anthropic's reset id, kind, count, expiry, usability and the limit names they clear) and a closed set of error classes.
 """
@@ -40,14 +40,6 @@ MAX_HOURS = 840
 CREDITS_INTERVAL_S = 3600.0
 CREDITS_TIMEOUT_S = 10.0
 MAX_CREDITS = 50
-# By default the list is read only for the Codex account Hermes currently uses, through Hermes's signed request: the plugin never holds that token, and the response does not say which pool account it is.
-CODEX_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
-# OpenAI asks third-party clients to name themselves; the plugin does not pose as the Codex CLI.
-CODEX_CREDITS_HEADERS = {"Accept": "application/json", "User-Agent": "hermes-t3sidebar"}
-# Store key of that account-less list: "@" is outside _ACCOUNT_ID_PATTERN, so no pool entry can collide with it.
-CURRENT_CREDITS_ID = "@current"
-# Opt-in experimental setting, kept in this store, for every pool account's list: it needs private Hermes helpers and each account's own token.
-POOL_CREDITS_SETTING = "experimental_pool_credits"
 
 # Built-in fetchers verified to issue at most one GET with the entry's own token and to never refresh, rotate or persist credentials when called through the per-entry read-only path.
 VETTED_PROVIDERS = ("openai-codex", "anthropic")
@@ -77,6 +69,8 @@ ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # The same body with the account's limit resets added, as Claude Code asks for it; skip_spend leaves out the spend block nothing here reads.
 ANTHROPIC_RESETS_URL = ANTHROPIC_USAGE_URL + "?cedar_ember=1&skip_spend=1"
 ANTHROPIC_HEADERS = {"Accept": "application/json", "anthropic-beta": "oauth-2025-04-20"}
+# Every Anthropic request names a Claude Code client, never httpx: by default the identity Hermes's own Anthropic usage fetch sends, so the sampler's reads look like Hermes's; only resets, which Anthropic lists and accepts for the Claude Code CLI alone, name the installed CLI.
+HERMES_ANTHROPIC_USER_AGENT = "claude-code/2.1.0"
 # Anthropic offers resets only to Claude Code, which it recognises by this User-Agent; the version is the installed CLI's, read from `claude --version`.
 CLAUDE_VERSION_TTL_S = 6 * 3600.0
 _CLAUDE_VERSION = {"checked": float("-inf"), "version": None}
@@ -86,6 +80,13 @@ RESET_KINDS = ("session", "weekly", "fable", "full")
 _GRANT_ID_PATTERN = re.compile(r"^[a-z0-9_-]{1,40}$")
 _SLUG_PATTERN = re.compile(r"^[a-z0-9_]{1,40}$")
 MAX_GRANTS = 16
+# The windows Hermes maps from Anthropic's usage body, with Hermes's labels so their keys stay those of samples recorded through Hermes.
+ANTHROPIC_FIXED_WINDOWS = (("five_hour", "Current session", "account"), ("seven_day", "Current week", "account"), ("seven_day_opus", "Opus week", "model"), ("seven_day_sonnet", "Sonnet week", "model"))
+# The plan changes rarely, so Anthropic's profile is read at the first collection, then hourly; a failed read is retried sooner and keeps the last plan.
+PLAN_INTERVAL_S = 3600.0
+PLAN_RETRY_S = 900.0
+_PLAN_LOCK = threading.Lock()
+_PLAN_READ = {}
 _BLOCKED_REASONS = {"five_hour": "blocked_five_hour", "seven_day": "blocked_seven_day", "seven_day_opus": "blocked_opus", "seven_day_sonnet": "blocked_sonnet"}
 # A ``limits`` entry's group names its period; the period word makes ``window_key`` give the same key Hermes's own labels would.
 _ANTHROPIC_GROUP_PERIODS = {"weekly": "week", "session": "session"}
@@ -229,18 +230,8 @@ def normalize_credits(payload, now=None):
 	return credits
 
 
-def _fetch_current_codex_credits():
-	"""The credit list of the Codex account Hermes currently uses, sent by Hermes with that sign-in (``requires_auth: [openai-codex]``); None on any failure or without a Codex sign-in."""
-	try:
-		from hermes_cli.plugin_provider_requests import credentialed_provider_request
-		response = credentialed_provider_request("openai-codex", "GET", CODEX_CREDITS_URL, headers=CODEX_CREDITS_HEADERS, timeout=CREDITS_TIMEOUT_S)
-		return normalize_credits(response.json(), time.time()) if response.status == 200 else None
-	except Exception:
-		return None
-
-
 def pool_credits_available(symbols=None):
-	"""Whether this Hermes still has the private Codex helpers the per-account credit lists need; without them the experimental setting cannot apply."""
+	"""Whether this Hermes still has the private Codex helpers the per-account credit lists need; without them no list is read."""
 	symbols = _native_symbols() if symbols is None else symbols
 	return symbols.get("_codex_backend_urls") is not None and symbols.get("_codex_headers") is not None
 
@@ -396,10 +387,15 @@ def claude_cli_version(clock=time.monotonic, runner=None):
 		return version
 
 
+def hermes_headers(token):
+	"""Headers of an Anthropic OAuth request named as Hermes names its own usage fetch."""
+	return {"Authorization": f"Bearer {token}", **ANTHROPIC_HEADERS, "User-Agent": HERMES_ANTHROPIC_USER_AGENT}
+
+
 def claude_headers(token, version=None):
-	"""Headers of an Anthropic OAuth request that names itself as the installed Claude Code CLI, or as httpx without one."""
+	"""Headers of an Anthropic OAuth request that names itself as the installed Claude Code CLI, which resets need; without a CLI, as Hermes does (resets are then not listed)."""
 	version = claude_cli_version() if version is None else version
-	return {"Authorization": f"Bearer {token}", **ANTHROPIC_HEADERS, **({"User-Agent": f"claude-cli/{version} (external, cli)"} if version else {})}
+	return {**hermes_headers(token), **({"User-Agent": f"claude-cli/{version} (external, cli)"} if version else {})}
 
 
 def _fetch_anthropic_usage(token):
@@ -413,19 +409,59 @@ def _fetch_anthropic_usage(token):
 		return None
 
 
-def _add_anthropic_extras(snapshot, raw, token, fetcher):
-	"""Append an Anthropic account's model-scoped windows and its limit resets to its normalized snapshot, from Hermes's ``raw`` body when it carries both, else from one GET with the token Hermes just read the account with. A failure leaves Hermes's windows as they are and the resets unread (``reset_grants`` None), and Hermes's own window wins on a shared key."""
-	try:
-		payload = raw if isinstance(raw, dict) and "limits" in raw and "cedar_ember" in raw else fetcher(token)
-		scoped = anthropic_scoped_windows(payload) or ()
-		snapshot["reset_grants"] = anthropic_reset_grants(payload)
-	except Exception:
-		return
-	keys = {window["key"] for window in snapshot["windows"]}
-	for window in scoped:
+def _is_oauth_token(token):
+	"""Hermes's rule for what may go to Anthropic's OAuth usage endpoint: OAuth and setup tokens, never Console API keys (``agent.anthropic_credentials._is_oauth_token``)."""
+	if not token or token.startswith(("sk-ant-api", "sk-ant-usr", "sk-ant-svc", "sk-ant-admin")):
+		return False
+	return token.startswith(("sk-ant-", "eyJ", "cc-"))
+
+
+def anthropic_snapshot(payload, fetched_at):
+	"""A normalized snapshot from Anthropic's usage body: the windows Hermes maps (utilization is already a percentage), then the model-scoped limits not already among them, then the resets; None when the body is not a usage body."""
+	if not isinstance(payload, dict):
+		return None
+	windows = []
+	for name, label, scope in ANTHROPIC_FIXED_WINDOWS:
+		block = payload.get(name)
+		used = _finite(block.get("utilization")) if isinstance(block, dict) else None
+		if used is None:
+			continue
+		key, model = window_key(label, None, scope)
+		windows.append({"key": key, "label": label, "window_seconds": window_seconds("anthropic", key, None), "scope": scope, "model": model,
+			"used_percent": used, "resets_at": _iso_epoch(block.get("resets_at"))})
+	keys = {window["key"] for window in windows}
+	for window in anthropic_scoped_windows(payload) or ():
 		if window["key"] not in keys:
 			keys.add(window["key"])
-			snapshot["windows"].append(window)
+			windows.append(window)
+	return {"fetched_at": _finite(fetched_at), "plan": None, "banked_resets": None, "banked_applicable": None, "windows": windows, "reset_grants": anthropic_reset_grants(payload)}
+
+
+def _read_anthropic(token, fetcher, clock):
+	"""One Anthropic account's snapshot from its own usage read; a snapshot without windows for a token that must not go to the OAuth endpoint (as Hermes reports it), None when the read failed."""
+	if not _is_oauth_token(token):
+		return {"fetched_at": _finite(clock()), "plan": None, "banked_resets": None, "banked_applicable": None, "windows": [], "reset_grants": None}
+	return anthropic_snapshot(fetcher(token), clock())
+
+
+def _cached_plan(account_id, token, fetcher, clock):
+	"""The account's plan from Anthropic's profile, read at the first collection of this process and then every ``PLAN_INTERVAL_S``, or ``PLAN_RETRY_S`` after a failure (which keeps the last plan)."""
+	try:
+		key = (_home_key(_default_home()), account_id)
+	except Exception:
+		key = ("", account_id)
+	now = float(clock())
+	with _PLAN_LOCK:
+		checked, plan, ok = _PLAN_READ.get(key, (None, None, False))
+		if checked is not None and 0 <= now - checked < (PLAN_INTERVAL_S if ok else PLAN_RETRY_S):
+			return plan
+	try:
+		fresh = fetcher(token)
+	except Exception:
+		fresh = None
+	with _PLAN_LOCK:
+		_PLAN_READ[key] = (now, fresh if fresh is not None else plan, fresh is not None)
+	return fresh if fresh is not None else plan
 
 
 # ─── Native adapters: every private Hermes symbol is imported here and degrades to None. ───
@@ -469,10 +505,9 @@ def _claude_code_login(clock=time.time):
 def _fetch_claude_profile_plan(token):
 	"""The organization's rate_limit_tier from Anthropic's OAuth profile with Claude Code's token; None on any failure (a 401 is not retried or refreshed)."""
 	import httpx
-	headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "anthropic-beta": "oauth-2025-04-20"}
 	try:
 		with httpx.Client(timeout=CREDITS_TIMEOUT_S, follow_redirects=False) as client:
-			response = client.get("https://api.anthropic.com/api/oauth/profile", headers=headers)
+			response = client.get("https://api.anthropic.com/api/oauth/profile", headers=hermes_headers(token))
 		if response.status_code != 200:
 			return None
 		organization = response.json().get("organization")
@@ -482,7 +517,7 @@ def _fetch_claude_profile_plan(token):
 	return tier if isinstance(tier, str) and re.fullmatch(r"[A-Za-z0-9_ -]{1,64}", tier) else None
 
 
-def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=_fetch_claude_profile_plan, refresher=None, scoped_fetcher=None):
+def _collect_claude_code(symbols, clock, login_reader, profile_fetcher=_fetch_claude_profile_plan, refresher=None, usage_fetcher=None):
 	"""One Anthropic reading from Claude Code's login, or None when there is no such login."""
 	login = login_reader(clock)
 	if login is not None and login["expired"]:
@@ -504,24 +539,15 @@ def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=
 		if login["expired"]:
 			account["error"] = "token_expired"
 			return reading
-		public = symbols.get("fetch_account_usage")
-		# The public fetch also lands the reading in Hermes's in-memory Anthropic gauge; it is the same account Claude Code sessions consume.
-		fetch = fetcher or (public and (lambda api_key: public("anthropic", api_key=api_key)))
-		if fetch is None:
-			reading["error"], reading["accounts"] = "unavailable", []
-			return reading
-		native = None
 		try:
-			native = fetch(api_key=login["token"])
-			snapshot = normalize_snapshot("anthropic", native)
+			snapshot = _read_anthropic(login["token"], usage_fetcher or _fetch_anthropic_usage, clock)
 		except Exception:
 			snapshot = None
 		if snapshot is None or not snapshot["windows"]:
 			account["error"] = "refresh_failed"
 		else:
-			_add_anthropic_extras(snapshot, getattr(native, "raw", None), login["token"], scoped_fetcher or _fetch_anthropic_usage)
-			# Neither the credentials file (its plan fields are often absent) nor Hermes's usage fetch names the allowance; the profile's tier does.
-			snapshot["plan"] = profile_fetcher(login["token"])
+			# Neither the credentials file (its plan fields are often absent) nor the usage body names the allowance; the profile's tier does.
+			snapshot["plan"] = _cached_plan(CLAUDE_CODE_ACCOUNT_ID, login["token"], profile_fetcher, clock)
 			account["snapshot"] = snapshot
 		return reading
 	finally:
@@ -567,8 +593,8 @@ def _token_fingerprint(token):
 	return "fp:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
 
 
-def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None, claude_login=_claude_code_login, claude_fetcher=None, claude_profile=_fetch_claude_profile_plan, claude_refresher=None, pool_credits_setting=lambda: False, current_credits_fetcher=_fetch_current_codex_credits, anthropic_fetcher=None):
-	"""Read every account of the vetted pooled providers through Hermes's read-only per-credential fetch.
+def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None, claude_login=_claude_code_login, claude_profile=_fetch_claude_profile_plan, claude_refresher=None, anthropic_fetcher=None):
+	"""Read every account of the vetted pooled providers: Codex through Hermes's read-only per-credential fetch, Anthropic with its own usage read.
 
 	Must run inside the target home's context: Hermes keys auth.json on the active home.
 	"""
@@ -583,12 +609,8 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 	required = ("fetch_account_usage", "PooledCredential", "_pool_entry_route_base_url", "_pool_entry_host")
 	started = float(clock())
 	providers, slots, requests = [], [], []
-	# Per-account credit lists only on request and while Hermes still has the private helpers they need; otherwise the account Hermes uses is read through its public signed request.
-	try:
-		pool_credits = bool(pool_credits_setting())
-	except Exception:
-		pool_credits = False
-	pool_credits = pool_credits and pool_credits_available(symbols)
+	# Per-account credit lists while Hermes still has the private helpers they need.
+	pool_credits = pool_credits_available(symbols)
 	# The sampler runs inside its home's override, so this keys the throttle per profile like Hermes's own usage cache.
 	try:
 		home = _home_key(_default_home())
@@ -643,15 +665,20 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 				continue
 			seen.add((host, fingerprint))
 			reading["accounts"].append(account)
-			# The per-account credit list needs the same route and token, kept only in that mode; an Anthropic account's scoped limits need its token again after Hermes's read.
+			# The per-account credit list needs the same route and token, kept only in that mode.
 			credit = (base_url, token) if pool_credits and provider == "openai-codex" else None
-			slots.append((account, reading, host, credit, token if provider == "anthropic" else None))
+			slots.append((account, reading, host, credit))
 			requests.append((provider, base_url, token, fingerprint))
 	try:
-		results = _fetch_accounts(symbols["fetch_account_usage"], requests, join_timeout) if requests else []
+		hermes_fetch, own_fetch = symbols["fetch_account_usage"], anthropic_fetcher or _fetch_anthropic_usage
+
+		def fetch(provider, **kwargs):
+			# Anthropic's own read already carries everything Hermes's fetch would return, so the same GET is not sent twice.
+			return _read_anthropic(kwargs["api_key"], own_fetch, clock) if provider == "anthropic" else hermes_fetch(provider, **kwargs)
+		results = _fetch_accounts(fetch, requests, join_timeout) if requests else []
 		requests.clear()
 		identities = set()
-		for (account, reading, host, _credit, scoped_token), snapshot in zip(slots, results):
+		for (account, reading, host, _credit), snapshot in zip(slots, results):
 			if snapshot is TIMEOUT:
 				account["error"] = "timeout"
 				continue
@@ -666,18 +693,15 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 					continue
 				identities.add((reading["provider"], host, identity))
 			try:
-				account["snapshot"] = normalize_snapshot(reading["provider"], snapshot)
+				account["snapshot"] = snapshot if isinstance(snapshot, dict) else normalize_snapshot(reading["provider"], snapshot)
 			except Exception:
 				account["error"] = "internal_error"
 				continue
 			if not account["snapshot"] or account["snapshot"]["fetched_at"] is None or not account["snapshot"]["windows"]:
 				account["error"] = "no_data"
-			elif scoped_token is not None:
-				# Only once Hermes's own read with this token answered, so the token goes nowhere Hermes did not just send it.
-				_add_anthropic_extras(account["snapshot"], getattr(snapshot, "raw", None), scoped_token, anthropic_fetcher or _fetch_anthropic_usage)
 		# Credit lists are read after the usage fetches, so a merged duplicate is never asked; a failure only skips this hour's update.
 		fetch_credits = credits_fetcher or (lambda base_url, token: _fetch_codex_credits(symbols, base_url, token))
-		for account, reading, _host, credit, _scoped in slots:
+		for account, reading, _host, credit in slots:
 			if credit is None or account not in reading["accounts"]:
 				continue
 			with _CREDITS_LOCK:
@@ -696,25 +720,10 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 		# Drop this collection's references to the tokens; each fetch thread drops its own when it ends.
 		requests.clear()
 		slots.clear()
-	codex = next((reading for reading in providers if reading["provider"] == "openai-codex" and reading["error"] != "logged_out"), None)
-	if codex is not None:
-		codex["credits_mode"] = "accounts" if pool_credits else "current"
-		if not pool_credits:
-			with _CREDITS_LOCK:
-				due = started - _CREDITS_READ.get((home, "openai-codex", CURRENT_CREDITS_ID), float("-inf")) >= CREDITS_INTERVAL_S
-				if due:
-					_CREDITS_READ[(home, "openai-codex", CURRENT_CREDITS_ID)] = started
-			if due:
-				try:
-					credits = current_credits_fetcher()
-				except Exception:
-					credits = None
-				if credits is not None:
-					codex["current_credits"] = credits
 	# Hermes's own anthropic pool wins; only an empty or missing one falls back to Claude Code's login.
 	current = next((reading for reading in providers if reading["provider"] == "anthropic"), None)
 	if current is None or current["error"] == "logged_out":
-		fallback = _collect_claude_code(symbols, clock, claude_login, claude_fetcher, claude_profile, claude_refresher, anthropic_fetcher)
+		fallback = _collect_claude_code(symbols, clock, claude_login, claude_profile, claude_refresher, anthropic_fetcher)
 		if fallback is not None:
 			providers = sorted([reading for reading in providers if reading is not current] + [fallback], key=lambda reading: reading["provider"])
 	return providers
@@ -728,19 +737,6 @@ def forget_credit_read(provider, account_id):
 		home = ""
 	with _CREDITS_LOCK:
 		_CREDITS_READ.pop((home, provider, account_id), None)
-		# The account Hermes currently uses may be the one that changed.
-		_CREDITS_READ.pop((home, provider, CURRENT_CREDITS_ID), None)
-
-
-def forget_credit_reads():
-	"""Make every credit list of the active home due at the next collection, after the experimental setting switched which lists are read."""
-	try:
-		home = _home_key(_default_home())
-	except Exception:
-		home = ""
-	with _CREDITS_LOCK:
-		for key in [key for key in _CREDITS_READ if key[0] == home]:
-			del _CREDITS_READ[key]
 
 
 def forget_due_credit_reads(now):
@@ -814,7 +810,8 @@ class LimitsStore:
 				PRIMARY KEY (provider, account_id)
 			)
 		""")
-		connection.execute("CREATE TABLE IF NOT EXISTS limit_settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+		# The table of the former experimental per-account switch: per-account lists are no longer optional.
+		connection.execute("DROP TABLE IF EXISTS limit_settings")
 		connection.execute("""
 			CREATE TABLE IF NOT EXISTS limit_sampler_status (
 				id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -865,37 +862,17 @@ class LimitsStore:
 					"INSERT INTO limit_provider_status (provider, checked_at, error) VALUES (?, ?, ?) "
 					"ON CONFLICT(provider) DO UPDATE SET checked_at = excluded.checked_at, error = excluded.error",
 					(provider, checked_at, _safe_error(reading.get("error"))))
-				self._record_credits_mode(connection, provider, reading, checked_at)
 				for account in reading.get("accounts") or ():
 					inserted += self._record_account(connection, provider, account, checked_at)
 			connection.execute("DELETE FROM limit_samples WHERE t < ?", (checked_at - RETENTION_S,))
 			connection.execute("DELETE FROM limit_provider_status WHERE checked_at < ?", (checked_at - RETENTION_S,))
-			# An account is shown only while it has samples, so its credit list goes with its last one; the current account's list follows the credit mode instead.
+			# An account is shown only while it has samples, so its credit list goes with its last one.
 			connection.execute(
-				"DELETE FROM limit_credits WHERE account_id != ? AND NOT EXISTS "
-				"(SELECT 1 FROM limit_samples WHERE limit_samples.provider = limit_credits.provider AND limit_samples.account_id = limit_credits.account_id)",
-				(CURRENT_CREDITS_ID,))
+				"DELETE FROM limit_credits WHERE NOT EXISTS "
+				"(SELECT 1 FROM limit_samples WHERE limit_samples.provider = limit_credits.provider AND limit_samples.account_id = limit_credits.account_id)")
 			# A reset list is shown only while fresh, so an older one is never offered again.
 			connection.execute("DELETE FROM limit_reset_grants WHERE fetched_at < ?", (checked_at - STALE_AFTER_S,))
 		return inserted
-
-	@staticmethod
-	def _record_credits_mode(connection, provider, reading, checked_at):
-		"""Keep only the credit lists of the mode that produced this reading, so switching the setting never leaves the other mode's dates on the page."""
-		mode = reading.get("credits_mode")
-		if mode == "accounts":
-			connection.execute("DELETE FROM limit_credits WHERE provider = ? AND account_id = ?", (provider, CURRENT_CREDITS_ID))
-		elif mode == "current":
-			connection.execute(
-				"UPDATE limit_credits SET credits_fetched_at = NULL, credits_json = NULL WHERE provider = ? AND account_id != ? AND credits_json IS NOT NULL",
-				(provider, CURRENT_CREDITS_ID))
-			credits = reading.get("current_credits")
-			if isinstance(credits, list):
-				clean = normalize_credits({"credits": credits}, checked_at) or []
-				connection.execute(
-					"INSERT INTO limit_credits (provider, account_id, credits_fetched_at, credits_json) VALUES (?, ?, ?, ?) "
-					"ON CONFLICT(provider, account_id) DO UPDATE SET credits_fetched_at = excluded.credits_fetched_at, credits_json = excluded.credits_json",
-					(provider, CURRENT_CREDITS_ID, checked_at, json.dumps(clean, separators=(",", ":"))))
 
 	@staticmethod
 	def _record_account(connection, provider, account, checked_at):
@@ -973,18 +950,6 @@ class LimitsStore:
 				"last_run_at = excluded.last_run_at, last_error = excluded.last_error",
 				(_finite(status.get("interval_s")), _finite(status.get("started_at")), _finite(status.get("last_run_at")),
 				 _status_error(status.get("last_error"))))
-
-	def read_setting(self, key):
-		"""A boolean setting kept in this store; off when the store, its table or the key is missing."""
-		with self._reader() as connection:
-			if connection is None or connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'limit_settings'").fetchone() is None:
-				return False
-			row = connection.execute("SELECT value FROM limit_settings WHERE key = ?", (key,)).fetchone()
-		return row is not None and row[0] == 1
-
-	def write_setting(self, key, value):
-		with self._writer() as connection:
-			connection.execute("INSERT INTO limit_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, 1 if value is True else 0))
 
 	def read_status(self):
 		with self._reader() as connection:
@@ -1191,8 +1156,7 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 		history = [_compact_series(account_id, key, samples) for (account_id, key), samples in sorted(block.pop("series").items())]
 		# A logged-out provider is an authentication state, not a sampling failure.
 		logged_out = block["error"] == "logged_out"
-		result.append({**block, "error": None if logged_out else block["error"], "auth": "logged_out" if logged_out else "ok", "auth_reason": None, "accounts": accounts, "history": history,
-			"current_banked_credits": _credits_block(credit_rows.get((slug, CURRENT_CREDITS_ID)), now)})
+		result.append({**block, "error": None if logged_out else block["error"], "auth": "logged_out" if logged_out else "ok", "auth_reason": None, "accounts": accounts, "history": history})
 	if sampler_status is None:
 		sampler_status = store.read_status()
 	return {"generated_at": now, "sampler": _sampler_block(sampler_status), "providers": result}
@@ -1368,7 +1332,7 @@ class LimitsSampler:
 	def _collect(self):
 		if self.collector is not None:
 			return self.collector()
-		return collect_native(join_timeout=self.join_timeout_s, clock=self.clock, pool_credits_setting=lambda: self.store.read_setting(POOL_CREDITS_SETTING))
+		return collect_native(join_timeout=self.join_timeout_s, clock=self.clock)
 
 	def run_once(self):
 		"""One collection + store write inside the sampler's home; returns a small summary, never raises for collector/store failures."""
