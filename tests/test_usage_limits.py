@@ -458,7 +458,7 @@ class CollectorTests(unittest.TestCase):
 	def test_current_account_read_goes_through_hermes_signed_request(self):
 		import hermes_cli.plugin_provider_requests as requests
 		calls = []
-		body = {"credits": [{"status": "available", "granted_at": "2026-09-29T18:58:39Z", "expires_at": "2026-10-29T18:58:39Z", "id": "secret-id"}]}
+		body = {"credits": [{"status": "available", "granted_at": "2026-09-29T18:58:39Z", "expires_at": "2099-10-29T18:58:39Z", "id": "secret-id"}]}
 
 		def signed(provider, method, url, **kwargs):
 			calls.append((provider, method, url, kwargs))

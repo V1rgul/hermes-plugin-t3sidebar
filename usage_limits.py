@@ -190,10 +190,10 @@ def _iso_epoch(value):
 	return _finite(parsed.timestamp()) if parsed.tzinfo is not None else None
 
 
-def normalize_credits(payload):
+def normalize_credits(payload, now=None):
 	"""Secret-free list of the still available credits in Codex's ``rate-limit-reset-credits`` body: status, grant and expiry only, or None when the body is not a credit list.
 
-	Only available credits are ever shown, so redeemed or malformed entries are dropped before ``MAX_CREDITS`` bounds the list; a long redeemed history cannot crowd out the credits after it.
+	Only available, unexpired credits are ever shown, so redeemed or malformed entries, and with a collection time ``now`` those whose known expiry has passed, are dropped before ``MAX_CREDITS`` bounds the list; a long history cannot crowd out the credits after it. A credit without a known expiry is kept.
 	"""
 	if not isinstance(payload, dict) or not isinstance(payload.get("credits"), list):
 		return None
@@ -201,7 +201,10 @@ def normalize_credits(payload):
 	for credit in payload["credits"]:
 		if not isinstance(credit, dict) or credit.get("status") != "available":
 			continue
-		credits.append({"status": "available", "granted_at": _iso_epoch(credit.get("granted_at")), "expires_at": _iso_epoch(credit.get("expires_at"))})
+		expires_at = _iso_epoch(credit.get("expires_at"))
+		if now is not None and expires_at is not None and expires_at <= now:
+			continue
+		credits.append({"status": "available", "granted_at": _iso_epoch(credit.get("granted_at")), "expires_at": expires_at})
 		if len(credits) == MAX_CREDITS:
 			break
 	return credits
@@ -212,7 +215,7 @@ def _fetch_current_codex_credits():
 	try:
 		from hermes_cli.plugin_provider_requests import credentialed_provider_request
 		response = credentialed_provider_request("openai-codex", "GET", CODEX_CREDITS_URL, headers=CODEX_CREDITS_HEADERS, timeout=CREDITS_TIMEOUT_S)
-		return normalize_credits(response.json()) if response.status == 200 else None
+		return normalize_credits(response.json(), time.time()) if response.status == 200 else None
 	except Exception:
 		return None
 
@@ -234,7 +237,7 @@ def _fetch_codex_credits(symbols, base_url, token):
 			response = client.get(urls(base_url or "")[1], headers=headers(token, None))
 		if response.status_code != 200:
 			return None
-		return normalize_credits(response.json())
+		return normalize_credits(response.json(), time.time())
 	except Exception:
 		return None
 
@@ -722,7 +725,7 @@ class LimitsStore:
 				(provider, CURRENT_CREDITS_ID))
 			credits = reading.get("current_credits")
 			if isinstance(credits, list):
-				clean = normalize_credits({"credits": credits}) or []
+				clean = normalize_credits({"credits": credits}, checked_at) or []
 				connection.execute(
 					"INSERT INTO limit_credits (provider, account_id, credits_fetched_at, credits_json) VALUES (?, ?, ?, ?) "
 					"ON CONFLICT(provider, account_id) DO UPDATE SET credits_fetched_at = excluded.credits_fetched_at, credits_json = excluded.credits_json",
@@ -748,7 +751,7 @@ class LimitsStore:
 		credits = account.get("credits")
 		if isinstance(credits, list):
 			# Re-normalized on write so a direct caller cannot store anything beyond status and times.
-			clean = normalize_credits({"credits": credits}) or []
+			clean = normalize_credits({"credits": credits}, checked_at) or []
 			connection.execute(
 				"INSERT INTO limit_credits (provider, account_id, credits_fetched_at, credits_json) VALUES (?, ?, ?, ?) "
 				"ON CONFLICT(provider, account_id) DO UPDATE SET credits_fetched_at = excluded.credits_fetched_at, credits_json = excluded.credits_json",
