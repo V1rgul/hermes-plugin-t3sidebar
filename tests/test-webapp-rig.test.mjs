@@ -141,6 +141,16 @@ test('sync copies tracked and unignored project files with their uncommitted edi
   assertScratchVolumes(result.calls);
 });
 
+test('sync copies the listed files of a directory that replaced a tracked file, not its ignored ones', async () => {
+  const repo = await checkout({ '.gitignore': gitignore, 'payload': 'tracked file' });
+  rmSync(join(repo, 'payload'));
+  write(join(repo, 'payload/new.py'), 'new project file');
+  write(join(repo, 'payload/ignored.sqlite3'), 'ignored');
+  const result = await rig(repo, ['sync'], { STUB_RUNNING: 't3demo' });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual((await tarList(join(root, 'sync.tar'))).filter(name => name.startsWith('payload/')), ['payload/', 'payload/new.py']);
+});
+
 test('sync keeps the installed plugin when the archive cannot be built, and leaves no temporary file', async () => {
   const repo = await checkout({ '__init__.py': '', 'unreadable.py': 'x' });
   chmodSync(join(repo, 'unreadable.py'), 0);

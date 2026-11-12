@@ -147,7 +147,8 @@ sync_plugin() {
 	staging=$(mktemp -d "${TMPDIR:-/tmp}/t3webapp-sync.XXXXXX")
 	on_exit 'rm -rf -- "$staging"'
 	project_files "$staging"
-	tar -C "$REPO" --null -T "$staging/files" -cf "$staging/plugin.tar"
+	# Without recursion, a listed directory (a tracked file that became one) brings in only its listed files, never the ignored ones beside them.
+	tar -C "$REPO" --null --no-recursion -T "$staging/files" -cf "$staging/plugin.tar"
 	tar -tf "$staging/plugin.tar" | grep -qx plugin.yaml || { echo "Refusing to sync: the archive holds no plugin.yaml" >&2; exit 1; }
 	"$RUNTIME" exec "$NAME" rm -rf "$PLUGIN"
 	"$RUNTIME" exec "$NAME" mkdir -p "$PLUGIN"
