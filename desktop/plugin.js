@@ -576,6 +576,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       if (sessions.length !== data.sessions.length || sessions.some((row, i) => row !== data.sessions[i])) client.setQueryData(key, { ...data, sessions });
     }
   }
+  // Settings saves in flight, by save id. They outlive the settings page that started them, so a remounted page must still see them.
+  const savingSettings = sdk.atom([]);
   return {
     dispose() { disposed = true; generation++; pendingRoutes = null; archiveHead = null; deleteRequests.clear(); doneAcks.clear(); }, check,
     async hasDraft(scope, row) {
@@ -1115,6 +1117,14 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const info = await fenced(scope, () => env.host.requestProfile(route, 'session.cwd.set', { session_id: created.session_id, cwd: project.path }));
       if (info?.cwd !== project.path) throw new Error('The session workspace was not confirmed. Do not send a message until the native workspace is checked.');
       return created;
+    },
+    savingSettings,
+    // One save per id at a time, whichever page mount asks; the work itself fences its publication with check().
+    async saveSetting(id, work) {
+      if (savingSettings.get().includes(id)) return;
+      savingSettings.set([...savingSettings.get(), id]);
+      try { await work(); }
+      finally { savingSettings.set(savingSettings.get().filter(item => item !== id)); }
     }
   };
 }
@@ -1365,7 +1375,7 @@ function MenuAction({ name, codicon, className = '', destructive = false, childr
     h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, codicon ? h(sdk.Codicon, { name: codicon, size: 14 }) : icon(name)), h('span', { className: 'sf-menu-label' }, children));
 }
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
-function Settings({ ctx }) {
+function Settings({ ctx, controller }) {
   const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
   const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [linesError, setLinesError] = useState(''), [tokensError, setTokensError] = useState('');
   // Write, exact readback, then publication to the mounted sidebar; a failure is reported under its own setting.
@@ -1404,7 +1414,7 @@ function Settings({ ctx }) {
     description: 'Show total input and output tokens on session cards.',
     checked: showTokens, onChange: saveTokens,
     below: tokensError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, tokensError) : null
-  }), h(ExperimentalSettings, { ctx }));
+  }), h(ExperimentalSettings, { ctx, controller }));
 }
 // Experimental features lean on Hermes internals. The backend reports, feature by feature, whether this Hermes still has them; a feature without them is off, its switch disabled and the reason shown under it, while the others keep working.
 const experimentalKey = scope => ['hermes-t3sidebar-settings', scope.connectionId, scope.profile, scope.epoch, 'experimental'];
@@ -1426,15 +1436,15 @@ export function validExperimental(value) {
   // A feature the backend does not report is treated as unavailable rather than guessed.
   return Object.fromEntries(EXPERIMENTAL_FEATURES.map(({ id }) => [id, { enabled: features[id]?.enabled === true, available: features[id]?.available === true }]));
 }
-function ExperimentalSettings({ ctx }) {
+function ExperimentalSettings({ ctx, controller }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
   useValue(host.state.gateway);
   useValue(activationEpoch);
   const epoch = gatewayActivationEpoch();
   const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
-  return h(ScopedExperimentalSettings, { key: JSON.stringify(experimentalKey(scope)), ctx, scope });
+  return h(ScopedExperimentalSettings, { key: JSON.stringify(experimentalKey(scope)), ctx, controller, scope });
 }
-function ScopedExperimentalSettings({ ctx, scope }) {
+function ScopedExperimentalSettings({ ctx, controller, scope }) {
   const query = useQuery({ queryKey: experimentalKey(scope), queryFn: () => experimentalRequest(ctx, scope, '/settings/experimental'), staleTime: 0, retry: false });
   // Same heading as Desktop's own settings sections (SectionHeading, not exported by the SDK): icon and title, with the caveat right after the title.
   return h('section', { className: 'sf-experimental mt-6', 'aria-label': 'Experimental' },
@@ -1442,30 +1452,31 @@ function ScopedExperimentalSettings({ ctx, scope }) {
       typeof sdk.Codicon === 'function' ? h(sdk.Codicon, { name: 'beaker', size: 16, className: 'shrink-0 text-muted-foreground' }) : null,
       h('span', null, 'Experimental'),
       h('span', { className: 'text-xs font-normal text-muted-foreground' }, 'May break with updates. Auto-disables in that case.')),
-    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, scope, feature, state: query.data?.[feature.id], readError: query.isError })));
+    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, controller, scope, feature, state: query.data?.[feature.id], readError: query.isError })));
 }
-function ExperimentalFeature({ ctx, scope, feature, state, readError }) {
-  const client = useQueryClient(), [error, setError] = useState(''), [saving, setSaving] = useState(false), pending = useRef(false);
-  const key = experimentalKey(scope);
-  // One save at a time: the switch stays disabled until the backend's readback of this save is published.
-  const save = async enabled => {
-    if (pending.current) return;
-    pending.current = true; setSaving(true);
+function ExperimentalFeature({ ctx, controller, scope, feature, state, readError }) {
+  const client = useQueryClient(), [error, setError] = useState('');
+  const key = experimentalKey(scope), saveId = JSON.stringify([...key, feature.id]);
+  // One save at a time, even across a remount of this page: the switch stays disabled until the backend's readback of this save is published.
+  const saving = useValue(controller.savingSettings).includes(saveId);
+  const save = enabled => controller.saveSetting(saveId, async () => {
     try {
       // A background read started before or during the write could otherwise publish the state from before it.
       await client.cancelQueries({ queryKey: key });
+      controller.check(scope);
       const value = await experimentalRequest(ctx, scope, `/settings/experimental/${feature.id}`, { method: 'PUT', body: { enabled } });
       if (value[feature.id].enabled !== enabled) throw new Error('The setting was not confirmed.');
       await client.cancelQueries({ queryKey: key });
-      if (!sameScope(scope, captureScope())) return;
+      // After a source or profile switch, or once the plugin is disposed, the answer is dropped.
+      controller.check(scope);
       client.setQueryData(key, value);
       setError('');
     } catch (_) {
-      if (!sameScope(scope, captureScope())) return;
+      try { controller.check(scope); } catch (_) { return; }
       setError('The setting was not saved.');
       client.invalidateQueries({ queryKey: key });
-    } finally { pending.current = false; setSaving(false); }
-  };
+    }
+  });
   const unavailable = state?.available === false;
   const note = unavailable ? INCOMPATIBLE_HERMES : error || (readError ? 'Could not read this setting from the plugin backend.' : '');
   return h(sdk.ToggleRow ?? SettingsToggleRow, {
@@ -4067,7 +4078,7 @@ export default {
     const controller = createController(ctx);
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
-    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx }) });
+    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx, controller }) });
     ctx.register({ id: 'usage', area: sdk.ROUTES_AREA ?? 'routes', title: 'Usage', data: { path: USAGE_ROUTE }, render: () => h(UsagePage, { ctx, view: 'usage' }) });
     ctx.register({ id: 'limits', area: sdk.ROUTES_AREA ?? 'routes', title: 'Limits', data: { path: LIMITS_ROUTE }, render: () => h(UsagePage, { ctx, view: 'limits' }) });
     let disposed = false, pending = null;
