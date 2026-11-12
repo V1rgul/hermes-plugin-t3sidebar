@@ -167,6 +167,15 @@ test('sync keeps the installed plugin when the archive cannot be built, and leav
   assert.deepEqual(readdirSync(join(root, 'tmp')), []);
 });
 
+test('sync refuses an archive without a plugin.yaml, even with a name that differs only where a pattern would match anything', async () => {
+  const repo = await checkout({ '__init__.py': '', 'pluginXyaml': 'not a manifest' });
+  rmSync(join(repo, 'plugin.yaml'));
+  const result = await rig(repo, ['sync'], { STUB_RUNNING: 't3demo' });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /Refusing to sync/);
+  assert.deepEqual(result.calls.filter(call => call[0] === 'exec' || call[0] === 'restart').map(call => call.join(' ')), []);
+});
+
 // A linked worktree of a fresh scratch checkout: its first setup clones the shared container's data.
 async function worktree() {
   const main = await checkout({ '__init__.py': '' });
