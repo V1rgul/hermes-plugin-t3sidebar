@@ -16,6 +16,10 @@ const DRAFT_SYNC_MS = 30_000;
 const DRAFT_FOCUS_MS = 2000;
 // Received drafts a client keeps; deletion markers, the oldest first, are forgotten beyond it.
 const DRAFT_STATE_LIMIT = 500;
+// The companion's request limits: DraftSync.changes in dashboard/plugin_api.py, and session_drafts.MAX_TEXT_LENGTH, which counts code points.
+const DRAFT_SYNC_BATCH = 200;
+const DRAFT_TEXT_LIMIT = 200_000;
+const draftFits = text => text.length <= DRAFT_TEXT_LIMIT || [...text].length <= DRAFT_TEXT_LIMIT;
 export const draftSyncKey = scope => ['hermes-t3sidebar-draft-sync', scope.connectionId, scope.profile, scope.epoch];
 const ARCHIVE_TAIL_STALE_MS = 30000;
 const HISTORY_PAGE_GC_MS = 300000;
@@ -405,20 +409,30 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     let stored;
     try { stored = ctx.storage.get(key, null); } catch (_) { stored = null; }
     const entries = value => Object.entries(value && typeof value === 'object' ? value : {});
+    const optional = (value, type) => value == null || typeof value === type;
+    // Each record is checked whole and dropped alone when invalid, so one damaged entry cannot break the view or take the others with it.
+    const validKnown = entry => entry && (entry.text === null || typeof entry.text === 'string') && optional(entry.cwd, 'string') && Number.isFinite(entry.edited_at) &&
+      optional(entry.seen, 'string') && optional(entry.project, 'object') && !Array.isArray(entry.project);
+    const validPending = change => change && typeof change.text === 'string' && Number.isFinite(change.edited_at) && optional(change.cwd, 'string') &&
+      (change.discarded === undefined || typeof change.discarded === 'string');
     // settled: the focused session once its composer has been reconciled; until then it is being entered, and an empty composer there is
-    // a copy not restored yet, never a deletion.
-    const state = { key, running: null, settled: null,
+    // a copy not restored yet, never a deletion. unsaved / unshown: changed since last stored / since the cards last got the view.
+    // reads: counts the reads of the focused composer, so that only the latest one applies.
+    // deleted: sessions whose deletion was verified here, kept for the controller's life so that nothing begun before the deletion (a sync answer, even one the companion handled afterwards, a composer read, the leave hook) can bring their draft back; the accepted cost is that a draft another client writes for one of them afterwards is not shown here, though it stays on the companion and on that client.
+    const state = { key, running: null, settled: null, unsaved: false, unshown: false, reads: 0, deleted: new Set(),
       cursor: Number.isSafeInteger(stored?.cursor) && stored.cursor >= 0 ? stored.cursor : 0,
-      known: new Map(entries(stored?.known).filter(([, entry]) => entry && (entry.text === null || typeof entry.text === 'string'))),
-      pending: new Map(entries(stored?.pending).filter(([, change]) => change && typeof change.text === 'string' && Number.isFinite(change.edited_at))) };
+      known: new Map(entries(stored?.known).filter(([, entry]) => validKnown(entry))),
+      pending: new Map(entries(stored?.pending).filter(([, change]) => validPending(change))) };
     draftStates.set(key, state);
     return state;
   }
   function saveDraftState(state) {
-    for (const [id, entry] of state.known) {
-      if (state.known.size <= DRAFT_STATE_LIMIT) break;
-      if (entry.text === null) state.known.delete(id);
+    // A marker's edit time is when its draft was deleted; Map order is only when its session was first seen.
+    if (state.known.size > DRAFT_STATE_LIMIT) {
+      const markers = [...state.known].filter(([, entry]) => entry.text === null).sort((a, b) => a[1].edited_at - b[1].edited_at);
+      for (const [id] of markers.slice(0, state.known.size - DRAFT_STATE_LIMIT)) state.known.delete(id);
     }
+    state.unsaved = false;
     try { ctx.storage.set(state.key, { cursor: state.cursor, known: Object.fromEntries(state.known), pending: Object.fromEntries(state.pending) }); }
     catch (_) { /* Sync still works for this run. */ }
   }
@@ -427,12 +441,13 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     const view = [];
     for (const id of new Set([...state.known.keys(), ...state.pending.keys()])) {
       const known = state.known.get(id), pending = state.pending.get(id);
-      if (pending ? pending.text : known?.text) view.push({ session_id: id, cwd: pending?.cwd ?? known?.cwd ?? null, project: known?.project ?? null, edited_at: known?.edited_at ?? pending.edited_at });
+      if (pending ? pending.text : known?.text) view.push({ session_id: id, cwd: pending?.cwd ?? known?.cwd ?? null, project: known?.project ?? null, edited_at: pending?.edited_at ?? known.edited_at });
     }
     return view;
   }
   function publishDrafts(scope, state) {
     saveDraftState(state);
+    state.unshown = false;
     if (!disposed && sameScope(scope, env.capture())) client.setQueryData(draftSyncKey(scope), draftView(state));
   }
   // Cards' own draft markers, which only the focused card polls: rereads their composers once a draft was deleted or changed elsewhere.
@@ -444,31 +459,45 @@ export function createController(ctx, client = queryClient, env = { capture: cap
        without stored history, so the draft is put back (as it is into a composer that never held this draft);
      - any other difference is a local edit, kept as pending and sent with the next sync (blank text deletes the draft).
      Only a mounted composer is written. False means retry once it is: a failed write, or, when entering, a composer not mounted yet. */
-  async function reconcileDraft(scope, state, target, { mounted = false, entering = false } = {}) {
+  async function reconcileDraft(scope, state, target, { mounted = () => false, entering = false, current = () => true } = {}) {
     const raw = await readComposer(scope, target.address);
+    // A newer read has started since: it sees at least as recent a composer, and acts on it.
+    if (!current()) return true;
     if (raw === null) return !entering;
     const key = draftKeyFor(state, target), local = raw.trim() ? raw : '', localHash = draftHash(local);
+    if (state.deleted.has(key)) return true;
     const known = state.known.get(key), pending = state.pending.get(key);
     if (local === (pending ? pending.text : known?.text ?? '')) {
-      if (known && !pending) known.seen = localHash;
+      if (known && !pending && known.seen !== localHash) { known.seen = localHash; state.unsaved = true; }
       // Typed before its session was listed: the folder is known now.
-      if (pending && !pending.cwd && target.cwd) pending.cwd = target.cwd;
+      if (pending && !pending.cwd && target.cwd) { pending.cwd = target.cwd; state.unsaved = state.unshown = true; }
       return true;
     }
-    if (!pending && known && (known.seen === localHash || entering && known.text !== null && (!local || known.seen == null))) {
-      if (!mounted) return true;
+    // A composer without a fingerprint never matched any version of this draft: still empty, it last matched its absence.
+    if (!pending && known && (known.seen === localHash || known.seen == null && !local || entering && known.text !== null && (!local || known.seen == null))) {
+      if (!mounted()) return true;
       if (!(await writeComposer(scope, target.address, known.text ?? ''))) return false;
       known.seen = draftHash(known.text ?? '');
+      state.unsaved = true;
       return true;
     }
+    // The same prune can erase text not synced yet; a pending deletion has no text to put back.
+    if (entering && !local && pending?.text) return !mounted() || writeComposer(scope, target.address, pending.text);
+    // A copy of a draft discarded here whose deletion is not synced yet, as when its clear failed: cleared like one deleted elsewhere, never an edit.
+    if (local && pending?.discarded === localHash) return !mounted() || writeComposer(scope, target.address, '');
     state.pending.set(key, { text: local, cwd: target.cwd ?? pending?.cwd ?? known?.cwd ?? null, edited_at: Date.now() / 1000 });
+    state.unsaved = state.unshown = true;
     return true;
   }
   // The focused composer, by whichever reader comes first after a focus change (entry, the local poll or a sync).
+  // Focus can move to another session of the same scope while a read is in flight: the reader of the session it left then neither writes that composer nor marks it settled, which would make the session focused now count as entered again, and a clear there as a prune.
   async function reconcileFocused(scope, state, target) {
     if (!ownsFocus(scope)) return false;
-    const done = await reconcileDraft(scope, state, target, { mounted: true, entering: state.settled !== target.key });
-    if (done) state.settled = target.key;
+    const focused = () => ownsFocus(scope) && target.ids.includes(env.host.state?.focusedStoredSessionId?.get());
+    // Reads complete out of order, also across leaving and re-entering one session: a read of a session no longer focused supersedes none.
+    const ticket = focused() ? ++state.reads : state.reads, current = () => state.reads === ticket;
+    const done = await reconcileDraft(scope, state, target, { mounted: focused, entering: state.settled !== target.key, current });
+    if (done && focused() && current()) state.settled = target.key;
     return done;
   }
   // A composer still holding the exact text of a draft deleted since (discarded here, sent or cleared elsewhere), which Desktop keeps until that
@@ -478,10 +507,21 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     return pending ? pending.text === '' && pending.discarded === hash : known?.text === null && known.seen === hash;
   }
   // Deletes a draft with the next sync. Composers still holding its text are cleared when next focused, as for a draft sent elsewhere.
-  // local: the composer's text, for a draft this client has not synced yet.
+  // local: the composer's text when it was read; the copy it still holds, possibly typed since the last poll, is the one to retire.
   function dropDraft(state, id, cwd = null, local = null) {
-    const text = state.pending.get(id)?.text || state.known.get(id)?.text || local?.trim() && local;
+    const text = local?.trim() && local || state.pending.get(id)?.text || state.known.get(id)?.text;
     if (text) state.pending.set(id, { text: '', cwd, edited_at: Date.now() / 1000, discarded: draftHash(text) });
+  }
+  // A deleted session's draft goes with it, so no draft-only card brings it back and no pending edit is sent for it again; the companion marks its own row deleted.
+  function forgetDrafts(scope, ids) {
+    const state = draftState(scope);
+    for (const id of ids) {
+      state.deleted.add(id);
+      state.pending.delete(id);
+      const known = state.known.get(id);
+      if (known && known.text !== null) state.known.set(id, { ...known, text: null, edited_at: Date.now() / 1000 });
+    }
+    publishDrafts(scope, state);
   }
   const ownsFocus = scope => { const owner = env.host.state?.focusedSessionOwner?.get(); return owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile; };
   // Text of one composer, or null when nothing answers for it (an unmounted session falls back to Desktop's local copy until its prune).
@@ -767,38 +807,55 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     // client's cursor come back. Concurrent callers share the call in flight.
     async syncDrafts(scope, focus) {
       const state = draftState(scope);
-      if (state.running) return state.running;
+      // The state outlives an activation, but a call in flight is fenced to the one that started it.
+      if (state.running && sameScope(state.running.scope, scope)) return state.running.work;
       const work = (async () => {
         const target = focus?.();
         if (target) await reconcileFocused(scope, state, target);
         const route = await routeFor(scope);
-        const sent = [...state.pending];
-        const body = { since: state.cursor, sent_at: Date.now() / 1000,
-          changes: sent.map(([session_id, change]) => ({ session_id, text: change.text, edited_at: change.edited_at, ...(change.cwd ? { cwd: change.cwd } : {}) })) };
-        const value = await fenced(scope, () => ctx.rest('/drafts/sync', { method: 'POST', body }));
-        if (value?.profile !== (route?.targetProfile || scope.profile) || !Number.isSafeInteger(value.cursor) || value.cursor < 0 || typeof value.reset !== 'boolean' ||
-          !Array.isArray(value.drafts) || !value.drafts.every(validDraft)) throw new Error('Invalid current-profile drafts response.');
-        if (value.reset) {
+        // At most one batch per call, the rest in the calls that follow at once; a text the companion would refuse stays pending here without holding up the others.
+        const tried = new Set(), sendable = ([id, change]) => !tried.has(id) && draftFits(change.text);
+        let received = false, more;
+        do {
+          const sent = [...state.pending].filter(sendable).slice(0, DRAFT_SYNC_BATCH);
+          for (const [id] of sent) tried.add(id);
+          const body = { since: state.cursor, sent_at: Date.now() / 1000,
+            changes: sent.map(([session_id, change]) => ({ session_id, text: change.text, edited_at: change.edited_at, ...(change.cwd ? { cwd: change.cwd } : {}) })) };
+          const value = await fenced(scope, () => ctx.rest('/drafts/sync', { method: 'POST', body }));
+          if (value?.profile !== (route?.targetProfile || scope.profile) || !Number.isSafeInteger(value.cursor) || value.cursor < 0 || typeof value.reset !== 'boolean' ||
+            !Array.isArray(value.drafts) || !value.drafts.every(validDraft)) throw new Error('Invalid current-profile drafts response.');
+          // The companion returns the current row of every changed session, once: anything else is not an acknowledgment of what was sent.
           const listed = new Set(value.drafts.map(draft => draft.session_id));
-          for (const [id, entry] of state.known) if (entry.text !== null && !listed.has(id)) state.known.set(id, { ...entry, text: null });
-        }
-        for (const draft of value.drafts) {
-          state.known.set(draft.session_id, { text: draft.text, cwd: draft.cwd, project: draft.project ?? null, edited_at: draft.edited_at, seen: state.known.get(draft.session_id)?.seen ?? null });
-        }
-        for (const [id, change] of sent) {
-          // The composer held the sent text, so an edit that lost to a newer one is then replaced like any remote change.
-          const known = state.known.get(id);
-          if (known) known.seen = change.discarded ?? draftHash(change.text);
-          if (state.pending.get(id) === change) state.pending.delete(id);
-        }
-        state.cursor = value.cursor;
+          if (listed.size !== value.drafts.length || !sent.every(([id]) => listed.has(id)) || value.drafts.some(draft => draft.seq > value.cursor)) {
+            throw new Error('Invalid current-profile drafts response.');
+          }
+          if (value.reset) {
+            for (const [id, entry] of state.known) if (entry.text !== null && !listed.has(id)) state.known.set(id, { ...entry, text: null });
+          }
+          for (const draft of value.drafts) {
+            if (state.deleted.has(draft.session_id)) continue;
+            state.known.set(draft.session_id, { text: draft.text, cwd: draft.cwd, project: draft.project ?? null, edited_at: draft.edited_at, seen: state.known.get(draft.session_id)?.seen ?? null });
+          }
+          for (const [id, change] of sent) {
+            // The composer held the sent text, so an edit that lost to a newer one is then replaced like any remote change.
+            const known = state.known.get(id);
+            if (known) known.seen = change.discarded ?? draftHash(change.text);
+            if (state.pending.get(id) === change) state.pending.delete(id);
+          }
+          state.cursor = value.cursor;
+          received ||= value.drafts.length > 0;
+          more = [...state.pending].some(sendable);
+          if (more) saveDraftState(state);
+        } while (more);
         if (target) await reconcileFocused(scope, state, target);
         saveDraftState(state);
-        if (value.drafts.length) refreshCardDrafts(scope);
+        if (received) refreshCardDrafts(scope);
+        state.unshown = false;
         return draftView(state);
       })();
-      state.running = work;
-      try { return await work; } finally { if (state.running === work) state.running = null; }
+      const running = { scope: { ...scope }, work };
+      state.running = running;
+      try { return await work; } finally { if (state.running === running) state.running = null; }
     },
     localDrafts(scope) { return draftView(draftState(scope)); },
     flushDrafts(scope) { refresh(scope, { queryKey: draftSyncKey(scope) }); },
@@ -816,9 +873,11 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     // The focused composer between syncs: records a change so its card, and the edit time sent with the next sync, follow it within DRAFT_FOCUS_MS.
     async noteDraft(scope, target) {
       if (!ownsFocus(scope)) return;
-      const state = draftState(scope), before = JSON.stringify(draftView(state));
+      const state = draftState(scope);
       await reconcileFocused(scope, state, target);
-      if (JSON.stringify(draftView(state)) !== before) publishDrafts(scope, state);
+      // Pending text is stored as soon as it changes, so closing Desktop keeps it; the cards are only told when what they show changed.
+      if (state.unshown) publishDrafts(scope, state);
+      else if (state.unsaved) saveDraftState(state);
     },
     async leaveDraft(scope, target) {
       const state = draftState(scope);
@@ -832,6 +891,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const text = id && (state.pending.has(id) ? state.pending.get(id).text : state.known.get(id)?.text);
       if (!text) throw new Error('This draft is no longer saved. Refresh and retry.');
       const cwd = state.pending.get(id)?.cwd ?? state.known.get(id)?.cwd ?? null;
+      // The version copied is its text in its folder, where it reopens: a change to either during the handoff is newer content, and stays.
+      const source = () => JSON.stringify([state.pending.has(id) ? state.pending.get(id).text : state.known.get(id)?.text, state.pending.get(id)?.cwd ?? state.known.get(id)?.cwd ?? null]);
+      const copied = source();
       const route = await routeFor(scope); check(scope);
       let created = null;
       if (cwd) created = await this.newChat(scope, { id: cwd, path: cwd }, `hermes-t3sidebar:draft:${id}:${draftHash(text)}`);
@@ -842,7 +904,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       for (let attempt = 0; attempt < 20 && !(written = await writeComposer(scope, address, text)); attempt++) await new Promise(resolve => setTimeout(resolve, 100));
       if (!written) throw new Error('A new session opened, but the draft could not be put into its composer. It stays saved.');
       if (created) state.pending.set(created.stored_session_id, { text, cwd, edited_at: Date.now() / 1000 });
-      dropDraft(state, id, cwd);
+      // Only the version copied leaves: one received or typed during the handoff is newer, and stays.
+      if (source() === copied) dropDraft(state, id, cwd);
       publishDrafts(scope, state);
       this.flushDrafts(scope);
     },
@@ -920,6 +983,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         }
         check(scope);
         updateRows(scope, new Set(deletedIds), null);
+        forgetDrafts(scope, deletedIds);
         const owner = env.host.state?.focusedSessionOwner?.get();
         if (owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile && hasAlias(row, env.host.state?.focusedStoredSessionId?.get())) {
           await fenced(scope, () => env.host.newChat(route));
