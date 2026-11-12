@@ -3300,6 +3300,11 @@ export function sharedWindowCatalog(providers) {
   for (const provider of providers || []) if (provider?.auth !== 'logged_out') for (const item of windowCatalog(provider)) if (!found.has(item.key)) found.set(item.key, item);
   return [...found.values()].sort((a, b) => windowRank(a.key) - windowRank(b.key) || (a.seconds ?? 0) - (b.seconds ?? 0) || a.key.localeCompare(b.key));
 }
+// The Window selector's buttons: model-scoped windows (keys `<period>:<model>`) are numbered in catalog order rather than named, so the bar stays short; the account bars still name each model.
+export function windowOptions(windows) {
+  let model = 0;
+  return windows.map(item => ({ id: item.key, label: item.key.includes(':') ? `Model limit #${++model}` : item.label }));
+}
 // A provider without the chosen window charts its weekly one, else its first.
 export const chartWindow = (windows, key) => windows.find(item => item.key === key) || windows.find(item => item.key === 'weekly') || windows[0] || null;
 // T3's pace mark: share of the window still to run, which is where an even spend would leave the remaining bar.
@@ -3567,7 +3572,7 @@ function LimitsView({ query, prefs, update, toolbar, redeem, unsettled }) {
   // The lookback is edited from each chart's averaging label rather than this bar; it is still one shared preference.
   const setLookback = useCallback(lookback => update({ lookback }), [update]);
   const controls = h('div', { className: 'su-top' }, h('header', { className: 'su-header su-limits-controls' },
-    windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windows.map(item => ({ id: item.key, label: item.label })), value: selected.key, onChange: value => update({ window: value }) }) : null,
+    windows.length > 1 ? h(Segmented, { label: 'Window', sizing: 'content', options: windowOptions(windows), value: selected.key, onChange: value => update({ window: value }) }) : null,
     toolbar));
   if (!data) return h(Fragment, null, controls, h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, query.isError ? h(QueryProblem, { query, what: 'Limits' }) : h(UsageState, null, 'Loading limits…'))));
   return h(Fragment, null, controls, h('div', { className: 'su-scroll' },

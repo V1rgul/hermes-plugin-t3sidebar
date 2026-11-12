@@ -578,6 +578,9 @@ test('overview order puts providers with accounts first and logged-out ones last
   const windows = usage.sharedWindowCatalog([{ accounts: [{ windows: [{ key: 'weekly', label: 'Weekly' }] }], history: [] }, { accounts: [{ windows: [{ key: 'five_hour', label: '5-hour' }, { key: 'weekly', label: 'Weekly' }] }], history: [] }, { auth: 'logged_out', accounts: [{ windows: [{ key: 'w7200' }] }], history: [] }]);
   assert.deepEqual(windows.map(item => item.key), ['five_hour', 'weekly'], 'the shared selector offers every logged-in provider\'s windows');
   assert.deepEqual([usage.chartWindow(windows, 'five_hour')?.key, usage.chartWindow([{ key: 'weekly' }], 'five_hour')?.key, usage.chartWindow([{ key: 'w7200' }], 'five_hour')?.key, usage.chartWindow([], 'weekly')], ['five_hour', 'weekly', 'w7200', null]);
+  // Model-scoped windows are numbered in selector order across providers; account-wide ones keep their label.
+  const scoped = usage.sharedWindowCatalog([{ accounts: [{ windows: [{ key: 'weekly:sonnet', label: 'Sonnet week' }, { key: 'weekly', label: 'Weekly' }] }], history: [] }, { accounts: [{ windows: [{ key: 'weekly:fable', label: 'Fable week' }, { key: 'five_hour', label: '5-hour' }] }], history: [] }]);
+  assert.deepEqual(usage.windowOptions(scoped).map(item => `${item.id}=${item.label}`), ['five_hour=5-hour', 'weekly=Weekly', 'weekly:fable=Model limit #1', 'weekly:sonnet=Model limit #2']);
 });
 
 // Sidebar footer and registration -----------------------------------------------------------------------------------

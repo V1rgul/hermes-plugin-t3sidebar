@@ -721,12 +721,118 @@ class CreditTests(unittest.TestCase):
 NO_CLAUDE = lambda clock: None
 
 
-class ClaudeCodeFallbackTests(unittest.TestCase):
-	def collect(self, pool, login, fetcher, profile=None, refresher=None):
+# The real read, kept before NoNetworkTestCase swaps it out of the module.
+REAL_FETCH_ANTHROPIC_USAGE = limits._fetch_anthropic_usage
+
+
+class NoNetworkTestCase(unittest.TestCase):
+	"""Anthropic's scoped-limit GET defaults to the real endpoint; record any default call instead of sending it."""
+
+	def setUp(self):
+		self.network = []
+		patcher = patch.object(limits, "_fetch_anthropic_usage", side_effect=lambda token: self.network.append(token))
+		patcher.start()
+		self.addCleanup(patcher.stop)
+
+
+def collect_claude(pool, login, fetcher, profile=None, refresher=None, scoped=None):
+	symbols = CollectorTests.symbols(CollectorTests(), pool)
+	profile = profile or (lambda token: "default_claude_max_5x")
+	with patch.object(limits, "_native_symbols", return_value=symbols):
+		return limits.collect_native(join_timeout=1, claude_login=login, claude_fetcher=fetcher, claude_profile=profile, claude_refresher=refresher, anthropic_fetcher=scoped)
+
+
+# Shape of a live /api/oauth/usage ``limits`` list (field names as Anthropic sends them; values invented).
+SCOPED_BODY = {"limits": [
+	{"kind": "session", "group": "session", "percent": 22, "severity": "normal", "resets_at": "2026-11-10T04:20:00.478555+00:00", "scope": None, "is_active": False},
+	{"kind": "weekly_all", "group": "weekly", "percent": 40, "severity": "normal", "resets_at": "2026-11-12T00:00:00.478581+00:00", "scope": None, "is_active": True},
+	{"kind": "weekly_scoped", "group": "weekly", "percent": 7, "severity": "normal", "resets_at": "2026-11-12T00:00:00+00:00", "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}, "is_active": False},
+]}
+
+
+class AnthropicScopedLimitsTests(NoNetworkTestCase):
+	def hermes(self, *windows, raw=None):
+		return SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=raw, windows=windows or (
+			SimpleNamespace(label="Current week", used_percent=40.0, reset_at=dt(NOW + 86400), scope="account"),))
+
+	def test_scoped_entries_become_model_windows_and_account_wide_ones_are_left_to_hermes(self):
+		(fable,) = limits.anthropic_scoped_windows(SCOPED_BODY)
+		self.assertEqual(fable, {"key": "weekly:fable", "label": "Fable week", "window_seconds": 604800, "scope": "model", "model": "fable",
+			"used_percent": 7.0, "resets_at": dt_epoch("2026-11-12T00:00:00+00:00")})
+		# A session-group scoped entry maps to the session window, the model's id stands in for a missing name, and malformed rows are skipped.
+		odd = {"limits": [{"group": "session", "percent": 3, "scope": {"model": {"id": "mist", "display_name": None}}}, "x",
+			{"group": "monthly", "percent": 1, "scope": {"model": {"display_name": "Fable"}}}, {"group": "weekly", "scope": {"model": {"display_name": "me@example.com"}}}]}
+		self.assertEqual([(w["key"], w["used_percent"]) for w in limits.anthropic_scoped_windows(odd)], [("five_hour:mist", 3.0)])
+		self.assertIsNone(limits.anthropic_scoped_windows({"seven_day": {}}))
+		self.assertIsNone(limits.anthropic_scoped_windows(None))
+
+	def test_claude_code_login_adds_the_fable_window_with_its_own_token(self):
+		sent = []
+		readings = collect_claude({}, lambda clock: {"token": "tok", "expired": False}, lambda **kw: self.hermes(),
+			scoped=lambda token: sent.append(token) or SCOPED_BODY)
+		windows = readings[0]["accounts"][0]["snapshot"]["windows"]
+		self.assertEqual([(w["key"], w["scope"], w["used_percent"]) for w in windows], [("weekly", "account", 40.0), ("weekly:fable", "model", 7.0)])
+		self.assertEqual(sent, ["tok"])
+		# The window survives the store and comes out as a model-scoped weekly with its pace duration.
+		with tempfile.TemporaryDirectory() as temp:
+			store = limits.LimitsStore(Path(temp) / "limits.sqlite3")
+			store.record(readings, checked_at=NOW)
+			(provider,) = limits.limits_payload(store, hours=1, now=NOW)["providers"]
+		fable = provider["accounts"][0]["windows"][1]
+		self.assertEqual((fable["key"], fable["model"], fable["remaining_percent"], fable["window_seconds"]), ("weekly:fable", "fable", 93.0, 604800))
+
+	def test_pool_account_is_read_again_only_after_hermes_answered_for_that_token(self):
+		pool = {"anthropic": [{"id": "a00001", "priority": 0, "access_token": "tok-a"}, {"id": "a00002", "priority": 1, "access_token": "fails"}]}
 		symbols = CollectorTests.symbols(CollectorTests(), pool)
-		profile = profile or (lambda token: "default_claude_max_5x")
+		sent = []
 		with patch.object(limits, "_native_symbols", return_value=symbols):
-			return limits.collect_native(join_timeout=1, claude_login=login, claude_fetcher=fetcher, claude_profile=profile, claude_refresher=refresher)
+			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, anthropic_fetcher=lambda token: sent.append(token) or SCOPED_BODY)
+		by_id = {a["id"]: a for a in reading["accounts"]}
+		self.assertEqual([w["key"] for w in by_id["a00001"]["snapshot"]["windows"]], ["weekly", "weekly:fable"])
+		self.assertEqual((by_id["a00002"]["error"], sent), ("refresh_failed", ["tok-a"]))
+		self.assertNotIn("tok-", repr(reading))
+
+	def test_hermes_raw_body_replaces_the_second_read_and_hermes_windows_win(self):
+		hermes = self.hermes(SimpleNamespace(label="Fable week", used_percent=50.0, reset_at=None, scope="model"),
+			SimpleNamespace(label="Current week", used_percent=40.0, reset_at=None, scope="account"), raw=SCOPED_BODY)
+		readings = collect_claude({}, lambda clock: {"token": "tok", "expired": False}, lambda **kw: hermes,
+			scoped=lambda token: self.fail("no second GET when Hermes passes the body"))
+		windows = readings[0]["accounts"][0]["snapshot"]["windows"]
+		self.assertEqual([(w["key"], w["used_percent"]) for w in windows], [("weekly:fable", 50.0), ("weekly", 40.0)])
+
+	def test_a_failed_scoped_read_keeps_hermes_windows_and_no_error(self):
+		for scoped in (lambda token: None, lambda token: {"limits": "broken"}, lambda token: (_ for _ in ()).throw(RuntimeError("429"))):
+			(reading,) = collect_claude({}, lambda clock: {"token": "tok", "expired": False}, lambda **kw: self.hermes(), scoped=scoped)
+			account = reading["accounts"][0]
+			self.assertEqual((account["error"], [w["key"] for w in account["snapshot"]["windows"]]), (None, ["weekly"]))
+
+	def test_default_read_sends_the_token_to_hermes_url_without_posing_as_another_client(self):
+		calls = []
+
+		class Client:
+			def __init__(self, **kwargs):
+				calls.append(("client", kwargs))
+
+			def __enter__(self):
+				return self
+
+			def __exit__(self, *exc):
+				return False
+
+			def get(self, url, headers):
+				calls.append(("get", url, headers))
+				return SimpleNamespace(status_code=200, json=lambda: SCOPED_BODY)
+
+		with patch("httpx.Client", Client):
+			self.assertEqual(REAL_FETCH_ANTHROPIC_USAGE("tok"), SCOPED_BODY)
+		(_, client), (_, url, headers) = calls
+		self.assertEqual((url, headers["Authorization"], client["follow_redirects"]), ("https://api.anthropic.com/api/oauth/usage", "Bearer tok", False))
+		self.assertNotIn("User-Agent", headers)
+
+
+class ClaudeCodeFallbackTests(NoNetworkTestCase):
+	def collect(self, pool, login, fetcher, profile=None, refresher=None):
+		return collect_claude(pool, login, fetcher, profile, refresher)
 
 	def test_plan_is_the_profiles_rate_limit_tier(self):
 		fetch = lambda **kwargs: SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
@@ -779,6 +885,8 @@ class ClaudeCodeFallbackTests(unittest.TestCase):
 		with patch.object(limits, "_native_symbols", return_value=symbols):
 			(reading,) = limits.collect_native(join_timeout=1, claude_login=lambda clock: files.pop(0), claude_profile=lambda token: "default_claude_max_5x")
 		self.assertEqual(calls, [("fetch", "anthropic", {}), ("fetch", "anthropic", {"api_key": "new"})])
+		# The scoped-limit read follows by default, with the same refreshed token.
+		self.assertEqual(self.network, ["new"])
 		self.assertEqual((reading["accounts"][0]["error"], reading["accounts"][0]["snapshot"]["windows"][0]["key"]), (None, "weekly"))
 
 	def test_expired_or_failing_login_is_an_account_error_and_no_login_stays_logged_out(self):

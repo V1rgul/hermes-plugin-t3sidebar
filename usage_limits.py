@@ -7,6 +7,7 @@ Read-only toward credentials, by construction, except that an expired Claude Cod
 - Each account is read by Hermes's public ``fetch_account_usage(read_only=True)`` with that entry's own token and an ``identity_id``, one thread per account, exactly as Hermes's model picker reads its pool: the Codex read-only fetcher reports a 401 instead of refreshing or rotating, the Anthropic fetcher with an explicit token never resolves or refreshes one, and a reading with an ``identity_id`` lands only in that account's slot of Hermes's cache, never in its single-account gauge. The provider-wide ``refresh_account_usage_async`` is deliberately not used because its Codex path resolves runtime credentials with ``refresh_if_expiring`` and force-refreshes on 401.
 - Only providers in ``VETTED_PROVIDERS`` are refreshed: plugin usage hooks are arbitrary code and OpenRouter issues two GETs.
 - Anthropic falls back to Claude Code's own login when Hermes's anthropic pool is empty: Claude sessions that run through the Claude Code CLI (claude-subscription-directsdk) consume that login's account, not a Hermes pool entry. Its access token is sent once per sample to Hermes's public ``fetch_account_usage`` (a single GET, whose reading Hermes also keeps as its in-memory Anthropic gauge) and to Anthropic's OAuth profile for the plan, and never stored; an expired one is refreshed by calling ``fetch_account_usage("anthropic")`` without a token, which resolves one through Hermes's Claude Code resolver and writes the new pair back to Claude Code's credentials, then read again.
+- Anthropic's model-scoped limits (a weekly cap on one model, such as Fable) come only in the usage response's ``limits`` list, which Hermes neither maps nor passes on (its Anthropic snapshot has no ``raw``). So after Hermes's own fetch with an account's token returned windows, the sampler sends that token once more to the same URL Hermes just used, keeps only the scoped entries and drops the body; Hermes's windows win on any shared key. Once a snapshot carries the response in ``raw``, the list is read from it and no second GET is sent.
 - Codex banked reset credit expiries (the usage payload only carries their count) are read at most every ``CREDITS_INTERVAL_S``. By default one GET for the account Hermes currently uses goes through ``credentialed_provider_request``: Hermes attaches its own Codex sign-in, refreshing it like any chat request would, and the plugin never sees it; the list is shown for that account without naming it. The experimental ``experimental_pool_credits`` setting (kept in this store, set from the plugin's settings page) instead lists every pool account with its own token through Hermes's private Codex helpers, falling back to the default when those helpers are gone; a 401 or any failure there keeps the previous list and never refreshes the token.
 
 Nothing secret is stored or logged: tokens, identities and base URLs stay in local variables of one collection; the store keeps pool entry id + label, plan, window numbers, banked reset count, banked credit status/grant/expiry times and a closed set of error classes.
@@ -71,6 +72,12 @@ _PERIOD_WORDS = {"current", "session", "week", "weekly", "5h", "7d", "limit", "w
 _CODEX_LABEL_BY_SECONDS = {18000: "Session", 604800: "Weekly"}
 # Anthropic's usage endpoint names its windows (five_hour, seven_day, seven_day_opus...) without a duration, and Hermes passes on only their labels; the names are the durations, so its five_hour and weekly keys (model-scoped ones included) get them back.
 _ANTHROPIC_SECONDS_BY_KEY = {key: seconds for seconds, key in _SECONDS_KEYS.items()}
+# The URL Hermes's Anthropic fetcher reads; its ``limits`` list is the only place model-scoped caps such as Fable's weekly appear.
+ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+ANTHROPIC_HEADERS = {"Accept": "application/json", "anthropic-beta": "oauth-2025-04-20"}
+# A ``limits`` entry's group names its period; the period word makes ``window_key`` give the same key Hermes's own labels would.
+_ANTHROPIC_GROUP_PERIODS = {"weekly": "week", "session": "session"}
+MAX_SCOPED_LIMITS = 16
 _ACCOUNT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 _EXCEPTION_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
@@ -280,6 +287,60 @@ def normalize_snapshot(provider, snapshot):
 	return {"fetched_at": fetched_at, "plan": plan, "banked_resets": _banked_resets(provider, raw), "banked_applicable": _banked_applicable(provider, raw), "windows": result_windows}
 
 
+def anthropic_scoped_windows(payload):
+	"""Model-scoped windows (such as Fable's weekly) from the ``limits`` list of Anthropic's usage body, shaped like ``normalize_snapshot``'s; None when the body has no such list.
+
+	Account-wide entries (no model in their ``scope``) are skipped: Hermes already reports them from the body's fixed keys.
+	"""
+	if not isinstance(payload, dict) or not isinstance(payload.get("limits"), list):
+		return None
+	windows = []
+	for entry in payload["limits"][:MAX_SCOPED_LIMITS]:
+		if not isinstance(entry, dict):
+			continue
+		scope = entry.get("scope")
+		model = scope.get("model") if isinstance(scope, dict) else None
+		name = (model.get("display_name") or model.get("id")) if isinstance(model, dict) else None
+		group = entry.get("group")
+		period = _ANTHROPIC_GROUP_PERIODS.get(group) if isinstance(group, str) else None
+		if not isinstance(name, str) or not name.strip() or "@" in name or period is None:
+			continue
+		label = f"{name.strip()[:48]} {period}"
+		key, slug = window_key(label, None, "model")
+		if slug is None:
+			continue
+		windows.append({
+			"key": key, "label": label, "window_seconds": window_seconds("anthropic", key, None), "scope": "model", "model": slug,
+			"used_percent": _finite(entry.get("percent")), "resets_at": _iso_epoch(entry.get("resets_at")),
+		})
+	return windows
+
+
+def _fetch_anthropic_usage(token):
+	"""Anthropic's usage body read with the account's token, the same single GET Hermes's fetcher sends; None on any failure (a 401 is not retried or refreshed)."""
+	import httpx
+	try:
+		with httpx.Client(timeout=CREDITS_TIMEOUT_S, follow_redirects=False) as client:
+			response = client.get(ANTHROPIC_USAGE_URL, headers={"Authorization": f"Bearer {token}", **ANTHROPIC_HEADERS})
+		return response.json() if response.status_code == 200 else None
+	except Exception:
+		return None
+
+
+def _add_scoped_windows(snapshot, raw, token, fetcher):
+	"""Append an Anthropic account's model-scoped windows to its normalized snapshot, from Hermes's ``raw`` body when it carries one, else from one GET with the token Hermes just read the account with. A failure leaves Hermes's windows as they are, and Hermes's own window wins on a shared key."""
+	try:
+		payload = raw if isinstance(raw, dict) and "limits" in raw else fetcher(token)
+		scoped = anthropic_scoped_windows(payload) or ()
+	except Exception:
+		return
+	keys = {window["key"] for window in snapshot["windows"]}
+	for window in scoped:
+		if window["key"] not in keys:
+			keys.add(window["key"])
+			snapshot["windows"].append(window)
+
+
 # ─── Native adapters: every private Hermes symbol is imported here and degrades to None. ───
 
 
@@ -334,7 +395,7 @@ def _fetch_claude_profile_plan(token):
 	return tier if isinstance(tier, str) and re.fullmatch(r"[A-Za-z0-9_ -]{1,64}", tier) else None
 
 
-def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=_fetch_claude_profile_plan, refresher=None):
+def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=_fetch_claude_profile_plan, refresher=None, scoped_fetcher=None):
 	"""One Anthropic reading from Claude Code's login, or None when there is no such login."""
 	login = login_reader(clock)
 	if login is not None and login["expired"]:
@@ -362,13 +423,16 @@ def _collect_claude_code(symbols, clock, login_reader, fetcher, profile_fetcher=
 		if fetch is None:
 			reading["error"], reading["accounts"] = "unavailable", []
 			return reading
+		native = None
 		try:
-			snapshot = normalize_snapshot("anthropic", fetch(api_key=login["token"]))
+			native = fetch(api_key=login["token"])
+			snapshot = normalize_snapshot("anthropic", native)
 		except Exception:
 			snapshot = None
 		if snapshot is None or not snapshot["windows"]:
 			account["error"] = "refresh_failed"
 		else:
+			_add_scoped_windows(snapshot, getattr(native, "raw", None), login["token"], scoped_fetcher or _fetch_anthropic_usage)
 			# Neither the credentials file (its plan fields are often absent) nor Hermes's usage fetch names the allowance; the profile's tier does.
 			snapshot["plan"] = profile_fetcher(login["token"])
 			account["snapshot"] = snapshot
@@ -416,7 +480,7 @@ def _token_fingerprint(token):
 	return "fp:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
 
 
-def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None, claude_login=_claude_code_login, claude_fetcher=None, claude_profile=_fetch_claude_profile_plan, claude_refresher=None, pool_credits_setting=lambda: False, current_credits_fetcher=_fetch_current_codex_credits):
+def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher=None, claude_login=_claude_code_login, claude_fetcher=None, claude_profile=_fetch_claude_profile_plan, claude_refresher=None, pool_credits_setting=lambda: False, current_credits_fetcher=_fetch_current_codex_credits, anthropic_fetcher=None):
 	"""Read every account of the vetted pooled providers through Hermes's read-only per-credential fetch.
 
 	Must run inside the target home's context: Hermes keys auth.json on the active home.
@@ -492,15 +556,15 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 				continue
 			seen.add((host, fingerprint))
 			reading["accounts"].append(account)
-			# The per-account credit list needs the same route and token, kept only in that mode.
+			# The per-account credit list needs the same route and token, kept only in that mode; an Anthropic account's scoped limits need its token again after Hermes's read.
 			credit = (base_url, token) if pool_credits and provider == "openai-codex" else None
-			slots.append((account, reading, host, credit))
+			slots.append((account, reading, host, credit, token if provider == "anthropic" else None))
 			requests.append((provider, base_url, token, fingerprint))
 	try:
 		results = _fetch_accounts(symbols["fetch_account_usage"], requests, join_timeout) if requests else []
 		requests.clear()
 		identities = set()
-		for (account, reading, host, _credit), snapshot in zip(slots, results):
+		for (account, reading, host, _credit, scoped_token), snapshot in zip(slots, results):
 			if snapshot is TIMEOUT:
 				account["error"] = "timeout"
 				continue
@@ -521,9 +585,12 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 				continue
 			if not account["snapshot"] or account["snapshot"]["fetched_at"] is None or not account["snapshot"]["windows"]:
 				account["error"] = "no_data"
+			elif scoped_token is not None:
+				# Only once Hermes's own read with this token answered, so the token goes nowhere Hermes did not just send it.
+				_add_scoped_windows(account["snapshot"], getattr(snapshot, "raw", None), scoped_token, anthropic_fetcher or _fetch_anthropic_usage)
 		# Credit lists are read after the usage fetches, so a merged duplicate is never asked; a failure only skips this hour's update.
 		fetch_credits = credits_fetcher or (lambda base_url, token: _fetch_codex_credits(symbols, base_url, token))
-		for account, reading, _host, credit in slots:
+		for account, reading, _host, credit, _scoped in slots:
 			if credit is None or account not in reading["accounts"]:
 				continue
 			with _CREDITS_LOCK:
@@ -560,7 +627,7 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 	# Hermes's own anthropic pool wins; only an empty or missing one falls back to Claude Code's login.
 	current = next((reading for reading in providers if reading["provider"] == "anthropic"), None)
 	if current is None or current["error"] == "logged_out":
-		fallback = _collect_claude_code(symbols, clock, claude_login, claude_fetcher, claude_profile, claude_refresher)
+		fallback = _collect_claude_code(symbols, clock, claude_login, claude_fetcher, claude_profile, claude_refresher, anthropic_fetcher)
 		if fallback is not None:
 			providers = sorted([reading for reading in providers if reading is not current] + [fallback], key=lambda reading: reading["provider"])
 	return providers
