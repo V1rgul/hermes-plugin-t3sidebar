@@ -543,7 +543,7 @@ test('scales, formats and colors are compact and stable per series key', () => {
   assert.deepEqual([...first.entries()].sort(), [...again.entries()].sort());
   assert.equal(new Set(first.values()).size, 3, 'colliding hashes probe to distinct hues');
   const providers = usage.seriesColors(usage.usageSeries(history, 'provider', 'tokens'), 'provider');
-  assert.match(providers.get('anthropic'), /oklch\(0\.72 0\.15 45\)/); assert.match(providers.get('openai-codex'), /var\(--ui-text-primary\)/);
+  assert.match(providers.get('anthropic'), /oklch\(0\.72 0\.15 45\)/); assert.match(providers.get('openai-codex'), /oklch\(0\.8 0 0\)/, 'OpenAI draws in light grey, not a hue');
 });
 
 test('preferences validate every field and fall back to safe defaults', () => {
@@ -1327,6 +1327,29 @@ test('a refused reset keeps its button but locks it, naming that every bar is at
   const usable = $('.su-account[data-account="edge"] .su-redeem-use');
   assert.deepEqual([usable.dataset.state, usable.getAttribute('aria-disabled'), usable.querySelector('small') === null, usable.querySelector('svg')?.dataset.icon], ['usable', null, true, 'Ticket']);
   assert.equal(restPaths().includes('/usage/limits/redeem'), false);
+});
+
+test('hovering or focusing a usable reset shows in green what it would give back on each account-wide bar', async () => {
+  const now = Date.now() / 1000;
+  const pool = redeemPool(now, [{ id: 'spare', plan: 'plus', left: 85, five: 92 }, { id: 'edge', plan: 'plus', left: 40, five: 70 }]);
+  // A model-scoped window is not refilled by a Codex reset.
+  pool.providers[0].accounts[1].windows.push({ key: 'weekly:gpt', label: 'Weekly gpt', scope: 'model', window_seconds: 604800, remaining_percent: 10, resets_at: now + D });
+  mock.control.usageLimits = pool;
+  await openCodexAccounts();
+  const gains = id => [...$$(`.su-account[data-account="${id}"] .su-window`)].map(row => `${row.dataset.window}=${row.querySelector('.su-bar-gain')?.dataset.gain ?? '-'}`).join();
+  const pointer = async (node, type) => { await act(async () => node.dispatchEvent(new window.MouseEvent(type, { bubbles: true, relatedTarget: document.body }))); await tick(); };
+  const usable = $('.su-account[data-account="edge"] .su-redeem-use');
+  assert.equal(gains('edge'), 'five_hour=-,weekly=-,weekly:gpt=-', 'nothing is shown before the button is pointed at');
+  await pointer(usable, 'pointerover');
+  assert.equal(gains('edge'), 'five_hour=30,weekly=60,weekly:gpt=-');
+  assert.equal(gains('spare'), 'five_hour=-,weekly=-', 'only the hovered account previews');
+  await pointer(usable, 'pointerout');
+  assert.equal(gains('edge'), 'five_hour=-,weekly=-,weekly:gpt=-');
+  await act(async () => usable.focus()); await tick();
+  assert.equal(gains('edge'), 'five_hour=30,weekly=60,weekly:gpt=-', 'keyboard focus previews too');
+  await act(async () => usable.blur()); await tick();
+  await pointer($('.su-account[data-account="spare"] .su-redeem-use'), 'pointerover');
+  assert.equal(gains('spare'), 'five_hour=-,weekly=-', 'a locked reset gives nothing back, so it previews nothing');
 });
 
 test('using a reset confirms the weekly loss, posts the account and reloads the limits', async () => {
