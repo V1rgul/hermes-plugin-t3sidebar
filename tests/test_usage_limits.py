@@ -639,10 +639,6 @@ class SamplerTests(unittest.TestCase):
 		self.assertEqual(payload["sampler"]["interval_s"], 300.0)
 
 
-if __name__ == "__main__":
-	unittest.main()
-
-
 class CreditTests(unittest.TestCase):
 	def test_normalizes_codex_credit_list_to_status_and_times(self):
 		body = {"available_count": 2, "total_earned_count": 9, "credits": [
@@ -828,3 +824,7 @@ class ClaudeCodeFallbackTests(unittest.TestCase):
 
 def dt_epoch(text):
 	return datetime.fromisoformat(text).timestamp()
+
+
+if __name__ == "__main__":
+	unittest.main()
