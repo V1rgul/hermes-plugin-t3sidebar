@@ -733,13 +733,21 @@ class NoNetworkTestCase(unittest.TestCase):
 		patcher = patch.object(limits, "_fetch_anthropic_usage", side_effect=lambda token: self.network.append(token))
 		patcher.start()
 		self.addCleanup(patcher.stop)
+		# The plan is cached per process; each test starts as a freshly started Hermes.
+		plans = patch.dict(limits._PLAN_READ, clear=True)
+		plans.start()
+		self.addCleanup(plans.stop)
 
 
-def collect_claude(pool, login, fetcher, profile=None, refresher=None, scoped=None):
-	symbols = CollectorTests.symbols(CollectorTests(), pool)
+TOKEN = "sk-ant-oat01-secret"
+
+
+def collect_claude(pool, login, body=lambda token: USAGE_BODY, profile=None, refresher=None, clock=time.time, hermes_calls=None):
+	"""One collection with Anthropic's usage read answered by ``body``; Hermes's own fetch records its calls and reads Codex only."""
+	symbols = CollectorTests.symbols(CollectorTests(), pool, hermes_calls)
 	profile = profile or (lambda token: "default_claude_max_5x")
 	with patch.object(limits, "_native_symbols", return_value=symbols):
-		return limits.collect_native(join_timeout=1, claude_login=login, claude_fetcher=fetcher, claude_profile=profile, claude_refresher=refresher, anthropic_fetcher=scoped)
+		return limits.collect_native(join_timeout=1, clock=clock, claude_login=login, claude_profile=profile, claude_refresher=refresher, anthropic_fetcher=body)
 
 
 # Shape of a live /api/oauth/usage ``limits`` list (field names as Anthropic sends them; values invented).
@@ -748,13 +756,12 @@ SCOPED_BODY = {"limits": [
 	{"kind": "weekly_all", "group": "weekly", "percent": 40, "severity": "normal", "resets_at": "2026-11-12T00:00:00.478581+00:00", "scope": None, "is_active": True},
 	{"kind": "weekly_scoped", "group": "weekly", "percent": 7, "severity": "normal", "resets_at": "2026-11-12T00:00:00+00:00", "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}, "is_active": False},
 ]}
+# The whole body: the windows Hermes maps (utilization already a percent) next to the scoped list.
+USAGE_BODY = {"five_hour": {"utilization": 23.0, "resets_at": "2026-11-10T04:20:00+00:00"}, "seven_day": {"utilization": 40.0, "resets_at": "2026-11-12T00:00:00+00:00"},
+	"seven_day_opus": None, "extra_usage": {"is_enabled": False}, **SCOPED_BODY}
 
 
 class AnthropicScopedLimitsTests(NoNetworkTestCase):
-	def hermes(self, *windows, raw=None):
-		return SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=raw, windows=windows or (
-			SimpleNamespace(label="Current week", used_percent=40.0, reset_at=dt(NOW + 86400), scope="account"),))
-
 	def test_scoped_entries_become_model_windows_and_account_wide_ones_are_left_to_hermes(self):
 		(fable,) = limits.anthropic_scoped_windows(SCOPED_BODY)
 		self.assertEqual(fable, {"key": "weekly:fable", "label": "Fable week", "window_seconds": 604800, "scope": "model", "model": "fable",
@@ -766,45 +773,58 @@ class AnthropicScopedLimitsTests(NoNetworkTestCase):
 		self.assertIsNone(limits.anthropic_scoped_windows({"seven_day": {}}))
 		self.assertIsNone(limits.anthropic_scoped_windows(None))
 
-	def test_claude_code_login_adds_the_fable_window_with_its_own_token(self):
-		sent = []
-		readings = collect_claude({}, lambda clock: {"token": "tok", "expired": False}, lambda **kw: self.hermes(),
-			scoped=lambda token: sent.append(token) or SCOPED_BODY)
-		windows = readings[0]["accounts"][0]["snapshot"]["windows"]
-		self.assertEqual([(w["key"], w["scope"], w["used_percent"]) for w in windows], [("weekly", "account", 40.0), ("weekly:fable", "model", 7.0)])
-		self.assertEqual(sent, ["tok"])
+	def test_the_body_gives_hermes_windows_under_the_same_keys_then_the_model_limits(self):
+		# Samples recorded through Hermes before keep their keys: the same labels and scopes give the same windows.
+		body = {**USAGE_BODY, "seven_day_opus": {"utilization": 0.5, "resets_at": None}, "seven_day_sonnet": {"resets_at": None}}
+		snapshot = limits.anthropic_snapshot(body, NOW)
+		hermes = limits.normalize_snapshot("anthropic", SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
+			SimpleNamespace(label="Current session", used_percent=23.0, reset_at=dt(dt_epoch("2026-11-10T04:20:00+00:00")), scope="account"),
+			SimpleNamespace(label="Current week", used_percent=40.0, reset_at=dt(dt_epoch("2026-11-12T00:00:00+00:00")), scope="account"),
+			SimpleNamespace(label="Opus week", used_percent=0.5, reset_at=None, scope="model"))))
+		self.assertEqual(snapshot["windows"][:3], hermes["windows"])
+		# Anthropic's utilization is a percent: 0.5 stays 0.5 % (Hermes's own mapping would read it as 50 %). A window without utilization is skipped.
+		self.assertEqual([(w["key"], w["used_percent"]) for w in snapshot["windows"]], [("five_hour", 23.0), ("weekly", 40.0), (hermes["windows"][2]["key"], 0.5), ("weekly:fable", 7.0)])
+		self.assertEqual((snapshot["fetched_at"], snapshot["plan"], snapshot["reset_grants"]), (NOW, None, None))
+		self.assertIsNone(limits.anthropic_snapshot(None, NOW))
+
+	def test_claude_code_login_is_read_with_one_own_get_and_never_through_hermes(self):
+		sent, hermes_calls = [], []
+		login = {"token": TOKEN, "expired": False}
+		readings = collect_claude({"anthropic": []}, lambda clock: login, lambda token: sent.append(token) or USAGE_BODY, clock=lambda: NOW, hermes_calls=hermes_calls)
+		(reading,) = readings
+		(account,) = reading["accounts"]
+		self.assertEqual((reading["provider"], reading["error"], account["id"], account["label"], account["error"], account["snapshot"]["plan"]),
+			("anthropic", None, "claude-code", "Claude Code", None, "default_claude_max_5x"))
+		self.assertEqual([(w["key"], w["scope"], w["used_percent"]) for w in account["snapshot"]["windows"]], [("five_hour", "account", 23.0), ("weekly", "account", 40.0), ("weekly:fable", "model", 7.0)])
+		self.assertEqual((sent, hermes_calls), ([TOKEN], []))
+		# The token never leaves the collection, and the local copy is dropped.
+		self.assertNotIn("secret", repr(readings))
+		self.assertEqual(login, {})
 		# The window survives the store and comes out as a model-scoped weekly with its pace duration.
 		with tempfile.TemporaryDirectory() as temp:
 			store = limits.LimitsStore(Path(temp) / "limits.sqlite3")
 			store.record(readings, checked_at=NOW)
 			(provider,) = limits.limits_payload(store, hours=1, now=NOW)["providers"]
-		fable = provider["accounts"][0]["windows"][1]
+		fable = provider["accounts"][0]["windows"][2]
 		self.assertEqual((fable["key"], fable["model"], fable["remaining_percent"], fable["window_seconds"]), ("weekly:fable", "fable", 93.0, 604800))
 
-	def test_pool_account_is_read_again_only_after_hermes_answered_for_that_token(self):
-		pool = {"anthropic": [{"id": "a00001", "priority": 0, "access_token": "tok-a"}, {"id": "a00002", "priority": 1, "access_token": "fails"}]}
-		symbols = CollectorTests.symbols(CollectorTests(), pool)
-		sent = []
-		with patch.object(limits, "_native_symbols", return_value=symbols):
-			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, anthropic_fetcher=lambda token: sent.append(token) or SCOPED_BODY)
-		by_id = {a["id"]: a for a in reading["accounts"]}
-		self.assertEqual([w["key"] for w in by_id["a00001"]["snapshot"]["windows"]], ["weekly", "weekly:fable"])
-		self.assertEqual((by_id["a00002"]["error"], sent), ("refresh_failed", ["tok-a"]))
-		self.assertNotIn("tok-", repr(reading))
+	def test_pool_accounts_are_read_with_their_own_token_and_codex_still_through_hermes(self):
+		pool = {"anthropic": [{"id": "a00001", "priority": 0, "access_token": "sk-ant-oat01-a"}, {"id": "a00002", "priority": 1, "access_token": "sk-ant-oat01-fails"},
+			{"id": "a00003", "priority": 2, "access_token": "sk-ant-api03-console"}], "openai-codex": [{"id": "7c202b", "priority": 0, "access_token": "tok-b"}]}
+		sent, hermes_calls = [], []
+		readings = collect_claude(pool, NO_CLAUDE, lambda token: sent.append(token) or (None if token.endswith("fails") else USAGE_BODY), hermes_calls=hermes_calls)
+		by_id = {a["id"]: a for reading in readings for a in reading["accounts"]}
+		self.assertEqual([w["key"] for w in by_id["a00001"]["snapshot"]["windows"]], ["five_hour", "weekly", "weekly:fable"])
+		self.assertEqual((by_id["a00002"]["error"], by_id["7c202b"]["error"]), ("refresh_failed", None))
+		# A Console API key is never sent to the OAuth endpoint, as Hermes's own rule has it; it reads as having no limits.
+		self.assertEqual(by_id["a00003"]["error"], "no_data")
+		self.assertEqual((sorted(sent), [provider for provider, _ in hermes_calls]), (["sk-ant-oat01-a", "sk-ant-oat01-fails"], ["openai-codex"]))
+		self.assertNotIn("sk-ant", repr(readings))
 
-	def test_hermes_raw_body_replaces_the_second_read_and_hermes_windows_win(self):
-		hermes = self.hermes(SimpleNamespace(label="Fable week", used_percent=50.0, reset_at=None, scope="model"),
-			SimpleNamespace(label="Current week", used_percent=40.0, reset_at=None, scope="account"), raw=SCOPED_BODY)
-		readings = collect_claude({}, lambda clock: {"token": "tok", "expired": False}, lambda **kw: hermes,
-			scoped=lambda token: self.fail("no second GET when Hermes passes the body"))
-		windows = readings[0]["accounts"][0]["snapshot"]["windows"]
-		self.assertEqual([(w["key"], w["used_percent"]) for w in windows], [("weekly:fable", 50.0), ("weekly", 40.0)])
-
-	def test_a_failed_scoped_read_keeps_hermes_windows_and_no_error(self):
-		for scoped in (lambda token: None, lambda token: {"limits": "broken"}, lambda token: (_ for _ in ()).throw(RuntimeError("429"))):
-			(reading,) = collect_claude({}, lambda clock: {"token": "tok", "expired": False}, lambda **kw: self.hermes(), scoped=scoped)
-			account = reading["accounts"][0]
-			self.assertEqual((account["error"], [w["key"] for w in account["snapshot"]["windows"]]), (None, ["weekly"]))
+	def test_a_failed_read_is_a_failed_account(self):
+		for body in (lambda token: None, lambda token: {"limits": "broken"}, lambda token: (_ for _ in ()).throw(RuntimeError("429"))):
+			(reading,) = collect_claude({}, lambda clock: {"token": TOKEN, "expired": False}, body)
+			self.assertEqual((reading["accounts"][0]["error"], reading["accounts"][0]["snapshot"]), ("refresh_failed", None))
 
 	def test_default_read_asks_for_resets_as_the_installed_claude_code_cli(self):
 		calls = []
@@ -823,14 +843,25 @@ class AnthropicScopedLimitsTests(NoNetworkTestCase):
 				calls.append(("get", url, headers))
 				return SimpleNamespace(status_code=200, json=lambda: SCOPED_BODY)
 
-		for version, agent in (("2.1.318", "claude-cli/2.1.318 (external, cli)"), ("", None)):
+		for version, agent in (("2.1.318", "claude-cli/2.1.318 (external, cli)"), ("", "claude-code/2.1.0")):
 			calls.clear()
 			with patch("httpx.Client", Client), patch.object(limits, "claude_cli_version", return_value=version):
 				self.assertEqual(REAL_FETCH_ANTHROPIC_USAGE("tok"), SCOPED_BODY)
 			(_, client), (_, url, headers) = calls
 			self.assertEqual((url, headers["Authorization"], client["follow_redirects"]), ("https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1", "Bearer tok", False))
-			# Without an installed CLI there is no version to name, so the read goes out under httpx's own name.
+			# Without an installed CLI there is no version to name, so the read goes out as Hermes's own usage fetch does, never as httpx.
 			self.assertEqual(headers.get("User-Agent"), agent)
+		# The plan's profile read needs no CLI identity: it is named as Hermes names its Anthropic reads.
+		calls.clear()
+
+		class Profile(Client):
+			def get(self, url, headers):
+				calls.append(("get", url, headers))
+				return SimpleNamespace(status_code=200, json=lambda: {"organization": {"rate_limit_tier": "default_claude_max_5x"}})
+
+		with patch("httpx.Client", Profile), patch.object(limits, "claude_cli_version", side_effect=AssertionError("no CLI identity for the profile")):
+			self.assertEqual(limits._fetch_claude_profile_plan("tok"), "default_claude_max_5x")
+		self.assertEqual((calls[1][1], calls[1][2]["User-Agent"], calls[1][2]["Authorization"]), ("https://api.anthropic.com/api/oauth/profile", "claude-code/2.1.0", "Bearer tok"))
 
 	def test_claude_cli_version_is_read_from_the_cli_and_kept_for_six_hours(self):
 		saved = dict(limits._CLAUDE_VERSION)
@@ -884,8 +915,8 @@ class AnthropicResetTests(NoNetworkTestCase):
 		later = NOW + 86400
 		iso = lambda epoch: dt(epoch).isoformat()
 		body = resets_body(grant("grant_fable_1", gives_back_weekly=True, ends_at=iso(later + 6 * 86400)), grant("grant_soon", type="session", ends_at=iso(later + 300)))
-		reading = lambda at, scoped: collect_claude({}, lambda clock: {"token": "tok", "expired": False},
-			lambda **kw: SimpleNamespace(fetched_at=dt(at), plan=None, raw=None, windows=(SimpleNamespace(label="Current week", used_percent=40.0, reset_at=None, scope="account"),)), scoped=scoped)
+		# A read without windows fails the account, so each body here carries the usage windows; a body without a reset block keeps the last list.
+		reading = lambda at, body: collect_claude({}, lambda clock: {"token": TOKEN, "expired": False}, lambda token: {**USAGE_BODY, **(body(token) or {})}, clock=lambda: at)
 		with tempfile.TemporaryDirectory() as temp:
 			store = limits.LimitsStore(Path(temp) / "limits.sqlite3")
 			store.record(reading(later, lambda token: body), checked_at=later)
@@ -902,92 +933,62 @@ class AnthropicResetTests(NoNetworkTestCase):
 			store.record(reading(later + 120, lambda token: resets_body(grant(), eligible=False)), checked_at=later + 120)
 			self.assertEqual(resets(later + 130)["grants"], [])
 
-	def test_hermes_raw_body_supplies_the_resets_only_when_it_carries_them(self):
-		raw = resets_body(grant(gives_back_weekly=True))
-		hermes = lambda raw: lambda **kw: SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=raw, windows=(SimpleNamespace(label="Current week", used_percent=40.0, reset_at=None, scope="account"),))
-		(reading,) = collect_claude({}, lambda clock: {"token": "tok", "expired": False}, hermes(raw), scoped=lambda token: self.fail("no second GET when Hermes passes both"))
-		self.assertEqual(reading["accounts"][0]["snapshot"]["reset_grants"]["grants"][0]["kind"], "fable")
-		sent = []
-		collect_claude({}, lambda clock: {"token": "tok", "expired": False}, hermes(SCOPED_BODY), scoped=lambda token: sent.append(token) or raw)
-		self.assertEqual(sent, ["tok"])
-
-
 class ClaudeCodeFallbackTests(NoNetworkTestCase):
-	def collect(self, pool, login, fetcher, profile=None, refresher=None):
-		return collect_claude(pool, login, fetcher, profile, refresher)
-
-	def test_plan_is_the_profiles_rate_limit_tier(self):
-		fetch = lambda **kwargs: SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
-			SimpleNamespace(label="Current week", used_percent=4.0, reset_at=dt(NOW + 6 * 86400), scope="account"),))
-		tokens = []
-		profile = lambda token: tokens.append(token) or "default_claude_max_5x"
-		readings = self.collect({}, lambda clock: {"token": "tok", "expired": False}, fetch, profile)
-		self.assertEqual((readings[0]["accounts"][0]["snapshot"]["plan"], tokens), ("default_claude_max_5x", ["tok"]))
-		# A failed profile read leaves the plan unknown rather than failing the account.
-		readings = self.collect({}, lambda clock: {"token": "tok", "expired": False}, fetch, lambda token: None)
-		self.assertEqual((readings[0]["accounts"][0]["error"], readings[0]["accounts"][0]["snapshot"]["plan"]), (None, None))
-
-	def test_empty_hermes_pool_reads_claude_codes_login_with_one_explicit_token_fetch(self):
-		calls = []
-
-		def fetch(**kwargs):
-			calls.append(kwargs)
-			return SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
-				SimpleNamespace(label="Current session", used_percent=36.0, reset_at=dt(NOW + 1200), scope="account"),
-				SimpleNamespace(label="Current week", used_percent=4.0, reset_at=dt(NOW + 6 * 86400), scope="account")))
-		login = {"token": "sk-ant-oat-secret", "expired": False}
-		readings = self.collect({"anthropic": []}, lambda clock: login, fetch)
-		(reading,) = readings
-		self.assertEqual((reading["provider"], reading["error"]), ("anthropic", None))
-		(account,) = reading["accounts"]
-		self.assertEqual((account["id"], account["label"], account["error"], account["snapshot"]["plan"]), ("claude-code", "Claude Code", None, "default_claude_max_5x"))
-		self.assertEqual([w["key"] for w in account["snapshot"]["windows"]], ["five_hour", "weekly"])
-		self.assertEqual(calls, [{"api_key": "sk-ant-oat-secret"}])
-		# The token never leaves the collection, and the local copy is dropped.
-		self.assertNotIn("secret", repr(readings))
-		self.assertEqual(login, {})
+	def test_plan_is_read_at_the_first_collection_then_hourly_and_kept_through_a_failure(self):
+		clock, tokens, answers = [NOW], [], ["default_claude_max_5x", None, "default_claude_max_20x"]
+		profile = lambda token: tokens.append(token) or answers.pop(0)
+		plan = lambda: collect_claude({}, lambda c: {"token": TOKEN, "expired": False}, profile=profile, clock=lambda: clock[0])[0]["accounts"][0]["snapshot"]["plan"]
+		self.assertEqual((plan(), len(tokens)), ("default_claude_max_5x", 1))
+		# Every 5-minute sample within the hour reuses it.
+		clock[0] = NOW + limits.PLAN_INTERVAL_S - 1
+		self.assertEqual((plan(), len(tokens)), ("default_claude_max_5x", 1))
+		# A failed hourly read keeps the last plan rather than failing the account, and is retried sooner.
+		clock[0] = NOW + limits.PLAN_INTERVAL_S
+		self.assertEqual((plan(), len(tokens)), ("default_claude_max_5x", 2))
+		clock[0] += limits.PLAN_RETRY_S - 1
+		self.assertEqual((plan(), len(tokens)), ("default_claude_max_5x", 2))
+		clock[0] += 1
+		self.assertEqual((plan(), tokens), ("default_claude_max_20x", [TOKEN] * 3))
+		# A new process (Hermes restarted) reads it again at once.
+		limits._PLAN_READ.clear()
+		answers.append("default_claude_max_5x")
+		self.assertEqual((plan(), len(tokens)), ("default_claude_max_5x", 4))
 
 	def test_expired_login_is_refreshed_by_hermes_then_read_again(self):
 		# Hermes's resolver rewrites Claude Code's file; the sampler only sees the new token by reading it again.
-		files = [{"token": "old", "expired": True}, {"token": "new", "expired": False}]
+		files = [{"token": "sk-ant-oat01-old", "expired": True}, {"token": "sk-ant-oat01-new", "expired": False}]
 		refreshed, sent = [], []
-		fetch = lambda **kw: sent.append(kw["api_key"]) or SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
-			SimpleNamespace(label="Current week", used_percent=4.0, reset_at=dt(NOW + 6 * 86400), scope="account"),))
-		(reading,) = self.collect({}, lambda clock: files.pop(0), fetch, refresher=lambda: refreshed.append(True) or "new")
-		self.assertEqual((refreshed, sent, reading["accounts"][0]["error"]), ([True], ["new"], None))
-		self.assertEqual(reading["accounts"][0]["snapshot"]["plan"], "default_claude_max_5x")
+		(reading,) = collect_claude({}, lambda clock: files.pop(0), lambda token: sent.append(token) or USAGE_BODY, refresher=lambda: refreshed.append(True))
+		self.assertEqual((refreshed, sent, reading["accounts"][0]["error"], reading["accounts"][0]["snapshot"]["plan"]), ([True], ["sk-ant-oat01-new"], None, "default_claude_max_5x"))
 
-	def test_default_path_refreshes_and_reads_through_hermes_public_usage_fetch(self):
-		# Without injected seams the fallback reaches Hermes only through its public usage fetch: without a token for an expired login, so Hermes resolves and refreshes one, then with the login's new token.
-		files = [{"token": "old", "expired": True}, {"token": "new", "expired": False}]
+	def test_default_path_refreshes_through_hermes_then_reads_with_its_own_get(self):
+		# Without injected seams Hermes is reached only to refresh an expired login, through its public usage fetch without a token; the reading is the plugin's own GET with the new token.
+		files = [{"token": "sk-ant-oat01-old", "expired": True}, {"token": "sk-ant-oat01-new", "expired": False}]
 		calls = []
-		symbols = CollectorTests.symbols(CollectorTests(), {})
-		symbols["fetch_account_usage"] = lambda provider, **kwargs: calls.append(("fetch", provider, kwargs)) or SimpleNamespace(fetched_at=dt(NOW), plan=None, raw=None, windows=(
-			SimpleNamespace(label="Current week", used_percent=4.0, reset_at=dt(NOW + 6 * 86400), scope="account"),))
+		symbols = CollectorTests.symbols(CollectorTests(), {}, calls)
 		with patch.object(limits, "_native_symbols", return_value=symbols):
 			(reading,) = limits.collect_native(join_timeout=1, claude_login=lambda clock: files.pop(0), claude_profile=lambda token: "default_claude_max_5x")
-		self.assertEqual(calls, [("fetch", "anthropic", {}), ("fetch", "anthropic", {"api_key": "new"})])
-		# The scoped-limit read follows by default, with the same refreshed token.
-		self.assertEqual(self.network, ["new"])
-		self.assertEqual((reading["accounts"][0]["error"], reading["accounts"][0]["snapshot"]["windows"][0]["key"]), (None, "weekly"))
+		self.assertEqual((calls, self.network), ([("anthropic", {})], ["sk-ant-oat01-new"]))
+		# The recorded default read answered nothing, so the account reads as failed.
+		self.assertEqual(reading["accounts"][0]["error"], "refresh_failed")
 
 	def test_expired_or_failing_login_is_an_account_error_and_no_login_stays_logged_out(self):
-		never = lambda **kw: self.fail("an expired token is never sent")
+		never = lambda token: self.fail("an expired token is never sent")
 		# When Hermes's refresh leaves the file expired or raises, the account reads as expired.
-		expired = self.collect({"anthropic": []}, lambda clock: {"token": "t", "expired": True}, never)
+		expired = collect_claude({"anthropic": []}, lambda clock: {"token": TOKEN, "expired": True}, never)
 		self.assertEqual(expired[0]["accounts"][0]["error"], "token_expired")
-		still = self.collect({}, lambda clock: {"token": "t", "expired": True}, never, refresher=lambda: None)
+		still = collect_claude({}, lambda clock: {"token": TOKEN, "expired": True}, never, refresher=lambda: None)
 		self.assertEqual(still[0]["accounts"][0]["error"], "token_expired")
-		raising = self.collect({}, lambda clock: {"token": "t", "expired": True}, never, refresher=lambda: (_ for _ in ()).throw(RuntimeError("invalid_grant")))
+		raising = collect_claude({}, lambda clock: {"token": TOKEN, "expired": True}, never, refresher=lambda: (_ for _ in ()).throw(RuntimeError("invalid_grant")))
 		self.assertEqual(raising[0]["accounts"][0]["error"], "token_expired")
-		failing = self.collect({}, lambda clock: {"token": "t", "expired": False}, lambda **kw: (_ for _ in ()).throw(RuntimeError("401")))
+		failing = collect_claude({}, lambda clock: {"token": TOKEN, "expired": False}, lambda token: (_ for _ in ()).throw(RuntimeError("401")))
 		self.assertEqual((failing[0]["provider"], failing[0]["accounts"][0]["error"]), ("anthropic", "refresh_failed"))
-		self.assertEqual(self.collect({"anthropic": []}, NO_CLAUDE, None)[0]["error"], "logged_out")
-		self.assertEqual(self.collect({}, NO_CLAUDE, None), [])
+		self.assertEqual(collect_claude({"anthropic": []}, NO_CLAUDE)[0]["error"], "logged_out")
+		self.assertEqual(collect_claude({}, NO_CLAUDE), [])
 
 	def test_hermes_pool_wins_over_claude_code(self):
-		pool = {"anthropic": [{"id": "a00001", "label": "pool", "priority": 0, "access_token": "tok-a"}]}
-		readings = self.collect(pool, lambda clock: self.fail("Claude Code is not read when Hermes has a pool"), None)
+		pool = {"anthropic": [{"id": "a00001", "label": "pool", "priority": 0, "access_token": "sk-ant-oat01-a"}]}
+		readings = collect_claude(pool, lambda clock: self.fail("Claude Code is not read when Hermes has a pool"))
 		self.assertEqual([a["id"] for a in readings[0]["accounts"]], ["a00001"])
 
 	def test_login_reader_is_read_only_and_honours_claude_config_dir(self):

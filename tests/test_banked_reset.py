@@ -144,6 +144,8 @@ class AnthropicRedeemTests(unittest.TestCase):
 		self.assertEqual(self.redeem("a00001", "grant_fable_1", client), {"status": "reset", "resets_left": 0})
 		(profile, claim) = client.requests
 		self.assertEqual(profile[1], "https://api.anthropic.com/api/oauth/profile")
+		# Only the claim needs the CLI identity; the profile read is named as Hermes's Anthropic reads are.
+		self.assertEqual(profile[2]["User-Agent"], "claude-code/2.1.0")
 		self.assertEqual(claim[1], f"https://api.anthropic.com/api/organizations/{ORG}/reset_rate_limits")
 		self.assertEqual((claim[2]["Authorization"], claim[2]["User-Agent"], claim[2]["anthropic-beta"]), ("Bearer tok-a", "claude-cli/2.1.318 (external, cli)", "oauth-2025-04-20"))
 		self.assertEqual((claim[3]["program"], claim[3]["grant_id"]), ("cedar_ember", "grant_fable_1"))

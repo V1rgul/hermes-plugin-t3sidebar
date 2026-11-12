@@ -152,7 +152,8 @@ def redeem_anthropic(account_id, grant_id, *, limits, symbols=None, client_facto
 		import httpx
 		headers = limits.claude_headers(token, version)
 		with (client_factory or (lambda: httpx.Client(timeout=_TIMEOUT_S, follow_redirects=False)))() as client:
-			organization = organization or _profile_organization(client, headers)
+			# The profile read needs no Claude Code CLI identity, so it is named as Hermes's own Anthropic reads are; only the claim names the CLI.
+			organization = organization or _profile_organization(client, limits.hermes_headers(token))
 			if organization is None:
 				return {"status": "signed_out", "resets_left": None}
 			request_id = _PENDING_CLAIMS.setdefault(key, str(uuid.uuid4()))
