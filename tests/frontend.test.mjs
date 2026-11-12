@@ -218,8 +218,8 @@ test('relative timestamps and local future snooze validation', () => {
   assert.throws(() => flow.parseLocalWake('2029-02-30T12:00', 0), /does not exist/);
   assert.throws(() => flow.parseLocalWake('2020-01-01T12:00'), /future/);
   assert.throws(() => flow.parseLocalWake('invalid'), /Choose/);
-  const presets = flow.snoozePresets(new Date('2026-10-23T17:00:00').getTime()); assert.equal(presets.length, 4);
-  assert.equal(new Date(presets[2].wake_at * 1000).getHours(), 9);
+  const presets = flow.snoozePresets(new Date('2026-10-23T17:00:00').getTime()); assert.equal(presets.relative.length, 3); assert.equal(presets.days.length, 3);
+  assert.equal(new Date(presets.days[0].wake_at * 1000).getHours(), 9);
 });
 
 test('scope keys separate same-profile sources and epochs; exact route required', () => {
@@ -369,24 +369,56 @@ test('React search and exact project filter stay flat with keyboard navigation',
   assert.equal(document.activeElement?.closest('[data-session-id]')?.dataset.sessionId, 'legacy');
 });
 
-test('context actions have decorative leading icons and Delete is marked destructive without bypassing confirmation', async () => {
+test('session menu: title line with Rename and AutoTitler, ID line with Copy, then a toolbar whose Delete is destructive without bypassing confirmation', async () => {
   await mount(); await click(button('Actions for Sidebar layout'));
-  const menu = $('.sf-menu'), actions = [...menu.querySelectorAll('.sf-menu-action')];
-  assert.deepEqual(actions.map(action => action.getAttribute('aria-label') || action.querySelector('.sf-menu-label')?.textContent), ['Pin', 'Rename', 'Autotitler: rename now', 'Copy session ID', 'Delete session', 'Move to project', 'Project']);
-  // Autotitler uses bundled Tabler pencil-ai.
-  assert.equal(button('Autotitler: rename now').querySelector('.sf-menu-icon svg')?.dataset.icon, 'PencilAi');
-  // Move to project and the Project submenu use bundled Tabler folder-symlink and folder-cog.
-  assert.deepEqual(actions.slice(-2).map(action => action.querySelector('.sf-menu-icon svg')?.dataset.icon), ['FolderSymlink', 'FolderCog']);
-  for (const action of actions) {
-    assert.equal(action.firstElementChild?.className, 'sf-menu-icon');
-    assert.equal(action.firstElementChild?.getAttribute('aria-hidden'), 'true');
-    assert.ok(action.firstElementChild?.querySelector('svg'));
+  const menu = $('.sf-session-menu');
+  const lines = [...menu.querySelectorAll(':scope > .sf-menu-line')];
+  assert.equal(lines[0].querySelector('.sf-menu-heading').textContent, 'Sidebar layout');
+  assert.deepEqual([...lines[0].querySelectorAll('button')].map(node => [node.getAttribute('aria-label'), node.querySelector('svg')?.dataset.icon]), [['Rename', 'Pencil'], ['Rename with AutoTitler', 'PencilAi']]);
+  assert.equal(lines[1].querySelector('.sf-menu-id').textContent, 'design');
+  assert.deepEqual([...lines[1].querySelectorAll('button')].map(node => node.getAttribute('aria-label')), ['Copy session ID']);
+  // Icon-only toolbar: Pin, Delete and Move act on the session; a divider sets Project apart.
+  const toolbar = menu.querySelector('[role=toolbar]');
+  assert.deepEqual([...toolbar.children].map(node => node.classList.contains('sf-menu-toolbar-divider') ? '|' : node.querySelector('button').getAttribute('aria-label')), ['Pin', 'Delete session', 'Move to project', '|', 'Project']);
+  assert.deepEqual([...toolbar.querySelectorAll('button')].map(node => node.querySelector('svg')?.dataset.icon), ['Pin', 'Trash2', 'FolderSymlink', 'FolderCog']);
+  for (const node of menu.querySelectorAll('.sf-menu-tool')) {
+    assert.equal(node.textContent, '', 'icon-only: the label lives in aria-label and the tooltip');
+    const wrap = node.closest('.sf-menu-tool-wrap');
+    // The tip names the action, then, when disabled, why.
+    assert.equal((wrap.dataset.sfTip ?? wrap.title).split('\n')[0], node.getAttribute('aria-label'));
+    if (node.disabled && node.getAttribute('aria-description')) assert.equal((wrap.dataset.sfTip ?? wrap.title).split('\n')[1], node.getAttribute('aria-description'));
   }
   assert.equal(button('Delete session').dataset.destructive, 'true');
   assert.equal(button('Pin').hasAttribute('data-destructive'), false);
   await click(button('Delete session'));
   assert.equal($('[role=dialog][aria-label="Delete session?"]') !== null, true);
   assert.equal(mock.calls.some(call => call[2] === 'session.mutate'), false, 'menu Delete still only opens confirmation');
+});
+
+test('session menu shows the start of a draft on its own line, read when it opens, and discards it from there', async () => {
+  mock.control.drafts.design = 'Check that a Friday snooze\n  lands on Monday,   not Saturday';
+  await mount();
+  assert.ok(row('design').querySelector('.sf-draft-mark'));
+  await click(button('Actions for Sidebar layout'));
+  const line = $('.sf-session-menu .sf-menu-draft');
+  assert.equal(line.querySelector('.sf-menu-draft-text').textContent, 'Check that a Friday snooze lands on Monday, not Saturday', 'whitespace collapses to one line');
+  assert.equal(line.querySelector('.sf-menu-draft-mark').getAttribute('aria-label'), 'Unsent draft');
+  assert.equal(line.querySelector('button').getAttribute('aria-label'), 'Discard draft');
+  assert.equal(line.querySelector('button').dataset.destructive, 'true');
+  assert.equal(mock.queryClient.getQueryCache().getAll().some(query => JSON.stringify(query.state.data ?? null).includes('Friday snooze')), false, 'the text never enters the query cache');
+  await click(button('Discard draft'));
+  assert.equal($('[role=dialog]'), null);
+  assert.equal($('.sf-session-menu'), null);
+});
+
+test('session menu toolbar explains why Delete and Move wait for an idle session', async () => {
+  await mount(); await click(button('Actions for Runtime classification'));
+  for (const label of ['Delete session', 'Move to project']) {
+    assert.equal(button(label).disabled, true, label);
+    assert.equal(button(label).getAttribute('aria-description'), 'Available once the session is idle.');
+    assert.equal(button(label).closest('.sf-menu-tool-wrap').dataset.sfTip, `${label}\nAvailable once the session is idle.`);
+  }
+  assert.equal($('.sf-session-menu .sf-menu-draft'), null, 'no draft, no draft line');
 });
 
 test('a pinned working card keeps its Working status, stays undimmed and follows pin/snooze transitions', async () => {
@@ -499,10 +531,11 @@ for (const status of ['working', 'starting', 'running children', 'waiting', 'unk
     assert.equal(row('root').querySelector('.sf-snooze-time') === null, true);
   }
   await click(row('root').querySelector('[aria-label="Snooze session"]'));
-  assert.equal($('form > button:not(:disabled)').textContent, 'Unsnooze');
+  // The existing snooze is one line: wake time, time left, then Unsnooze, the menu's first enabled action.
   const information = all('form > .sf-snooze-info');
   assert.equal(information.length, 1);
-  assert.equal(information[0].disabled, true);
+  assert.equal($('form button:not(:disabled)'), button('Unsnooze'));
+  assert.equal(information[0].contains(button('Unsnooze')), true);
   assert.match(information[0].querySelector('.sf-snooze-remaining').textContent, /^(\d+d \d+h |\d+h )?\d+min left$/);
   const wake = new Date(mock.control.metadata.sessions.root.wake_at * 1000);
   assert.equal(information[0].querySelector('.sf-snooze-date').textContent, `${new Intl.DateTimeFormat(undefined, { dateStyle: 'short' }).format(wake)} ${new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }).format(wake)}`);
@@ -532,29 +565,31 @@ test('Unsnooze only dismisses and removes the countdown after exact backend conf
   assert.equal(row('snoozed').querySelector('.sf-snooze-time') === null, true);
 });
 
-test('snooze menu actions use the requested leading icons while its combined information row stays icon-free', async () => {
+test('snooze rows lead with their icon outside the buttons, the preset time under the calendar, and an existing snooze on one line', async () => {
   await mount();
   await click(row('snoozed').querySelector('[aria-label="Snooze session"]'));
-  const actions = [...$('[role=dialog]').querySelectorAll('.sf-menu-action')];
-  assert.deepEqual(actions.map(node => node.querySelector('[data-codicon]')?.getAttribute('data-codicon') || node.querySelector('[data-icon]')?.getAttribute('data-icon')),
-    ['AlarmOff', 'ClockHour1', 'ClockHour3', 'Sun', 'calendar']);
-  for (const node of actions) {
-    assert.equal(node.firstElementChild.className, 'sf-menu-icon');
-    assert.equal(node.firstElementChild.getAttribute('aria-hidden'), 'true');
-    assert.equal(node.lastElementChild.className, 'sf-menu-label');
-  }
-  const info = [...$('[role=dialog]').querySelectorAll('.sf-snooze-info')];
-  assert.equal(info.length, 1);
-  assert.equal(info.every(node => node.disabled && !node.querySelector('.sf-menu-icon,svg,[data-codicon]')), true);
+  const dialog = $('[role=dialog]');
+  const leads = [...dialog.querySelectorAll('.sf-snooze-lead')];
+  assert.deepEqual(leads.map(node => node.querySelector('svg')?.dataset.icon), ['Clock', 'Calendar', 'CalendarTime']);
+  assert.equal(leads[1].querySelector('small').textContent, '9:00');
+  for (const node of leads) assert.equal(node.closest('button'), null, 'row icons sit outside the buttons');
+  assert.deepEqual([...dialog.querySelectorAll('.sf-snooze-choice')].map(node => node.querySelector('svg')), [null, null, null, null, null, null], 'choices carry no icon of their own');
+  const info = dialog.querySelector('.sf-snooze-info');
+  assert.equal(info.querySelector('.sf-snooze-info-mark svg')?.dataset.icon, 'AlarmSnooze');
+  assert.equal(info.querySelector('.sf-unsnooze svg')?.dataset.icon, 'AlarmOff');
 });
 
-test('fourth snooze option persists next Monday at 09:00 without a toast or opening a session', async () => {
+test('snooze choices: +1h/+2h/+4h, then Tomorrow, Monday and Next week with their dates; Monday persists next Monday at 09:00 without a toast or opening a session', async () => {
   await mount();
-  const wake = flow.snoozePresets()[3].wake_at;
+  const presets = flow.snoozePresets(), wake = presets.days[1].wake_at;
   await click(row('design').querySelector('[aria-label="Snooze session"]'));
-  assert.deepEqual([...$('[role=dialog]').querySelectorAll('form > button')].map(node => node.textContent),
-    ['In 1 hour', 'In 3 hours', 'Tomorrow at 9:00', 'Next Monday at 9:00']);
-  await click(button('Next Monday at 9:00'));
+  const choices = [...$('[role=dialog]').querySelectorAll('.sf-snooze-choice')];
+  assert.deepEqual(choices.map(node => node.getAttribute('aria-label')), ['In 1 hour', 'In 2 hours', 'In 4 hours', 'Tomorrow at 9:00', 'Monday at 9:00', 'Next week at 9:00']);
+  assert.deepEqual(choices.slice(0, 3).map(node => node.textContent), ['+1h', '+2h', '+4h']);
+  const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'short' }), day = { format: date => `${weekday.format(date)} ${date.getDate()}` };
+  assert.deepEqual(choices.slice(3).map(node => [node.querySelector('.sf-snooze-day-name').textContent, node.querySelector('.sf-snooze-day-date').textContent]),
+    presets.days.map(preset => [preset.label, day.format(preset.date)]));
+  await click(button('Monday at 9:00'));
   assert.equal(mock.control.metadata.sessions.design.wake_at, wake);
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
   assert.equal($('[role=dialog]') === null, true); assert.equal($('.sf-undo') === null, true);
@@ -758,7 +793,7 @@ test('draft-bearing empty cards use New session consistently and retain genuine 
     assert.equal(row(id).querySelector('.sf-project-name').textContent, 'Project unavailable', id);
   }
   await click(fresh.querySelector('[aria-label="Actions for New session"]'));
-  assert.equal($('[role=dialog] .sf-menu-title').textContent, 'New session');
+  assert.equal($('[role=dialog] .sf-menu-heading').textContent, 'New session');
   await click(button('Pin')); assert.equal(row('empty').closest('section'), shelf('Pinned'));
   assert.equal($('.sf-undo') === null, true); assert.equal(button('Undo'), undefined);
   Object.assign(mock.control.rows[0], { message_count: 1, title: 'First task', preview: 'A real message' }); await refresh();
@@ -1430,7 +1465,9 @@ test('context menu copies durable ID and filters by exact session project withou
   const text = $('[role=dialog]').textContent;
   assert.doesNotMatch(text, /Archive|Snooze ·|Custom snooze/);
   await click(button('Copy session ID')); assert.ok(mock.calls.some(call => call[0] === 'clipboard' && call[1] === 'root'));
-  await click(button('Actions for Release notes')); await click(button('Project')); await click(button('Filter for'));
+  // Copy answers with a check mark and keeps the menu open.
+  assert.ok(button('Copied')); assert.equal(button('Copied').classList.contains('sf-copied'), true); assert.ok($('[role=dialog]'));
+  await click(button('Actions for Release notes')); await click(button('Project')); await click(button('Filter for /projects/docs'));
   assert.ok(row('readme')); assert.equal(row('design') === null, true);
   assert.equal(mock.calls.some(call => call[0] === 'new' || call[2] === 'session.cwd.set'), false);
 });
@@ -1445,9 +1482,9 @@ test('clipboard failure stays visible without falsely closing context; stale cop
   assert.equal(mock.calls.filter(call => call[0] === 'clipboard').length, count);
 });
 
-test('Autotitler: rename now stays visible but disabled unless the backend registers the autotitler command', async () => {
+test('Rename with AutoTitler stays visible but disabled unless the backend registers the autotitler command', async () => {
   await mount(); await click(button('Actions for Sidebar layout'));
-  const action = button('Autotitler: rename now');
+  const action = button('Rename with AutoTitler');
   assert.equal(action.disabled, true);
   // The reason stays on hover (the wrapper, since a disabled button takes no pointer events) and in the button's description.
   assert.match(action.closest('.sf-tip-wrap').dataset.sfTip || '', /not available/); assert.match(action.getAttribute('aria-description') || '', /not available/);
@@ -1456,24 +1493,24 @@ test('Autotitler: rename now stays visible but disabled unless the backend regis
   mock.control.autotitler = true; mock.control.pluginDiscoveryError = 'fixture discovery failed';
   await act(async () => mock.queryClient.removeQueries({ queryKey: [...flow.scopeKey(flow.captureScope()), 'autotitler'] }));
   await click(button('Actions for Sidebar layout'));
-  assert.equal(button('Autotitler: rename now').disabled, true);
+  assert.equal(button('Rename with AutoTitler').disabled, true);
   assert.equal(mock.calls.some(call => call[2] === 'command.dispatch'), false);
 });
 
-test('Autotitler: rename now dispatches rename-now for the surfaced tip and refreshes the title', async () => {
+test('Rename with AutoTitler dispatches rename-now for the surfaced tip and refreshes the title', async () => {
   mock.control.autotitler = true;
   await mount(); await click(button('Actions for Runtime classification'));
-  const action = button('Autotitler: rename now');
+  const action = button('Rename with AutoTitler');
   assert.equal(action.disabled, false);
   await click(action); await tick();
   const dispatch = mock.calls.filter(call => call[0] === 'requestProfile' && call[2] === 'command.dispatch');
   assert.deepEqual(dispatch.map(call => call[3]), [{ name: 'autotitler', arg: 'rename-now tip' }]);
   assert.equal(dispatch[0][1].connectionId, 'source-a');
   assert.equal(row('root').querySelector('.sf-row-title').textContent, 'Regenerated title');
-  assert.equal(button('Autotitler: rename now'), undefined, 'menu closes after success');
+  assert.equal(button('Rename with AutoTitler'), undefined, 'menu closes after success');
 });
 
-test('Autotitler: rename now reports skipped, foreign and switched-source results', async () => {
+test('Rename with AutoTitler reports skipped, foreign and switched-source results', async () => {
   mock.control.autotitler = true;
   controller = flow.createController(mock.ctx);
   const item = mock.control.rows.find(row => row.id === 'tip');
