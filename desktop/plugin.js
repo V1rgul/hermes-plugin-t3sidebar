@@ -180,8 +180,8 @@ export function compactTokens(row) {
   const thousands = Math.round(total / 1000);
   return thousands < 1000 ? `${tokenFormatter.format(thousands)}K` : `${millionTokenFormatter.format(total / 1000000)}M`;
 }
-export function isEmptySession(row, runtimes = []) {
-  if (aliases(row).length > 1) return false; // Native counts describe only the tip, not ancestor history.
+export function isEmptySession(row, runtimes = [], ids = aliases(row)) {
+  if (ids.length > 1) return false; // Native counts describe only the tip, not ancestor history.
   const knownCount = value => Number.isInteger(value) && value >= 0;
   const runtimeCounts = runtimes.map(item => item.message_count).filter(knownCount);
   const count = knownCount(row.message_count) ? row.message_count : runtimeCounts.includes(0) ? 0 : null;
@@ -314,7 +314,7 @@ export function buildSections(rows, metadata, live, { now = Date.now() / 1000, r
       : meta.state === 'snoozed' && !woke ? 'snoozed'
       : meta.pinned ? 'pinned'
       : observed === 'working' ? 'working' : 'active';
-    const newSession = isEmptySession(row, runtimeKnown ? matches : []);
+    const newSession = isEmptySession(row, runtimeKnown ? matches : [], ids);
     // A draft saved on the server, typed here or on another client: it keeps an empty session's card and tints any card.
     const drafted = !!draftIds?.size && ids.some(id => draftIds.has(id));
     if ((tokens.length || project !== '*') && !matchesFilters({ ...row, newSession }, tokens, project)) continue;
@@ -576,6 +576,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       if (sessions.length !== data.sessions.length || sessions.some((row, i) => row !== data.sessions[i])) client.setQueryData(key, { ...data, sessions });
     }
   }
+  // Settings saves in flight, by save id. They outlive the settings page that started them, so a remounted page must still see them.
+  const savingSettings = sdk.atom([]);
   return {
     dispose() { disposed = true; generation++; pendingRoutes = null; archiveHead = null; deleteRequests.clear(); doneAcks.clear(); }, check,
     async hasDraft(scope, row) {
@@ -603,11 +605,11 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       readTicket(scope, ticket);
       const route = await routeFor(scope);
       try {
-        const value = qualified(await fenced(scope, () => ctx.rest('/sessions?offset=0&limit=500')), scope, route);
+        const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=0&limit=${HISTORY_PAGE_SIZE}`)), scope, route);
         readTicket(scope, ticket); return value;
       } catch (error) {
         readTicket(scope, ticket);
-        const value = await fenced(scope, () => env.host.listPersistedSessions(route, { profile: route?.targetProfile || scope.profile, limit: 500 }));
+        const value = await fenced(scope, () => env.host.listPersistedSessions(route, { profile: route?.targetProfile || scope.profile, limit: HISTORY_PAGE_SIZE }));
         readTicket(scope, ticket);
         return { ...value, capped: true, companionError: error.message };
       }
@@ -653,9 +655,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const route = await routeFor(scope), sessions = [];
       let has_more = true;
       for (let page = 1; page <= pages && has_more; page++) {
-        const offset = page * 500;
+        const offset = page * HISTORY_PAGE_SIZE;
         const value = await fenced(scope, () => client.fetchQuery({ queryKey: [...scopeKey(scope), 'page', offset], staleTime: Infinity, gcTime: HISTORY_PAGE_GC_MS,
-          queryFn: async () => { const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=${offset}&limit=500`)), scope, route); readTicket(scope, ticket); return value; } }));
+          queryFn: async () => { const value = qualified(await fenced(scope, () => ctx.rest(`/sessions?offset=${offset}&limit=${HISTORY_PAGE_SIZE}`)), scope, route); readTicket(scope, ticket); return value; } }));
         readTicket(scope, ticket);
         sessions.push(...value.sessions); has_more = value.has_more;
       }
@@ -687,11 +689,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           try {
             state = validState(await fenced(scope, () => ctx.rest('/state')));
             const meta = state.sessions[id];
-            const restore = payload.restoreMetadata;
-            const metadataPayload = restore ? (restore.state === 'snoozed' && restore.wake_at > Date.now() / 1000 ? { action: 'snooze', wake_at: restore.wake_at } : { action: restore.state === 'settled' ? 'settle' : 'restore' })
-              // Record an explicit Ready restoration even for external archives with no plugin metadata,
-              // so the companion's organized-row backfill retains an older unarchived conversation.
-              : !archived && (!meta || meta.state !== 'active') ? { action: 'restore' } : null;
+            // Record an explicit Ready restoration even for external archives with no plugin metadata,
+            // so the companion's organized-row backfill retains an older unarchived conversation.
+            const metadataPayload = !archived && (!meta || meta.state !== 'active') ? { action: 'restore' } : null;
             if (metadataPayload) {
               await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: metadataPayload }));
               state = verifyAction(validState(await fenced(scope, () => ctx.rest('/state'))), id, metadataPayload);
@@ -700,11 +700,17 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           check(scope); client.setQueryData(key, state);
           return { archived, before };
         }
-        if (['pin', 'snooze'].includes(payload.action)) {
-          const route = await routeFor(scope);
-          if (await archiveFlag(scope, route, id)) throw new Error('Unarchive this session before pinning or snoozing it.');
+        if (['pin', 'snooze'].includes(payload.action)) await routeFor(scope);
+        try { await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: payload })); }
+        catch (error) {
+          // The companion refuses pinning or snoozing an archived session itself (HTTP 409 native_session_archived); the transport reports it as "409: <body>".
+          // Only that exact refusal is translated; any other status, detail or unparsable body keeps its own error.
+          const body = /(?:^|error:\s*)409:\s*(\{.*\})\s*$/is.exec(String(error?.message ?? error))?.[1];
+          let detail;
+          try { detail = body && JSON.parse(body).detail; } catch (_) { /* not the companion's JSON error body */ }
+          if (['pin', 'snooze'].includes(payload.action) && detail === 'native_session_archived') throw new Error('Unarchive this session before pinning or snoozing it.');
+          throw error;
         }
-        await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: payload }));
         const value = verifyAction(validState(await fenced(scope, () => ctx.rest('/state'))), id, payload);
         await client.cancelQueries({ queryKey: key, exact: true }); check(scope);
         client.setQueryData(key, value);
@@ -1090,7 +1096,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
 
     async newChat(scope, project, idempotencyKey) {
       const route = await routeFor(scope); check(scope);
-      if (project === undefined) return env.host.newChat(route); // Preserve archive-and-advance fallback.
+      if (project === undefined) return fenced(scope, () => env.host.newChat(route)); // Preserve archive-and-advance fallback.
       if (project.isNoProject || project.id === '__no_project__') throw new Error('Home creation is unavailable: the public Desktop SDK cannot select a detached workspace. No session was created. Use native Home new chat.');
       if (typeof project.path !== 'string' || !project.path || !idempotencyKey) throw new Error('Choose a project folder before creating a session.');
       const create = params => fenced(scope, () => env.host.requestProfile(route, 'session.create', params));
@@ -1114,6 +1120,14 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const info = await fenced(scope, () => env.host.requestProfile(route, 'session.cwd.set', { session_id: created.session_id, cwd: project.path }));
       if (info?.cwd !== project.path) throw new Error('The session workspace was not confirmed. Do not send a message until the native workspace is checked.');
       return created;
+    },
+    savingSettings,
+    // One save per id at a time, whichever page mount asks; the work itself fences its publication with check().
+    async saveSetting(id, work) {
+      if (savingSettings.get().includes(id)) return;
+      savingSettings.set([...savingSettings.get(), id]);
+      try { await work(); }
+      finally { savingSettings.set(savingSettings.get().filter(item => item !== id)); }
     }
   };
 }
@@ -1364,38 +1378,24 @@ function MenuAction({ name, codicon, className = '', destructive = false, childr
     h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, codicon ? h(sdk.Codicon, { name: codicon, size: 14 }) : icon(name)), h('span', { className: 'sf-menu-label' }, children));
 }
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
-function Settings({ ctx }) {
+function Settings({ ctx, controller }) {
   const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
   const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [linesError, setLinesError] = useState(''), [tokensError, setTokensError] = useState('');
+  // Write, exact readback, then publication to the mounted sidebar; a failure is reported under its own setting.
+  const savePreference = (storageKey, queryKey, value, message, setFailure) => {
+    try {
+      ctx.storage.set(storageKey, value);
+      if (ctx.storage.get(storageKey) !== value) throw new Error(message);
+      client.setQueryData(queryKey, value); setFailure('');
+    } catch (err) { setFailure(err.message); }
+  };
   const save = value => {
     if (!validSnoozeTime(value)) { setError('Choose a valid time.'); return; }
-    try {
-      ctx.storage.set('snooze-time', value);
-      if (ctx.storage.get('snooze-time') !== value) throw new Error('The snooze preset time was not saved.');
-      client.setQueryData(SNOOZE_TIME_KEY, value); setError('');
-    } catch (err) { setError(err.message); }
+    savePreference('snooze-time', SNOOZE_TIME_KEY, value, 'The snooze preset time was not saved.', setError);
   };
-  const saveDetails = on => {
-    try {
-      ctx.storage.set('working-details', on);
-      if (ctx.storage.get('working-details') !== on) throw new Error('The Working indicator setting was not saved.');
-      client.setQueryData(WORKING_DETAILS_KEY, on); setDetailsError('');
-    } catch (err) { setDetailsError(err.message); }
-  };
-  const saveLines = lines => {
-    try {
-      ctx.storage.set('pinned-lines', lines);
-      if (ctx.storage.get('pinned-lines') !== lines) throw new Error('The pinned session height setting was not saved.');
-      client.setQueryData(PINNED_LINES_KEY, lines); setLinesError('');
-    } catch (err) { setLinesError(err.message); }
-  };
-  const saveTokens = on => {
-    try {
-      ctx.storage.set('show-tokens', on);
-      if (ctx.storage.get('show-tokens') !== on) throw new Error('The token count setting was not saved.');
-      client.setQueryData(SHOW_TOKENS_KEY, on); setTokensError('');
-    } catch (err) { setTokensError(err.message); }
-  };
+  const saveDetails = on => savePreference('working-details', WORKING_DETAILS_KEY, on, 'The Working indicator setting was not saved.', setDetailsError);
+  const saveLines = lines => savePreference('pinned-lines', PINNED_LINES_KEY, lines, 'The pinned session height setting was not saved.', setLinesError);
+  const saveTokens = on => savePreference('show-tokens', SHOW_TOKENS_KEY, on, 'The token count setting was not saved.', setTokensError);
   // The host already supplies the page title and gutters; behavior notes live in docs/behavior.md.
   return h('div', null, h('style', null, SETTINGS_CSS), h(sdk.ListRow ?? SettingsRow, {
     title: 'Snooze preset time',
@@ -1417,10 +1417,17 @@ function Settings({ ctx }) {
     description: 'Show total input and output tokens on session cards.',
     checked: showTokens, onChange: saveTokens,
     below: tokensError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, tokensError) : null
-  }), h(ExperimentalSettings, { ctx }));
+  }), h(ExperimentalSettings, { ctx, controller }));
 }
 // Experimental features lean on Hermes internals. The backend reports, feature by feature, whether this Hermes still has them; a feature without them is off, its switch disabled and the reason shown under it, while the others keep working.
-const EXPERIMENTAL_KEY = ['hermes-t3sidebar-settings', 'experimental'];
+const experimentalKey = scope => ['hermes-t3sidebar-settings', scope.connectionId, scope.profile, scope.epoch, 'experimental'];
+// Each read and save belongs to the backend of the source and profile it started on; an answer arriving after a switch is dropped.
+async function experimentalRequest(ctx, scope, path, options) {
+  if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load this setting.');
+  const value = await ctx.rest(path, options);
+  if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh to load this setting.');
+  return validExperimental(value);
+}
 export const INCOMPATIBLE_HERMES = 'Incompatible with your Hermes version.';
 export const EXPERIMENTAL_FEATURES = [
   { id: 'pool_credits', label: 'Banked reset expiries for every Codex account',
@@ -1432,32 +1439,52 @@ export function validExperimental(value) {
   // A feature the backend does not report is treated as unavailable rather than guessed.
   return Object.fromEntries(EXPERIMENTAL_FEATURES.map(({ id }) => [id, { enabled: features[id]?.enabled === true, available: features[id]?.available === true }]));
 }
-function ExperimentalSettings({ ctx }) {
-  const query = useQuery({ queryKey: EXPERIMENTAL_KEY, queryFn: async () => validExperimental(await ctx.rest('/settings/experimental')), staleTime: 0, retry: false });
+function ExperimentalSettings({ ctx, controller }) {
+  const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
+  useValue(host.state.gateway);
+  useValue(activationEpoch);
+  const epoch = gatewayActivationEpoch();
+  const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
+  return h(ScopedExperimentalSettings, { key: JSON.stringify(experimentalKey(scope)), ctx, controller, scope });
+}
+function ScopedExperimentalSettings({ ctx, controller, scope }) {
+  const query = useQuery({ queryKey: experimentalKey(scope), queryFn: () => experimentalRequest(ctx, scope, '/settings/experimental'), staleTime: 0, retry: false });
   // Same heading as Desktop's own settings sections (SectionHeading, not exported by the SDK): icon and title, with the caveat right after the title.
   return h('section', { className: 'sf-experimental mt-6', 'aria-label': 'Experimental' },
     h('div', { className: 'mb-2.5 flex items-center gap-2 pt-2 text-[length:var(--conversation-text-font-size)] font-medium' },
       typeof sdk.Codicon === 'function' ? h(sdk.Codicon, { name: 'beaker', size: 16, className: 'shrink-0 text-muted-foreground' }) : null,
       h('span', null, 'Experimental'),
       h('span', { className: 'text-xs font-normal text-muted-foreground' }, 'May break with updates. Auto-disables in that case.')),
-    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, feature, state: query.data?.[feature.id], readError: query.isError })));
+    EXPERIMENTAL_FEATURES.map(feature => h(ExperimentalFeature, { key: feature.id, ctx, controller, scope, feature, state: query.data?.[feature.id], readError: query.isError })));
 }
-function ExperimentalFeature({ ctx, feature, state, readError }) {
+function ExperimentalFeature({ ctx, controller, scope, feature, state, readError }) {
   const client = useQueryClient(), [error, setError] = useState('');
-  const save = async enabled => {
+  const key = experimentalKey(scope), saveId = JSON.stringify([...key, feature.id]);
+  // One save at a time, even across a remount of this page: the switch stays disabled until the backend's readback of this save is published.
+  const saving = useValue(controller.savingSettings).includes(saveId);
+  const save = enabled => controller.saveSetting(saveId, async () => {
     try {
-      client.setQueryData(EXPERIMENTAL_KEY, validExperimental(await ctx.rest(`/settings/experimental/${feature.id}`, { method: 'PUT', body: { enabled } })));
+      // A background read started before or during the write could otherwise publish the state from before it.
+      await client.cancelQueries({ queryKey: key });
+      controller.check(scope);
+      const value = await experimentalRequest(ctx, scope, `/settings/experimental/${feature.id}`, { method: 'PUT', body: { enabled } });
+      if (value[feature.id].enabled !== enabled) throw new Error('The setting was not confirmed.');
+      await client.cancelQueries({ queryKey: key });
+      // After a source or profile switch, or once the plugin is disposed, the answer is dropped.
+      controller.check(scope);
+      client.setQueryData(key, value);
       setError('');
     } catch (_) {
+      try { controller.check(scope); } catch (_) { return; }
       setError('The setting was not saved.');
-      client.invalidateQueries({ queryKey: EXPERIMENTAL_KEY });
+      client.invalidateQueries({ queryKey: key });
     }
-  };
+  });
   const unavailable = state?.available === false;
   const note = unavailable ? INCOMPATIBLE_HERMES : error || (readError ? 'Could not read this setting from the plugin backend.' : '');
   return h(sdk.ToggleRow ?? SettingsToggleRow, {
     label: feature.label, description: feature.description,
-    checked: state?.enabled === true, disabled: !state || unavailable, onChange: save,
+    checked: state?.enabled === true, disabled: !state || unavailable || saving, onChange: save,
     below: note ? h('div', { role: unavailable ? undefined : 'alert', className: 'mt-1.5 text-xs text-destructive', 'data-feature': feature.id }, note) : null
   });
 }
@@ -1558,7 +1585,7 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
   const update = patch => void perform(() => controller.updateProject(scope, project, patch));
   return h('div', { className: 'sf-menu sf-project-submenu', style: { '--sf-project-color': project?.color || 'var(--ui-text-tertiary)' } },
     h('div', { className: 'sf-menu-title' }, project?.name || 'Project unavailable'),
-    h(MenuAction, { name: 'Pencil', disabled: busy || !editable, onClick: () => setRenaming(true) }, 'Rename'),
+    h(MenuAction, { name: 'Pencil', disabled: busy || !editable, onClick: () => { if (!renaming) setName(project?.name || ''); setRenaming(true); } }, 'Rename'),
     renaming ? h('form', { onSubmit: event => { event.preventDefault(); update({ name }); } },
       h('span', { className: 'sf-custom-time' },
         h('input', { value: name, autoFocus: true, 'aria-label': 'Project name', disabled: busy, onChange: event => setName(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
@@ -1619,7 +1646,8 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
   };
   const action = (text, name, payload) => h(MenuAction, { key: text, name, disabled: disabled || busy, onClick: () => run(payload) }, text);
 
-  const customValid = (() => { try { parseLocalWake(value); return true; } catch (_) { return false; } })();
+  // Only the snooze menu shows the custom field, and an empty one is never valid; submitting validates again.
+  const customValid = snoozeOnly && !!value && (() => { try { parseLocalWake(value); return true; } catch (_) { return false; } })();
   const custom = event => {
     event.preventDefault();
     try { const wake_at = parseLocalWake(value); setError(''); run({ action: 'snooze', wake_at }); } catch (err) { setError(err.message); }
@@ -1638,7 +1666,8 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
         h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: disabled || snoozeDisabled || !value, 'data-valid': customValid })))
       : h('div', null,
         row.archived !== true ? action(row.meta.pinned ? 'Unpin' : 'Pin', 'Pin', { action: row.meta.pinned ? 'unpin' : 'pin' }) : null,
-        h(MenuAction, { name: 'Pencil', disabled: busy || (row._liveOnly && !row.runtimeId), onClick: () => setRenaming(true) }, 'Rename'),
+        // The field starts from the title current now, not when the menu opened; once editing, a poll never replaces the typed text.
+        h(MenuAction, { name: 'Pencil', disabled: busy || (row._liveOnly && !row.runtimeId), onClick: () => { if (!renaming) setTitle(row.title || ''); setRenaming(true); } }, 'Rename'),
         renaming ? h('form', { onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
           h('span', { className: 'sf-custom-time' },
           h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
@@ -1763,7 +1792,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   // The focused composer is read every 2 s, while its synced copy can lag one sync behind, so a focused card follows its composer alone.
   const hasDraft = (row.newSession ? draftPresent : draft.data === true && !draft.isError) || !active && row.drafted;
   const attention = row.status === 'waiting', snoozed = row.section === 'snoozed', badge = snoozed ? null : cardStatus(row, active);
-  const tokens = compactTokens(row), provider = providerMark(row.provider);
+  const tokens = showTokens ? compactTokens(row) : null, provider = providerMark(row.provider);
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
     if (event.target !== event.currentTarget) return;
@@ -1987,13 +2016,13 @@ export function projectDisplayPath(path, home) {
   return value === prefix ? '~' : value.startsWith(`${prefix}/`) ? `~${path.slice(root.length)}` : path;
 }
 function prepareProjectGroups(entries, home) {
-  const groups = new Map(), paths = new Map(), text = new Map();
+  const groups = new Map(), seen = new Map(), paths = new Map(), text = new Map();
   for (const choice of entries) {
     if (choice.isNoProject || choice.id === '__no_project__' || typeof choice.path !== 'string' || !choice.path) continue;
     const id = choice.projectId || choice.id;
-    if (!groups.has(id)) groups.set(id, { id, name: choice.name, choices: [] });
-    const group = groups.get(id);
-    if (!group.choices.some(item => item.path === choice.path)) group.choices.push(choice);
+    if (!groups.has(id)) { groups.set(id, { id, name: choice.name, choices: [] }); seen.set(id, new Set()); }
+    // The first choice for a folder wins; a per-group set avoids rescanning the choices kept so far.
+    if (!seen.get(id).has(choice.path)) { seen.get(id).add(choice.path); groups.get(id).choices.push(choice); }
   }
   const ordered = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map(group => ({
     ...group, multiple: group.choices.length > 1,
@@ -2124,7 +2153,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const rich = sessions.data?.sessions || EMPTY_ROWS, extra = sessions.data?.capped ? EMPTY_ROWS : expanded.data?.sessions || EMPTY_ROWS;
   const archivedRows = archives.data?.sessions || EMPTY_ROWS;
   const serverDrafts = drafts.data || EMPTY_ROWS;
-  const rows = useMemo(() => withDraftRows(mergeRows(rich, extra, live, true, archivedRows), serverDrafts), [rich, extra, live, archivedRows, serverDrafts]);
+  // Draft-view changes (every focused composer check) reuse the merged history; only its own inputs merge it again.
+  const merged = useMemo(() => mergeRows(rich, extra, live, true, archivedRows), [rich, extra, live, archivedRows]);
+  const rows = useMemo(() => withDraftRows(merged, serverDrafts), [merged, serverDrafts]);
   const draftIds = useMemo(() => new Set(serverDrafts.map(draft => draft.session_id)), [serverDrafts]);
   const runtimeKnown = !!runtime.data, runtimeStale = runtimeKnown && runtime.isError;
   // Successful polls still advance ages and due snoozes when Query structural
@@ -2144,6 +2175,15 @@ function ScopedSidebar({ ctx, controller, scope }) {
   }, [snoozeDeadlines, now]);
   const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, liveCounts, { runtimeKnown, runtimeStale, now: classificationNow, draftIds }), [rows, metadata.data, liveCounts, runtimeKnown, runtimeStale, classificationNow, draftIds]);
   const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession && !row._draftOnly), [classified]);
+  // Search keystrokes and toolbar state do not touch these observers, which cover hidden empty sessions too.
+  const draftObservers = useMemo(() => emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
+    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId) })), [emptyCandidates, scope, controller, onDraftPresence, runtime.dataUpdatedAt, activeOwner, activeId]);
+  // An observer only reports while mounted: forget the presence of a session that gained history, left the list or changed identity.
+  useEffect(() => setEmptyDrafts(previous => {
+    if (!previous.size) return previous;
+    const ids = new Set(emptyCandidates.map(draftIdentity));
+    return [...previous].every(id => ids.has(id)) ? previous : new Set([...previous].filter(id => ids.has(id)));
+  }), [emptyCandidates]);
   const ownsActive = activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile;
   useDraftFocus({ controller, scope, rows, focusedId: ownsActive ? activeId : null, focus: draftFocus });
   const tokens = useMemo(() => searchTokens(query), [query]);
@@ -2162,6 +2202,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const selectProject = useCallback(cwd => { controller.check(scope); setProject(cwd); setFilterOpen(false); }, [controller, scope]);
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
   // A background acknowledgment notice describes one thread's marker; it is stale once a later acknowledgment succeeds or another thread is shown, and must not hide an unrelated action error.
+  const shownThread = useRef(activeId);
+  shownThread.current = activeId;
   const clearMarkerNotice = useCallback(() => {
     const message = markerNotice.current;
     markerNotice.current = null;
@@ -2169,6 +2211,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
   }, []);
   useEffect(clearMarkerNotice, [activeId, clearMarkerNotice]);
   useEffect(() => {
+    // Remember an acknowledged marker only while the metadata still carries it: an in-flight one is still there, and one that returns is acknowledged again.
+    if (metadata.data) for (const key of readMarkers.current) {
+      const [id, label, token] = JSON.parse(key);
+      if ((label === 'Woke' ? metadata.data.sessions[id]?.woke_at : metadata.data.completions?.[id]?.done_token) !== token) readMarkers.current.delete(key);
+    }
     if (!metadata.data || metadata.isError || mutation.isPending || !activeId || activeOwner?.connectionId !== (scope.connectionId ?? 'local') || activeOwner?.profile !== scope.profile) return;
     const row = rows.find(item => hasAlias(item, activeId));
     const meta = row && metadata.data.sessions[durableId(row)];
@@ -2190,8 +2237,12 @@ function ScopedSidebar({ ctx, controller, scope }) {
           // Another write finishing republishes metadata, which reruns this effect and retries silently.
           if (error instanceof WriterBusy) return;
           if (!sameScope(scope, captureScope())) return;
+          // By now another thread may be shown, or a foreground action error queued or shown: neither is replaced by this background notice.
+          if (shownThread.current !== activeId) return;
           const message = `Thread opened, but its ${marker.label} marker could not be acknowledged: ${error.message}`;
-          markerNotice.current = message; setActionError(message);
+          const previous = markerNotice.current;
+          markerNotice.current = message;
+          setActionError(current => !current || current === previous ? message : current);
         }
       }
     })();
@@ -2214,13 +2265,11 @@ function ScopedSidebar({ ctx, controller, scope }) {
     } catch (error) { if (sameScope(scope, captureScope())) setActionError(error.message); return false; }
   }, [controller, scope, mutation.mutateAsync]);
   const navigate = useCallback((event, id) => {
-    const keys = latest.current.visible.map(row => row.key), index = keys.indexOf(id);
-    let target;
-    if (event.key === 'ArrowDown') target = keys[Math.min(keys.length - 1, index + 1)];
-    if (event.key === 'ArrowUp') target = keys[Math.max(0, index - 1)];
-    if (event.key === 'Home') target = keys[0];
-    if (event.key === 'End') target = keys.at(-1);
-    if (target) { event.preventDefault(); const row = latest.current.visible.find(row => row.key === target); navigators.current.get(row.section)?.(target); }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const visible = latest.current.visible, index = event.key === 'ArrowDown' || event.key === 'ArrowUp' ? visible.findIndex(row => row.key === id) : -1;
+    const target = event.key === 'Home' ? visible[0] : event.key === 'End' ? visible.at(-1)
+      : visible[event.key === 'ArrowDown' ? Math.min(visible.length - 1, index + 1) : Math.max(0, index - 1)];
+    if (target) { event.preventDefault(); navigators.current.get(target.section)?.(target.key); }
   }, []);
   useEffect(() => {
     // Only recover a card's own focus; blur relinquishes ownership to search, menus or the composer.
@@ -2278,12 +2327,12 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const knownTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0;
   const fallbackCount = knownTotal && total > 500 ? ` is capped at 500 of ${total}`
     : `: ${sessions.data?.sessions.length || 0} loaded${knownTotal ? ` of ${total} available` : ''}`;
-  const canExpand = !sessions.data?.capped && (limit === 0 ? sessions.data?.has_more : expanded.data?.has_more);
+  // Until the expansion has answered (a failed first request included), the first page's has_more keeps the button, which is then the retry.
+  const canExpand = !sessions.data?.capped && (limit === 0 || !expanded.data ? sessions.data?.has_more : expanded.data.has_more);
   return h('aside', { className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); search.current?.focus(); }
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
-  } }, ...emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
-    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId) })), h('style', null, CSS),
+  } }, ...draftObservers, h('style', null, CSS),
     h('header', { className: 'sf-header' },
       h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) }),
         query ? h(IconButton, { label: 'Clear search', name: 'X', glyph: '×', className: 'sf-clear', onClick: () => { setQuery(''); search.current?.focus(); } }) : null),
@@ -4034,7 +4083,7 @@ export default {
     const controller = createController(ctx);
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
-    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx }) });
+    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx, controller }) });
     ctx.register({ id: 'usage', area: sdk.ROUTES_AREA ?? 'routes', title: 'Usage', data: { path: USAGE_ROUTE }, render: () => h(UsagePage, { ctx, view: 'usage' }) });
     ctx.register({ id: 'limits', area: sdk.ROUTES_AREA ?? 'routes', title: 'Limits', data: { path: LIMITS_ROUTE }, render: () => h(UsagePage, { ctx, view: 'limits' }) });
     let disposed = false, pending = null;
@@ -4066,6 +4115,6 @@ export default {
         return queryClient.invalidateQueries({ queryKey: scopeKey(scope), predicate: query => resources.includes(query.queryKey[4]), refetchType: 'active' }, { cancelRefetch: false });
       }).catch(() => { /* Query retains errors for the pane's normal recovery UI. */ });
     });
-    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-draft-sync', 'hermes-t3sidebar-preferences', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
+    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-draft-sync', 'hermes-t3sidebar-preferences', 'hermes-t3sidebar-settings', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
   }
 };
