@@ -13,7 +13,7 @@ const { createRoot } = await import('react-dom/client');
 const rest = mock.ctx.rest;
 let root, controller;
 const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
-const notes = () => [...document.querySelectorAll('.sf-note[role=alert]')].map(node => node.textContent);
+const notes = () => [...document.querySelectorAll('.sf-strip li[data-error=true]')].map(node => node.textContent);
 // Holds the Woke acknowledgment's write until fail() rejects it; the retry that follows stays pending, so the outcome is observed once.
 async function mountWithHeldAck() {
 	const wokeAt = Math.floor(Date.now() / 1000) - 60;

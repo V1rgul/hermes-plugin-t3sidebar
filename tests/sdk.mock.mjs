@@ -210,6 +210,8 @@ export const ctx = {
     }
     if (path.startsWith('/sessions?') || path.startsWith('/archives?')) {
       const archives = path.startsWith('/archives?');
+      // A pending promise here holds the regular listing in flight (the first load) until the test resolves it.
+      if (!archives && control.listGate) await control.listGate;
       if (control.listError || (archives ? control.archivesMissing : control.sessionsMissing)) throw new Error('fixture listing unavailable');
       const params = new URLSearchParams(path.split('?')[1]);
       const offset = Number(params.get('offset')), limit = Number(params.get('limit') || 500);
@@ -512,6 +514,27 @@ function TipBubble({ side, position, children }) {
   });
   return h('div', { ref: node, role: 'tooltip', className: 'mock-tip', 'data-side': side, style: { position: 'fixed', ...position } }, children);
 }
+// Public Tooltip parts (Desktop re-exports its Radix wrappers): a controlled root, an asChild trigger whose element anchors the content, and content that is portalled beside it only while open. Escape asks the root to close, as Radix's dismissable layer does.
+const TooltipContext = createContext(null);
+export function Tooltip({ open = false, onOpenChange, children }) {
+  const anchor = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const escape = event => { if (event.key === 'Escape') onOpenChange?.(false); };
+    document.addEventListener('keydown', escape);
+    return () => document.removeEventListener('keydown', escape);
+  }, [open, onOpenChange]);
+  return h(TooltipContext.Provider, { value: { open, anchor } }, children);
+}
+export function TooltipTrigger({ children }) { const { anchor } = useContext(TooltipContext); return React.cloneElement(children, { ref: anchor, 'data-slot': 'tooltip-trigger' }); }
+export function TooltipContent({ side = 'top', children }) {
+  const { open, anchor } = useContext(TooltipContext), [box, setBox] = useState(null);
+  useLayoutEffect(() => { setBox(open ? anchor.current?.getBoundingClientRect() ?? null : null); }, [open, anchor]);
+  if (!open || !box) return null;
+  const position = side === 'bottom' ? { left: box.left + box.width / 2, top: box.bottom + 5 } : side === 'left' ? { left: box.left - 5, top: box.top + box.height / 2 }
+    : side === 'right' ? { left: box.right + 5, top: box.top + box.height / 2 } : { left: box.left + box.width / 2, top: box.top - 5 };
+  return createPortal(h(TipBubble, { side, position }, children), document.body);
+}
 // Public SegmentedControl contract: pressed state on plain buttons, string ids.
 export function SegmentedControl({ options, value, onChange, className, disabled = false }) {
   return h('div', { className: `mock-segmented ${className || ''}`.trim() }, options.map(({ id, label }) => h('button', { key: id, type: 'button', 'aria-pressed': value === id, disabled, onClick: () => onChange(id) }, label)));
@@ -616,6 +639,6 @@ export const icons = Object.fromEntries(Object.entries({
   MessageSquare: 'M4 4h16v12H9l-5 4V4', Undo2: 'M3 10l5-5M3 10l5 5M3 10h11a6 6 0 0 1 0 12',
   Check: 'M5 12l5 5L20 7', Ellipsis: 'M5 12h1M11 12h1M17 12h1', X: 'M6 6l12 12M6 18L18 6', RefreshCw: 'M20 4v6h-6M20 10a8 8 0 1 0 0 7',
   Copy: 'M9 9h12v12H9ZM5 15H3V3h12v2', FolderOpen: 'M3 5h6l2 3h10v12H3Z', CornerDownLeft: 'M9 10l-5 5 5 5M4 15h12a4 4 0 0 0 4-4V4',
-  Pencil: 'M16 3l5 5-13 13H3v-5ZM14 5l5 5', BarChart3: 'M3 21h18M6 17V9M11 17V5M16 17v-6M21 17v-3', Trash2: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7', AlertTriangle: 'M12 3 2 20h20ZM12 9v5M12 17v.01'
+  Pencil: 'M16 3l5 5-13 13H3v-5ZM14 5l5 5', BarChart3: 'M3 21h18M6 17V9M11 17V5M16 17v-6M21 17v-3', Trash2: 'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7', AlertTriangle: 'M12 3 2 20h20ZM12 9v5M12 17v.01', Info: 'M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18M12 11v5M12 8v.01'
 }).map(([name, path]) => [name, props => h('svg', { 'data-icon': name, width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: path }))]));
 reset();

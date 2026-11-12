@@ -12,7 +12,7 @@
 
 - **Input**, **Done**, **Woke** badges: question or approval waiting, finished turn, expired snooze.
 - Shelves: **Pinned** (one outlined group under a single pin, optionally one line per session), **Working** (elapsed time), **Snoozed**, **Archived** (history kept).
-- Orange background: unsent draft in a session you are not viewing. Drafts are synced across every Desktop connected to the same Hermes; a draft whose session no longer exists reopens in a new session in its folder.
+- Orange pencil: unsent draft, with an orange background in a session you are not viewing. Drafts are synced across every Desktop connected to the same Hermes; a draft whose session no longer exists reopens in a new session in its folder.
 - Cards: project, provider icon, token count including subagents.
 - Pins, snoozes and completion markers shared between Desktop clients through the backend companion.
 
@@ -37,7 +37,7 @@
 
 ### Usage page
 
-- Footer chart button → **Usage** page.
+- Footer chart button → **Usage** page; click it again to return to your session.
 - Charts on one time axis: tokens, API-equivalent cost, human user messages, as amounts per bucket sized to the period.
 - Configurable period, per-provider or per-model series, stacking.
 - Read-only from Hermes's `session_model_usage`; no extra storage.
@@ -46,7 +46,7 @@
 
 ### Limits page
 
-- Footer button: remaining units and verdict icon per provider → **Limits** page.
+- Footer button: remaining units and verdict icon per provider → **Limits** page; click it again to return to your session, also after switching from Usage.
 - Providers: OpenAI Codex and Anthropic credential pools; accounts pooled in units weighted by plan.
 - Chart: past quota, **Now**, projection; configurable averaging period and limit window. Unfold arrows at each end of the x axis set how far back and ahead it reaches (weekly 1d/7d/30d, 5-hour 5h/1d/7d), shared by every chart and remembered on the client.
 - Verdicts: when the pool runs out before a reset, or how many units expire unused; the next meaningful event picks the icon. Run-out colour by time blocked in the 7 days (15 min grey, 2 h yellow, 6 h orange, 24 h red), expiry colour by units lost against capacity (5% grey, 15% yellow, 30% orange, 50% red); below that, no icon. A grey warning icon means the verdict cannot be computed (no drain data or stale readings).

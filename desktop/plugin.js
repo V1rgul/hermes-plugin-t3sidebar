@@ -1,6 +1,6 @@
 // hermes-t3sidebar — independent T3-inspired session browser; plain disk-plugin ESM.
 import * as sdk from '@hermes/plugin-sdk';
-import { createElement as h, Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { cloneElement, createElement as h, Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 const { host, useValue, useQuery, useMutation, useQueryClient, queryClient, gatewayActivationEpoch } = sdk;
 export const SECTIONS = ['pinned', 'active', 'working', 'snoozed', 'archived'];
@@ -1199,9 +1199,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
 const CSS = `
 /* Desktop's --ui-purple (#9e94d5 in both modes) is 2.7:1 on light backgrounds, and --ui-blue (#0053fd in both modes, Midnight included) about 3.3:1 on dark ones. Mixing in the base text darkens them in light mode and lightens them in dark mode; raising OKLCH chroma restores the saturation the mix removes (blue 62% at ×1.6: saturated yet light enough at 12px). */
 .sf,.sf-menu{--sf-blue:color-mix(in srgb,var(--ui-blue,#0053fd) 66%,var(--ui-base,var(--ui-text-primary)));--sf-blue:oklch(from color-mix(in oklab,var(--ui-blue,#0053fd) 62%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.6) h);--sf-purple:color-mix(in srgb,var(--ui-purple,#9e94d5) 70%,var(--ui-base,var(--ui-text-primary)));--sf-purple:oklch(from color-mix(in oklab,var(--ui-purple,#9e94d5) 65%,var(--ui-base,var(--ui-text-primary))) l calc(c * 2) h)}
+@property --sf-floor-cards{syntax:'<integer>';inherits:false;initial-value:0}
 /* Card geometry: --sf-card-content (two text lines), --sf-card-padding and --sf-card-margin (vertical, per side). Defaults are fallbacks rather than declarations, so :root, a theme or any ancestor can set them; the stride used by windowing and shelf minimums derives from them. */
 .sf{--sf-card-stride:calc(var(--sf-card-content,42px) + 2 * var(--sf-card-padding,6px) + 2 * var(--sf-card-margin,1px))}
-.sf{display:flex;flex-direction:column;height:100%;min-height:0;min-width:220px;font:12px/1.4 var(--font-sans,inherit);color:var(--ui-text-primary)}
+.sf{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;min-width:220px;font:12px/1.4 var(--font-sans,inherit);color:var(--ui-text-primary)}
 .sf *{box-sizing:border-box}.sf button,.sf input,.sf select{font:inherit}.sf button{cursor:pointer}.sf button:disabled{cursor:default;opacity:.4}
 .sf button:focus-visible,.sf input:focus-visible,.sf select:focus-visible{outline:2px solid var(--ui-accent);outline-offset:-2px}
 .sf-header{padding:6px 12px;display:flex;align-items:center;gap:5px;height:40px;flex-shrink:0}.sf-icon{display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;width:27px;height:27px;padding:4px;border:0;border-radius:4px;color:var(--ui-text-tertiary);background:transparent}
@@ -1213,8 +1214,8 @@ const CSS = `
 .sf-search input::-webkit-search-cancel-button{-webkit-appearance:none}.sf-search .sf-clear{width:20px;height:20px;padding:2px;visibility:visible;opacity:1}
 .sf-header input{font-size:14px}.sf-menu select{max-width:260px;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary)}
 .sf-scroll{overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column;padding:0 6px;gap:1px}
-.sf{interpolate-size:allow-keywords}.sf-shelves{display:flex;flex-direction:column;flex:1;min-height:0;gap:1px}.sf-shelves>.sf-section{flex:1 1 0;transition:flex-grow .22s ease,min-height .22s ease,max-height .22s ease}.sf-shelves>.sf-section[data-section=active]{min-height:min(40%,calc(var(--sf-count) * var(--sf-card-stride)));max-height:max-content;margin-bottom:auto}.sf-shelves>.sf-section:is([data-section=working],[data-section=snoozed],[data-section=archived]){min-height:max(30px,min(calc(30px + min(var(--sf-count),2) * var(--sf-card-stride)),calc(20% - 1px)));max-height:max-content}.sf-shelves>.sf-section[data-section=archived]{max-height:40%;max-height:calc-size(max-content,min(size,40%))}.sf-shelves>.sf-section[data-closed=true]{flex-grow:0;min-height:30px;max-height:30px}
-/* Shelves are a flex column: every section starts from zero and takes an equal share (flex-grow), bounded by its min/max heights, so constrained sections end up the same height. The 20% minima give up 1px each for the gaps, so 40% + 3 × 20% fits exactly. Ready takes up to 40% first (its minimum) and absorbs unused space below its cards (auto margin) so headings stay at the bottom. Working and Snoozed keep up to two cards (20% in short panes) and can grow to all their cards; Archived stops at 40%. Folding transitions flex-grow plus min/max-height (interpolate-size makes max-content animatable), so the edge moves from the first frame whether the section is squeezed or fits its cards. */
+.sf{interpolate-size:allow-keywords}.sf-shelves{display:flex;flex-direction:column;flex:1;min-height:0;gap:1px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--ui-text-primary) 28%,transparent) transparent}.sf-shelves>.sf-section{flex:1 1 0;transition:flex-grow .22s ease,min-height .22s ease,max-height .22s ease}.sf-shelves>.sf-section[data-section=active]{min-height:max(calc(min(var(--sf-count),1) * var(--sf-card-stride)),min(40%,calc(var(--sf-count) * var(--sf-card-stride)),calc(100% - 93px - var(--sf-floor-cards,0) * var(--sf-card-stride))));max-height:max-content;margin-bottom:auto}.sf-shelves>.sf-section:is([data-section=working],[data-section=snoozed],[data-section=archived]){min-height:max(calc(30px + min(var(--sf-count),1) * var(--sf-card-stride)),min(calc(30px + min(var(--sf-count),2) * var(--sf-card-stride)),calc(20% - 1px)));max-height:max-content}.sf-shelves>.sf-section[data-section=archived]{max-height:40%;max-height:calc-size(max-content,min(size,40%))}.sf-shelves>.sf-section[data-closed=true]{flex-grow:0;min-height:30px;max-height:30px}
+/* Shelves are a flex column: every section starts from zero and takes an equal share (flex-grow), bounded by its min/max heights, so constrained sections end up the same height. The 20% minima give up 1px each for the gaps, so 40% + 3 × 20% fits exactly. Ready takes up to 40% first (its minimum) and absorbs unused space below its cards (auto margin) so headings stay at the bottom. Working and Snoozed keep up to two cards (20% in short panes) and can grow to all their cards; Archived stops at 40%. No shelf holding a card ever drops below its header and one whole card, whatever the share: a title is never cut to its metadata line. Ready's 40% gives way first to the other shelves' floors (three 30px headings, their gaps and one card per open populated shelf, counted in --sf-floor-cards); only when the floors alone exceed a short pane does the shelves area scroll as a whole instead of clipping the lowest shelves. Folding transitions flex-grow plus min/max-height (interpolate-size makes max-content animatable), so the edge moves from the first frame whether the section is squeezed or fits its cards. */
 .sf-section{display:flex;flex-direction:column;min-height:0;overflow:hidden}/* Pinned sessions are meant to stay in sight: the group keeps its natural height and Ready shrinks first. Oversized groups scroll past 60% of the list or what leaves 450px for Ready and the shelves; short sidebars fall back to 18% so every shelf keeps a body. */.sf-section[data-section=pinned]{flex:none;max-height:max(18%,min(60%,calc(100% - 450px)))}
 /* Pinned cards form one outlined group marked by a single pin on its top border, rather than a pin per card. The outline runs exactly along the cards' backgrounds (inside their transparent margin border, with the same inner corner radii) and under them: cards keep Ready's width, and a hovered or selected card covers its part of the outline, including the gap the outline's mask leaves behind the pin, so the pin needs no background colour of its own. */
 .sf-section[data-section=pinned][data-populated=true]{position:relative;isolation:isolate;padding-top:calc(7px - var(--sf-card-margin,1px));margin-bottom:calc(6px - var(--sf-card-margin,1px))}
@@ -1231,17 +1232,22 @@ const CSS = `
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-wait{order:2}
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-token{order:3}
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-time{order:4}
+.sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-draft-mark{order:5}
 /* Centred in the single-line row, as the 4px inset centres it on the metadata line of a two-line card. */
 .sf-scroll[data-pinned-lines="1"]>.sf-section[data-section=pinned] .sf-hover{top:calc((var(--sf-card-stride) - 2 * var(--sf-card-margin,1px) - 25px) / 2)}
 /* An empty Pinned stays mounted (zero height, gap cancelled) so its last card can animate out. */
 .sf-section[data-section=pinned][data-populated=false]{margin-bottom:-1px}
 .sf-section-body{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1 1 auto;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--ui-text-primary) 28%,transparent) transparent}
 /* Fade the bottom edge only while more content lies below, so lists never run hard into the next heading. */
-.sf-section-body[data-more-below=true]{mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:30px;min-height:30px;padding:9px 6px 3px;border:0;background:transparent;color:var(--ui-text-secondary);font-size:11px;text-align:left}.sf-section-label{font-weight:500;color:var(--ui-accent)}.sf-count{color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}.sf-section-label,.sf-count,.sf-section-chevron{flex-shrink:0}.sf-section-line{flex:1;min-width:0;height:1px;background:var(--ui-stroke-secondary)}.sf-section-chevron{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px}
+.sf-section-body[data-more-below=true]{mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}.sf-section-toggle{display:flex;flex-shrink:0;align-items:center;gap:5px;width:100%;height:30px;min-height:30px;padding:9px 6px 3px;border:0;background:transparent;color:var(--ui-text-secondary);font-size:11px;text-align:left}.sf-section-label{font-weight:500;color:var(--ui-accent)}.sf-section[data-populated=false]>.sf-section-toggle .sf-section-label{color:var(--ui-text-tertiary)}.sf-count{color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}.sf-section-label,.sf-count,.sf-section-chevron{flex-shrink:0}.sf-section-line{flex:1;min-width:0;height:1px;background:var(--ui-stroke-secondary)}.sf-section-chevron{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px}
 /* The margin is a transparent border clipping each card's background: adjacent hovered/selected/draft cards stay visually separate while the stride stays exact. */
 .sf-row{position:relative;height:var(--sf-card-stride);flex-shrink:0;padding:0 10px;border-block:var(--sf-card-margin,1px) solid transparent;border-radius:6px}.sf .sf-row{background-clip:padding-box!important}/* the hover/selected/draft background shorthands would reset it */.sf-row[data-current=true]{background:var(--ui-bg-quaternary);box-shadow:inset 2px 0 var(--ui-accent)}
 .sf-row[data-has-draft=true][data-current=false]{background:color-mix(in srgb,var(--ui-orange,#db704b) 10%,transparent)}
 .sf-row[data-has-draft=true][data-current=false]:hover,.sf-row[data-has-draft=true][data-current=false]:focus-within{background:color-mix(in srgb,var(--ui-orange,#db704b) 14%,transparent)}
+/* Keyboard focus rings the card rather than its inner button. An inset shadow is clipped to the padding box, so it follows the visible rounded background inside the transparent margin border and replaces the selected card's accent bar while focused; the button's own rectangular outline goes. */
+.sf .sf-row>.sf-open:focus-visible{outline:none}.sf-row:has(>.sf-open:focus-visible){box-shadow:inset 0 0 0 2px var(--ui-accent)}
+/* The draft tint is colour-only; a pencil in the same orange names it, inline on the project line so the card keeps its height and the title its left edge. */
+.sf-draft-mark{display:inline-flex;flex-shrink:0;color:var(--ui-orange,#db704b)}.sf-draft-mark svg{width:13px;height:13px}
 /* Recede only the neutral title so status labels, colored icons and metadata stay readable. */
 .sf-row[data-dimmed=true]:not([data-unread=true]) .sf-row-title{color:var(--ui-text-secondary)}.sf-row[data-dimmed=true]:hover .sf-row-title,.sf-row[data-dimmed=true]:focus-within .sf-row-title,.sf-row[data-dimmed=true][data-menu-open=true] .sf-row-title{color:var(--ui-text-primary)}
 /* Native semantic blue is independent of the user's configurable accent. */
@@ -1249,11 +1255,22 @@ const CSS = `
 .sf-open{display:flex;flex-direction:column;justify-content:center;gap:3px;width:100%;height:100%;min-width:0;padding:var(--sf-card-padding,6px) 0;border:0;background:transparent;text-align:left;color:inherit}.sf-card-meta{display:flex;align-items:center;gap:8px;width:100%;min-width:0;font-size:12px;color:var(--ui-text-tertiary);height:19px}.sf-project{display:flex;align-items:center;gap:7px;flex:1;min-width:0}.sf-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-project-icon{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:4px;background:transparent;flex-shrink:0}.sf-project-icon svg{width:13px;height:13px}/* Quieter than the other metadata. The filled provider logo covers about 2.3x more of its box than digits do, so at equal colour it reads heavier; 0.7 opacity (about the square root of that ratio) evens them out. */
 .sf-row .sf-token,.sf-row .sf-provider{color:color-mix(in srgb,var(--ui-base,var(--ui-text-primary)) 30%,transparent)}.sf-row .sf-provider{opacity:.7}
 .sf-provider{display:flex;width:14px;height:14px;flex-shrink:0}.sf-provider svg{width:14px;height:14px}.sf-token,.sf-time{flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}.sf-time{display:inline-flex;align-items:center}.sf-row-title{display:block;width:100%;font-size:14px;line-height:19px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-wait{color:var(--ui-accent);flex-shrink:0;display:inline-flex}.sf-pin{display:inline-flex;flex-shrink:0}/* Equal top and right insets; 4px also centres the 25px strip on the 19px metadata line. */
-.sf-hover{position:absolute;right:4px;top:4px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}/* The SDK Button's transition-all would keep hidden actions visible for its 100ms: swap instantly. */.sf-hover .sf-icon{transition:none}/* Desktop's buttons draw both hover icons in 12px boxes, where the round alarm (about 9px of ink) reads smaller than the square Archive mark (about 10px). A 15px box with a 1.6 stroke keeps its 1px line and gives about 10.7px of round ink, optically level with Archive. */.sf-hover .sf-icon svg[data-icon^=Alarm]{width:15px;height:15px;flex-shrink:0;stroke-width:1.6}/* Desktop's ghost buttons use the secondary text color, and its 12px icon boxes thin the 1.6-stroke Archive mark to 0.8px: hover actions use the primary text color and a 1px Archive line, like the alarm. */.sf .sf-hover .sf-icon{color:var(--ui-text-primary)}.sf-hover .sf-archive svg{stroke-width:2}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time{visibility:hidden}
+.sf-hover{position:absolute;right:4px;top:4px;height:25px;display:flex;visibility:hidden;align-items:center;gap:2px;background:var(--ui-bg-elevated,var(--ui-bg-quaternary));border-radius:4px}.sf-hover .sf-icon{width:22px;height:25px}.sf-hover .sf-archive{width:auto;gap:4px;white-space:nowrap}.sf-row:hover .sf-hover{visibility:visible}/* The SDK Button's transition-all would keep hidden actions visible for its 100ms: swap instantly. */.sf-hover .sf-icon{transition:none}/* Desktop's buttons draw both hover icons in 12px boxes, where the round alarm (about 9px of ink) reads smaller than the square Archive mark (about 10px). A 15px box with a 1.6 stroke keeps its 1px line and gives about 10.7px of round ink, optically level with Archive. */.sf-hover .sf-icon svg[data-icon^=Alarm]{width:15px;height:15px;flex-shrink:0;stroke-width:1.6}/* Desktop's ghost buttons use the secondary text color, and its 12px icon boxes thin the 1.6-stroke Archive mark to 0.8px: hover actions use the primary text color and a 1px Archive line, like the alarm. */.sf .sf-hover .sf-icon{color:var(--ui-text-primary)}.sf-hover .sf-archive svg{stroke-width:2}.sf-row:hover .sf-provider,.sf-row:hover .sf-token,.sf-row:hover .sf-time,.sf-row:hover .sf-draft-mark{visibility:hidden}
 .sf-context-trigger{position:absolute;right:8px;top:4px;width:1px;height:1px;clip-path:inset(50%);overflow:hidden;padding:0;border:0}
-.sf-row[data-menu-open=true] .sf-hover{visibility:visible}.sf-row[data-menu-open=true] .sf-provider,.sf-row[data-menu-open=true] .sf-token,.sf-row[data-menu-open=true] .sf-time{visibility:hidden}
+.sf-row[data-menu-open=true] .sf-hover{visibility:visible}.sf-row[data-menu-open=true] .sf-provider,.sf-row[data-menu-open=true] .sf-token,.sf-row[data-menu-open=true] .sf-time,.sf-row[data-menu-open=true] .sf-draft-mark{visibility:hidden}
 .sf-empty{padding:7px 20px;color:var(--ui-text-quaternary);font-size:11px}.sf-note{margin:5px 10px;padding:7px;border:1px solid var(--ui-stroke-secondary);border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}
 .sf-group{padding:6px 12px 2px;font-size:10px;color:var(--ui-text-quaternary)}
+/* Status strip: one 24px line above the list; its details unfold below it and scroll when long. */
+.sf-strip{flex-shrink:0;margin:0 6px 2px;border-radius:4px;font-size:11px;color:var(--ui-text-secondary)}.sf-strip[data-error=true]{background:color-mix(in srgb,var(--ui-red) 8%,transparent)}.sf-strip-line{display:flex;align-items:center;gap:2px;height:24px}.sf-strip-toggle{display:flex;align-items:center;gap:6px;flex:1;min-width:0;height:24px;padding:0 6px;border:0;border-radius:4px;background:transparent;color:inherit;text-align:left}.sf-strip-toggle:hover{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-strip-icon,.sf-strip-chevron{display:inline-flex;flex-shrink:0}.sf-strip-icon svg{width:13px;height:13px}.sf-strip[data-error=true] .sf-strip-icon{color:var(--ui-red)}.sf-strip[data-error=false] .sf-strip-icon,.sf-strip-more,.sf-strip-chevron{color:var(--ui-text-tertiary)}.sf-strip-summary{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-strip-more{flex-shrink:0;font-variant-numeric:tabular-nums}.sf-strip-chevron{margin-left:auto}.sf-strip-chevron svg{width:12px;height:12px}.sf-strip-retry{flex-shrink:0}.sf-strip-details{display:flex;flex-direction:column;gap:4px;max-height:30vh;margin:0;padding:2px 6px 6px 25px;overflow:auto;list-style:none;overflow-wrap:anywhere}.sf-strip-details[hidden]{display:none}
+/* The strip reports a list-wide unknown runtime once; the cards' "?" would only repeat it. */
+.sf-scroll[data-runtime-unknown=true] .sf-wait{display:none}
+/* Skeleton cards share the card stride and text lines, so the first real cards take their place without a shift. */
+.sf-skeleton{flex-shrink:0}.sf-skeleton-card{display:flex;flex-direction:column;justify-content:center;gap:3px;height:var(--sf-card-stride);padding:var(--sf-card-padding,6px) 10px;border-block:var(--sf-card-margin,1px) solid transparent}.sf-skeleton-meta,.sf-skeleton-title{display:block;border-radius:3px;background:linear-gradient(90deg,color-mix(in srgb,var(--ui-text-primary) 7%,transparent) 40%,color-mix(in srgb,var(--ui-text-primary) 13%,transparent) 50%,color-mix(in srgb,var(--ui-text-primary) 7%,transparent) 60%) 0 0/300% 100%;animation:sf-shimmer 1.4s ease-in-out infinite}.sf-skeleton-meta{width:45%;height:10px;margin:4.5px 0}.sf-skeleton-title{width:75%;height:12px;margin:3.5px 0}.sf-skeleton-card:nth-child(3) .sf-skeleton-title{width:60%}.sf-skeleton-card:nth-child(4) .sf-skeleton-title{width:68%}
+@keyframes sf-shimmer{from{background-position:100% 0}to{background-position:0 0}}
+/* No-match state at the top of the list, under the search field. */
+.sf-empty.sf-no-match{display:flex;flex-direction:column;gap:2px;flex-shrink:0;padding:6px 10px 8px;font-size:12px;color:var(--ui-text-tertiary)}.sf-no-match-hint{font-size:11px;color:var(--ui-text-quaternary)}.sf-no-match-actions{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 0 -6px}
+/* The cards' shared tooltip anchor: an empty box laid over the hovered part, never hit by the pointer. */
+.sf-tip-anchor{position:absolute;pointer-events:none}.sf-tip-wrap{display:flex;flex-direction:column}.sf-tip-wrap>:disabled{pointer-events:none}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-row .sf-project{gap:4px}/* Start the glyph at the title's left edge; Codicons also carry a 1/16em side bearing. */.sf-row .sf-project-icon{width:auto;min-width:13px;justify-content:flex-start}.sf-row .sf-project-icon>.codicon{margin-left:calc(-1em / 16)}/* Outranks the Working time color: a snoozed card can still be running. */
 .sf-row .sf-time.sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--sf-purple);font-weight:400}.sf-snooze-time svg{width:16px;height:16px;flex-shrink:0;stroke-width:1.6}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
@@ -1293,7 +1310,7 @@ const CSS = `
 .sf-limit .su-verdict-icon[data-severity=caution]{color:var(--ui-yellow,#c08532)}.sf-limit .su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.sf-limit .su-verdict-icon[data-severity=high]{color:var(--dt-destructive,#cf2d56)}
 /* Saturated hues read stronger than the neutral icons beside them at equal lightness contrast; 0.75 opacity brings the coloured glyphs to the same visual weight in light and dark themes. */.sf-limit .su-verdict-icon:is([data-severity=caution],[data-severity=medium],[data-severity=high]){opacity:.75;transition:opacity .1s}
 /* Hover, focus and the open page lift the neutral items to the primary text colour; the coloured glyphs rise with them to full opacity, over the Button's own 100ms colour transition. */.sf .sf-footer .sf-limits:is(:hover,:focus-visible,[aria-current=page]) .su-verdict-icon{opacity:1}
-@media(prefers-reduced-motion:reduce){.sf-empty{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
+@media(prefers-reduced-motion:reduce){.sf-empty,.sf-skeleton-meta,.sf-skeleton-title{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 `;
 // Monochrome 24x24 provider marks: LobeHub Icons, @lobehub/icons-static-svg 1.95.1 (MIT, Copyright (c) 2023 LobeHub; notice in
 // THIRD_PARTY_NOTICES.md), pinned to a release at least 7 days old. Only the marks of Hermes providers are bundled, not the whole
@@ -1436,12 +1453,54 @@ function icon(name, fallback) {
   if (local) return h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: local }));
   const Component = sdk.icons?.[name]; return Component ? h(Component, { size: 14, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, fallback);
 }
-function IconButton({ label, name, glyph, children, title = label, ...props }) { return h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-xs', ...props, className: `sf-icon ${props.className || ''}`, 'aria-label': label, title }, children ?? icon(name, glyph)); }
+// Tooltips use Desktop's own Tip (a Radix tooltip with the app's delay, styling and keyboard-only focus opening). Hosts without it keep the native title, and an element never carries both.
+const multiline = label => typeof label === 'string' && label.includes('\n') ? tipLabel(label.split('\n')) : label;
+// A node label (one block line per provider, say) passes its plain text for the native title.
+function tipped(label, node, options, text = label) {
+  if (!label) return node;
+  return typeof sdk.Tip === 'function' ? h(sdk.Tip, { label: multiline(label), ...options }, node) : cloneElement(node, { title: typeof text === 'string' ? text : undefined });
+}
+// Session cards and their menus share one tooltip instead of a Tip each: every Tip mounts a Radix tooltip (root, anchor context, trigger) around its trigger, which a list of 1,000 memoised cards with several labelled parts would multiply on every mount. An element names itself in data-sf-tip, and SharedTips points Desktop's tooltip at whichever one is hovered or keyboard-focused.
+const TIP_DELAY_MS = 200, ROW_TIP_DELAY_MS = 600, TIP_WARM_MS = 300;
+const sharedTips = () => [sdk.Tooltip, sdk.TooltipTrigger, sdk.TooltipContent].every(part => typeof part === 'function');
+// The Usage and Limits pages name their parts for their own shared tooltip in the same way, since their charts re-render every element on each change.
+const pageTipped = (label, node) => label ? cloneElement(node, sharedTip(label, 'top')) : node;
+function sharedTip(label, side = 'right', delay, folderLine) {
+  if (!label) return null;
+  return sharedTips() ? { 'data-sf-tip': label, 'data-sf-tip-side': side, 'data-sf-tip-delay': delay, 'data-sf-tip-card': folderLine } : { title: label };
+}
+// A card's tip leads with its title in bold and dims its folder line (folderLine is that line's index, 0 without a folder). Opacity rather than a theme grey: Desktop's tooltip inverts the theme, text colour as background, and the text greys are tuned for the normal background.
+const cardTipLabel = (label, folderLine) => h('span', { style: { display: 'block', textAlign: 'left' } }, label.split('\n').map((line, index) => h('span', { key: index, style: { display: 'block', fontWeight: index ? undefined : 700, opacity: index && index === folderLine ? .6 : undefined } }, line)));
+function IconButton({ label, name, glyph, children, title = label, tip, tipSide, ...props }) {
+  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-xs', ...props, className: `sf-icon ${props.className || ''}`, 'aria-label': label, ...(tip === 'card' ? sharedTip(title) : null) }, children ?? icon(name, glyph));
+  return tip === 'card' ? button : tipped(title, button, tipSide ? { side: tipSide } : undefined);
+}
 function MenuAction({ name, codicon, className = '', destructive = false, children, ...props }) {
   return h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', ...props, className: `sf-menu-action ${className}`.trim(), 'data-destructive': destructive || undefined },
     h('span', { className: 'sf-menu-icon', 'aria-hidden': true }, codicon ? h(sdk.Codicon, { name: codicon, size: 14 }) : icon(name)), h('span', { className: 'sf-menu-label' }, children));
 }
 function Note({ children, error = false }) { return h('div', { className: 'sf-note', role: error ? 'alert' : 'status' }, children); }
+// One line for every problem instead of a stacked box each: the most important summary with a count of the others, Retry when a feed can be read again, and the complete messages behind a disclosure. Errors announce as an alert, neutral states (checking, read-only listing) as a status.
+function StatusStrip({ problems, onRetry }) {
+  const [open, setOpen] = useState(false), id = useId();
+  const [first] = problems, error = problems.some(problem => problem.error), more = problems.length - 1;
+  return h('div', { className: 'sf-strip', role: error ? 'alert' : 'status', 'data-error': error },
+    h('div', { className: 'sf-strip-line' },
+      h('button', { type: 'button', className: 'sf-strip-toggle', 'aria-expanded': open, 'aria-controls': id, onClick: () => setOpen(value => !value) },
+        h('span', { className: 'sf-strip-icon', 'aria-hidden': true }, icon(error ? 'AlertTriangle' : 'Info', error ? '⚠' : 'ℹ')),
+        h('span', { className: 'sf-strip-summary' }, first.summary),
+        more ? h('span', { className: 'sf-strip-more', 'aria-hidden': true }, `+${more}`) : null,
+        more ? h('span', { className: 'sf-sr' }, `, ${more} more`) : null,
+        h('span', { className: 'sf-strip-chevron', 'aria-hidden': true }, icon(open ? 'ChevronUp' : 'ChevronDown', open ? '⌃' : '⌄'))),
+      problems.some(problem => problem.retry) ? h(sdk.Button, { type: 'button', variant: 'ghost', size: 'xs', className: 'sf-strip-retry', onClick: onRetry }, 'Retry') : null),
+    h('ul', { id, className: 'sf-strip-details', hidden: !open }, problems.map(problem => h('li', { key: problem.key, 'data-error': !!problem.error }, problem.detail))));
+}
+// First-load placeholders with the real card geometry, so the first cards replace them without moving anything; screen readers hear the same busy status as before.
+function SkeletonCards() {
+  return h('div', { className: 'sf-skeleton', role: 'status', 'aria-busy': true },
+    h('span', { className: 'sf-sr' }, 'Loading sessions…'),
+    [0, 1, 2].map(index => h('div', { key: index, className: 'sf-skeleton-card', 'aria-hidden': true }, h('span', { className: 'sf-skeleton-meta' }), h('span', { className: 'sf-skeleton-title' }))));
+}
 function Settings({ ctx, controller }) {
   const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
   const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [linesError, setLinesError] = useState(''), [tokensError, setTokensError] = useState('');
@@ -1659,12 +1718,12 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
       onClick: () => void perform(() => filterProject(row.cwd || '')) }, 'Filter for'),
     !editable ? h('p', null, 'Project editing requires a named project with a known folder.') : null,
     h('fieldset', { disabled: busy || !editable, 'aria-label': 'Project color' }, h('legend', null, 'Color'),
-      h('div', { className: 'sf-project-colors' }, ...PROJECT_PALETTE.map(color => h('button', { key: color.value, type: 'button', 'aria-label': `Project color: ${color.name}`, title: color.name,
+      h('div', { className: 'sf-project-colors' }, ...PROJECT_PALETTE.map(color => h('button', { key: color.value, type: 'button', 'aria-label': `Project color: ${color.name}`, ...sharedTip(color.name, 'top'),
         'aria-pressed': project?.color?.toLowerCase() === color.value, style: { backgroundColor: color.value }, onClick: () => update({ color: color.value }) }))),
       h(MenuAction, { codicon: 'circle-slash', onClick: () => update({ color: null }) }, 'No color')),
     h('fieldset', { disabled: busy || !editable, 'aria-label': 'Project icon' }, h('legend', null, 'Icon'),
       h('div', { className: 'sf-project-icon-categories' }, ...PROJECT_ICON_GROUPS.map(group => h('fieldset', { key: group.label, className: 'sf-project-icon-category' },
-        h('legend', null, group.label), h('div', { className: 'sf-project-icons' }, ...group.icons.map(icon => h('button', { key: icon, type: 'button', 'aria-label': `Project icon: ${icon}`, title: icon,
+        h('legend', null, group.label), h('div', { className: 'sf-project-icons' }, ...group.icons.map(icon => h('button', { key: icon, type: 'button', 'aria-label': `Project icon: ${icon}`, ...sharedTip(icon, 'top'),
           'aria-pressed': project?.icon === icon,
           onClick: () => update({ icon: project?.icon === icon ? null : icon }) }, projectMark({ icon }))))))),
       h(MenuAction, { name: 'FolderOpen', onClick: () => update({ icon: null }) }, 'Default icon')),
@@ -1701,6 +1760,7 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const snoozeDisabled = row.archived === true;
+  const autotitlerReason = autotitler.data === true ? null : autotitler.isLoading ? 'Checking for the AutoTitler plugin…' : 'The AutoTitler plugin is not available on this backend.';
   const run = payload => { void mutate(row, payload).then(ok => { if (ok && alive.current) close(); }); };
   const perform = async work => {
     setBusy(true); setError('');
@@ -1736,9 +1796,10 @@ function RowActions({ row, scope, controller, filterProject, deleteSession, muta
           h('span', { className: 'sf-custom-time' },
           h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
           h(IconButton, { type: 'submit', label: 'Save rename', name: 'Check', glyph: '✓', disabled: busy || !title.trim() }))) : null,
-        h(MenuAction, { name: 'PencilAi', disabled: busy || row._liveOnly || autotitler.data !== true,
-          title: autotitler.data === true ? undefined : autotitler.isLoading ? 'Checking for the AutoTitler plugin…' : 'The AutoTitler plugin is not available on this backend.',
-          onClick: () => void perform(() => controller.autotitlerRename(scope, row)) }, 'Autotitler: rename now'),
+        // A disabled button takes no pointer events, so its wrapper carries the reason's tooltip; the button keeps it as its description.
+        h('span', { className: 'sf-tip-wrap', ...sharedTip(autotitlerReason) },
+          h(MenuAction, { name: 'PencilAi', disabled: busy || row._liveOnly || autotitler.data !== true, 'aria-description': autotitlerReason || undefined,
+            onClick: () => void perform(() => controller.autotitlerRename(scope, row)) }, 'Autotitler: rename now')),
         h(MenuAction, { name: 'Copy', disabled: busy, onClick: () => void perform(() => controller.copyId(scope, row)) }, 'Copy session ID'),
         h(MenuAction, { name: 'Trash2', destructive: true, disabled: disabled || busy || row.status !== 'idle' || row._liveOnly || typeof sdk.ConfirmDialog !== 'function', onClick: () => { controller.check(scope); deleteSession(row); close(); } }, 'Delete session'),
         row.drafted ? h(MenuAction, { name: 'X', destructive: true, disabled: busy, onClick: () => void perform(() => controller.discardDraft(scope, row)) }, 'Discard draft') : null,
@@ -1864,12 +1925,15 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
     else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); if (!disabled && (row.archived === true || row.status === 'idle')) void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive', advance: row.archived !== true }); }
     else onNavigate(event, row.key);
   };
+  const details = [row.cwd, row.git_branch, row.status === 'waiting' ? 'Waiting for approval or answer' : isWorking(row) ? workingDetails && workingDetail(row) || 'working' : row.status, hasDraft && 'Unsent draft'].filter(Boolean);
   return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': hasDraft, 'data-working': isWorking(row), 'data-unread': row.archived !== true && (!!(!active && row.completion?.done_token) || row.unread === true || row.woke) || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onContextMenu: event => { event.preventDefault(); openMenu('actions'); } },
     h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${sessionTitle(row)}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
+      // The tooltip no longer doubles as the accessible description, so the folder, branch and status stay announced.
+      'aria-description': details.join(', ') || undefined,
       onClick: open, onFocus: () => onFocus(row.key), onBlur: () => onFocus(null), onKeyDown: keyDown,
-      title: [sessionTitle(row), row.cwd, row.git_branch, row.status === 'waiting' ? 'Waiting for approval or answer' : isWorking(row) ? workingDetails && workingDetail(row) || 'working' : row.status].filter(Boolean).join('\n') },
+      ...sharedTip([sessionTitle(row), ...details].join('\n'), 'right', ROW_TIP_DELAY_MS, row.cwd ? 1 : 0) },
       h('span', { className: 'sf-card-meta' },
         h('span', { className: 'sf-project' },
           h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: row.project?.color || undefined } }, projectMark(row.project)),
@@ -1877,18 +1941,23 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
           row.archived !== true && row.meta.pinned && row.section !== 'pinned' ? h('span', { className: 'sf-pin', 'aria-label': 'Pinned' }, icon('Pin', '♧')) : null,
           row.project?.name || !row.newSession ? h('span', { className: 'sf-project-name' }, row.project?.name || 'Project unavailable') : null),
         row.status === 'unknown' ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': 'Status unknown' }, '?') : null,
-        provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, title: row.provider }, provider) : null,
-        showTokens ? h('span', { className: 'sf-token', title: 'Total input and output tokens, including subagents', 'aria-label': `Total tokens: ${tokens}` }, tokens) : null,
+        provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, ...sharedTip(row.provider) }, provider) : null,
+        showTokens ? h('span', { className: 'sf-token', 'aria-label': `Total tokens: ${tokens}`, ...sharedTip('Total input and output tokens, including subagents') }, tokens) : null,
         // A running snoozed card stays in Snoozed but still shows its Working status, between tokens and the countdown.
         snoozed && isWorking(row) ? h('span', { className: 'sf-time sf-snooze-working' }, statusBadge('working', row, hidden, workingDetails)) : null,
-        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row, hidden, workingDetails) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age)),
+        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row, hidden, workingDetails) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age),
+        // The tint alone is colour-only (and absent on the viewed card); the pencil marks every card with a draft, the viewed one included, following its focused composer read. It closes the metadata line, right of the time and the status badge, where the hover actions cover it like the rest of that side: the card's own tip and description name the draft instead.
+        hasDraft ? h('span', { className: 'sf-draft-mark', role: 'img', 'aria-label': 'Unsent draft' }, icon('Pencil', '✎')) : null),
       h('span', { className: 'sf-row-title' }, sessionTitle(row))),
-    h('div', { className: 'sf-hover' },
-      row.archived !== true ? withMenu('snooze', h(IconButton, { label: 'Snooze session', name: 'Alarm', glyph: '◷', disabled, 'aria-haspopup': 'dialog', 'aria-expanded': snoozeOpen, ...bare('snooze') }),
+    // Hover-action tips point out of the card, past its right edge, so they cover neither the other action nor the neighbouring cards.
+    h('div', { className: 'sf-hover', 'data-sf-tip-anchor': true },
+      row.archived !== true ? withMenu('snooze', h(IconButton, { label: 'Snooze session', name: 'Alarm', glyph: '◷', disabled, 'aria-haspopup': 'dialog', 'aria-expanded': snoozeOpen, tip: 'card', ...bare('snooze') }),
         () => h(RowActions, { row, scope, controller, mutate, disabled, presetTime, snoozeDetail, snoozeOnly: true, close: () => setOpen('snooze')(false) })) : null,
       h(sdk.Button, { type: 'button', variant: 'ghost', size: 'xs', className: 'sf-icon sf-archive', 'aria-label': row.archived === true ? 'Unarchive session' : 'Archive session', disabled: disabled || (row.archived !== true && row.status !== 'idle'),
+        ...sharedTip(row.archived === true ? 'Unarchive session' : 'Archive session'),
         onClick: () => void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive' }) }, icon(row.archived === true ? 'ArchiveRestore' : 'Archive', '▤'), row.archived === true ? 'Unarchive' : 'Archive')),
-    withMenu('actions', h(IconButton, { className: 'sf-context-trigger', label: `Actions for ${sessionTitle(row)}`, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog', 'aria-expanded': menuOpen, ...bare('actions') }),
+    // Visually hidden: it only carries the keyboard menu, so it needs no tooltip.
+    withMenu('actions', h(IconButton, { className: 'sf-context-trigger', label: `Actions for ${sessionTitle(row)}`, title: null, name: 'Ellipsis', glyph: '…', 'aria-haspopup': 'dialog', 'aria-expanded': menuOpen, ...bare('actions') }),
       () => h(RowActions, { row, scope, controller, filterProject, deleteSession, mutate, disabled, close: () => setOpen('actions')(false) })));
 }
 // Query structural sharing preserves nested native/project/metadata values. The
@@ -2061,6 +2130,52 @@ function SessionWindow({ entries, section, renderRow, navigators, rowRefs, anima
     ...indexes.map(index => h('div', { key: entries[index].key, ref: windowed ? undefined : slotRef(entries[index].key), className: 'sf-slot',
       style: windowed ? { position: 'absolute', top: index * stride, left: 0, right: 0 } : undefined }, renderRow(entries[index]))));
 }
+// The cards' shared tooltip: an inert proxy laid over the hovered or keyboard-focused part, relative to the sidebar root, anchors Desktop's own controlled tooltip, so only this layer renders as the pointer moves. Row tips wait longer than control tips (a pointer crossing the list must not pop a trail of titles) and, as in Desktop, a tip opened shortly before makes the next one instant.
+// Memoized: its props are refs, so sidebar renders never reach it.
+const SharedTips = memo(function SharedTips({ api, root }) {
+  const [tip, setTip] = useState(null);
+  useEffect(() => {
+    let timer = 0, current = null, shown = false, warmUntil = 0;
+    const cancel = () => { clearTimeout(timer); timer = 0; };
+    const show = target => {
+      const element = root.current, label = target.getAttribute('data-sf-tip');
+      if (!element || !label || !target.isConnected) return;
+      // A card's own tip points from the whole card, so it starts past the card's edge rather than inside its padding.
+      const anchor = target.closest('[data-sf-tip-anchor]') || (target.matches('.sf-open') ? target.closest('.sf-row') : target), box = anchor.getBoundingClientRect(), base = element.getBoundingClientRect();
+      const side = target.getAttribute('data-sf-tip-side') || 'right', card = target.getAttribute('data-sf-tip-card');
+      shown = true;
+      setTip({ label, card: card === null ? null : Number(card), side, box: { left: box.left - base.left, top: box.top - base.top, width: box.width, height: box.height } });
+    };
+    const hide = () => { cancel(); if (shown) { warmUntil = Date.now() + TIP_WARM_MS; shown = false; setTip(null); } };
+    const close = () => { hide(); current = null; };
+    const arm = (target, delay) => {
+      const warm = shown || Date.now() < warmUntil;
+      hide(); current = target;
+      if (!delay || warm) show(target); else timer = setTimeout(() => show(target), delay);
+    };
+    api.current = {
+      over(event) {
+        const target = event.target.closest?.('[data-sf-tip]') || null;
+        if (target === current) return;
+        if (!target) close(); else arm(target, Number(target.getAttribute('data-sf-tip-delay')) || TIP_DELAY_MS);
+      },
+      out(event) { if (!event.currentTarget.contains(event.relatedTarget)) close(); },
+      // Keyboard focus only, as Desktop's Tip: a click's focus must not open a tip over what was just clicked.
+      focus(event) {
+        const target = event.target.closest?.('[data-sf-tip]');
+        let keyboard = false;
+        try { keyboard = event.target.matches(':focus-visible'); } catch (_) { /* Selector unsupported: no focus tips. */ }
+        if (target && keyboard) arm(target, 0);
+      },
+      close
+    };
+    return () => { cancel(); api.current = null; };
+  }, [api, root]);
+  if (!tip) return null;
+  return h(sdk.Tooltip, { open: true, onOpenChange: open => { if (!open) api.current?.close(); } },
+    h(sdk.TooltipTrigger, { asChild: true }, h('span', { className: 'sf-tip-anchor', 'aria-hidden': true, style: { left: tip.box.left, top: tip.box.top, width: tip.box.width, height: tip.box.height } })),
+    h(sdk.TooltipContent, { side: tip.side, placement: 'row', hideWhenDetached: false }, tip.card === null ? multiline(tip.label) : cardTipLabel(tip.label, tip.card)));
+});
 export function HermesT3Sidebar({ ctx, controller }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
   useValue(host.state.gateway);
@@ -2155,7 +2270,7 @@ function ProjectChoice({ choice, selected, scope, controller, filterProject, clo
   return h(sdk.Popover, { open, onOpenChange: setOpen },
     // Declare ownership before Hermes's window-capture fallback intercepts the gesture.
     h(sdk.ContextMenu, null, h(sdk.ContextMenuTrigger, { asChild: true },
-      h(sdk.PopoverTrigger, { asChild: true }, h(sdk.Button, { type: 'button', variant: 'ghost', className: `sf-project-choice${heading ? ' sf-project-heading' : pathOnly ? ' sf-project-folder' : ''}`, disabled: busy, 'aria-disabled': heading || undefined, 'aria-label': label, 'aria-pressed': heading ? undefined : selected, title: heading ? undefined : choice.path,
+      h(sdk.PopoverTrigger, { asChild: true }, h(sdk.Button, { type: 'button', variant: 'ghost', className: `sf-project-choice${heading ? ' sf-project-heading' : pathOnly ? ' sf-project-folder' : ''}`, disabled: busy, 'aria-disabled': heading || undefined, 'aria-label': label, 'aria-pressed': heading ? undefined : selected, ...(heading ? null : sharedTip(choice.path)),
       // Prevent the trigger's normal toggle: left click selects; right click edits.
       onClick: event => { event.preventDefault(); if (!heading) onSelect(); }, onContextMenu: openMenu,
       onKeyDown: event => { if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') openMenu(event); } },
@@ -2167,7 +2282,10 @@ function ProjectChoice({ choice, selected, scope, controller, filterProject, clo
 function ScopedSidebar({ ctx, controller, scope }) {
   const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
   // No session counts as viewed while a plugin page is shown, so the previous chat neither stays highlighted nor gets its Done/Woke markers acknowledged.
-  const focusedId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner), activeId = useShownPage() ? null : focusedId;
+  const focusedId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner), shownPage = useShownPage(), activeId = shownPage ? null : focusedId;
+  // What the workspace showed before a plugin page covered it (a session, or the new-session draft when none), so re-clicking the page's footer button can bring it back. Switching between pages keeps the first value.
+  const beforePage = useRef(null);
+  if (!shownPage) beforePage.current = { id: focusedId, owner: activeOwner };
   const client = useQueryClient();
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false), [deleteTarget, setDeleteTarget] = useState(null);
   const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [actionError, setActionError] = useState('');
@@ -2180,6 +2298,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   useEffect(() => {
     try { ctx.storage.set(preferenceKey, collapsed); } catch (_) { /* Folding still works when persistence is unavailable. */ }
   }, [ctx, preferenceKey, collapsed]);
+  const root = useRef(null), paneTips = useRef(null);
   const search = useRef(null), rowRefs = useRef(new Map()), navigators = useRef(new Map()), focused = useRef(null), latest = useRef(null), readMarkers = useRef(new Set()), markerNotice = useRef(null);
   const key = scopeKey(scope);
   const mutation = useMutation({ mutationFn: async ({ id, payload }) => controller.mutate(scope, id, payload) });
@@ -2312,6 +2431,16 @@ function ScopedSidebar({ ctx, controller, scope }) {
     })();
   }, [activeId, activeOwner, metadata.data, metadata.dataUpdatedAt, metadata.isError, mutation.isPending, rows, controller, scope]);
   const refresh = () => { try { controller.check(scope); void client.invalidateQueries({ queryKey: key }); } catch (_) { /* old pane */ } };
+  // Re-clicking the shown page's footer button closes it: the session it covered reopens through the public SDK, or the new-session draft returns when that is what was shown. A session that no longer lists (deleted, another source or profile) or fails to open falls back to a new chat; hosts without these doors keep the page.
+  const closePage = useCallback(() => {
+    const previous = beforePage.current, owner = previous?.owner;
+    const owned = owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile;
+    const row = previous?.id && owned ? latest.current.rows.find(item => hasAlias(item, previous.id)) : null;
+    const fallback = () => Promise.resolve().then(() => controller.newChat(scope)).catch(() => { /* The page stays open; nothing else to undo. */ });
+    if (row) void Promise.resolve().then(() => controller.open(scope, row)).catch(fallback);
+    else if (!previous?.id) openRoute('/');
+    else void fallback();
+  }, [controller, scope]);
   const mutate = useCallback(async (row, input) => {
     try {
       controller.check(scope);
@@ -2353,7 +2482,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
     const entries = sections[section], closed = isClosed(section);
     const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs, animate: settled, menuKey: menu?.open ? menu.key : null, strideKey: section === 'pinned' ? pinnedLines : null });
     const headerless = section === 'active' || section === 'pinned';
-    return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed, style: { '--sf-count': entries.length } },
+    // Ready yields its 40% to the other shelves' one-card floors: one per open shelf holding a card (a non-inherited property, so no card restyles).
+    const floors = section === 'active' ? { '--sf-floor-cards': ['working', 'snoozed', 'archived'].filter(other => !isClosed(other) && sections[other].length > 0).length } : null;
+    return h('section', { key: section, className: 'sf-section', 'aria-label': LABELS[section], 'data-section': section, 'data-populated': entries.length > 0, 'data-closed': closed, style: { '--sf-count': entries.length, ...floors } },
       !headerless ? h('button', { type: 'button', className: 'sf-section-toggle', 'aria-expanded': !closed, 'aria-label': `${LABELS[section]} (${entries.length})`,
         onClick: () => setCollapsed(previous => ({ ...previous, [section]: !previous[section] })) },
         h('span', { className: 'sf-section-label' }, LABELS[section]), h('span', { className: 'sf-count' }, entries.length),
@@ -2393,34 +2524,54 @@ function ScopedSidebar({ ctx, controller, scope }) {
     : `: ${sessions.data?.sessions.length || 0} loaded${knownTotal ? ` of ${total} available` : ''}`;
   // Until the expansion has answered (a failed first request included), the first page's has_more keeps the button, which is then the retry.
   const canExpand = !sessions.data?.capped && (limit === 0 || !expanded.data ? sessions.data?.has_more : expanded.data.has_more);
-  return h('aside', { className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
+  const browseOlder = () => setLimit(previous => previous + 1);
+  // Problems share one status strip, most important first: what the user just did, then the feeds the list depends on, then neutral states. Each keeps its complete message for the details.
+  const runtimeUnknown = !runtimeKnown || runtimeStale;
+  const problems = [
+    actionError && { key: 'action', error: true, summary: actionError, detail: actionError },
+    sessions.isError && { key: 'sessions', error: true, retry: true, summary: 'Session list failed', detail: `Session list failed: ${sessions.error.message}` },
+    metadata.isError && { key: 'backend', error: true, retry: true, summary: 'Backend unavailable, read-only browsing', detail: `hermes-t3sidebar backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback.` },
+    runtimeUnknown && (runtime.isError ? { key: 'runtime', error: true, retry: true, summary: 'Runtime status unavailable',
+      detail: runtimeStale ? `Runtime status unavailable: ${runtime.error.message}. Showing last known shelves; status-dependent actions wait for the next successful refresh.`
+        : `Runtime status unavailable: ${runtime.error.message}. Native archives remain Archived; other sessions stay accessible in Ready.` }
+      : { key: 'runtime', summary: 'Checking runtime status…', detail: 'Checking runtime status…' }),
+    expanded.isError && { key: 'older', error: true, retry: true, summary: 'Older sessions could not load', detail: `Older sessions could not load: ${expanded.error.message}` },
+    sessions.data?.capped && { key: 'capped', summary: 'Read-only SDK browsing', detail: `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.` }
+  ].filter(Boolean).sort((a, b) => !!b.error - !!a.error);
+  const noMatch = !hasMatches && filtering && !sessions.isLoading;
+  const clearSearch = () => { setQuery(''); search.current?.focus(); };
+  // React events also bubble here from the sidebar's popovers (card menus, project pickers), so their shared tips follow the same layer.
+  return h('aside', { ref: root, className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); search.current?.focus(); }
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
-  } }, ...draftObservers, h('style', null, CSS),
+  }, onPointerOver: event => paneTips.current?.over(event), onPointerOut: event => paneTips.current?.out(event), onPointerDownCapture: () => paneTips.current?.close(),
+    onFocus: event => paneTips.current?.focus(event), onBlur: () => paneTips.current?.close(), onScrollCapture: () => paneTips.current?.close() }, ...draftObservers, h('style', null, CSS),
     h('header', { className: 'sf-header' },
       h('div', { className: 'sf-search' }, icon('Search', '⌕'), h('input', { ref: search, type: 'search', placeholder: 'Search', 'aria-label': 'Search sessions', value: query, onChange: event => setQuery(event.target.value) }),
-        query ? h(IconButton, { label: 'Clear search', name: 'X', glyph: '×', className: 'sf-clear', onClick: () => { setQuery(''); search.current?.focus(); } }) : null),
+        query ? h(IconButton, { label: 'Clear search', name: 'X', glyph: '×', className: 'sf-clear', tipSide: 'bottom', onClick: clearSearch }) : null),
       h(sdk.Popover, { open: filterOpen, onOpenChange: setFilterOpen },
-        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Filter sessions', name: 'ListFilter', glyph: '≡', 'data-filtered': project !== '*', title: project === '*' ? 'Filter sessions' : `Filter sessions: ${selectedProject.name}` },
+        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Filter sessions', name: 'ListFilter', glyph: '≡', 'data-filtered': project !== '*', tipSide: 'bottom', title: project === '*' ? 'Filter sessions' : `Filter sessions: ${selectedProject.name}` },
           project !== '*' ? h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: selectedProject.color || undefined } }, projectMark(selectedProject)) : null)),
         h(sdk.PopoverContent, { align: 'end', style: PROJECT_MENU_STYLE, 'aria-label': 'Session filters' }, filterOpen ? h(ProjectPicker, { mode: 'filter', selected: project, controller, scope, filterProject: selectProject, close: () => setFilterOpen(false) }) : null)),
 
       h(sdk.Popover, { open: pickerOpen, onOpenChange: setPickerOpen },
-        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'New session', name: 'SquarePen', glyph: '+' })),
+        h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'New session', name: 'SquarePen', glyph: '+', tipSide: 'bottom' })),
         h(sdk.PopoverContent, { align: 'end', style: PROJECT_MENU_STYLE, 'aria-label': 'New session project' }, pickerOpen ? h(ProjectPicker, { controller, scope, filterProject: selectProject, close: () => setPickerOpen(false) }) : null))),
-    sessions.isLoading ? h(Note, null, 'Loading sessions…') : null,
-    sessions.isError ? h(Note, { error: true }, `Session list failed: ${sessions.error.message} `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
-    !runtimeKnown || runtimeStale ? h(Note, { error: runtime.isError }, runtimeStale ? `Runtime status unavailable: ${runtime.error.message}. Showing last known shelves; status-dependent actions wait for the next successful refresh.`
-      : runtime.isError ? `Runtime status unavailable: ${runtime.error.message}. Native archives remain Archived; other sessions stay accessible in Ready.` : 'Checking runtime status…') : null,
-    metadata.isError ? h(Note, { error: true }, `hermes-t3sidebar backend unavailable: ${metadata.error.message}. Read-only browsing; no local metadata fallback. `, h(sdk.Button, { variant: 'ghost', size: 'xs', onClick: refresh }, 'Retry')) : null,
-    expanded.isError ? h(Note, { error: true }, `Older sessions could not load: ${expanded.error.message}`) : null,
-    actionError ? h(Note, { error: true }, actionError) : null,
-    h('div', { className: 'sf-scroll', 'data-pinned-lines': pinnedLines }, renderedSections[0],
-      h('div', { ref: shelvesRef, className: 'sf-shelves' }, ...renderedSections.slice(1),
-        !hasMatches && filtering ? h('div', { className: 'sf-empty' }, 'No matching sessions') : null)),
-    sessions.data?.capped ? h(Note, null, `Companion session listing unavailable. Read-only SDK browsing${fallbackCount}; older organized sessions cannot be recovered until the companion returns.`) : null,
-    canExpand ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: () => setLimit(previous => previous + 1) }, 'Browse older sessions')) : null,
-    h(UsageFooter, { ctx, scope, companion: !!sessions.data && !sessions.data.capped }),
+    problems.length ? h(StatusStrip, { problems, onRetry: refresh }) : null,
+    // While the whole list's runtime status is unknown, the strip says so once and the cards drop their visible "?" (their labels still say it).
+    h('div', { className: 'sf-scroll', 'data-pinned-lines': pinnedLines, 'data-runtime-unknown': runtimeUnknown },
+      sessions.isLoading ? h(SkeletonCards) : null,
+      // Directly under the search field rather than under the empty shelves; it waits for leaving cards to collapse like other empty states.
+      noMatch ? h('div', { className: 'sf-empty sf-no-match' },
+        h('div', null, 'No matching sessions'),
+        canExpand ? h('div', { className: 'sf-no-match-hint' }, 'Search covers loaded sessions only.') : null,
+        // The search field's own clear cross already clears the query, so the only action here loads more history to search.
+        canExpand ? h('div', { className: 'sf-no-match-actions' }, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: browseOlder }, 'Browse older sessions')) : null) : null,
+      renderedSections[0],
+      h('div', { ref: shelvesRef, className: 'sf-shelves' }, ...renderedSections.slice(1))),
+    canExpand && !noMatch ? h(Note, null, h(sdk.Button, { variant: 'ghost', size: 'xs', disabled: expanded.isFetching, onClick: browseOlder }, 'Browse older sessions')) : null,
+    sharedTips() ? h(SharedTips, { api: paneTips, root }) : null,
+    h(UsageFooter, { ctx, scope, companion: !!sessions.data && !sessions.data.capped, onClosePage: closePage }),
     typeof sdk.ConfirmDialog === 'function' ? h(sdk.ConfirmDialog, { open: !!deleteTarget, onClose: () => setDeleteTarget(null),
       title: 'Delete session?', description: `Delete “${deleteTarget ? sessionTitle(deleteTarget) : ''}”? Stored history will be permanently removed. This cannot be undone.`,
       confirmLabel: 'Delete', busyLabel: 'Deleting…', doneLabel: 'Session deleted', destructive: true,
@@ -2482,45 +2633,47 @@ export function writeUsagePreferences(storage, value) {
 // T3 Code's SidebarUtilityItem: icon-only ghost buttons with a tooltip, in one fixed-height footer row below the shelves, so the flex shelf allocation only sees a shorter list.
 const USAGE_LINK = { route: USAGE_ROUTE, label: 'Usage', tip: 'Token usage', icon: 'ChartNoAxesColumn', glyph: '▥' };
 const openRoute = route => { try { host.navigate(route); } catch (_) { /* Older hosts without navigation keep the sidebar usable. */ } };
-function UtilityLink({ link }) {
-  const tip = typeof sdk.Tip === 'function', current = useShownPage() === link.route;
-  // Without the SDK tooltip, a native title still names the icon on hover.
-  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-sm', className: 'sf-utility', 'aria-label': link.label, title: tip ? undefined : link.tip, 'data-route': link.route, 'aria-current': current ? 'page' : undefined, onClick: () => openRoute(link.route) }, icon(link.icon, link.glyph));
-  return tip ? h(sdk.Tip, { label: link.tip, side: 'top' }, button) : button;
+// A footer page button toggles its page: shown, it closes the page (the sidebar brings back what the page covered); otherwise it opens it, also switching from the other page. Without a sidebar to restore the workspace, closing returns to the chat route.
+const leavePage = () => openRoute('/');
+const togglePage = (route, current, onClose = leavePage) => current ? onClose() : openRoute(route);
+function UtilityLink({ link, onClose }) {
+  const current = useShownPage() === link.route;
+  const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'icon-sm', className: 'sf-utility', 'aria-label': current ? `Close ${link.label}` : link.label, 'data-route': link.route, 'aria-current': current ? 'page' : undefined, onClick: () => togglePage(link.route, current, onClose) }, icon(link.icon, link.glyph));
+  return tipped(current ? `Close ${link.label}` : link.tip, button, { side: 'top' });
 }
 // Memoized: toolbar, search and fold changes re-render the sidebar, and the footer's limits verdict would otherwise be re-formatted with each one.
-const UsageFooter = memo(function UsageFooter({ ctx, scope, companion = false }) {
+const UsageFooter = memo(function UsageFooter({ ctx, scope, companion = false, onClosePage }) {
   // Providers sit on the left and the Usage stats button on the right; DOM order matches so keyboard focus follows the visual order.
   return h('footer', { className: 'sf-footer' },
-    ctx && scope ? h(LimitsFooterStatus, { ctx, scope, enabled: companion }) : h(LimitsFooterButton, { items: [], now: 0 }),
-    h('span', { className: 'sf-footer-end' }, h(UtilityLink, { link: USAGE_LINK })));
+    ctx && scope ? h(LimitsFooterStatus, { ctx, scope, enabled: companion, onClose: onClosePage }) : h(LimitsFooterButton, { items: [], now: 0, onClose: onClosePage }),
+    h('span', { className: 'sf-footer-end' }, h(UtilityLink, { link: USAGE_LINK, onClose: onClosePage })));
 });
 // The Limits entry point is one button whatever the data: every provider's mark, pooled units and a verdict glyph (when the week runs short or wastes quota, coloured by severity, or a muted warning when the verdict cannot be computed), or the gauge alone while there is nothing to show (loading, failure, no companion, no provider with limits), so the page stays reachable and no placeholder or error ever appears in the row.
-function LimitsFooterStatus({ ctx, scope, enabled }) {
+function LimitsFooterStatus({ ctx, scope, enabled, onClose }) {
   const prefs = useUsagePreferences(ctx);
   // Same key as the Limits page with the same preferences, so both read one cache entry.
   const limits = useQuery({ ...limitsQueryOptions(ctx, scope, limitsHistoryHours(prefs.lookback, prefs.range)), enabled });
   const now = useMemo(() => Date.now() / 1000, [limits.dataUpdatedAt]);
   const items = useMemo(() => limitsProviderOrder(limits.data?.providers || []).filter(item => item.auth !== 'logged_out')
     .map(item => ({ provider: item, verdict: limitsVerdict(item, prefs, now) })).filter(item => item.verdict.capacity > 0), [limits.data, prefs.lookback, prefs.window, now]);
-  return h(LimitsFooterButton, { items, now });
+  return h(LimitsFooterButton, { items, now, onClose });
 }
 // One tooltip line per provider, also used (joined) as the button's accessible name: facts only, no advice.
 export const limitsFooterLine = (provider, verdict, now) => `${provider.label || provider.provider}: ${unitsText(verdict.remaining)} / ${unitsText(verdict.capacity)} units · ${verdictText(verdict, now)}`;
-function LimitsFooterButton({ items, now }) {
+function LimitsFooterButton({ items, now, onClose }) {
   const current = useShownPage() === LIMITS_ROUTE;
   const lines = items.map(({ provider, verdict }) => limitsFooterLine(provider, verdict, now));
-  const tip = typeof sdk.Tip === 'function';
-  // Block lines keep one provider per tooltip line; the SDK Tip takes a node label.
-  const label = lines.length ? h('span', { style: { display: 'block', textAlign: 'left' } }, lines.map(line => h('span', { key: line, style: { display: 'block' } }, line))) : 'Subscription limits';
+  // One provider per tooltip line; on the shown page the tooltip and name also say that the button closes it.
+  const tipLines = lines.length ? [...lines, ...(current ? ['Close Limits'] : [])] : [current ? 'Close Limits' : 'Subscription limits'];
+  const name = current ? 'Close Limits' : 'Limits';
   const button = h(sdk.Button, { type: 'button', variant: 'ghost', size: 'sm', className: 'sf-limits', 'data-route': LIMITS_ROUTE, 'data-empty': !lines.length, 'aria-current': current ? 'page' : undefined,
-    'aria-label': lines.length ? `Limits. ${lines.join('. ')}.` : 'Limits', title: tip ? undefined : lines.length ? lines.join('\n') : 'Subscription limits', onClick: () => openRoute(LIMITS_ROUTE) },
+    'aria-label': lines.length ? `${name}. ${lines.join('. ')}.` : name, onClick: () => togglePage(LIMITS_ROUTE, current, onClose) },
     lines.length ? h('span', { className: 'sf-limits-items' }, items.map(({ provider, verdict }) => h('span', { key: provider.provider, className: 'sf-limit', 'data-provider': provider.provider, 'data-status': verdict.status, 'data-severity': verdict.severity ?? undefined },
       providerMark(provider.provider) || h('span', { className: 'sf-limit-name' }, provider.label || provider.provider),
       h('span', { className: 'sf-limit-value' }, unitsText(verdict.remaining)),
       verdictIcon(verdict))))
       : icon('Gauge', '◔'));
-  return tip ? h(sdk.Tip, { label, side: 'top' }, button) : button;
+  return tipped(lines.length ? tipLabel(tipLines) : tipLines[0], button, { side: 'top' }, tipLines.join('\n'));
 }
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 const finiteOrNull = value => Number.isFinite(value) ? value : null;
@@ -3206,7 +3359,7 @@ function Segmented({ label, options, value, onChange, showLabel = true, sizing, 
 // Banked-reset redemptions by Source/profile and account. Each request mints a new upstream idempotency key, so a second request is a second spend: a confirmation while one is in flight joins it, and after an outcome that neither confirms nor refuses the reset the account waits for a limits read started after that outcome, whose number its mark holds.
 const redeemsInFlight = new Map(), unsettledRedeems = new Map();
 function ScopedUsagePage({ ctx, scope, view }) {
-  const client = useQueryClient(), shared = useUsagePreferences(ctx);
+  const client = useQueryClient(), shared = useUsagePreferences(ctx), tipRoot = useRef(null), pageTips = useRef(null);
   // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made on the other page.
   const [prefs, setPrefs] = useState(shared);
   // The shared copy echoes every local change a tick later as an equal but new object; keeping the current one then spares the charts a redundant render, which would otherwise land in the middle of a range glide.
@@ -3270,8 +3423,10 @@ function ScopedUsagePage({ ctx, scope, view }) {
   const toolbar = h(Fragment, null,
     h('span', { className: 'su-spacer' }),
     // A refetch behind data already on screen spins the refresh icon instead of adding text; screen readers hear the busy state.
-    h('button', { type: 'button', className: 'su-icon su-refresh', 'aria-label': active.isFetching ? 'Updating' : 'Refresh', title: active.isFetching ? 'Updating…' : 'Refresh', 'aria-busy': active.isFetching, 'data-spinning': !!(active.isFetching && active.data), disabled: active.isFetching, onClick: () => void active.refetch() }, icon('RefreshCw', '↻')));
-  return h('div', { className: 'su', 'data-view': view }, h('style', null, USAGE_CSS),
+    pageTipped(active.isFetching ? 'Updating…' : 'Refresh', h('button', { type: 'button', className: 'su-icon su-refresh', 'aria-label': active.isFetching ? 'Updating' : 'Refresh', 'aria-busy': active.isFetching, 'data-spinning': !!(active.isFetching && active.data), disabled: active.isFetching, onClick: () => void active.refetch() }, icon('RefreshCw', '↻'))));
+  return h('div', { ref: tipRoot, className: 'su', 'data-view': view, onPointerOver: event => pageTips.current?.over(event), onPointerOut: event => pageTips.current?.out(event), onPointerDownCapture: () => pageTips.current?.close(),
+    onFocus: event => pageTips.current?.focus(event), onBlur: () => pageTips.current?.close(), onScrollCapture: () => pageTips.current?.close() }, h('style', null, USAGE_CSS),
+    sharedTips() ? h(SharedTips, { api: pageTips, root: tipRoot }) : null,
     view === 'usage' ? h(Fragment, null,
       h('div', { className: 'su-top' }, h('header', { className: 'su-header' },
         h(Segmented, { label: 'Split', options: [{ id: 'provider', label: 'Provider' }, { id: 'model', label: 'Model' }], value: prefs.split, onChange: split => update({ split }) }),
@@ -3362,8 +3517,8 @@ function UsageChart({ chart, model, mode, hover, setHover, range }) {
       h('span', { className: 'su-total' }, `${metric.format(chart.total)} `, h('span', { className: 'su-total-label' }, periodTotalLabel(model.days)))),
     // The unit (amount per bucket) opens the line under the title and the legend fills it from the right.
     h('div', { className: 'su-chart-sub' }, h('span', { className: 'su-yunit' }, `${metric.unit} / ${model.unit}`),
-      h('div', { className: 'su-legend' }, series.length ? series.map(item => h('span', { key: item.key, className: 'su-legend-item', 'data-series': item.key, title: `${item.label}: ${metric.format(item.total)} total in this period` },
-        h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', { className: 'su-legend-label' }, item.label), h('b', null, metric.format(item.total))))
+      h('div', { className: 'su-legend' }, series.length ? series.map(item => pageTipped(`${item.label}: ${metric.format(item.total)} total in this period`, h('span', { key: item.key, className: 'su-legend-item', 'data-series': item.key },
+        h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', { className: 'su-legend-label' }, item.label), h('b', null, metric.format(item.total)))))
         : h('span', { className: 'su-muted' }, 'Nothing in this period'))),
     h('div', { className: 'su-plot-row' },
       // No 0 label, as on the Limits charts: the range control sits under it, and the 0 gridline stays.
@@ -3455,7 +3610,7 @@ function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem, 
     h('button', { type: 'button', className: 'su-disclosure', 'aria-expanded': open, 'aria-controls': open ? id : undefined, 'aria-label': `Accounts (${count})`, onClick: () => onToggle(!open) },
       h('span', { className: 'su-disclosure-chevron', 'aria-hidden': true }, icon('ChevronRight', '›')),
       h('span', { className: 'su-disclosure-label' }, 'Accounts'), h('span', { className: 'su-disclosure-count' }, count),
-      names ? h('span', { className: 'su-disclosure-names', title: names }, names) : null),
+      names ? pageTipped(names, h('span', { className: 'su-disclosure-names' }, names)) : null),
     open ? h('div', { className: 'su-accounts', id }, h(CurrentBankedResets, { credits: provider.current_banked_credits, now }),
       count ? provider.accounts.map(account => h(LimitAccount, { key: account.id, provider: provider.provider, account, selected: windowKey, now, redeem, unsettled }))
         : h(UsageState, null, 'No accounts in this provider pool.')) : null);
@@ -3466,7 +3621,7 @@ function CurrentBankedResets({ credits, now }) {
   if (!live.length) return null;
   return h('div', { className: 'su-account', 'data-account': CURRENT_CREDITS_ID },
     h('div', { className: 'su-account-head' }, h('strong', null, 'Current account'), h('span', { className: 'su-spacer' }),
-      h('span', { className: 'su-muted', title: 'Hermes reads this list with the Codex sign-in it is using now and does not say which pool account that is. The experimental per-account setting lists every account instead.' }, 'the account Hermes is using now')),
+      pageTipped('Hermes reads this list with the Codex sign-in it is using now and does not say which pool account that is. The experimental per-account setting lists every account instead.', h('span', { className: 'su-muted' }, 'the account Hermes is using now'))),
     h('div', { className: 'su-banked-row' }, h('ul', { className: 'su-banked', 'aria-label': 'Banked resets of the current account' }, live.map((credit, index) => bankedCreditLine(credit, index, now)))));
 }
 // Shared notes once under every section: how the samples and projections work, what a unit is, and which capacities are guessed.
@@ -3494,8 +3649,8 @@ const LOOKBACK_POPOVER_PAD_PX = 12, LOOKBACK_POPOVER_BORDER_PX = 1;
 function AverageLookback({ toPct, hours, onChange, children }) {
   const [open, setOpen] = useState(false), pencil = useRef(null), escaped = useRef(false);
   // Desktop's soft-fill secondary button, restated in the plugin CSS at a size that fits the label row (icon-xs alone is 24px).
-  const edit = h(sdk.Button, { ref: pencil, type: 'button', variant: 'secondary', size: 'icon-xs', className: 'su-lookback-edit', 'aria-label': 'Edit averaging period', title: 'Edit averaging period', 'aria-haspopup': 'dialog', 'aria-expanded': open,
-    onClick: () => setOpen(value => !value) }, sdk.icons?.Pencil ? h(sdk.icons.Pencil, { size: 12, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, '✎'));
+  const edit = pageTipped('Edit averaging period', h(sdk.Button, { ref: pencil, type: 'button', variant: 'secondary', size: 'icon-xs', className: 'su-lookback-edit', 'aria-label': 'Edit averaging period', 'aria-haspopup': 'dialog', 'aria-expanded': open,
+    onClick: () => setOpen(value => !value) }, sdk.icons?.Pencil ? h(sdk.icons.Pencil, { size: 12, 'aria-hidden': true }) : h('span', { 'aria-hidden': true }, '✎')));
   return h(sdk.Popover, { open, onOpenChange: setOpen },
     children(edit),
     h(sdk.PopoverTrigger, { asChild: true }, h('span', { className: 'su-lookback-anchor', 'aria-hidden': true, tabIndex: -1, style: { left: `${toPct}%` } })),
@@ -3558,7 +3713,7 @@ function MeasureRow({ nowPct, average, empty, lookback, setLookback }) {
   // The label box is what gets positioned and clamped; only its text ellipsizes, so a trailing control stays whole.
   const label = (item, side, low, high, control = null) => h('span', { className: 'su-measure-label', 'data-side': side, 'data-low': low, 'data-high': high, 'data-center': (item.fromPct + item.toPct) / 2, 'data-align': control ? 'end' : undefined, style: { left: `${(item.fromPct + item.toPct) / 2}%` } },
     // The title restores the full text when a narrow plot ellipsizes it.
-    h('span', { className: 'su-measure-text', title: item.title || item.text }, item.text), control);
+    pageTipped(item.title || item.text, h('span', { className: 'su-measure-text' }, item.text)), control);
   const averaged = edit => h('div', { className: 'su-measure', 'data-kind': 'average', 'data-seconds': Math.round(average.seconds), role: 'note', 'aria-label': average.title || average.text },
     h(MeasureSpan, { fromPct: average.fromPct, toPct: average.toPct, startCap: !average.clipped }), label(average, 'left', 0, nowPct, edit));
   return h('div', { className: 'su-measures', ref: row },
@@ -3659,13 +3814,13 @@ function ChartMarks({ waste, resets, past, flags, xPct, start, end, cap, now }) 
     waste.map(mark => {
       const when = resetTime(mark.t, now);
       const title = mark.accounts.map(item => `${accountName(item)} · ${unitsText(item.lost)} units unused at reset ${when}`).join('\n');
-      return h('div', { key: mark.t, className: 'su-waste', role: 'img', 'aria-label': title, title, 'data-t': Math.round(mark.t), 'data-before': mark.before, 'data-lost': mark.lost,
+      return pageTipped(title, h('div', { key: mark.t, className: 'su-waste', role: 'img', 'aria-label': title, 'data-t': Math.round(mark.t), 'data-before': mark.before, 'data-lost': mark.lost,
         style: { left: `${xPct(mark.t)}%`, top: `${(1 - mark.before / cap) * 100}%`, height: `${mark.lost / cap * 100}%` } },
         h('span', { className: 'su-waste-line' }),
         h('span', { className: 'su-waste-tick', 'data-end': 'top' }), h('span', { className: 'su-waste-tick', 'data-end': 'bottom' }),
         h('svg', { className: 'su-waste-arrow', 'data-end': 'top', viewBox: '0 0 8 6', 'aria-hidden': true }, h('path', { d: 'M0.5,6 L4,0 L7.5,6 Z' })),
         h('svg', { className: 'su-waste-arrow', 'data-end': 'bottom', viewBox: '0 0 8 6', 'aria-hidden': true }, h('path', { d: 'M0.5,0 L4,6 L7.5,0 Z' })),
-        h('span', { className: 'su-waste-text', 'data-side': 'right', 'aria-hidden': true }, `${unitsText(mark.lost)} lost`));
+        h('span', { className: 'su-waste-text', 'data-side': 'right', 'aria-hidden': true }, `${unitsText(mark.lost)} lost`)));
     }),
     flags.map(flag => h(BankedFlag, { key: Math.floor(flag.t / 60), flag, xPct, now })));
 }
@@ -3676,7 +3831,7 @@ function AxisRangeControl({ side, hours, stops, onChange }) {
   const label = target => target === null ? null : past ? `Show ${lookbackLabel(target)} before Now` : `Project ${lookbackLabel(target)} ahead`;
   const arrow = (direction, delta, fallback) => {
     const target = step(delta), text = label(target) || fallback;
-    return h('button', { type: 'button', className: 'su-axis-step', 'data-direction': direction, 'aria-label': text, title: text, disabled: target === null, onClick: () => { if (target !== null) onChange(target); } }, icon(direction === 'left' ? 'UnfoldLeft' : 'UnfoldRight', direction === 'left' ? '←' : '→'));
+    return pageTipped(text, h('button', { type: 'button', className: 'su-axis-step', 'data-direction': direction, 'aria-label': text, disabled: target === null, onClick: () => { if (target !== null) onChange(target); } }, icon(direction === 'left' ? 'UnfoldLeft' : 'UnfoldRight', direction === 'left' ? '←' : '→')));
   };
   return h('div', { className: 'su-axis-range', 'data-side': side, 'data-hours': hours, role: 'group', 'aria-label': past ? `Past shown: ${lookbackLabel(hours)}` : `Projection: ${lookbackLabel(hours)}` },
     past ? arrow('left', 1, 'Longest past shown') : arrow('left', -1, 'Shortest projection shown'),
@@ -3864,7 +4019,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
     h('div', { className: 'su-headline' },
       // Without any account reading the pool is unknown, not empty.
       h('span', { className: 'su-pool' }, projection.capacity ? unitsText(projection.current) : '—'),
-      h('span', { className: 'su-capacity', title: PLAN_UNITS_NOTE }, projection.capacity ? `/ ${unitsText(projection.capacity)} units` : 'no account readings yet')),
+      pageTipped(PLAN_UNITS_NOTE, h('span', { className: 'su-capacity' }, projection.capacity ? `/ ${unitsText(projection.capacity)} units` : 'no account readings yet'))),
     verdict ? h(VerdictLine, { verdict, now, windowKey }) : null,
     h('div', { className: 'su-limits-grid', ref: grid },
       // No unit caption (the headline already says units) and no 0 label, which would sit on the past range control under it; the 0 gridline stays.
@@ -3880,7 +4035,7 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
           h('path', { className: 'su-line su-projected', d: projectedLine })),
         h('div', { className: 'su-now', style: { left: `${nowPct}%` } }, h('span', null, 'Now')),
         h(ChartMarks, { waste, resets, past: pastResets, flags, xPct: t => x(t) / VIEW_W * 100, start, end, cap, now }),
-        emptyPct === null ? null : h('span', { className: 'su-empty-dot', title: emptyText, style: { left: `${emptyPct}%` } })),
+        emptyPct === null ? null : pageTipped(emptyText, h('span', { className: 'su-empty-dot', style: { left: `${emptyPct}%` } }))),
       h(AxisRangeControl, { side: 'past', hours: range.past, stops, onChange: hours => onRange('past', hours) }),
       h('div', { className: 'su-xaxis' }, axis.times.map((t, index) => {
         const share = x(t) / VIEW_W * 100;
@@ -3891,10 +4046,10 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
       h(MeasureRow, { key: `${view.past}|${view.future}`, nowPct, average, empty: emptyMeasured ? { fromPct: nowPct, toPct: emptyPct, text: emptyText } : null, lookback, setLookback })),
     notes.length ? h('div', { className: 'su-chart-foot' }, h('div', { className: 'su-chart-notes' }, notes)) : null);
 }
-function Badge({ tone, title, children }) { return h('span', { className: 'su-badge', 'data-tone': tone, title }, children); }
+function Badge({ tone, title, children }) { return pageTipped(title, h('span', { className: 'su-badge', 'data-tone': tone }, children)); }
 // One pill split in two: the subject keeps the plain badge look and the detail half carries the colour.
 function SplitBadge({ kind, tone, title, subject, detail }) {
-  return h('span', { className: 'su-badge su-badge-split', 'data-badge': kind, title }, h('span', null, subject), h('span', { className: 'su-badge-half', 'data-tone': tone }, detail));
+  return pageTipped(title, h('span', { className: 'su-badge su-badge-split', 'data-badge': kind }, h('span', null, subject), h('span', { className: 'su-badge-half', 'data-tone': tone }, detail)));
 }
 function LimitAccount({ provider, account, selected, now, redeem, unsettled }) {
   const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
@@ -3966,13 +4121,13 @@ function BankedResets({ provider, account, windows, now, redeem, unsettled = fal
 // Usable: an outline in the success green. Refused: still names the reset, but dashed and padlocked so it reads as unavailable rather than dangerous, with the scope of the refusal (every bar) on a second line.
 function RedeemButton({ usable, unsettled, onClick }) {
   // While an earlier attempt's outcome is unknown the reset is unavailable for another reason than the 80% rule, so the lock keeps the attempt's own message instead of that rule.
-  if (unsettled) return h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true, title: UNCONFIRMED_REDEEM },
-    h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one'));
-  if (usable === false) return h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true,
-    title: `Codex only accepts a banked reset once an allowance has less than ${BANKED_REDEEM_BELOW_PERCENT}% left; every one here has ${BANKED_REDEEM_BELOW_PERCENT}% or more.` },
-    h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one'), h('small', null, `all ≥${BANKED_REDEEM_BELOW_PERCENT}% left`));
-  return h('button', { type: 'button', className: 'su-redeem-use', 'data-state': usable ? 'usable' : 'unknown', 'aria-haspopup': 'dialog', title: 'Use one banked reset now. Codex picks which credit is spent.', onClick },
-    h('span', { className: 'su-redeem-use-row' }, icon('Ticket', '◇'), 'Use one'));
+  if (unsettled) return pageTipped(UNCONFIRMED_REDEEM, h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true },
+    h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one')));
+  if (usable === false) return pageTipped(`Codex only accepts a banked reset once an allowance has less than ${BANKED_REDEEM_BELOW_PERCENT}% left; every one here has ${BANKED_REDEEM_BELOW_PERCENT}% or more.`,
+    h('button', { type: 'button', className: 'su-redeem-use', 'data-state': 'locked', 'aria-disabled': true },
+      h('span', { className: 'su-redeem-use-row' }, icon('TicketLocked', '⊘'), 'Use one'), h('small', null, `all ≥${BANKED_REDEEM_BELOW_PERCENT}% left`)));
+  return pageTipped('Use one banked reset now. Codex picks which credit is spent.', h('button', { type: 'button', className: 'su-redeem-use', 'data-state': usable ? 'usable' : 'unknown', 'aria-haspopup': 'dialog', onClick },
+    h('span', { className: 'su-redeem-use-row' }, icon('Ticket', '◇'), 'Use one')));
 }
 // The confirmation's only content: how much of the weekly allowance the reset throws away, as a figure and as a bar whose hatched part is lost and whose plain part is restored.
 function RedeemLoss({ loss }) {
@@ -3993,13 +4148,13 @@ function LimitWindowRow({ win, now, selected }) {
   const resets = Number.isFinite(win.resets_at) ? win.resets_at > now ? `resets in ${formatDurationShort(win.resets_at - now)}` : 'reset due' : '—';
   const summary = `${win.label || win.key}: ${remaining === null ? 'unknown' : `${Math.round(remaining)}% left`}${pace === null ? '' : `, ${Math.round(pace)}% of the window left`}`;
   return h('div', { className: 'su-window', 'data-window': win.key, 'data-selected': selected },
-    h('span', { className: 'su-window-label', title: win.label || win.key }, win.label || win.key),
-    h('div', { className: 'su-bar', role: 'img', 'aria-label': summary, title: pace === null ? summary : `${summary}. The tick marks where an even spend would be.` },
+    pageTipped(win.label || win.key, h('span', { className: 'su-window-label' }, win.label || win.key)),
+    pageTipped(pace === null ? summary : `${summary}. The tick marks where an even spend would be.`, h('div', { className: 'su-bar', role: 'img', 'aria-label': summary },
       h('span', { className: 'su-bar-track' }),
       remaining ? h('span', { className: 'su-bar-fill', style: { width: `${remaining}%` } }) : null,
-      pace === null ? null : h('span', { className: 'su-pace', style: { left: `clamp(1px, ${pace}%, calc(100% - 1px))` } })),
+      pace === null ? null : h('span', { className: 'su-pace', style: { left: `clamp(1px, ${pace}%, calc(100% - 1px))` } }))),
     h('span', { className: 'su-window-value' }, remaining === null ? '—' : `${Math.round(remaining)}% left`),
-    h('span', { className: 'su-window-reset', title: Number.isFinite(win.resets_at) ? resetTime(win.resets_at, now) : undefined }, resets));
+    pageTipped(Number.isFinite(win.resets_at) ? resetTime(win.resets_at, now) : null, h('span', { className: 'su-window-reset' }, resets)));
 }
 function SamplerInfo({ sampler, now }) {
   if (!sampler) return h('p', { className: 'su-footnote' }, 'The limits sampler has not reported yet.');
@@ -4010,7 +4165,7 @@ function SamplerInfo({ sampler, now }) {
 }
 // The page renders in the workspace pane, outside the sidebar stylesheet, so it carries its own theme-variable styles.
 const USAGE_CSS = `
-.su{box-sizing:border-box;display:flex;flex-direction:column;height:100%;overflow:hidden;font:12px/1.45 var(--font-sans,inherit);color:var(--ui-text-primary)}
+.su{position:relative;box-sizing:border-box;display:flex;flex-direction:column;height:100%;overflow:hidden;font:12px/1.45 var(--font-sans,inherit);color:var(--ui-text-primary)}
 /* The top bar sits outside the scrolling pane. Both reserve the same scrollbar gutter, so the centred bar and sections share their edges whether or not the page overflows. */
 .su-top{flex:none;padding:14px 24px 0;overflow:hidden;scrollbar-gutter:stable}
 .su-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:16px 24px 28px;scrollbar-gutter:stable}

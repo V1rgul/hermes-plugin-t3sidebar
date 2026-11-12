@@ -582,7 +582,9 @@ test('overview order puts providers with accounts first and logged-out ones last
 
 // Sidebar footer and registration -----------------------------------------------------------------------------------
 const ADVICE = /cut optional|background work|room for|optional work/i;
-const adviceFree = () => !ADVICE.test(document.body.textContent) && $$('[aria-label]').every(node => !ADVICE.test(node.getAttribute('aria-label'))) && $$('[title]').every(node => !ADVICE.test(node.getAttribute('title')));
+// Page parts name their tooltip for the page's shared tooltip, or in a native title on hosts without it.
+const tipText = node => node.getAttribute('data-sf-tip') ?? node.getAttribute('title');
+const adviceFree = () => !ADVICE.test(document.body.textContent) && $$('[aria-label]').every(node => !ADVICE.test(node.getAttribute('aria-label'))) && $$('[title],[data-sf-tip]').every(node => !ADVICE.test(tipText(node)));
 test('Usage and Limits register as two routes and the sidebar footer has the Usage icon button then one Limits button', async () => {
   plugin.register(mock.ctx);
   assert.deepEqual([page().area, page().title, page().data.path], ['routes', 'Usage', '/t3sidebar-usage']);
@@ -779,9 +781,9 @@ test('the Limits page is one overview of every provider under a shared controls 
   assert.deepEqual($$('.su-verdict').map(node => node.closest('.su-provider-limits').dataset.provider), ['openai-codex', 'anthropic']);
   assert.equal($$('.su-pooled .su-line.su-past').length + $$('.su-pooled .su-line.su-projected').length + $$('.su-now').length, 6);
   assert.ok($$('.su-pooled')[1].querySelectorAll('.su-day-grid').length >= 13, 'a week of past plus a week ahead crosses at least thirteen midnights');
-  assert.equal($('.su-legend'), null, 'the Remaining/Projected legend is gone');
+  assert.equal($('.su-legend') === null, true, 'the Remaining/Projected legend is gone');
   // Reset times are markers in the charts now, never a Next reset line; no wording anywhere still says plan units.
-  assert.deepEqual([/Next reset/.test(document.body.textContent), /plan units/i.test(document.body.textContent), $$('[title]').some(node => /plan units/i.test(node.title))], [false, false, false]);
+  assert.deepEqual([/Next reset/.test(document.body.textContent), /plan units/i.test(document.body.textContent), $$('[title],[data-sf-tip]').some(node => /plan units/i.test(tipText(node)))], [false, false, false]);
   // One controls bar at the top: window and refresh, none of them repeated per chart; the past and future ranges sit beside each chart's x axis and the lookback is edited from each averaging label.
   const bar = $('.su-limits-controls');
   // The bar sits in its own fixed strip above the scrolling pane, so it stays visible whatever is scrolled.
@@ -869,7 +871,7 @@ test('account details are folded by default and each provider remembers its own 
   const plan = (id, part = '.su-badge[data-badge=plan]') => [...$(`.su-account[data-account="${id}"] ${part}`).children].map(half => `${half.dataset.tone ?? ''}|${half.textContent}`).join(' ');
   assert.equal(plan('acct-prolite'), '|Pro 100 primary|100 units', 'the plan pill splits, units in the primary colour');
   assert.equal(plan('acct-prolite', '.su-badge[data-badge=priority]'), '|priority primary|1', 'the priority pill splits, its number in the primary colour');
-  assert.equal($('.su-assumed'), null, 'every plan is in the capacity table');
+  assert.equal($('.su-assumed') === null, true, 'every plan is in the capacity table');
   assert.equal(first.querySelectorAll('.su-window').length, 2);
   assert.equal(first.querySelectorAll('.su-pace').length, 2, 'every window with a length and reset time has a pace tick');
   // In the mixed fixture both Codex accounts reset together tomorrow.
@@ -896,7 +898,7 @@ test('the mixed fixture stacks both Codex resets on one line, flags banked credi
     assert.deepEqual(marks.map(item => item.id), ['acct-team', 'acct-prolite'], 'stacked in pool priority order');
     assert.deepEqual([Math.abs(marks[1].base - marks[0].top) < 1e-9, Math.abs(marks[1].top - 120) < 1e-9], [true, true], 'the Pro 100 segment starts where the Business one ends and refills the pool');
     assert.deepEqual(marks.map(item => item.label), marks.map(item => `⟳${usage.unitsText(item.weight)} +${usage.unitsText(item.gain)}`), 'each label reads the account\'s full plan units, then what the reset adds');
-    assert.equal(codexSection.querySelector('.su-reset-seg'), null, 'only the normal curve connects reset discs');
+    assert.equal(codexSection.querySelector('.su-reset-seg') === null, true, 'only the normal curve connects reset discs');
     for (const node of stacked.querySelectorAll('.su-reset-mark')) {
       assert.ok(Math.abs(parseFloat(node.style.bottom) - Number(node.dataset.top) / 120 * 100) < 1e-9, 'each disc is anchored directly at its cumulative level');
       assert.equal(node.style.height, '', 'a reset mark does not span the reset step');
@@ -952,7 +954,7 @@ test('without per-account reads, the current account\'s credits stand apart unle
     assert.equal(current, codexSection.querySelector('.su-accounts > .su-account'), 'ahead of the account cards');
     assert.equal(current.querySelector('strong').textContent, 'Current account');
     assert.match([...current.querySelectorAll('.su-banked-credit')].map(node => node.textContent).join(), /^Banked reset · expires .* in 5h 0m$/);
-    assert.equal(current.querySelector('.su-redeem-use'), null, 'a reset is spent from a chosen account card');
+    assert.equal(current.querySelector('.su-redeem-use') === null, true, 'a reset is spent from a chosen account card');
   } finally { Date.now = realNow; }
 });
 
@@ -976,7 +978,7 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [served(verdictProvider(now))] };
   plugin.register(mock.ctx); await render(limitsPage());
   assert.deepEqual([$('.su-pool').textContent, $('.su-capacity').textContent], ['60', '/ 120 units']);
-  assert.equal($('.su-capacity').getAttribute('title'), '20 units = one $20 plan\'s allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.');
+  assert.equal(tipText($('.su-capacity')), '20 units = one $20 plan\'s allowance (ChatGPT Plus, Claude Pro); units measure capacity, not price.');
   const verdict = $('.su-verdict');
   assert.equal(verdict.dataset.status, 'waste');
   assert.match(verdict.textContent, /^48 units will expire unused by [A-Z][a-z]{2}$/);
@@ -989,14 +991,14 @@ test('the Limits page shows the verdict and a waste measurement at each reset th
   assert.ok(near(parseFloat(mark.style.left), 192 / 336 * 100), `x ${mark.style.left}`);
   assert.ok(near(parseFloat(mark.style.top), 60) && near(parseFloat(mark.style.height), 40), `span ${mark.style.top} + ${mark.style.height}`);
   assert.deepEqual([mark.querySelector('.su-waste-text').textContent, mark.querySelectorAll('.su-waste-arrow').length, mark.querySelectorAll('.su-waste-tick').length], ['48 lost', 2, 2]);
-  assert.match(mark.getAttribute('title'), /^codex-pro · Pro 100 · 48 units unused at reset [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
+  assert.match(tipText(mark), /^codex-pro · Pro 100 · 48 units unused at reset [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM)$/);
   // Each reset is a marker on its step: Pro 100 rises from the 48 units left by the 52 it restores; three days of half a unit an hour later the Business seat rises from 64 by its 20.
   const resets = $$('.su-pooled .su-reset[data-kind=projected] .su-reset-mark').map(node => [node.dataset.account, Math.round(Number(node.dataset.base)), Math.round(Number(node.dataset.top)), node.querySelector('.su-reset-text')?.textContent]);
   assert.deepEqual(resets, [['second', 48, 100, '⟳100 +52'], ['first', 64, 84, '⟳20 +20']]);
   const dot = $('.su-reset-mark[data-account=second] .su-reset-dot');
   assert.deepEqual([dot.getAttribute('role'), dot.getAttribute('aria-label').replace(/Resets \w{3} \d{1,2}:\d{2} (AM|PM)/, 'Resets <time>')], ['img', 'codex-pro · Pro 100. Resets <time>. +52 units restored. 48 units lost at this reset']);
   assert.equal($('.su-reset-mark[data-account=first] .su-reset-dot').getAttribute('aria-label').endsWith('+20 units restored'), true, 'an empty account loses nothing at its reset');
-  assert.equal($('.su-measure[data-kind="empty"]'), null, 'this pool never runs dry');
+  assert.equal($('.su-measure[data-kind="empty"]') === null, true, 'this pool never runs dry');
 });
 
 test('a pool that wastes at a reset before running dry gets the waste glyph, both facts and its waste and time-to-empty measurements', async () => {
@@ -1275,7 +1277,7 @@ test('stale, failing and unread accounts keep the normal view', async () => {
   assert.match($('.su-chart-notes').textContent, /1 account without a reading left out of the pool/);
   // Compare text, never a DOM node: a failing assertion on a jsdom element tries to diff the whole DOM.
   assert.match($('.su-measure[data-kind="average"]')?.textContent ?? '', /· no drain data$/, 'the averaging label says there is no drain data');
-  assert.equal($('.su-measure[data-kind="empty"]'), null, 'a flat projection never empties');
+  assert.equal($('.su-measure[data-kind="empty"]') === null, true, 'a flat projection never empties');
   const unknown = $('.su-account[data-account="acct-b2"]');
   assert.equal(unknown.querySelector('.su-window-value').textContent, '—', 'unknown stays a dash, never 0%');
   assert.equal(unknown.querySelector('.su-bar-fill') === null, true);
@@ -1316,7 +1318,7 @@ test('a refused reset keeps its button but locks it, naming that every bar is at
   await openCodexAccounts();
   const locked = $('.su-account[data-account="spare"] .su-redeem-use');
   assert.deepEqual([locked.dataset.state, locked.getAttribute('aria-disabled'), locked.querySelector('small').textContent, locked.querySelector('svg')?.dataset.icon], ['locked', 'true', 'all ≥80% left', 'TicketLocked']);
-  assert.match(locked.title, /less than 80% left; every one here has 80% or more/);
+  assert.match(tipText(locked), /less than 80% left; every one here has 80% or more/);
   await click(locked);
   assert.equal(dialog() === null, true, 'a locked reset opens no confirmation');
   const usable = $('.su-account[data-account="edge"] .su-redeem-use');

@@ -16,6 +16,8 @@ mock.ctx.storage = {
   set(key, value) { localStorage.setItem(`hermes.plugin.hermes-t3sidebar.${key}`, JSON.stringify(value)); },
   remove(key) { localStorage.removeItem(`hermes.plugin.hermes-t3sidebar.${key}`); }
 };
+// ?hold=sessions keeps the first session listing in flight (its loading state) until window.hermesT3SidebarRelease() is called.
+if (new URLSearchParams(location.search).get('hold') === 'sessions') mock.control.listGate = new Promise(resolve => { window.hermesT3SidebarRelease = () => { mock.control.listGate = null; resolve(); }; });
 plugin.register(mock.ctx);
 // The running fixture's native in-flight turn began just over two minutes ago.
 mock.control.live.find(item => item.id === 'runtime-worker').turn_started_at = Date.now() / 1000 - 125;
