@@ -144,3 +144,60 @@ test('reopening keeps the source draft when only its folder changed during the h
   await controller.syncDrafts(scope);
   assert.equal(mock.control.serverDrafts.find(draft => draft.session_id === 'gone')?.text, 'same text');
 });
+
+// A second Desktop client on the same companion: its own composers (mounted while listed in texts), its own plugin storage, focused on one session.
+function client(texts, focused) {
+  const composer = {
+    async getDraft(id) { return Object.hasOwn(texts, id) ? texts[id] : null; },
+    async setDraft(id, text) { if (!Object.hasOwn(texts, id)) return false; texts[id] = text; return true; }
+  };
+  const host = Object.create(mock.host, { composer: { value: composer }, state: { value: { ...mock.host.state, focusedStoredSessionId: mock.atom(focused) } } });
+  const data = new Map(), storage = { get: (key, fallback) => data.has(key) ? JSON.parse(data.get(key)) : fallback, set: (key, value) => { data.set(key, JSON.stringify(value)); } };
+  return make(host, { ...mock.ctx, storage });
+}
+const serverText = id => mock.control.serverDrafts.find(draft => draft.session_id === id)?.text;
+
+test('a draft from another client reaches a focused, untouched empty composer instead of being deleted by it', async () => {
+  const scope = captureScope(), x = target('x'), textsA = { x: '' }, textsB = { x: '' };
+  const a = client(textsA, 'x'), b = client(textsB, 'x');
+  await b.enterDraft(scope, x);
+  await b.syncDrafts(scope, () => x);
+  await a.enterDraft(scope, x);
+  textsA.x = 'written on A';
+  await a.noteDraft(scope, x);
+  await a.syncDrafts(scope, () => x);
+  for (let round = 0; round < 2; round++) {
+    await b.syncDrafts(scope, () => x);
+    await b.noteDraft(scope, x);
+    await a.syncDrafts(scope, () => x);
+    await a.noteDraft(scope, x);
+  }
+  assert.equal(serverText('x'), 'written on A');
+  assert.equal(textsA.x, 'written on A');
+  assert.equal(textsB.x, 'written on A');
+  // Clearing it on B, once it held the draft, still deletes it everywhere.
+  textsB.x = '';
+  await b.noteDraft(scope, x);
+  await b.syncDrafts(scope, () => x);
+  await a.syncDrafts(scope, () => x);
+  assert.equal(serverText('x'), null);
+  assert.equal(textsA.x, '');
+});
+
+test('text typed on a focused client before another client\'s draft arrives stays its own edit, and the most recent one wins', async () => {
+  const scope = captureScope(), x = target('x'), textsA = { x: '' }, textsB = { x: '' };
+  const a = client(textsA, 'x'), b = client(textsB, 'x');
+  await b.enterDraft(scope, x);
+  await a.enterDraft(scope, x);
+  textsA.x = 'written on A';
+  await a.noteDraft(scope, x);
+  await a.syncDrafts(scope, () => x);
+  // Typed on B after A's edit, not seen by any poll yet when A's draft arrives.
+  textsB.x = 'typed on B';
+  await b.syncDrafts(scope, () => x);
+  await b.syncDrafts(scope, () => x);
+  await a.syncDrafts(scope, () => x);
+  assert.equal(textsB.x, 'typed on B');
+  assert.equal(serverText('x'), 'typed on B');
+  assert.equal(textsA.x, 'typed on B');
+});

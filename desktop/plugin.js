@@ -473,7 +473,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       if (pending && !pending.cwd && target.cwd) { pending.cwd = target.cwd; state.unsaved = state.unshown = true; }
       return true;
     }
-    if (!pending && known && (known.seen === localHash || entering && known.text !== null && (!local || known.seen == null))) {
+    // A composer without a fingerprint never matched any version of this draft: still empty, it last matched its absence.
+    if (!pending && known && (known.seen === localHash || known.seen == null && !local || entering && known.text !== null && (!local || known.seen == null))) {
       if (!mounted()) return true;
       if (!(await writeComposer(scope, target.address, known.text ?? ''))) return false;
       known.seen = draftHash(known.text ?? '');
