@@ -677,7 +677,7 @@ try {
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   await page.getByRole('button', { name: 'All projects', exact: true }).click();
   await page.getByRole('button', { name: 'Simulate missing backend' }).click();
-  await page.getByText(/Read-only browsing/).waitFor();
+  await page.locator('.sf-strip-summary', { hasText: 'Backend unavailable, read-only browsing' }).waitFor();
   check('missing backend disables mutation but preserves browsing', await page.locator('[data-session-id="design"] [aria-label="Archive session"]').isDisabled());
   await page.getByRole('button', { name: 'Restore mock backend' }).click();
   await page.locator('[data-session-id="design"] [aria-label="Archive session"]').waitFor({ state: 'attached' });
@@ -688,7 +688,8 @@ try {
   check('dropped native write stays Ready, reports failed readback, and creates no Undo', await page.locator('section[aria-label="Ready"] [data-session-id="design"]').count() === 1 && await noUndo());
   await page.evaluate(() => { window.hermesT3SidebarHarness.control.dropArchiveWrite = false; });
   await page.getByRole('button', { name: 'Simulate runtime failure' }).click();
-  await page.getByText(/Runtime status unavailable/).waitFor();
+  // An earlier action error keeps the strip's summary; the runtime failure joins its details.
+  await page.locator('.sf-strip li', { hasText: 'Runtime status unavailable' }).waitFor({ state: 'attached' });
   check('runtime failure explicitly unknown, native archives remain Archived', await page.locator('section[aria-label="Archived"] [data-session-id="archived"]').count() === 1);
   await page.locator('[data-session-id="archived"]').hover();
   check('native archived Unarchive remains enabled during runtime outage; Snooze absent', !await page.locator('[data-session-id="archived"] [aria-label="Unarchive session"]').isDisabled() && !await page.locator('[data-session-id="archived"] [aria-label="Snooze session"]').count());
@@ -859,7 +860,7 @@ try {
     const ring = el.querySelector('svg[data-status-icon=working]').getBoundingClientRect(), count = el.querySelector('.sf-subagents').getBoundingClientRect(), tokens = el.closest('.sf-card-meta').querySelector('.sf-token').getBoundingClientRect();
     const centre = rect => rect.top + rect.height / 2;
     return el.querySelectorAll('svg path').length === 6 && ring.width === 13 && Math.abs(centre(ring) - centre(tokens)) <= 1 && Math.abs(count.left - ring.right) <= 0.5
-      && el.querySelector('.sf-sr').textContent === 'Working: Compacting context · 2 subagents running' && el.closest('.sf-open').title.endsWith('\nCompacting context · 2 subagents running');
+      && el.querySelector('.sf-sr').textContent === 'Working: Compacting context · 2 subagents running' && el.closest('.sf-open').dataset.sfTip.endsWith('\nCompacting context · 2 subagents running');
   }));
   await design.screenshot({ path: join(screenshotDir, 'compacting-card.png') });
   await page.evaluate(async () => {
@@ -1045,11 +1046,18 @@ try {
         toolbar: [...el.querySelector('.sf-header').children].map(rect), sections: [...el.querySelectorAll('.sf-section')].map(s => ({ name: s.dataset.section, rect: rect(s), header: s.querySelector('.sf-section-toggle') ? rect(s.querySelector('.sf-section-toggle')) : null, body: rect(s.querySelector('.sf-section-body')), scrollHeight: s.querySelector('.sf-section-body').scrollHeight, count: s.querySelectorAll('.sf-row').length })) };
     });
     check(`${height}px: logical Ready rows use a bounded viewport while small priority shelves retain all 20 rows`, layout.sections.find(s => s.name === 'active').count > 0 && layout.sections.find(s => s.name === 'active').count < 30 && layout.sections.filter(s => s.name !== 'active').every(s => s.count === 20));
-    check(`${height}px: Pinned before headerless Ready, secondary headings fixed and visible`, layout.sections.map(s => s.name).join(',') === 'pinned,active,working,snoozed,archived' && layout.sections.slice(0, 2).every(s => !s.header) && layout.sections.slice(2).every(s => s.header.height === 30 && s.header.top >= layout.list.top && s.header.bottom <= layout.root.bottom && s.body.top >= s.header.bottom));
-    check(`${height}px: no whole-list scrolling; all five bodies constrained`, layout.overflow === 'hidden' && layout.listScrollHeight <= layout.listHeight + 1 && layout.sections.every(s => s.body.height > 0 && s.body.bottom <= layout.list.bottom + 1 && s.scrollHeight > s.body.height));
-    const shares = await page.locator('.sf-shelves').evaluate(el => ({ height: el.getBoundingClientRect().height, ...Object.fromEntries([...el.children].map(s => [s.dataset.section, s.getBoundingClientRect().height])) }));
-    check(`${height}px: dense Ready takes its 40% first and constrained Working, Snoozed and Archived share the rest equally`, Math.abs(shares.active - shares.height * .4) <= 1.5
-      && Math.max(shares.working, shares.snoozed, shares.archived) - Math.min(shares.working, shares.snoozed, shares.archived) <= 1 && layout.sections.every(s => s.body.height > 0));
+    // At 400px the shelves' one-card floors (Ready's card and three headings with a card each) exceed the pane: the shelves scroll as a whole rather than cutting cards to their metadata line, and Ready's 40% gives way. At 650px they fit and the shares are unchanged.
+    const crowded = height === 400;
+    check(`${height}px: Pinned before headerless Ready, secondary headings fixed${crowded ? '' : ' and visible'}`, layout.sections.map(s => s.name).join(',') === 'pinned,active,working,snoozed,archived' && layout.sections.slice(0, 2).every(s => !s.header) && layout.sections.slice(2).every(s => s.header.height === 30 && s.header.top >= layout.list.top && (crowded || s.header.bottom <= layout.root.bottom) && s.body.top >= s.header.bottom));
+    if (crowded) {
+      const floors = await page.locator('.sf-shelves').evaluate(el => ({ scrolls: el.scrollHeight > el.clientHeight + 1, overflow: getComputedStyle(el).overflowY, bodies: [...el.children].map(section => section.querySelector('.sf-section-body').getBoundingClientRect().height) }));
+      check(`${height}px: the one-card floors exceed the pane, so the shelves scroll as a whole and every body still shows a whole card`, layout.overflow === 'hidden' && floors.scrolls && floors.overflow === 'auto' && floors.bodies.every(body => body >= 55.5));
+    } else {
+      check(`${height}px: no whole-list scrolling; all five bodies constrained`, layout.overflow === 'hidden' && layout.listScrollHeight <= layout.listHeight + 1 && layout.sections.every(s => s.body.height > 0 && s.body.bottom <= layout.list.bottom + 1 && s.scrollHeight > s.body.height));
+      const shares = await page.locator('.sf-shelves').evaluate(el => ({ height: el.getBoundingClientRect().height, ...Object.fromEntries([...el.children].map(s => [s.dataset.section, s.getBoundingClientRect().height])) }));
+      check(`${height}px: dense Ready takes its 40% first and constrained Working, Snoozed and Archived share the rest equally`, Math.abs(shares.active - shares.height * .4) <= 1.5
+        && Math.max(shares.working, shares.snoozed, shares.archived) - Math.min(shares.working, shares.snoozed, shares.archived) <= 1 && layout.sections.every(s => s.body.height > 0));
+    }
     await page.getByRole('searchbox').fill('SYNTHETIC snoozed'); await page.waitForTimeout(100);
     check(`${height}px: Snoozed grows past 40% into space nobody else needs`, await page.locator('.sf-shelves').evaluate(el => el.querySelector('[data-section=snoozed]').getBoundingClientRect().height > el.getBoundingClientRect().height * .6));
     await page.getByRole('searchbox').fill('SYNTHETIC archived'); await page.waitForTimeout(100);
@@ -1067,8 +1075,10 @@ try {
     // Scroll each body in turn: every other category's scrollTop AND geometry stay fixed.
     for (const section of ['pinned', 'active', 'working', 'snoozed', 'archived']) {
       await page.locator('.sf-section-body').evaluateAll(els => els.forEach(el => { el.scrollTop = 0; }));
-      const before = await page.locator('.sf-section-body').evaluateAll(els => els.map(el => ({ top: el.getBoundingClientRect().top, scroll: el.scrollTop })));
       const body = page.locator(`[data-section="${section}"] .sf-section-body`);
+      // In a crowded pane the shelves scroll as a whole: bring this body into view first, so only the wheel is measured.
+      await body.scrollIntoViewIfNeeded();
+      const before = await page.locator('.sf-section-body').evaluateAll(els => els.map(el => ({ top: el.getBoundingClientRect().top, scroll: el.scrollTop })));
       await body.hover(); await page.mouse.wheel(0, 280);
       await page.waitForFunction(section => document.querySelector(`[data-section="${section}"] .sf-section-body`).scrollTop > 0, section);
       const after = await page.locator('.sf-section-body').evaluateAll(els => els.map(el => ({ top: el.getBoundingClientRect().top, scroll: el.scrollTop })));
@@ -1158,25 +1168,29 @@ try {
     for (const base of [300, 350, 400]) {
       const height = base + footerHeight;
       await page.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
+      // Each populated shelf keeps a whole card; when those floors exceed the pane, the shelves scroll as a whole and every heading and body can be reached instead of being clipped.
       const geometry = await page.locator('.sf-scroll').evaluate(list => {
-        const bounds = list.getBoundingClientRect();
+        const bounds = list.getBoundingClientRect(), shelves = list.querySelector('.sf-shelves');
+        const inside = el => { const r = el.getBoundingClientRect(); return r.top >= bounds.top && r.bottom <= bounds.bottom + 1; };
+        const scrolls = shelves.scrollHeight > shelves.clientHeight + 1;
+        const headers = [...list.querySelectorAll('.sf-section-toggle')], bodies = [...shelves.querySelectorAll('.sf-section-body')], pinned = list.querySelector('[data-section=pinned] .sf-section-body');
+        const visible = () => headers.every(el => el.getBoundingClientRect().height === 30 && (scrolls || inside(el))) && bodies.every(el => el.getBoundingClientRect().height >= 55.5 && el.scrollHeight > el.clientHeight && (scrolls || inside(el)))
+          && (!pinned || pinned.getBoundingClientRect().height > 0 && inside(pinned));
+        const top = visible();
+        shelves.scrollTop = shelves.scrollHeight;
+        const last = [...shelves.children].at(-1), reachable = !scrolls || inside(last.querySelector('.sf-section-toggle')) && inside(last.querySelector('.sf-section-body'));
+        shelves.scrollTop = 0;
         return {
-          fits: list.scrollHeight <= list.clientHeight + 1,
+          fits: list.scrollHeight <= list.clientHeight + 1, scrolls,
           tightCards: [...list.querySelectorAll('.sf-open')].every(el => {
             const meta = el.querySelector('.sf-card-meta').getBoundingClientRect(), title = el.querySelector('.sf-row-title').getBoundingClientRect();
             return el.closest('.sf-row').getBoundingClientRect().height === 56 && getComputedStyle(el).rowGap === '3px' && meta.height === 19 && title.height === 19 && title.top - meta.bottom === 3;
           }),
-          headers: [...list.querySelectorAll('.sf-section-toggle')].every(el => {
-            const r = el.getBoundingClientRect();
-            return r.height === 30 && r.top >= bounds.top && r.bottom <= bounds.bottom + 1;
-          }),
-          bodies: [...list.querySelectorAll('.sf-section-body')].every(el => {
-            const r = el.getBoundingClientRect();
-            return r.height > 0 && r.top >= bounds.top && r.bottom <= bounds.bottom + 1 && el.scrollHeight > el.clientHeight;
-          })
+          shelves: top && reachable
         };
       });
-      check(`${base}px list pane (+${footerHeight}px footer)${banner === 'error' ? ' with error' : ''}: headers and complete scroll bodies fit without outer clipping`, geometry.fits && geometry.headers && geometry.bodies);
+      console.log(`SHORT ${base}px ${banner}: ${JSON.stringify(geometry)}`);
+      check(`${base}px list pane (+${footerHeight}px footer)${banner === 'error' ? ' with error' : ''}: whole-card shelves fit, or scroll as a whole with every heading and body reachable, without outer clipping`, geometry.fits && geometry.shelves);
       check(`${base}px list pane ${banner}: tight card text preserves 56px rows and 19px lines`, geometry.tightCards);
       check(`${base}px list pane ${banner}: no Undo or dismiss-Undo controls`, await noUndo());
       if (base === 300 && banner === 'error') await page.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, 'short-300-error.png') });
@@ -1407,6 +1421,103 @@ try {
     await focus.close();
   }
   {
+    // Presentation: skeleton first load, the card focus ring, one-card shelf floors, the no-match state, the status strip, the draft pencil and the shared card tooltip.
+    const polish = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
+    polish.on('pageerror', error => errors.push(error.message));
+    await polish.goto(`http://127.0.0.1:${server.address().port}/?hold=sessions`);
+    await polish.locator('.sf-skeleton[role=status][aria-busy=true]').waitFor();
+    const skeleton = await polish.evaluate(() => {
+      const cards = [...document.querySelectorAll('.sf-skeleton-card')].map(el => el.getBoundingClientRect());
+      return { heights: cards.map(box => box.height), top: cards[0].top, listTop: document.querySelector('.sf-scroll').getBoundingClientRect().top, shimmer: getComputedStyle(document.querySelector('.sf-skeleton-meta')).animationName, notes: document.querySelectorAll('.sf-note').length };
+    });
+    await polish.emulateMedia({ reducedMotion: 'reduce' });
+    const stillShimmer = await polish.evaluate(() => getComputedStyle(document.querySelector('.sf-skeleton-meta')).animationName);
+    await polish.evaluate(() => window.hermesT3SidebarRelease());
+    await polish.locator('[data-section=active] .sf-row').first().waitFor();
+    const stride = await polish.evaluate(() => document.querySelector('[data-section=active] .sf-row').getBoundingClientRect().height);
+    console.log(`SKELETON: ${JSON.stringify({ skeleton, stillShimmer, stride })}`);
+    check('first load shows skeleton cards with the real card stride at the top of the list, shimmering only without reduced motion', skeleton.heights.length === 3 && skeleton.heights.every(height => Math.abs(height - stride) < 0.5)
+      && Math.abs(skeleton.top - skeleton.listTop) < 0.5 && skeleton.shimmer === 'sf-shimmer' && stillShimmer === 'none' && skeleton.notes === 0 && !await polish.locator('.sf-skeleton').count());
+
+    // Keyboard focus rings the card itself; a mouse click does not.
+    const ring = id => polish.evaluate(key => { const row = document.querySelector(`[data-session-id="${key}"]`); return { shadow: getComputedStyle(row).boxShadow, outline: getComputedStyle(row.querySelector('.sf-open')).outlineStyle }; }, id);
+    const ids = await polish.evaluate(() => [...document.querySelectorAll('[data-section=active] .sf-row')].map(row => row.dataset.sessionId));
+    await polish.locator(`[data-session-id="${ids[0]}"] .sf-open`).click();
+    const clicked = await ring(ids[0]);
+    await polish.keyboard.press('ArrowDown');
+    const keyed = await ring(ids[1]);
+    await polish.locator(`[data-session-id="${ids[1]}"]`).hover();
+    const hovered = await ring(ids[1]);
+    await polish.keyboard.press('ArrowUp');
+    const current = await ring(ids[0]);
+    console.log(`FOCUS RING: ${JSON.stringify({ clicked, keyed, hovered, current })}`);
+    const ringed = value => /0px 0px 0px 2px/.test(value.shadow) && value.outline === 'none';
+    check('keyboard focus rings the whole card (also hovered and selected), without the inner rectangle, and a click shows no ring', !/0px 0px 0px 2px/.test(clicked.shadow) && ringed(keyed) && ringed(hovered) && ringed(current));
+    // A focus tip opens at once, outside the card on its right.
+    await polish.keyboard.press('ArrowDown');
+    await polish.locator('.mock-tip').waitFor();
+    const focusTip = await polish.evaluate(key => ({ first: document.querySelector('.mock-tip span > span')?.textContent, left: document.querySelector('.mock-tip').getBoundingClientRect().left, right: document.querySelector(`[data-session-id="${key}"]`).getBoundingClientRect().right, titles: document.querySelectorAll('.sf .sf-row [title]').length }), ids[1]);
+    check('a keyboard-focused card shows its details in the shared tooltip beside the pane, and cards carry no native titles', focusTip.left >= focusTip.right && !!focusTip.first && focusTip.titles === 0);
+    await polish.getByRole('searchbox').click();
+    check('leaving the card closes its tooltip', !await polish.locator('.mock-tip').count());
+
+    // The viewed card's pencil follows its composer through the existing two-second read; the tint stays off the viewed card.
+    const viewed = await polish.evaluate(() => document.querySelector('.sf-row[data-current=true]').dataset.sessionId);
+    await polish.evaluate(key => { window.hermesT3SidebarHarness.control.mountedDrafts[key] = 'typing'; }, viewed);
+    await polish.locator('.sf-row[data-current=true] .sf-draft-mark[aria-label="Unsent draft"]').waitFor({ timeout: 4000 });
+    const tint = await polish.evaluate(() => { const row = document.querySelector('.sf-row[data-current=true]'), probe = document.createElement('span'); probe.style.background = 'var(--ui-bg-quaternary)'; row.append(probe); const selected = getComputedStyle(probe).backgroundColor; probe.remove(); return { background: getComputedStyle(row).backgroundColor, selected, height: row.getBoundingClientRect().height, mark: getComputedStyle(row.querySelector('.sf-draft-mark')).color }; });
+    check('typing in the viewed session shows its pencil within one read, without the tint or a height change', tint.background === tint.selected && Math.abs(tint.height - stride) < 0.5);
+    await polish.evaluate(key => { window.hermesT3SidebarHarness.control.mountedDrafts[key] = ''; }, viewed);
+    await polish.locator('.sf-row[data-current=true] .sf-draft-mark').waitFor({ state: 'detached', timeout: 4000 });
+    check('emptying the viewed composer drops its pencil', true);
+
+    // A short pane keeps a whole card in every populated shelf and scrolls the shelves rather than clipping the lowest.
+    await polish.setViewportSize({ width: 1200, height: 460 });
+    await polish.waitForTimeout(100);
+    const floors = await polish.evaluate(() => {
+      const shelves = document.querySelector('.sf-shelves');
+      return [...document.querySelectorAll('.sf-shelves > .sf-section')].filter(section => section.dataset.closed !== 'true' && Number(section.style.getPropertyValue('--sf-count')) > 0).map(section => {
+        const body = section.querySelector('.sf-section-body'), title = section.querySelector('.sf-row-title');
+        return { section: section.dataset.section, body: body.getBoundingClientRect().height, titleInside: title.getBoundingClientRect().bottom <= body.getBoundingClientRect().bottom + 0.5 };
+      }).concat([{ scrolls: shelves.scrollHeight > shelves.clientHeight, overflowY: getComputedStyle(shelves).overflowY }]);
+    });
+    console.log(`SHORT PANE FLOORS: ${JSON.stringify(floors)}`);
+    const shelfFloors = floors.slice(0, -1), scrolling = floors.at(-1);
+    check('in a short pane every populated open shelf shows at least one whole card, titles included', shelfFloors.length >= 3 && shelfFloors.every(item => item.body >= stride - 0.5 && item.titleInside));
+    await polish.locator('.sf-shelves').evaluate(el => { el.scrollTop = el.scrollHeight; });
+    const lowest = await polish.evaluate(() => { const shelves = document.querySelector('.sf-shelves').getBoundingClientRect(), sections = [...document.querySelectorAll('.sf-shelves > .sf-section')], last = sections.at(-1).getBoundingClientRect(); return last.bottom <= shelves.bottom + 0.5 && last.top >= shelves.top - 0.5; });
+    check('when the floors exceed the pane, the shelves scroll as a whole and the lowest shelf is reachable', scrolling.overflowY === 'auto' && lowest);
+    await polish.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, 'short-460-floors.png') });
+    await polish.setViewportSize({ width: 1200, height: 900 });
+
+    // No match: the message sits under the search field and empty shelf headings recede.
+    const labelColor = name => polish.evaluate(section => getComputedStyle(document.querySelector(`[data-section=${section}] .sf-section-label`)).color, name);
+    const accent = await labelColor('archived');
+    await polish.getByRole('searchbox').fill('no-such-synthetic-session-5150');
+    await polish.getByText('No matching sessions', { exact: true }).waitFor();
+    const noMatch = await polish.evaluate(() => ({ below: document.querySelector('.sf-no-match').getBoundingClientRect().top - document.querySelector('.sf-header').getBoundingClientRect().bottom, buttons: [...document.querySelectorAll('.sf-no-match button')].map(node => node.textContent) }));
+    const muted = await labelColor('archived');
+    check('a search without matches says so directly under the search field, with no clear actions of its own', noMatch.below >= 0 && noMatch.below < 12 && !noMatch.buttons.some(text => /^Clear/.test(text)));
+    check('zero-count shelf headings use a quiet neutral label instead of the accent', muted !== accent);
+    await polish.getByRole('searchbox').fill('');
+
+    // Two problems: one single-line strip, details on request; the cards' "?" waits for the strip.
+    await polish.getByRole('button', { name: 'Simulate missing backend' }).click();
+    await polish.getByRole('button', { name: 'Simulate runtime failure' }).click();
+    await polish.locator('.sf-strip-more').waitFor();
+    const strip = await polish.evaluate(() => ({ count: document.querySelectorAll('.sf-strip').length, height: document.querySelector('.sf-strip').getBoundingClientRect().height, role: document.querySelector('.sf-strip').getAttribute('role'), notes: document.querySelectorAll('.sf-note[role=alert]').length,
+      wait: [...document.querySelectorAll('.sf-wait')].map(el => getComputedStyle(el).display), unknown: [...document.querySelectorAll('.sf-open')].filter(el => /status unknown/.test(el.getAttribute('aria-label'))).length }));
+    console.log(`STATUS STRIP: ${JSON.stringify(strip)}`);
+    check('several problems make one single-line alert strip and the per-card "?" gives way to it, labels unchanged', strip.count === 1 && strip.height <= 26 && strip.role === 'alert' && strip.notes === 0 && strip.wait.length > 0 && strip.wait.every(value => value === 'none') && strip.unknown > 0);
+    await polish.locator('.sf-strip-toggle').click();
+    check('the strip unfolds every complete message', await polish.locator('.sf-strip-details').isVisible() && await polish.locator('.sf-strip-details li').count() >= 2 && await polish.locator('.sf-strip-toggle').getAttribute('aria-expanded') === 'true');
+    await polish.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, 'status-strip.png') });
+    await polish.getByRole('button', { name: 'Restore mock backend' }).click();
+    await polish.getByRole('button', { name: 'Restore runtime status' }).click();
+    await polish.locator('.sf-strip').waitFor({ state: 'detached' });
+    await polish.close();
+  }
+  {
     const lines = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1 });
     lines.on('pageerror', error => errors.push(error.message));
     await lines.emulateMedia({ reducedMotion: 'reduce' });
@@ -1460,7 +1571,9 @@ try {
     await lines.waitForFunction(() => document.querySelector('[data-section=pinned]')?.dataset.populated === 'false');
     check('search hiding all pinned cards removes the outline, pin and reserved space', await lines.locator('.sf-scroll').evaluate(el => {
       const pinned = el.querySelector('[data-section=pinned]'), ready = el.querySelector('[data-section=active]');
-      return pinned.getBoundingClientRect().height === 0 && getComputedStyle(pinned, '::before').content === 'none' && !pinned.querySelector('.sf-pinned-mark') && getComputedStyle(pinned).marginBottom === '-1px' && ready.getBoundingClientRect().top === el.getBoundingClientRect().top;
+      return pinned.getBoundingClientRect().height === 0 && getComputedStyle(pinned, '::before').content === 'none' && !pinned.querySelector('.sf-pinned-mark') && getComputedStyle(pinned).marginBottom === '-1px'
+        // The no-match message, when shown, leads the list; nothing is reserved between it and Ready.
+        && Math.abs(ready.getBoundingClientRect().top - (el.querySelector('.sf-no-match') ? el.querySelector('.sf-no-match').getBoundingClientRect().bottom + 1 : el.getBoundingClientRect().top)) < 0.5;
     }));
     await lines.getByRole('searchbox', { name: 'Search sessions', exact: true }).fill('');
     await lines.locator('[data-session-id="pinned"]').waitFor();
@@ -1479,11 +1592,11 @@ try {
     check('switching to 2 lines re-reads the stride of the mounted windowed list', JSON.stringify(await slots()) === JSON.stringify({ height: `${110 * 56}px`, tops: ['0px', '56px', '112px'], row: 56 }));
     for (const height of [300, 400, 650, 1300]) {
       await lines.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
-      check(`${height}px with an oversized pinned group: Pinned scrolls past its cap (60% of the list, leaving 450px, at least 18%), Ready keeps a body and all secondary headings fit`, await lines.locator('.sf-scroll').evaluate(el => {
+      check(`${height}px with an oversized pinned group: Pinned scrolls past its cap (60% of the list, leaving 450px, at least 18%), Ready keeps a body and the secondary headings fit, or the shelves scroll as a whole when their one-card floors exceed the pane`, await lines.locator('.sf-scroll').evaluate(el => {
         const pinned = el.querySelector('[data-section=pinned]'), body = pinned.querySelector('.sf-section-body'), h = el.clientHeight;
         const cap = Math.max(h * .18, Math.min(h * .6, h - 450));
         return el.scrollHeight <= el.clientHeight + 1 && Math.abs(pinned.getBoundingClientRect().height - cap) <= 2 && body.scrollHeight > body.clientHeight && el.querySelector('[data-section=active] .sf-section-body').getBoundingClientRect().height > 0 &&
-          [...el.querySelectorAll('.sf-section-toggle')].every(header => header.getBoundingClientRect().bottom <= el.getBoundingClientRect().bottom + 1);
+          ([...el.querySelectorAll('.sf-section-toggle')].every(header => header.getBoundingClientRect().bottom <= el.getBoundingClientRect().bottom + 1) || el.querySelector('.sf-shelves').scrollHeight > el.querySelector('.sf-shelves').clientHeight + 1);
       }));
     }
     // A few pinned cards in an ordinary window full of Ready sessions: every pinned card stays in sight and Ready scrolls instead.
@@ -1981,7 +2094,7 @@ try {
           arrowsAtEnds: tight || Math.abs(arrows.top.top - box.top) <= 0.5 && Math.abs(arrows.bottom.bottom - box.bottom) <= 0.5, ticks: Object.keys(ticks).sort().join(),
           ticksAtEnds: Math.abs(ticks.top.top - box.top) <= 1 && Math.abs(ticks.bottom.top - box.bottom) <= 1, text: label.textContent, hidden: label.dataset.hidden === 'true',
           label: { left: labelBox.left, right: labelBox.right, top: labelBox.top, bottom: labelBox.bottom }, labelInside: labelBox.left >= plot.left - 0.5 && labelBox.right <= plot.right + 0.5,
-          color: rgb(mark), labelColor: rgb(label), nowColor, title: mark.getAttribute('title') };
+          color: rgb(mark), labelColor: rgb(label), nowColor, title: mark.getAttribute('data-sf-tip') ?? mark.getAttribute('title') };
       });
       const shown = marks.filter(mark => !mark.hidden);
       const apart = shown.every((a, i) => shown.every((b, j) => i >= j || a.label.right <= b.label.left || b.label.right <= a.label.left || a.label.bottom <= b.label.top || b.label.bottom <= a.label.top));
@@ -2006,8 +2119,8 @@ try {
       check('Limits headlines are in units and the axes tick in units without a caption or 0 label: Business 20 + Pro 100 100 = 120, Max 20x = 200', headline.length === 2 && headline.every(item => /^\d+(\.\d)?$/.test(item.pool))
         && headline[0].capacity === '/ 120 units' && !headline[0].composition && headline[0].ticks === '25,50,75,100,120'
         && headline[1].capacity === '/ 200 units' && !headline[1].composition && headline[1].ticks === '50,100,150,200');
-      check('No Next reset line and no plan units wording anywhere on the Limits page', await usage.evaluate(() => !/Next reset|plan units/i.test(document.querySelector('.su').innerText) && [...document.querySelectorAll('[title],[aria-label]')].every(node => !/plan units/i.test(`${node.getAttribute('title') || ''} ${node.getAttribute('aria-label') || ''}`))));
-      check('No advice anywhere on the Limits page or in the footer', await usage.evaluate(source => { const advice = new RegExp(source, 'i'); return !advice.test(document.body.innerText) && [...document.querySelectorAll('[aria-label],[title]')].every(node => !advice.test(node.getAttribute('aria-label') || '') && !advice.test(node.getAttribute('title') || '')); }, ADVICE.source));
+      check('No Next reset line and no plan units wording anywhere on the Limits page', await usage.evaluate(() => !/Next reset|plan units/i.test(document.querySelector('.su').innerText) && [...document.querySelectorAll('[title],[data-sf-tip],[aria-label]')].every(node => !/plan units/i.test(`${node.getAttribute('title') || ''} ${node.getAttribute('data-sf-tip') || ''} ${node.getAttribute('aria-label') || ''}`))));
+      check('No advice anywhere on the Limits page or in the footer', await usage.evaluate(source => { const advice = new RegExp(source, 'i'); return !advice.test(document.body.innerText) && [...document.querySelectorAll('[aria-label],[title],[data-sf-tip]')].every(node => !advice.test(node.getAttribute('aria-label') || '') && !advice.test(node.getAttribute('title') || '') && !advice.test(node.getAttribute('data-sf-tip') || '')); }, ADVICE.source));
     }
     {
       // Reset markers: Business and Pro 100 reset together tomorrow, so their markers stack on one vertical line in pool priority order, each dot at the cumulative level its account brings the pool to.

@@ -1,6 +1,6 @@
 # Usage page
 
-The sidebar footer's **Usage** button opens the `/t3sidebar-usage` page, modeled on T3 Code's Usage page and on the quota chart of Theo's CLIProxyAPI fork ("These 3 skills changed my life", https://www.youtube.com/watch?v=5Bmp9cz1JN8&t=496).
+The sidebar footer's **Usage** button opens the `/t3sidebar-usage` page (and, clicked again while it is shown, closes it to bring back the session or new-session draft it covered; the **Limits** button works the same way, and switching from one page to the other still returns to what was there before either opened), modeled on T3 Code's Usage page and on the quota chart of Theo's CLIProxyAPI fork ("These 3 skills changed my life", https://www.youtube.com/watch?v=5Bmp9cz1JN8&t=496).
 
 ## Usage tab
 

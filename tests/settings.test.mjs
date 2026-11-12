@@ -217,13 +217,13 @@ test('the Working indicator setting defaults to Normal, persists, switches every
 	assert.equal(pressed('Working indicator'), 'Normal');
 	assert.deepEqual(badge('root'), plain);
 	assert.deepEqual(badge('design'), plain);
-	assert.equal($('[data-session-id="root"] .sf-open').title.split('\n').at(-1), 'working');
+	assert.equal($('[data-session-id="root"] .sf-open').dataset.sfTip.split('\n').at(-1), 'working');
 	await click(option('Working indicator', 'Detailed'));
 	assert.equal(storage.get('working-details'), true);
 	assert.equal(pressed('Working indicator'), 'Detailed');
 	assert.deepEqual(badge('root'), { agent: 'true', glyph: 1, count: '+2', label: 'Working: Agent working · 2 subagents running' });
 	assert.deepEqual(badge('design'), { agent: null, glyph: 0, count: null, label: 'Working' });
-	assert.equal($('[data-session-id="root"] .sf-open').title.split('\n').at(-1), 'Agent working · 2 subagents running');
+	assert.equal($('[data-session-id="root"] .sf-open').dataset.sfTip.split('\n').at(-1), 'Agent working · 2 subagents running');
 	// Persisted: a fresh mount reads it back.
 	await act(async () => root.unmount()); mock.queryClient.removeQueries({ queryKey: ['hermes-t3sidebar-preferences'] }); await render();
 	assert.equal(pressed('Working indicator'), 'Detailed');
@@ -249,7 +249,7 @@ test('each experimental feature saves through the backend and disables only itse
 	await click(toggle());
 	assert.deepEqual([state(), mock.control.experimentalSaved], [['true', false], { pool_credits: true }], 'saved through the feature\'s own route');
 	assert.deepEqual(mock.calls.filter(call => call[2]?.method === 'PUT').map(call => [call[1], call[2].body]), [['/settings/experimental/pool_credits', { enabled: true }]]);
-	assert.equal(section().querySelector('.text-destructive'), null);
+	assert.equal(section().querySelector('.text-destructive') === null, true);
 	await act(async () => root.unmount()); root = null;
 	// A Hermes without this feature's internals: its saved choice no longer applies, and its own switch says why it cannot be used.
 	mock.control.experimentalUnavailable = ['pool_credits']; mock.queryClient.clear();

@@ -14,7 +14,7 @@ const rest = mock.ctx.rest;
 let root, controller;
 const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
 const microtasks = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
-const notes = () => [...document.querySelectorAll('.sf-note[role=alert]')].map(node => node.textContent);
+const notes = () => [...document.querySelectorAll('.sf-strip li[data-error=true]')].map(node => node.textContent);
 afterEach(async () => {
 	if (root) { await act(async () => root.unmount()); root = null; }
 	controller?.dispose(); controller = null; mock.ctx.rest = rest;
