@@ -179,17 +179,6 @@ export const ctx = {
     if (path.startsWith('/drafts')) return draftsRoute(path, options);
     // The redeem route answers control.redeemResult (a value, or a function of the posted body that may throw like a failed request).
     if (path === '/usage/limits/redeem') return clone(typeof control.redeemResult === 'function' ? await control.redeemResult(options?.body) : control.redeemResult ?? { status: 'reset', available_count: 1, windows_reset: 2, profile: host.state.profile.get() || 'default' });
-    // Experimental settings: control.experimentalUnavailable lists the features this Hermes lacks the internals for; enabling one of them fails like the backend's 409.
-    if (path === '/settings/experimental' || path.startsWith('/settings/experimental/')) {
-      const unavailable = new Set(control.experimentalUnavailable || []), saved = control.experimentalSaved ??= {};
-      const feature = path.split('/')[3];
-      if (options?.method === 'PUT') {
-        if (options.body?.enabled && unavailable.has(feature)) throw new Error('409 incompatible_hermes');
-        saved[feature] = options.body?.enabled === true;
-      }
-      const features = Object.fromEntries(['pool_credits', ...(control.experimentalExtra || [])].map(id => [id, { enabled: !unavailable.has(id) && saved[id] === true, available: !unavailable.has(id) }]));
-      return { features, profile: host.state.profile.get() || 'default' };
-    }
     if (path.startsWith('/usage/')) {
       if (control.usageError) throw new Error(control.usageError);
       // A pending promise here holds every usage read in flight until the test resolves it.

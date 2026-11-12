@@ -150,12 +150,6 @@ class SessionDelete(BaseModel):
 	expected_generation: int = Field(ge=0)
 
 
-class ExperimentalToggle(BaseModel):
-	model_config = ConfigDict(extra="forbid", strict=True)
-
-	enabled: bool
-
-
 class BankedResetRedeem(BaseModel):
 	model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -1247,7 +1241,7 @@ async def native_rename(request, profile, session_id, body):
 	return {"ok": True, "profile": profile, "session_id": session_id, "title": title}
 
 
-def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None, history_db_path=None, limits_path=None, limits_sampler=None, limits_redeemer=None, anthropic_redeemer=None, pool_credits_available=None) -> APIRouter:
+def create_router(path: Path | None = None, clock: Callable[[], float] = time.time, *, runtime_reader=None, sessions_reader=None, archives_reader=None, archive_reader=None, profile_reader=None, history_db_path=None, limits_path=None, limits_sampler=None, limits_redeemer=None, anthropic_redeemer=None) -> APIRouter:
 	"""Inject a temporary path and clock for tests; production accepts neither over HTTP.
 
 	``limits_sampler`` is a zero-argument starter returning the running sampler. Only the module-level production router passes one, so routers built by tests never sample live provider limits. ``limits_redeemer`` replaces the banked-reset redemption and ``anthropic_redeemer`` the Anthropic reset claim, so tests never reach Codex or Anthropic.
@@ -1460,48 +1454,6 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise HTTPException(422, str(exc)) from exc
 		except Exception as exc:
 			raise HTTPException(503, "usage_limits_unavailable") from exc
-		return {**value, "profile": profile}
-
-	# Experimental features by wire name: their store key and whether this Hermes still has the internals they need. Availability is per feature, so one missing internal never turns off the others.
-	experimental = {
-		"pool_credits": (usage_limits.POOL_CREDITS_SETTING, pool_credits_available or usage_limits.pool_credits_available),
-	}
-
-	def experimental_state():
-		limits_store = usage_limits.LimitsStore(limits_path if limits_path is not None else default_limits_path(), clock)
-		features = {}
-		for name, (key, available) in experimental.items():
-			ok = bool(available())
-			# Without its internals a feature is off whatever was saved, and comes back on if a later Hermes restores them.
-			features[name] = {"enabled": ok and limits_store.read_setting(key), "available": ok}
-		return {"features": features}
-
-	@api.get("/settings/experimental")
-	def get_experimental(request: Request, response: Response):
-		response.headers["Cache-Control"] = "no-store"
-		profile = listing_profile(request)
-		try:
-			value = experimental_state()
-		except Exception as exc:
-			raise HTTPException(503, "settings_unavailable") from exc
-		return {**value, "profile": profile}
-
-	@api.put("/settings/experimental/{feature}")
-	def put_experimental(feature: str, body: ExperimentalToggle, request: Request, response: Response):
-		response.headers["Cache-Control"] = "no-store"
-		profile = listing_profile(request)
-		if feature not in experimental:
-			raise HTTPException(404, "unknown_feature")
-		key, available = experimental[feature]
-		if body.enabled and not available():
-			raise HTTPException(409, "incompatible_hermes")
-		try:
-			usage_limits.LimitsStore(limits_path if limits_path is not None else default_limits_path(), clock).write_setting(key, body.enabled)
-			# The other mode's credit lists are due at once instead of after the hourly throttle.
-			usage_limits.forget_credit_reads()
-			value = experimental_state()
-		except Exception as exc:
-			raise HTTPException(503, "settings_unavailable") from exc
 		return {**value, "profile": profile}
 
 	@api.post("/usage/limits/redeem")

@@ -388,7 +388,7 @@ class CollectorTests(unittest.TestCase):
 			home.reset(token)
 		self.assertEqual(seen, ["profile-a"])
 
-	def test_experimental_setting_reads_codex_credit_lists_hourly_with_each_accounts_token(self):
+	def test_codex_credit_lists_are_read_hourly_with_each_accounts_token(self):
 		pool = {"openai-codex": [
 			{"id": "7c202b", "label": "a", "priority": 0, "access_token": "tok-a"},
 			{"id": "7ad3ca", "label": "b", "priority": 1, "access_token": "tok-b"},
@@ -404,11 +404,9 @@ class CollectorTests(unittest.TestCase):
 			return [{"status": "available", "granted_at": 1.0e9, "expires_at": 2.0e9}]
 		now = [1_800_000_000.0]
 		symbols = dict(self.symbols(pool), _codex_backend_urls=lambda base: (None, None, None), _codex_headers=lambda token, account: {})
-		collect = lambda: limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch,
-			pool_credits_setting=lambda: True, current_credits_fetcher=lambda: self.fail("the per-account mode never reads the current account's list"))
+		collect = lambda: limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], credits_fetcher=fetch)
 		with patch.object(limits, "_native_symbols", return_value=symbols):
 			(reading,) = collect()
-			self.assertEqual(reading["credits_mode"], "accounts")
 			# Duplicates of an account and dead credentials are never asked; a failed read leaves no list.
 			self.assertEqual(calls, ["tok-a", "tok-b"])
 			by_id = {a["id"]: a for a in reading["accounts"]}
@@ -423,78 +421,30 @@ class CollectorTests(unittest.TestCase):
 			collect()
 			self.assertEqual(calls[2:], ["tok-a", "tok-b"])
 
-	def test_default_reads_only_the_current_accounts_credits_through_hermes_hourly(self):
-		pool = {"openai-codex": [{"id": "7c202b", "label": "a", "priority": 0, "access_token": "tok-a"}, {"id": "7ad3ca", "label": "b", "priority": 1, "access_token": "tok-b"}]}
-		current = []
-		listed = [{"status": "available", "granted_at": 1.0e9, "expires_at": 2.0e9}]
-		now = [1_800_000_000.0]
-		full = dict(self.symbols(pool), _codex_backend_urls=lambda base: (None, None, None), _codex_headers=lambda token, account: {})
-		# Off, or on while Hermes no longer has the private helpers: no pool token is used for credits, only Hermes's own signed read.
-		for setting, symbols in ((lambda: False, full), (lambda: True, self.symbols(pool)), (lambda: (_ for _ in ()).throw(RuntimeError("config")), full)):
-			limits._CREDITS_READ.clear()
-			with patch.object(limits, "_native_symbols", return_value=symbols):
-				(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], pool_credits_setting=setting,
-					credits_fetcher=lambda base_url, token: self.fail("no per-account read by default"), current_credits_fetcher=lambda: current.append(True) or listed)
-			self.assertEqual((reading["credits_mode"], reading["current_credits"]), ("current", listed))
-			self.assertTrue(all("credits" not in account for account in reading["accounts"]))
-		self.assertEqual(len(current), 3)
-		# Hourly like the per-account lists; a failed read leaves the stored list alone.
-		with patch.object(limits, "_native_symbols", return_value=full):
-			now[0] += limits.CREDITS_INTERVAL_S - 1
-			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], pool_credits_setting=lambda: False, current_credits_fetcher=lambda: current.append(True) or listed)
-			self.assertEqual((len(current), "current_credits" in reading), (3, False))
-			now[0] += 1
-			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], pool_credits_setting=lambda: False, current_credits_fetcher=lambda: None)
-			self.assertEqual((reading["credits_mode"], "current_credits" in reading), ("current", False))
-			# A redeemed reset may have changed the current account's list too.
-			limits.forget_credit_read("openai-codex", "7c202b")
-			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, clock=lambda: now[0], pool_credits_setting=lambda: False, current_credits_fetcher=lambda: listed)
-			self.assertEqual(reading["current_credits"], listed)
-		# A logged-out Codex pool asks nothing.
-		with patch.object(limits, "_native_symbols", return_value=self.symbols({"openai-codex": []})):
-			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=1, clock=lambda: now[0] + 86400, current_credits_fetcher=lambda: self.fail("no sign-in to read with"))
-		self.assertNotIn("credits_mode", reading)
-
-	def test_current_account_read_goes_through_hermes_signed_request(self):
-		import hermes_cli.plugin_provider_requests as requests
-		calls = []
-		body = {"credits": [{"status": "available", "granted_at": "2026-09-29T18:58:39Z", "expires_at": "2099-10-29T18:58:39Z", "id": "secret-id"}]}
-
-		def signed(provider, method, url, **kwargs):
-			calls.append((provider, method, url, kwargs))
-			return SimpleNamespace(status=200, json=lambda: body)
-		with patch.object(requests, "credentialed_provider_request", signed):
-			self.assertEqual(limits._fetch_current_codex_credits(), limits.normalize_credits(body))
-		((provider, method, url, kwargs),) = calls
-		self.assertEqual((provider, method, url), ("openai-codex", "GET", "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"))
-		# The plugin names itself and sends no credential of its own; Hermes attaches the sign-in.
-		self.assertEqual(kwargs["headers"], {"Accept": "application/json", "User-Agent": "hermes-t3sidebar"})
-		for response in (SimpleNamespace(status=401, json=lambda: body), PermissionError("not declared")):
-			def failing(*args, response=response, **kwargs):
-				if isinstance(response, Exception):
-					raise response
-				return response
-			with patch.object(requests, "credentialed_provider_request", failing):
-				self.assertIsNone(limits._fetch_current_codex_credits())
-
-	def test_experimental_setting_lives_in_the_limits_store_and_needs_hermes_helpers(self):
-		with tempfile.TemporaryDirectory() as temp:
-			store = limits.LimitsStore(Path(temp) / "limits.sqlite3")
-			# Off until written, even before the store file exists.
-			self.assertFalse(store.read_setting(limits.POOL_CREDITS_SETTING))
-			store.write_setting(limits.POOL_CREDITS_SETTING, True)
-			self.assertTrue(store.read_setting(limits.POOL_CREDITS_SETTING))
-			store.write_setting(limits.POOL_CREDITS_SETTING, False)
-			self.assertFalse(store.read_setting(limits.POOL_CREDITS_SETTING))
-			# The sampler hands the stored value to each collection.
-			store.write_setting(limits.POOL_CREDITS_SETTING, True)
-			seen = []
-			with patch.object(limits, "collect_native", side_effect=lambda **kwargs: seen.append(kwargs["pool_credits_setting"]()) or []):
-				limits.LimitsSampler(store, home_resolver=lambda: Path(temp))._collect()
-			self.assertEqual(seen, [True])
+	def test_per_account_lists_need_both_hermes_helpers_and_no_setting_survives(self):
 		self.assertTrue(limits.pool_credits_available({"_codex_backend_urls": len, "_codex_headers": len}))
 		self.assertFalse(limits.pool_credits_available({"_codex_backend_urls": len, "_codex_headers": None}))
 		self.assertFalse(limits.pool_credits_available({}))
+		# Without them no credit list is read at all; the accounts keep their usage readings.
+		pool = {"openai-codex": [{"id": "7c202b", "label": "a", "priority": 0, "access_token": "tok-a"}]}
+		with patch.object(limits, "_native_symbols", return_value=self.symbols(pool)):
+			(reading,) = limits.collect_native(claude_login=NO_CLAUDE, join_timeout=5, credits_fetcher=lambda base_url, token: self.fail("no list without the helpers"))
+		self.assertEqual((reading["accounts"][0]["error"], "credits" in reading["accounts"][0]), (None, False))
+		# A store that kept the former switch drops its table at the next write; the sampler collects with no setting.
+		with tempfile.TemporaryDirectory() as temp:
+			path = Path(temp) / "limits.sqlite3"
+			with closing(sqlite3.connect(path)) as connection:
+				connection.execute("CREATE TABLE limit_settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+				connection.execute("INSERT INTO limit_settings VALUES ('experimental_pool_credits', 0)")
+				connection.commit()
+			store = limits.LimitsStore(path)
+			store.record([], checked_at=NOW)
+			with closing(sqlite3.connect(path)) as connection:
+				self.assertIsNone(connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'limit_settings'").fetchone())
+			seen = []
+			with patch.object(limits, "collect_native", side_effect=lambda **kwargs: seen.append(sorted(kwargs)) or []):
+				limits.LimitsSampler(store, home_resolver=lambda: Path(temp))._collect()
+			self.assertEqual(seen, [["clock", "join_timeout"]])
 
 	def test_missing_native_symbol_reports_unavailable(self):
 		symbols = self.symbols({"openai-codex": [{"id": "7ad3ca", "access_token": "x"}]})
@@ -540,7 +490,6 @@ class CollectorTests(unittest.TestCase):
 			for alias in node.names if node.module and node.module.split(".")[0] in ("agent", "hermes_cli", "hermes_constants")
 		}
 		self.assertEqual(imported, {
-			("hermes_cli.plugin_provider_requests", "credentialed_provider_request"),
 			("hermes_constants", "get_hermes_home"), ("hermes_constants", "hermes_home_key"),
 			("hermes_constants", "reset_hermes_home_override"), ("hermes_constants", "set_hermes_home_override"),
 		})
@@ -681,29 +630,6 @@ class CreditTests(unittest.TestCase):
 			store.record([{"provider": "openai-codex", "error": None, "accounts": [{"id": "7ad3ca", "label": "b", "priority": 1, "snapshot": later}]}], checked_at=now + 300)
 			block = limits.limits_payload(store, hours=24, now=now + 6 * 3600)["providers"][0]["accounts"][0]["banked_credits"]
 			self.assertEqual((block["applicable_count"], block["fetched_at"], [c["expires_at"] for c in block["credits"]]), (2, now, [now + 9 * 86400]))
-
-	def test_credit_mode_keeps_only_its_own_lists(self):
-		now = 1_800_000_000.0
-		listed = [{"status": "available", "granted_at": now - 86400, "expires_at": now + 3 * 86400}]
-		with tempfile.TemporaryDirectory() as temp:
-			store = limits.LimitsStore(Path(temp) / "limits.sqlite3")
-			payload = lambda t: limits.limits_payload(store, hours=24, now=t)["providers"][0]
-			sampled = lambda t, **extra: dict(account("7ad3ca", t, [window("weekly", 40.0, now + 86400)]), **extra)
-			# Per-account mode: lists sit on their accounts and nothing at the provider level.
-			store.record([{"provider": "openai-codex", "error": None, "credits_mode": "accounts", "accounts": [sampled(now, credits=listed)]}], checked_at=now)
-			block = payload(now)
-			self.assertEqual(([c["expires_at"] for c in block["accounts"][0]["banked_credits"]["credits"]], block["current_banked_credits"]), ([now + 3 * 86400], None))
-			# Default mode: the per-account list is dropped rather than left to go stale, and the current account's list is provider-level.
-			store.record([{"provider": "openai-codex", "error": None, "credits_mode": "current", "current_credits": listed, "accounts": [sampled(now + 300)]}], checked_at=now + 300)
-			block = payload(now + 300)
-			self.assertIsNone(block["accounts"][0]["banked_credits"])
-			self.assertEqual((block["current_banked_credits"]["fetched_at"], [c["expires_at"] for c in block["current_banked_credits"]["credits"]]), (now + 300, [now + 3 * 86400]))
-			self.assertNotIn(limits.CURRENT_CREDITS_ID, [a["id"] for a in block["accounts"]])
-			# A sample without a fresh read keeps the current list; switching back to per-account drops it.
-			store.record([{"provider": "openai-codex", "error": None, "credits_mode": "current", "accounts": [sampled(now + 600)]}], checked_at=now + 600)
-			self.assertIsNotNone(payload(now + 600)["current_banked_credits"])
-			store.record([{"provider": "openai-codex", "error": None, "credits_mode": "accounts", "accounts": [sampled(now + 900)]}], checked_at=now + 900)
-			self.assertIsNone(payload(now + 900)["current_banked_credits"])
 
 	def test_account_without_a_credit_read_has_none(self):
 		with tempfile.TemporaryDirectory() as temp:
