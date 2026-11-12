@@ -2,7 +2,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,16 +83,34 @@ function assertScratchVolumes(calls) {
   for (const call of calls) for (let i = 0; i < call.length - 1; i++) if (call[i] === '-v') assert.equal(call[i + 1].startsWith(root + '/'), true, `volume outside scratch: ${call[i + 1]}`);
 }
 
-test('destroy refuses the shared data directory whatever the container name', async () => {
+test('destroy refuses the shared data directory whatever the container name or spelling, and a directory it cannot resolve', async () => {
   const repo = await checkout();
   write(join(shared, 'data/state.db'), 'shared');
-  for (const env of [{ T3WEBAPP_NAME: 't3demo-other' }, { T3WEBAPP_NAME: 't3demo-other', T3WEBAPP_DIR: `${shared}/` }, { T3WEBAPP_NAME: 't3demo-other', T3WEBAPP_DIR: join(root, 'home/./t3sidebar-demo') }, {}]) {
-    const result = await rig(repo, ['destroy'], { STUB_EXISTING: 't3demo-other t3demo', ...env });
-    assert.equal(result.code, 1, JSON.stringify(env));
-    assert.match(result.stderr, /Refusing to destroy/);
-    assert.deepEqual(result.calls.filter(call => call[0] === 'rm' || call[0] === 'run'), []);
-  }
+  write(join(shared, 'demo-login.env'), 'invented marker');
+  const alias = join(root, 'shared-alias');
+  symlinkSync(shared, alias);
+  const locked = join(root, 'locked-demo');
+  write(join(locked, 'data/state.db'), 'locked');
+  chmodSync(locked, 0);
+  try {
+    // Root could enter the locked directory, so it is only a case for an ordinary user. A symlink followed by `..` resolves, on the file system, to the symlink target's parent, not to the directory holding the symlink.
+    const other = dir => ({ T3WEBAPP_NAME: 't3demo-other', T3WEBAPP_DIR: dir });
+    for (const env of [{ T3WEBAPP_NAME: 't3demo-other' }, other(`${shared}/`), other(join(root, 'home/./t3sidebar-demo')), other(alias), other(`${alias}/../t3sidebar-demo`), ...(process.getuid() === 0 ? [] : [other(locked)]), {}]) {
+      const result = await rig(repo, ['destroy'], { STUB_EXISTING: 't3demo-other t3demo', ...env });
+      assert.equal(result.code, 1, JSON.stringify(env));
+      assert.match(result.stderr, /Refusing to destroy/);
+      assert.deepEqual(result.calls.filter(call => call[0] === 'rm' || call[0] === 'run'), []);
+      assert.equal(existsSync(join(shared, 'demo-login.env')), true, JSON.stringify(env));
+    }
+  } finally { chmodSync(locked, 0o755); }
   assert.equal(readFileSync(join(shared, 'data/state.db'), 'utf8'), 'shared');
+});
+
+test('destroy of a container whose data directory is missing removes only the container', async () => {
+  const repo = await checkout();
+  const result = await rig(repo, ['destroy'], { STUB_EXISTING: 't3demo-gone', T3WEBAPP_NAME: 't3demo-gone', T3WEBAPP_DIR: join(root, 'missing-demo') });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(result.calls.filter(call => call[0] === 'rm' || call[0] === 'run').map(call => call.join(' ')), ['rm -f t3demo-gone']);
 });
 
 test('destroy removes a container and its own data directory', async () => {
