@@ -3063,8 +3063,10 @@ function updateUsagePreferences(ctx, client, patch) {
   let base;
   try { base = validUsagePreferences(ctx.storage.get(USAGE_PREFERENCES_KEY, null)); } catch (_) { base = validUsagePreferences(client.getQueryData(USAGE_PREFERENCES_QUERY)); }
   const next = validUsagePreferences({ ...base, ...resolvePatch(patch, base) });
-  writeUsagePreferences(ctx.storage, next);
+  // A change that could not be stored is not published either, so every page keeps showing what storage holds; the caller learns it from the null.
+  if (!writeUsagePreferences(ctx.storage, next)) return null;
   client.setQueryData(USAGE_PREFERENCES_QUERY, next);
+  return next;
 }
 // One component for both route pages; `view` picks the content and the only endpoint that page fetches.
 export function UsagePage({ ctx, view = 'usage' }) {
@@ -3093,8 +3095,9 @@ function ScopedUsagePage({ ctx, scope, view }) {
   // The shared copy echoes every local change a tick later as an equal but new object; keeping the current one then spares the charts a redundant render, which would otherwise land in the middle of a range glide.
   useEffect(() => { setPrefs(previous => JSON.stringify(previous) === JSON.stringify(shared) ? previous : shared); }, [shared]);
   const update = useCallback(patch => {
-    setPrefs(previous => validUsagePreferences({ ...previous, ...resolvePatch(patch, previous) }));
-    updateUsagePreferences(ctx, client, patch);
+    // The page shows the snapshot that was stored and published, and keeps its current choices when the write failed.
+    const saved = updateUsagePreferences(ctx, client, patch);
+    if (saved) setPrefs(saved);
   }, [ctx, client]);
   const tz = useMemo(() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (_) { return 'UTC'; } }, []);
   const key = usageScopeKey(scope);
