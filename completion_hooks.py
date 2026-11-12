@@ -179,6 +179,8 @@ class CompletionObserver:
 		self.clock = clock
 		self._lock = RLock()
 		self._receipts = OrderedDict()
+		# Conversation root -> receipt key of the turn that began there last. It decides which turn is current whether or not that turn's start reached the ledger, and lives no longer than that receipt.
+		self._latest = {}
 		self._closed = False
 		self._ttl = 24 * 60 * 60
 		self._capacity = 4096
@@ -188,11 +190,15 @@ class CompletionObserver:
 		return get_hermes_home().resolve() == self.home
 
 	def _prune(self, now):
-		for key, (created, _) in list(self._receipts.items()):
+		for key, (created, *_) in list(self._receipts.items()):
 			if now - created > self._ttl:
 				self._receipts.pop(key, None)
 		while len(self._receipts) > self._capacity:
 			self._receipts.popitem(last=False)
+		# An end already in flight may outlive the entry of a newer turn here, so a missing entry means the order is unknown, never that the ending turn is current.
+		for root, key in list(self._latest.items()):
+			if key not in self._receipts:
+				del self._latest[root]
 
 	@staticmethod
 	def _key(task_id, turn_id):
@@ -213,7 +219,7 @@ class CompletionObserver:
 				if key in self._receipts:
 					return None
 				# Reserve before I/O: concurrent duplicate callbacks cannot each restore.
-				pending = (started, None)
+				pending = (started, None, False)
 				self._receipts[key] = pending
 			snapshot = native_snapshot(self.home, sid, dispatched_before=started_wall)
 			fired = heartbeat_fired_at(self.home, snapshot.aliases) if snapshot is not None else None
@@ -222,27 +228,30 @@ class CompletionObserver:
 				self._prune(now)
 				if (not self._closed and self._same_home() and now - started <= self._ttl
 						and self._receipts.get(key) is pending):
+					if snapshot is not None:
+						self._latest[snapshot.root] = key
 					# Viewing/resume construction never invokes this turn hook. Only a
 					# real pre-loop activity receipt may restore deliberate archives.
 					# Fence late workers before any write, not just before Done admission.
 					if snapshot is not None and snapshot.archived:
 						if not restore_archived_activity(self.home, sid, snapshot):
 							snapshot = None
-					self._receipts[key] = (started, snapshot)
-					self._prune(now)
 					# Still under the end fence: a turn that already ended can never leave a start behind.
-					if snapshot is not None:
-						self._begin_run(snapshot.root, key[1], started_wall, fired)
-		except Exception:
-			log.debug("Completion begin observation unavailable")
+					recorded = snapshot is not None and self._begin_run(snapshot.root, key[1], started_wall, fired)
+					self._receipts[key] = (started, snapshot, recorded)
+					self._prune(now)
+		except Exception as exc:
+			log.debug("Completion begin observation unavailable (%s)", type(exc).__name__)
 		return None
 
 	def _begin_run(self, root, turn_id, started_wall, heartbeat_fired_at):
 		# Independent of Done admission: a failed timer write must not discard the receipt.
 		try:
 			self.store.begin_run(root, turn_id, float(started_wall), heartbeat_fired_at)
-		except Exception:
-			log.debug("Turn start unavailable")
+			return True
+		except Exception as exc:
+			log.debug("Turn start unavailable (%s)", type(exc).__name__)
+			return False
 
 	def on_session_end(self, *, session_id=None, task_id=None, turn_id=None, completed=None,
 					   failed=None, interrupted=None, platform=None, **_ignored):
@@ -257,7 +266,7 @@ class CompletionObserver:
 				self._prune(now)
 				receipt = self._receipts.get(key)
 				# Also fence begins whose timeout worker has not returned yet.
-				self._receipts[key] = (now, None)
+				self._receipts[key] = (now, None, False)
 				self._prune(now)
 			# Background work still running wakes this conversation again, so its next turn continues the user's work time: live children, children that finished during this turn with their result still undelivered (those already undelivered at its start are what this turn consumes, or stale), and notifying processes of any lineage id, since compression rotates the owning key. A Stop suppresses those wake-ups until the user's next prompt (native _notif_claim_turn). Without a begin snapshot this turn recorded no start to continue.
 			before = receipt[1] if receipt is not None else None
@@ -265,16 +274,20 @@ class CompletionObserver:
 			if before is not None and interrupted is not True:
 				try:
 					after = native_snapshot(self.home, sid)
-				except Exception:
-					log.debug("Turn end snapshot unavailable")
+				except Exception as exc:
+					log.debug("Turn end snapshot unavailable (%s)", type(exc).__name__)
 			pending = before is not None and interrupted is not True and (
 				bool(after and (after.live or after.undelivered - before.undelivered))
 				or awaits_processes({sid, key[0], *before.aliases}))
 			# Every outcome ends this exact turn; its start stays for subagent-only Working parents.
-			try:
-				self.store.end_run(key[1], pending)
-			except Exception:
-				log.debug("Turn end unavailable")
+			with self._lock:
+				# Under the lock close() takes, so no write starts once it has returned.
+				if self._closed or not self._same_home():
+					return None
+				try:
+					self.store.end_run(key[1], pending)
+				except Exception as exc:
+					log.debug("Turn end unavailable (%s)", type(exc).__name__)
 			if (completed is not True or failed is not False or interrupted is not False
 					or (platform and not _human(platform)) or receipt is None):
 				return None
@@ -284,17 +297,20 @@ class CompletionObserver:
 					or not after.delegations <= before.delegations):
 				return None
 			with self._lock:
-				if not self._closed and self._same_home():
-					self.store.record(after.root, turn_id)
-		except Exception:
+				# A turn that began after this one in the same conversation replaced it, whether or not either start reached the ledger, so Done stays independent of timer writes.
+				if not self._closed and self._same_home() and self._latest.get(after.root) == key:
+					# A turn whose start was recorded also yields to a turn the ledger names instead, such as one another process began.
+					self.store.record(after.root, turn_id, current_only=receipt[2])
+		except Exception as exc:
 			# Observation must never break a turn or return injectable context.
-			log.debug("Completion end observation unavailable")
+			log.debug("Completion end observation unavailable (%s)", type(exc).__name__)
 		return None
 
 	def close(self):
 		with self._lock:
 			self._closed = True
 			self._receipts.clear()
+			self._latest.clear()
 
 
 def register_completion_hooks(ctx):

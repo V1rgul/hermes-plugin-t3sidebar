@@ -190,18 +190,23 @@ def _iso_epoch(value):
 	return _finite(parsed.timestamp()) if parsed.tzinfo is not None else None
 
 
-def normalize_credits(payload):
-	"""Secret-free credit list from Codex's ``rate-limit-reset-credits`` body: status, grant and expiry only, or None when the body is not a credit list."""
+def normalize_credits(payload, now=None):
+	"""Secret-free list of the still available credits in Codex's ``rate-limit-reset-credits`` body: status, grant and expiry only, or None when the body is not a credit list.
+
+	Only available, unexpired credits are ever shown, so redeemed or malformed entries, and with a collection time ``now`` those whose known expiry has passed, are dropped before ``MAX_CREDITS`` bounds the list; a long history cannot crowd out the credits after it. A credit without a known expiry is kept.
+	"""
 	if not isinstance(payload, dict) or not isinstance(payload.get("credits"), list):
 		return None
 	credits = []
-	for credit in payload["credits"][:MAX_CREDITS]:
-		if not isinstance(credit, dict):
+	for credit in payload["credits"]:
+		if not isinstance(credit, dict) or credit.get("status") != "available":
 			continue
-		status = credit.get("status")
-		if not isinstance(status, str) or not re.fullmatch(r"[a-z_]{1,32}", status):
+		expires_at = _iso_epoch(credit.get("expires_at"))
+		if now is not None and expires_at is not None and expires_at <= now:
 			continue
-		credits.append({"status": status, "granted_at": _iso_epoch(credit.get("granted_at")), "expires_at": _iso_epoch(credit.get("expires_at"))})
+		credits.append({"status": "available", "granted_at": _iso_epoch(credit.get("granted_at")), "expires_at": expires_at})
+		if len(credits) == MAX_CREDITS:
+			break
 	return credits
 
 
@@ -210,7 +215,7 @@ def _fetch_current_codex_credits():
 	try:
 		from hermes_cli.plugin_provider_requests import credentialed_provider_request
 		response = credentialed_provider_request("openai-codex", "GET", CODEX_CREDITS_URL, headers=CODEX_CREDITS_HEADERS, timeout=CREDITS_TIMEOUT_S)
-		return normalize_credits(response.json()) if response.status == 200 else None
+		return normalize_credits(response.json(), time.time()) if response.status == 200 else None
 	except Exception:
 		return None
 
@@ -232,7 +237,7 @@ def _fetch_codex_credits(symbols, base_url, token):
 			response = client.get(urls(base_url or "")[1], headers=headers(token, None))
 		if response.status_code != 200:
 			return None
-		return normalize_credits(response.json())
+		return normalize_credits(response.json(), time.time())
 	except Exception:
 		return None
 
@@ -584,6 +589,17 @@ def forget_credit_reads():
 			del _CREDITS_READ[key]
 
 
+def forget_due_credit_reads(now):
+	"""Drop the active home's credit reads that are due at ``now`` anyway, so accounts that left the pool do not keep an entry for the life of the process."""
+	try:
+		home = _home_key(_default_home())
+	except Exception:
+		home = ""
+	with _CREDITS_LOCK:
+		for key in [key for key, read_at in _CREDITS_READ.items() if key[0] == home and now - read_at >= CREDITS_INTERVAL_S]:
+			del _CREDITS_READ[key]
+
+
 # ─── Store ───
 
 
@@ -690,6 +706,11 @@ class LimitsStore:
 					inserted += self._record_account(connection, provider, account, checked_at)
 			connection.execute("DELETE FROM limit_samples WHERE t < ?", (checked_at - RETENTION_S,))
 			connection.execute("DELETE FROM limit_provider_status WHERE checked_at < ?", (checked_at - RETENTION_S,))
+			# An account is shown only while it has samples, so its credit list goes with its last one; the current account's list follows the credit mode instead.
+			connection.execute(
+				"DELETE FROM limit_credits WHERE account_id != ? AND NOT EXISTS "
+				"(SELECT 1 FROM limit_samples WHERE limit_samples.provider = limit_credits.provider AND limit_samples.account_id = limit_credits.account_id)",
+				(CURRENT_CREDITS_ID,))
 		return inserted
 
 	@staticmethod
@@ -704,7 +725,7 @@ class LimitsStore:
 				(provider, CURRENT_CREDITS_ID))
 			credits = reading.get("current_credits")
 			if isinstance(credits, list):
-				clean = normalize_credits({"credits": credits}) or []
+				clean = normalize_credits({"credits": credits}, checked_at) or []
 				connection.execute(
 					"INSERT INTO limit_credits (provider, account_id, credits_fetched_at, credits_json) VALUES (?, ?, ?, ?) "
 					"ON CONFLICT(provider, account_id) DO UPDATE SET credits_fetched_at = excluded.credits_fetched_at, credits_json = excluded.credits_json",
@@ -730,7 +751,7 @@ class LimitsStore:
 		credits = account.get("credits")
 		if isinstance(credits, list):
 			# Re-normalized on write so a direct caller cannot store anything beyond status and times.
-			clean = normalize_credits({"credits": credits}) or []
+			clean = normalize_credits({"credits": credits}, checked_at) or []
 			connection.execute(
 				"INSERT INTO limit_credits (provider, account_id, credits_fetched_at, credits_json) VALUES (?, ?, ?, ?) "
 				"ON CONFLICT(provider, account_id) DO UPDATE SET credits_fetched_at = excluded.credits_fetched_at, credits_json = excluded.credits_json",
@@ -977,25 +998,36 @@ class _SamplerOwner:
 
 	def close(self):
 		with _OWNERS_LOCK:
-			if self.closed:
-				return
-			self.closed = True
-			if _OWNERS.get(self.key) is self:
-				del _OWNERS[self.key]
-			# Keep starts fenced until stop releases the process/home sampler slot. A currently collecting tick may finish, but no later tick will run.
-			if self.sampler is not None:
-				self.sampler.stop()
+			sampler = self._shut()
+		# Join outside the lock: an async /runtime poll takes it to start sampling, and a tick can take seconds to notice the stop.
+		if sampler is not None:
+			sampler.stop()
+
+	def _shut(self):
+		"""Under _OWNERS_LOCK: fence later starts and signal this owner's sampler; return it for the caller to join once the lock is released."""
+		if self.closed:
+			return None
+		self.closed = True
+		if _OWNERS.get(self.key) is self:
+			del _OWNERS[self.key]
+		# A currently collecting tick may finish, but no later tick will run, and a stopping sampler no longer holds the process/home sampler slot.
+		if self.sampler is not None:
+			self.sampler._stop.set()
+		return self.sampler
 
 
 def register_limits_sampler(ctx):
 	owner = _SamplerOwner(_default_home())
 	ctx.on_unload(owner.close)
+	stale = None
 	with _OWNERS_LOCK:
 		if not owner.closed:
 			previous = _OWNERS.get(owner.key)
 			if previous is not None:
-				previous.close()
+				stale = previous._shut()
 			_OWNERS[owner.key] = owner
+	if stale is not None:
+		stale.stop()
 
 
 def start_limits_sampler(store):
@@ -1120,6 +1152,7 @@ class LimitsSampler:
 				readings = self._collect()
 			except Exception as exc:
 				readings, error = None, f"collector_failed:{type(exc).__name__}"
+			forget_due_credit_reads(checked_at)
 			if readings is not None:
 				try:
 					inserted = self.store.record(readings, checked_at=checked_at)

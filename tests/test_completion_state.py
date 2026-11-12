@@ -290,8 +290,8 @@ class CompletionTests(unittest.TestCase):
         self.act(client, "pin", "both")
         self.producer.record("both", "turn-1")
         self.producer.record("old-completed", "turn-1")
-        original = backend.HermesT3SidebarStore.state
-        with patch.object(backend.HermesT3SidebarStore, "state", autospec=True, side_effect=original) as read:
+        original = backend.HermesT3SidebarStore.organized_ids
+        with patch.object(backend.HermesT3SidebarStore, "organized_ids", autospec=True, side_effect=original) as read:
             self.assertEqual(client.get("/sessions").status_code, 200)
             self.assertEqual(read.call_count, 1)
             self.assertEqual(client.get("/sessions?offset=500").status_code, 200)
