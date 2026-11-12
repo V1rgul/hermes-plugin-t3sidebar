@@ -20,7 +20,7 @@ MAX_TEXT_LENGTH = 200_000
 SYNC_SLOT_SECONDS = 30
 MARKER_DAYS = 30
 # Everything ensure_schema creates: a store missing any of them goes through the writer path once, which creates it.
-SCHEMA_OBJECTS = ("session_drafts", "session_drafts_seq", "session_drafts_sync")
+SCHEMA_OBJECTS = ("session_drafts", "session_drafts_seq", "session_drafts_marker_age", "session_drafts_sync")
 
 
 def validate_session_id(value):
@@ -55,6 +55,8 @@ class DraftStore:
 			)
 		""")
 		connection.execute("CREATE INDEX IF NOT EXISTS session_drafts_seq ON session_drafts (seq)")
+		# Every sync probes for deletion markers old enough to purge, while most rows are live drafts.
+		connection.execute("CREATE INDEX IF NOT EXISTS session_drafts_marker_age ON session_drafts (updated_at) WHERE text IS NULL")
 		# One row: the last sequence value given out, and the highest one purged with its deletion marker.
 		connection.execute("""
 			CREATE TABLE IF NOT EXISTS session_drafts_sync (
@@ -112,7 +114,8 @@ class DraftStore:
 					ON CONFLICT(session_id) DO UPDATE SET text = excluded.text, cwd = COALESCE(excluded.cwd, cwd),
 						edited_at = excluded.edited_at, seq = excluded.seq, updated_at = excluded.updated_at
 				""", (sid, change["text"] if change["text"].strip() else None, change.get("cwd"), edited_at, seq, now))
-			purged = connection.execute("SELECT MAX(seq) FROM session_drafts WHERE text IS NULL AND updated_at < ?",
+			# Without INDEXED BY, MAX(seq) walks the sequence index back through every live draft.
+			purged = connection.execute("SELECT MAX(seq) FROM session_drafts INDEXED BY session_drafts_marker_age WHERE text IS NULL AND updated_at < ?",
 				(now - MARKER_DAYS * 86400,)).fetchone()[0]
 			if purged is not None:
 				connection.execute("DELETE FROM session_drafts WHERE text IS NULL AND updated_at < ?", (now - MARKER_DAYS * 86400,))
