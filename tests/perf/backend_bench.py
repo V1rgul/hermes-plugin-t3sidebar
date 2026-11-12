@@ -2,7 +2,7 @@
 """Backend performance regression gate on scratch SQLite fixtures only.
 
 Run (same interpreter resolution as `npm run test:backend`):
-	python -W error::ResourceWarning tests/perf/backend_bench.py [--samples 15] [--baseline <git-ref>] [--update-budgets]
+	python -W error::ResourceWarning tests/perf/backend_bench.py [--samples 15] [--baseline <git-ref>] [--update-budgets] [--allow-output-change]
 
 Statement counts are the primary, machine-independent gate; wall-clock budgets in backend-budgets.json are deliberately generous so only catastrophic regressions trip on a noisy machine. `--baseline` compares interleaved against another revision on identical fixtures, which is the precise check for a single change. Nothing here reads or writes live Hermes profile storage: every database is created under $TMPDIR and the native listing adapter is patched to open only that scratch file read-only.
 """
@@ -364,10 +364,47 @@ def comparable(value):
 	return json.dumps(value, sort_keys=True, default=str)
 
 
+def select_scenarios(names, only):
+	"""Names selected by the --only substrings. A token that matches nothing would silently measure less and still pass, so it is an error, as is a blank one, which would match everything."""
+	if any(not token.strip() for token in only):
+		raise ValueError("--only needs a non-blank scenario substring")
+	unknown = [token for token in only if not any(token in name for name in names)]
+	if unknown:
+		raise ValueError(f"--only {', '.join(unknown)} matches no scenario (known: {', '.join(names)})")
+	return [name for name in names if not only or any(token in name for token in only)]
+
+
+def output_difference(baseline, candidate):
+	"""Path and values of the first difference between two comparable() outputs, so a failing parity gate says where the output changed."""
+	def walk(a, b, path):
+		if type(a) is not type(b):
+			return f"{path}: {type(a).__name__} in baseline, {type(b).__name__} in candidate"
+		if isinstance(a, dict):
+			for key in sorted(set(a) | set(b)):
+				if key not in b:
+					return f"{path}.{key}: only in baseline"
+				if key not in a:
+					return f"{path}.{key}: only in candidate"
+				found = walk(a[key], b[key], f"{path}.{key}")
+				if found:
+					return found
+			return None
+		if isinstance(a, list):
+			for index, (left, right) in enumerate(zip(a, b)):
+				found = walk(left, right, f"{path}[{index}]")
+				if found:
+					return found
+			return None if len(a) == len(b) else f"{path}: {len(a)} items in baseline, {len(b)} in candidate"
+		return None if a == b else f"{path}: {a!r} in baseline, {b!r} in candidate"[:300]
+	return walk(json.loads(baseline), json.loads(candidate), "$")
+
+
 def run_scenarios(fx, impls, warmup, samples, only):
 	results = {}
-	for name, description, needs, prepare, reset in scenarios(fx):
-		if only and not any(token in name for token in only):
+	listed = scenarios(fx)
+	selected = set(select_scenarios([item[0] for item in listed], only))
+	for name, description, needs, prepare, reset in listed:
+		if name not in selected:
 			continue
 		active = [impl for impl in impls if needs(impl)]
 		entry = {"description": description, "impls": {}}
@@ -408,6 +445,9 @@ def run_scenarios(fx, impls, warmup, samples, only):
 				"statement_kinds": statement_kinds(statements)}
 		if len(outputs) > 1:
 			entry["same_output"] = len(set(outputs.values())) == 1
+			if not entry["same_output"]:
+				reference = next(label for label in outputs if label != "candidate")
+				entry["output_difference"] = output_difference(outputs[reference], outputs["candidate"])
 		sys.stderr.write(f"  {name}: " + ", ".join(f"{label} {entry['impls'][label]['median_ms']:.2f} ms" for label in outputs) + "\n")
 	return results
 
@@ -438,11 +478,16 @@ def nice_ceiling(value):
 	return float(math.ceil(value / 25) * 25)
 
 
-def apply_gates(results, budgets, candidate, baseline, ratio, min_delta_ms, timing_gate):
+def apply_gates(results, budgets, candidate, baseline, ratio, min_delta_ms, timing_gate, allow_output_change=False):
 	failures = []
+	if not results:
+		failures.append("no scenario was measured")
 	for name, entry in results.items():
 		measured = entry["impls"].get(candidate)
+		# Only an old baseline may lack a module or seam; a candidate that skips a selected scenario has not been measured.
 		if not measured or "skipped" in measured:
+			failures.append(f"{name}: the candidate did not run it ({measured['skipped'] if measured else 'not measured'})")
+			entry["status"] = ["SKIPPED"]
 			continue
 		budget = budgets.get(name)
 		status = []
@@ -464,8 +509,20 @@ def apply_gates(results, budgets, candidate, baseline, ratio, min_delta_ms, timi
 			if timing_gate and measured["median_ms"] > base["median_ms"] * ratio and measured["median_ms"] > base["median_ms"] + min_delta_ms:
 				failures.append(f"{name}: median {measured['median_ms']:.2f} ms vs baseline {base['median_ms']:.2f} ms (> x{ratio} and > +{min_delta_ms} ms)")
 				status.append("AB-TIME")
+		# A faster implementation that drops rows or fields must not pass; an intended contract change says so explicitly.
+		if entry.get("same_output") is False and not allow_output_change:
+			failures.append(f"{name}: output differs from the baseline at {entry.get('output_difference')} (pass --allow-output-change if the change is intended)")
+			status.append("OUTPUT")
 		entry["status"] = status or ["ok"]
 	return failures
+
+
+def baseline_skips(results, baseline):
+	"""Scenarios the baseline revision could not run, reported so that a missing comparison is never silent."""
+	if not baseline:
+		return []
+	return [f"{name}: baseline skipped ({entry['impls'][baseline]['skipped']})" for name, entry in results.items()
+		if "skipped" in entry["impls"].get(baseline, {})]
 
 
 def table(results, budgets, candidate, baseline):
@@ -575,6 +632,7 @@ def main(argv=None):
 	parser.add_argument("--budgets", type=Path, default=BUDGETS_PATH)
 	parser.add_argument("--update-budgets", action="store_true", help="rewrite the budget file from this run (exact counts, timings x4) instead of gating on it")
 	parser.add_argument("--no-timing-gate", action="store_true", help="gate on statement counts only (for very noisy or shared machines)")
+	parser.add_argument("--allow-output-change", action="store_true", help="do not fail when the candidate's output differs from the baseline's (an intended contract change)")
 	args = parser.parse_args(argv)
 	if args.samples < 1 or args.warmup < 0:
 		parser.error("--samples must be >= 1 and --warmup >= 0")
@@ -611,27 +669,33 @@ def main(argv=None):
 		for impl in impls:
 			if hasattr(impl.api, "open_session_db"):
 				stack.enter_context(patch.object(impl.api, "open_session_db", open_db))
+		try:
+			select_scenarios([item[0] for item in scenarios(fx)], args.only)
+		except ValueError as exc:
+			parser.error(str(exc))
 		sys.stderr.write(f"running {args.warmup} warmup + {args.samples} samples per scenario...\n")
 		results = run_scenarios(fx, impls, args.warmup, args.samples, args.only)
 		if digest(fx.native) != fx.native_digest:
 			raise SystemExit("native fixture bytes changed during read-only scenarios")
 
 	budgets = load_budgets(args.budgets)
-	failures = apply_gates(results, budgets, "candidate", baseline_label, args.ab_ratio, args.ab_min_ms, not args.no_timing_gate)
+	failures = apply_gates(results, budgets, "candidate", baseline_label, args.ab_ratio, args.ab_min_ms, not args.no_timing_gate, args.allow_output_change)
 	if args.update_budgets:
 		write_budgets(args.budgets, results, "candidate", budgets, args.samples)
 		budgets = load_budgets(args.budgets)
-		failures = apply_gates(results, budgets, "candidate", baseline_label, args.ab_ratio, args.ab_min_ms, not args.no_timing_gate)
+		failures = apply_gates(results, budgets, "candidate", baseline_label, args.ab_ratio, args.ab_min_ms, not args.no_timing_gate, args.allow_output_change)
+	skips = baseline_skips(results, baseline_label)
 	report = {
 		"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
 		"candidate": git_describe(ROOT, "HEAD"),
 		"baseline": {"ref": args.baseline, "sha": git_describe(ROOT, args.baseline)} if args.baseline else None,
 		"settings": {"samples": args.samples, "warmup": args.warmup, "ab_ratio": args.ab_ratio, "ab_min_ms": args.ab_min_ms,
-			"timing_gate": not args.no_timing_gate, "only": args.only},
+			"timing_gate": not args.no_timing_gate, "allow_output_change": args.allow_output_change, "only": args.only},
 		"environment": {"python": sys.version.split()[0], "executable": sys.executable, "sqlite": sqlite3.sqlite_version,
 			"machine": platform.machine(), "cpus": os.cpu_count(), "loadavg": os.getloadavg() if hasattr(os, "getloadavg") else None},
 		"fixtures": {**fx.counts, "limit_rows": fx.limit_rows, "metadata_ids": len(fx.metadata_ids), "build_s": round(build_s, 2)},
 		"results": results,
+		"baseline_skips": skips,
 		"failures": failures,
 	}
 	out = OUT_DIR / f"backend-{stamp}.json"
@@ -640,6 +704,8 @@ def main(argv=None):
 	print(f"\nraw: {out}")
 	if args.update_budgets:
 		print(f"budgets written: {args.budgets}")
+	for skip in skips:
+		print(f"SKIP {skip}")
 	if failures:
 		print("\nFAIL:\n  " + "\n  ".join(failures))
 		return 1

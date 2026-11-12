@@ -98,10 +98,13 @@ follow() {
 	"$RUNTIME" exec -d --user hermes -e HERMES_HOME=/opt/data "$NAME" sh -c 'cd /opt/data/demo && exec /opt/hermes/.venv/bin/python seed_limits.py follow >> /opt/data/demo/limits-follow.log 2>&1' >/dev/null
 }
 
+# True when process $1 has exactly --user-data-dir=$2 among its arguments: the path is compared as a whole argument, never as a pattern, so a similar or longer profile path does not match. The arguments are read as the kernel separates them, by NUL, so an argument holding newlines cannot pass for several.
+holds_profile() { grep -zFxq -- "--user-data-dir=$2" "/proc/$1/cmdline" 2>/dev/null; }
+
 # The pid file alone could name a recycled pid: the process must also hold this profile.
 browser_pid() {
 	pid=$(cat "$BROWSER_DIR/browser.pid" 2>/dev/null) || return 1
-	{ tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null | grep -q -- "--user-data-dir=$PROFILE " && echo "$pid"
+	holds_profile "$pid" "$PROFILE" && echo "$pid"
 }
 
 # Closed through CDP so Chromium writes its storage to the profile first: a signal can lose the last writes, such as a plugin switch. The signal is only the fallback.
@@ -128,12 +131,30 @@ restart_box() {
 	follow
 }
 
-# Copies the working tree (uncommitted changes included, development files and the main checkout's linked worktrees excluded) over the installed plugin.
+# Runs $1 if the script ends before release, including on hang-up, Ctrl-C or termination, so an interrupted step still undoes what it started.
+on_exit() { trap "$1" EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; }
+release() { trap - EXIT HUP INT TERM; }
+
+# Writes the project's own files to $1/files, NUL-separated: tracked ones and untracked ones Git does not ignore, so ignored scratch material, environments and databases never enter the container; development-only paths are left out too. A tracked file deleted in the working tree is skipped. Each step writes a file rather than feeding a pipe, so a failing step stops the script.
+project_files() {
+	git -C "$REPO" ls-files -z -c -o --exclude-standard -- . ':(exclude).worktrees' ':(exclude).t3webapp' ':(exclude)node_modules' ':(exclude,glob)**/__pycache__/**' \
+		':(exclude)artifacts' ':(exclude)harness' ':(exclude)tests' ':(exclude)docs' ':(exclude)tools' ':(exclude)AGENTS.md' > "$1/listed"
+	(cd "$REPO" && xargs -0 sh -c 'for f; do if [ -e "$f" ] || [ -L "$f" ]; then printf "%s\0" "$f"; fi; done' sh) < "$1/listed" > "$1/files"
+}
+
+# Copies the project files of the working tree (uncommitted changes included) over the installed plugin. The archive is built and checked before the installed copy is removed: in a pipeline, sh would ignore a failing tar on the left and install a partial copy.
 sync_plugin() {
+	staging=$(mktemp -d "${TMPDIR:-/tmp}/t3webapp-sync.XXXXXX")
+	on_exit 'rm -rf -- "$staging"'
+	project_files "$staging"
+	# Without recursion, a listed directory (a tracked file that became one) brings in only its listed files, never the ignored ones beside them.
+	tar -C "$REPO" --null --no-recursion -T "$staging/files" -cf "$staging/plugin.tar"
+	tar -tf "$staging/plugin.tar" | grep -Fqx -- plugin.yaml || { echo "Refusing to sync: the archive holds no plugin.yaml" >&2; exit 1; }
 	"$RUNTIME" exec "$NAME" rm -rf "$PLUGIN"
 	"$RUNTIME" exec "$NAME" mkdir -p "$PLUGIN"
-	tar -C "$REPO" --exclude=.git --exclude=.worktrees --exclude=.t3webapp --exclude=node_modules --exclude=__pycache__ --exclude=artifacts --exclude=harness --exclude=tests --exclude=docs --exclude=tools --exclude=AGENTS.md -cf - . \
-		| "$RUNTIME" exec -i "$NAME" tar -C "$PLUGIN" -xf -
+	"$RUNTIME" exec -i "$NAME" tar -C "$PLUGIN" -xf - < "$staging/plugin.tar"
+	rm -rf -- "$staging"
+	release
 	"$RUNTIME" exec "$NAME" chown -R hermes:hermes "$PLUGIN"
 	# A browser keeps the Desktop half's on/off choice, and a new browser profile starts with it off: this container-only plugin turns it on there (see enable-sidebar.js).
 	"$RUNTIME" exec "$NAME" mkdir -p "$ENABLER"
@@ -152,13 +173,19 @@ with open(path, "w") as file:
 	yaml.dump(config, file)'
 }
 
-# Starts a worktree container from the shared container's seeded data and test-account login, so it needs neither seed nor an interactive login. A running shared container is paused during the copy so its databases are not caught mid-write.
+# Starts a worktree container from the shared container's seeded data and test-account login, so it needs neither seed nor an interactive login. A running shared container is paused during the copy so its databases are not caught mid-write; an interruption meanwhile still unpauses it, and only a container this run paused is unpaused.
 clone_main_data() {
 	paused=
-	if running "$MAIN_NAME"; then "$RUNTIME" pause "$MAIN_NAME" >/dev/null && paused=1; fi
+	if running "$MAIN_NAME" && "$RUNTIME" pause "$MAIN_NAME" >/dev/null; then
+		paused=1
+		on_exit '"$RUNTIME" unpause "$MAIN_NAME" >/dev/null'
+	fi
 	rc=0
 	as_root -v "$MAIN_DIR/data:/src:ro" -v "$DIR/data:/dst" --entrypoint sh "$IMAGE" -c 'cp -a /src/. /dst/ && sed -i "s|^\( *public_url:\).*|\1 \"http://127.0.0.1:$1\"|" /dst/config.yaml' sh "$PORT" || rc=$?
-	[ -z "$paused" ] || "$RUNTIME" unpause "$MAIN_NAME" >/dev/null
+	if [ -n "$paused" ]; then
+		"$RUNTIME" unpause "$MAIN_NAME" >/dev/null
+		release
+	fi
 	return "$rc"
 }
 
@@ -180,13 +207,26 @@ create() {
 	wait_ready
 }
 
-# A worktree's browser is found by its profile path, which survives the pid file of a removed worktree.
-stop_worktree_browser() { pkill -f -- "--user-data-dir=$1/.t3webapp/browser-profile" 2>/dev/null || true; }
+# A worktree's browser is found by its profile path, which survives the pid file of a removed worktree; every process holding exactly that profile is signalled, Chromium's helpers included.
+stop_worktree_browser() {
+	for candidate in $(pgrep -f -- '--user-data-dir=' 2>/dev/null || true); do
+		! holds_profile "$candidate" "$1/.t3webapp/browser-profile" || kill "$candidate" 2>/dev/null || true
+	done
+}
 
-# Deletes only what create made (data, and the login file of containers made before logins were dropped, then the directory if nothing else is left), so a wrong directory never loses unrelated files.
+# The same directory can be spelled several ways (a trailing slash, a symlink, a dot segment), so data directories are compared by their physical path. cd -P resolves a spelling as file operations do: a symlink followed by .. leads to the parent of the symlink's target. A directory that exists but cannot be resolved counts as the shared one, so a doubt never leads to a deletion; one that does not exist has nothing to delete.
+canonical() { (CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P); }
+is_shared_dir() {
+	[ -d "$1" ] && [ -d "$MAIN_DIR" ] || return 1
+	dir=$(canonical "$1") && main=$(canonical "$MAIN_DIR") || return 0
+	[ "$dir" = "$main" ]
+}
+
+# Deletes only what create made (data, and the login file of containers made before logins were dropped, then the directory if nothing else is left), so a wrong directory never loses unrelated files. The shared data directory is never deleted, whichever container claims it.
 remove_box() {
 	! exists "$1" || "$RUNTIME" rm -f "$1" >/dev/null
 	[ -n "$2" ] && [ -d "$2" ] || return 0
+	! is_shared_dir "$2" || { echo "Kept $2: it is the shared container's data directory, or cannot be resolved" >&2; return 0; }
 	[ ! -d "$2/data" ] || as_root -v "$2:/d" --entrypoint rm "$IMAGE" -rf /d/data
 	rm -f "$2/demo-login.env"
 	rmdir "$2" 2>/dev/null || echo "Kept $2: it holds other files"
@@ -308,8 +348,9 @@ status)
 	"$RUNTIME" ps -a --filter "name=^$NAME\$" --format '{{.Names}} {{.Status}} {{.Ports}}'
 	;;
 destroy)
-	# The shared container holds the test-account login made interactively, so this command never destroys it.
+	# The shared container holds the test-account login made interactively, so this command never destroys it, nor its data directory under another container name.
 	[ "$NAME" != "$MAIN_NAME" ] || { echo "Refusing to destroy the shared container $MAIN_NAME" >&2; exit 1; }
+	! is_shared_dir "$DIR" || { echo "Refusing to destroy $NAME: its data directory $DIR is the shared container's, or cannot be resolved; set T3WEBAPP_DIR" >&2; exit 1; }
 	stop_browser
 	rm -rf -- "$BROWSER_DIR"
 	remove_box "$NAME" "$DIR"
