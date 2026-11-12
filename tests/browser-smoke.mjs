@@ -20,6 +20,18 @@ async function executable() {
 const errors = [];
 const checks = [];
 const check = (label, condition) => { assert.ok(condition, label); checks.push(label); console.log(`PASS ${label}`); };
+// Every truncating text fades instead of ending in an ellipsis, and its fade applies only while the text is actually cut.
+const FADE_SITES = ['.sf-row-title', '.sf-project-name', '.sf-strip-summary', '.sf-menu-title', '.sf-project-path', '.sf-limit-name', '.su-tip-row>span:nth-child(2)', '.su-disclosure-names', '.su-measure-text', '.su-window-label'];
+const fadeSites = target => target.evaluate(sites => sites.map(selector => {
+  const els = [...document.querySelectorAll(selector)], isCut = el => el.scrollWidth > el.clientWidth;
+  const bad = els.filter(el => { const style = getComputedStyle(el); return style.textOverflow !== 'clip' || style.maskImage === 'none' || style.getPropertyValue('--sf-cut') !== (isCut(el) ? '1' : '0'); });
+  return { selector, count: els.length, cut: els.filter(isCut).length, bad: bad.length };
+}), FADE_SITES);
+const checkFades = async (label, target, expected) => {
+  const sites = await fadeSites(target);
+  console.log(`FADES ${label}: ${JSON.stringify(sites.filter(site => site.count))}`);
+  check(`${label}: cut text fades instead of an ellipsis, only while cut`, expected.every(selector => sites.find(site => site.selector === selector).count > 0) && sites.every(site => site.bad === 0));
+};
 try {
   browser = await chromium.launch({ executablePath: await executable(), headless: true, args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, deviceScaleFactor: 1, timezoneId: 'Europe/Paris' });
@@ -174,6 +186,10 @@ try {
     const probe = document.createElement('span'); probe.style.color = `var(${token})`; el.append(probe);
     const color = getComputedStyle(probe).color; probe.remove(); return color;
   }, token);
+  // A title that fits has no scroll range, so its scroll-driven --sf-cut stays 0 and cancels the right fade.
+  const fitting = (await page.locator('.sf-row-title').evaluateAll(els => els.map(el => { const style = getComputedStyle(el); return { start: style.getPropertyValue('--sf-fade-start'), cut: style.getPropertyValue('--sf-cut'), max: el.scrollWidth - el.clientWidth }; }))).filter(f => f.max === 0);
+  check('session titles that fit have no fade', fitting.length > 0 && fitting.every(f => f.start === '0px' && f.cut === '0'));
+  await checkFades('sidebar cards', page, ['.sf-row-title', '.sf-project-name']);
   const titleColor = id => page.locator(`[data-session-id="${id}"] .sf-row-title`).evaluate(el => getComputedStyle(el).color);
   check('Working, Input and Done status icons and labels share the metadata line centre', await page.locator('.sf-status').evaluateAll(labels => labels.length >= 2 && labels.every(label => {
     const tokens = label.closest('.sf-card-meta').querySelector('.sf-token').getBoundingClientRect(), icon = label.querySelector('[data-status-icon]')?.getBoundingClientRect(), text = label.getBoundingClientRect();
@@ -606,6 +622,7 @@ try {
   await filters.getByRole('button', { name: 'Filter by docs', exact: true }).click({ button: 'right' });
   await projectMenu.waitFor();
   check('filter right-click claims ownership before the native capture-phase fallback', await page.evaluate(() => window.fixtureFallbackMenus === 0));
+  await checkFades('project menu', page, ['.sf-menu-title']);
   check('filter project right-click opens the shared menu without selecting a filter', await projectMenu.locator('.sf-menu-title').textContent() === 'docs' && await filters.getByRole('button', { name: 'All projects', exact: true }).getAttribute('aria-pressed') === 'true' && await design.count() === 1);
   await projectMenu.getByRole('button', { name: 'Project icon: law', exact: true }).click();
   await page.locator('[data-session-id="readme"] [data-codicon="law"]').waitFor();
@@ -678,6 +695,7 @@ try {
   await page.getByRole('button', { name: 'All projects', exact: true }).click();
   await page.getByRole('button', { name: 'Simulate missing backend' }).click();
   await page.locator('.sf-strip-summary', { hasText: 'Backend unavailable, read-only browsing' }).waitFor();
+  await checkFades('status strip', page, ['.sf-strip-summary']);
   check('missing backend disables mutation but preserves browsing', await page.locator('[data-session-id="design"] [aria-label="Archive session"]').isDisabled());
   await page.getByRole('button', { name: 'Restore mock backend' }).click();
   await page.locator('[data-session-id="design"] [aria-label="Archive session"]').waitFor({ state: 'attached' });
@@ -1099,13 +1117,40 @@ try {
     await page.locator('.sf-section-body').evaluateAll(els => els.forEach(el => { el.scrollTop = 0; }));
     const card = page.locator('[data-session-id="synthetic-active-000"]');
     const metadata = await card.locator('.sf-card-meta').boundingBox(), title = await card.locator('.sf-row-title').boundingBox();
-    check(`${height}px: 56px two-line card; title ellipsis below metadata`, (await card.boundingBox()).height === 56 && metadata.y + metadata.height <= title.y && await card.locator('.sf-row-title').evaluate(el => getComputedStyle(el).textOverflow === 'ellipsis' && el.scrollWidth > el.clientWidth));
+    // Registered lengths compute to px: the 1.5em fade of the 14px title reads 21px. The right fade drawn is --sf-cut × --sf-fade-end.
+    const fadeState = el => { const style = getComputedStyle(el); return { cut: style.getPropertyValue('--sf-cut'), start: style.getPropertyValue('--sf-fade-start'), end: style.getPropertyValue('--sf-fade-end'), left: el.scrollLeft, max: el.scrollWidth - el.clientWidth, overflow: style.textOverflow, mask: style.maskImage, transition: style.transitionProperty }; };
+    const cardTitle = card.locator('.sf-row-title');
+    const rest = await cardTitle.evaluate(fadeState);
+    check(`${height}px: 56px two-line card; cut title fades only at its right edge, below metadata`, (await card.boundingBox()).height === 56 && metadata.y + metadata.height <= title.y && rest.overflow === 'clip' && rest.mask !== 'none' && rest.max > 0 && rest.left === 0 && rest.cut === '1' && rest.start === '0px' && rest.end === '21px');
     check(`${height}px: card text lines use a centered 3px gap without changing line heights`, await card.locator('.sf-open').evaluate(el => {
       const meta = el.querySelector('.sf-card-meta').getBoundingClientRect(), title = el.querySelector('.sf-row-title').getBoundingClientRect(), bounds = el.getBoundingClientRect();
       return getComputedStyle(el).rowGap === '3px' && meta.height === 19 && title.height === 19 && title.top - meta.bottom === 3 && Math.abs((meta.top + title.bottom) / 2 - (bounds.top + bounds.bottom) / 2) < 1;
     }));
     await card.hover(); const action = await card.locator('.sf-hover').boundingBox(), titleHovered = await card.locator('.sf-row-title').boundingBox();
     check(`${height}px: hover actions stay at top, title unaffected`, action.y < title.y && action.y + action.height <= title.y + 1 && JSON.stringify(titleHovered) === JSON.stringify(title));
+    if (height === 400) {
+      await page.waitForTimeout(700);
+      check('reduced motion leaves a hovered cut title at its start', await cardTitle.evaluate(el => el.scrollLeft) === 0);
+      await page.mouse.move(1100, 850);
+      await page.emulateMedia({ reducedMotion: 'no-preference' });
+      await card.hover();
+      // The dwell keeps the title still at first; then it scrolls with both edges faded until its end shows, where only the left fade remains.
+      const dwell = await cardTitle.evaluate(fadeState);
+      await page.waitForFunction(() => { const el = document.querySelector('[data-session-id="synthetic-active-000"] .sf-row-title'); return el.scrollLeft > 8 && el.scrollLeft < el.scrollWidth - el.clientWidth - 80; });
+      const moving = await cardTitle.evaluate(fadeState);
+      await page.waitForFunction(() => { const el = document.querySelector('[data-session-id="synthetic-active-000"] .sf-row-title'); return el.scrollWidth - el.clientWidth - el.scrollLeft < 1; }, null, { timeout: 10000 });
+      await page.waitForTimeout(350);
+      const end = await cardTitle.evaluate(fadeState);
+      console.log(`TITLE REVEAL: ${JSON.stringify({ dwell, moving, end })}`);
+      check('hover reveal waits, then scrolls a cut title with its left edge fading in and the right fade kept until its end shows', dwell.transition.includes('--sf-fade-start') && dwell.transition.includes('--sf-fade-end') && dwell.left === 0 && dwell.start === '0px' && moving.start !== '0px' && moving.end === '21px' && end.start === '21px' && end.end === '0px');
+      await page.mouse.move(1100, 850);
+      const leaving = await cardTitle.evaluate(fadeState);
+      await page.waitForFunction(() => document.querySelector('[data-session-id="synthetic-active-000"] .sf-row-title').scrollLeft === 0);
+      await page.waitForTimeout(350);
+      const back = await cardTitle.evaluate(fadeState);
+      check('leaving the card glides its title back with fades transitioning, ending with the right fade only', leaving.left > 0 && back.start === '0px' && back.end === '21px');
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+    }
     await page.mouse.move(1100, 850);
     await page.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, `dense-${height}.png`) });
     console.log(`LAYOUT ${height}: ${JSON.stringify(layout)}`);
@@ -1270,6 +1315,7 @@ try {
     const picker = page.getByRole('dialog', { name: dialogName, exact: true });
     await picker.getByRole('button', { name: `${prefix} Multi workspace: ~/second`, exact: true }).waitFor();
     check(`${trigger} always has search and only Filter has All projects`, await picker.getByRole('searchbox', { name: 'Search projects' }).isVisible() && await picker.getByRole('button', { name: 'All projects', exact: true }).count() === (prefix === 'Filter by' ? 1 : 0));
+    await checkFades(`${trigger} picker`, page, ['.sf-project-path']);
     pickerShapes.push(await picker.locator('.sf-project-options .sf-project-name,.sf-project-path').allTextContents().then(values => values.filter(value => value !== 'All projects')));
     check(`${trigger} groups multiple paths beneath one project name`, await picker.locator('.sf-project-group .sf-project-name').allTextContents().then(names => names.join() === 'Multi workspace') && await picker.locator('.sf-project-group .sf-project-folder .sf-project-path').allTextContents().then(paths => paths.join('|') === '~/main|~/second'));
     check(`${trigger} uses context-menu-density rows and compact folder spacing`, await picker.locator('.sf-project-choice').evaluateAll(rows => rows.every(row => Math.abs(row.getBoundingClientRect().height - 24) < .1) && [...document.querySelectorAll('.sf-project-group')].every(group => {
@@ -2419,6 +2465,7 @@ try {
           stored: JSON.parse(localStorage.getItem('hermes.plugin.hermes-t3sidebar.usage-preferences')).accounts };
       }, CODEX);
       console.log(`USAGE LIMITS ACCOUNTS: ${JSON.stringify(accounts)}`);
+      await checkFades('Limits accounts', usage, ['.su-disclosure-names', '.su-window-label']);
       check('Unfolding Codex accounts shows its two rows with pace ticks inside the bars, leaves Anthropic folded and stores the fold', accounts.codex === 2 && accounts.total === 2 && accounts.paces && accounts.overflowX <= 0 && accounts.inCard && accounts.names.join() === 'anthropic'
         && JSON.stringify(accounts.stored) === '{"openai-codex":true}');
       const thickness = await usage.evaluate(selector => [...document.querySelectorAll(`${selector} .su-window`)].map(row => { const track = row.querySelector('.su-bar-track').getBoundingClientRect(), bar = row.querySelector('.su-bar').getBoundingClientRect(), pace = row.querySelector('.su-pace')?.getBoundingClientRect();
@@ -2554,7 +2601,8 @@ try {
     {
       const geometry = await measure(), other = await measureIn(ANTHROPIC), overflow = await usage.evaluate(() => Math.max(...[...document.querySelectorAll('.su-top, .su-scroll')].map(el => el.scrollWidth - el.clientWidth)));
       console.log(`USAGE LIMITS NARROW: ${JSON.stringify({ geometry, other, overflow })}`);
-      // Too narrow for a whole averaging label left of Now: it is ellipsized (full text in its title) rather than crossing Now.
+      await checkFades('narrow Limits', usage, ['.su-measure-text']);
+      // Too narrow for a whole averaging label left of Now: it is cut with a fade (full text in its title) rather than crossing Now.
       check('Limits page fits a narrow workspace: no overflow and every chart keeps its measurement labels on their side of Now', overflow <= 0 && averageOk(geometry) && labelsOk(geometry, { full: false }) && averageOk(other) && labelsOk(other, { full: false }));
     }
     await usageButton.click();

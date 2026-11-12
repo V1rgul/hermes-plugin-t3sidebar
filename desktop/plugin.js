@@ -1196,6 +1196,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
   };
 }
 
+// Cut text fades out over its last 1.5em instead of ending in an ellipsis. Overflow is read in CSS: the element is its own scroll container, and a scroll-driven animation is active only while it has a scroll range, so --sf-cut is 1 when the text is cut and 0 when it fits. Fades are registered lengths so that a state change (the hover reveal) transitions them. Clients without scroll-driven animations keep the ellipsis.
+const shortFade = selector => `@property --sf-cut{syntax:'<number>';inherits:false;initial-value:0}@property --sf-fade-start{syntax:'<length>';inherits:false;initial-value:0px}@property --sf-fade-end{syntax:'<length>';inherits:false;initial-value:0px}@keyframes sf-cut{from,to{--sf-cut:1}}
+@supports(animation-timeline:scroll()){${selector}{text-overflow:clip;--sf-fade-end:1.5em;mask-image:linear-gradient(to right,transparent,#000 var(--sf-fade-start),#000 calc(100% - var(--sf-cut) * var(--sf-fade-end)),transparent);animation:sf-cut linear both;animation-timeline:scroll(self inline)}}`;
 const CSS = `
 /* Desktop's --ui-purple (#9e94d5 in both modes) is 2.7:1 on light backgrounds, and --ui-blue (#0053fd in both modes, Midnight included) about 3.3:1 on dark ones. Mixing in the base text darkens them in light mode and lightens them in dark mode; raising OKLCH chroma restores the saturation the mix removes (blue 62% at ×1.6: saturated yet light enough at 12px). */
 .sf,.sf-menu{--sf-blue:color-mix(in srgb,var(--ui-blue,#0053fd) 66%,var(--ui-base,var(--ui-text-primary)));--sf-blue:oklch(from color-mix(in oklab,var(--ui-blue,#0053fd) 62%,var(--ui-base,var(--ui-text-primary))) l calc(c * 1.6) h);--sf-purple:color-mix(in srgb,var(--ui-purple,#9e94d5) 70%,var(--ui-base,var(--ui-text-primary)));--sf-purple:oklch(from color-mix(in oklab,var(--ui-purple,#9e94d5) 65%,var(--ui-base,var(--ui-text-primary))) l calc(c * 2) h)}
@@ -1311,6 +1314,11 @@ const CSS = `
 /* Saturated hues read stronger than the neutral icons beside them at equal lightness contrast; 0.75 opacity brings the coloured glyphs to the same visual weight in light and dark themes. */.sf-limit .su-verdict-icon:is([data-severity=caution],[data-severity=medium],[data-severity=high]){opacity:.75;transition:opacity .1s}
 /* Hover, focus and the open page lift the neutral items to the primary text colour; the coloured glyphs rise with them to full opacity, over the Button's own 100ms colour transition. */.sf .sf-footer .sf-limits:is(:hover,:focus-visible,[aria-current=page]) .su-verdict-icon{opacity:1}
 @media(prefers-reduced-motion:reduce){.sf-empty,.sf-skeleton-meta,.sf-skeleton-title{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
+
+/* Last, so it overrides the ellipsis each rule above keeps for older clients. */
+${shortFade(':is(.sf-row-title,.sf-project-name,.sf-project-details>.sf-project-name,.sf-strip-summary,.sf-menu-title,.sf-project-path,.sf-limit-name)')}
+/* While a hover scrolls a cut title (useTitleReveal), its left edge fades in as the text starts moving, and its right edge fades out as the end arrives; both return as the title glides back. */
+@supports(animation-timeline:scroll()){.sf-row-title{transition:--sf-fade-start .3s ease,--sf-fade-end .3s ease}.sf-row-title[data-reveal]{--sf-fade-start:1.5em}.sf-row-title[data-reveal=end]{--sf-fade-end:0px}}
 `;
 // Monochrome 24x24 provider marks: LobeHub Icons, @lobehub/icons-static-svg 1.95.1 (MIT, Copyright (c) 2023 LobeHub; notice in
 // THIRD_PARTY_NOTICES.md), pinned to a release at least 7 days old. Only the marks of Hermes providers are bundled, not the whole
@@ -1901,9 +1909,48 @@ function statusBadge(badge, row, hidden, details = false) {
     statusIcon(badge),
     { done: 'Done', woke: 'Woke', input: 'Input' }[badge]);
 }
+// Hovering a card scrolls a cut title to its end after a short dwell, so it reads whole without waiting for the tooltip; the dwell keeps a pointer crossing the list from scrolling every title it passes. Leaving glides it back to its start. data-reveal switches the edge fades, which transition over TITLE_FADE_MS (CSS): "moving" fades the left edge in as the text starts, "end" fades the right edge out once the remaining scroll takes no longer than that transition, so both finish together.
+const TITLE_REVEAL_DELAY_MS = 350, TITLE_REVEAL_PX_PER_S = 120, TITLE_FADE_MS = 300;
+function useTitleReveal() {
+  const title = useRef(null), motion = useRef(null);
+  const stop = useCallback(() => { const current = motion.current; motion.current = null; if (current) { clearTimeout(current.timer); cancelAnimationFrame(current.frame); } }, []);
+  useEffect(() => stop, [stop]);
+  // Moves scrollLeft from its current value to `to` over `duration`; the position is tracked here rather than read back, because the browser may round scrollLeft.
+  const glide = useCallback((el, to, duration, ease, frame) => {
+    const current = motion.current = { timer: 0, frame: 0 }, from = el.scrollLeft, start = performance.now();
+    const step = now => {
+      const t = duration > 0 ? Math.min(1, (now - start) / duration) : 1;
+      el.scrollLeft = from + (to - from) * ease(t);
+      frame?.(duration * (1 - t));
+      if (t < 1 && motion.current === current) current.frame = requestAnimationFrame(step);
+    };
+    current.frame = requestAnimationFrame(step);
+  }, []);
+  const enter = useCallback(() => {
+    stop();
+    if (reducedMotion()) return;
+    const current = motion.current = { timer: 0, frame: 0 };
+    current.timer = setTimeout(() => {
+      const el = title.current, end = el ? el.scrollWidth - el.clientWidth : 0;
+      if (!(end > 0) || motion.current !== current) return;
+      el.dataset.reveal = 'moving';
+      glide(el, end, (end - el.scrollLeft) * 1000 / TITLE_REVEAL_PX_PER_S, t => t, remaining => { if (remaining <= TITLE_FADE_MS) el.dataset.reveal = 'end'; });
+    }, TITLE_REVEAL_DELAY_MS);
+  }, [stop, glide]);
+  const leave = useCallback(() => {
+    stop();
+    const el = title.current;
+    if (!el || (!el.dataset.reveal && !el.scrollLeft)) return;
+    delete el.dataset.reveal;
+    if (reducedMotion()) el.scrollLeft = 0;
+    else glide(el, 0, TITLE_FADE_MS, t => 1 - (1 - t) ** 3);
+  }, [stop, glide]);
+  return { title, enter, leave };
+}
 // The sidebar has one menu, { key, kind: 'actions' | 'snooze', open }, held by the card that last opened it. Only that card mounts a popover around its trigger; every other card renders bare buttons, which keeps mounting a card cheap.
 function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, menu, setMenu, presetTime, snoozeDetail, workingDetails, showTokens }) {
   const menuOpen = menu?.kind === 'actions' && menu.open, snoozeOpen = menu?.kind === 'snooze' && menu.open;
+  const reveal = useTitleReveal();
   const openMenu = kind => setMenu({ key: row.key, kind, open: true });
   const setOpen = kind => open => setMenu(current => current?.key === row.key && current.kind === kind ? { ...current, open } : current);
   // A card that leaves (scrolled out of a windowed list while closed, moved to another shelf, removed) drops its menu, as its own state did before.
@@ -1927,6 +1974,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   };
   const details = [row.cwd, row.git_branch, row.status === 'waiting' ? 'Waiting for approval or answer' : isWorking(row) ? workingDetails && workingDetail(row) || 'working' : row.status, hasDraft && 'Unsent draft'].filter(Boolean);
   return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': hasDraft, 'data-working': isWorking(row), 'data-unread': row.archived !== true && (!!(!active && row.completion?.done_token) || row.unread === true || row.woke) || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
+    onPointerEnter: reveal.enter, onPointerLeave: reveal.leave,
     onContextMenu: event => { event.preventDefault(); openMenu('actions'); } },
     h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
       'aria-label': `${sessionTitle(row)}${attention ? ', waiting for approval or answer' : ''}${row.status === 'unknown' ? ', status unknown' : ''}`,
@@ -1948,7 +1996,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
         h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row, hidden, workingDetails) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age),
         // The tint alone is colour-only (and absent on the viewed card); the pencil marks every card with a draft, the viewed one included, following its focused composer read. It closes the metadata line, right of the time and the status badge, where the hover actions cover it like the rest of that side: the card's own tip and description name the draft instead.
         hasDraft ? h('span', { className: 'sf-draft-mark', role: 'img', 'aria-label': 'Unsent draft' }, icon('Pencil', '✎')) : null),
-      h('span', { className: 'sf-row-title' }, sessionTitle(row))),
+      h('span', { className: 'sf-row-title', ref: reveal.title }, sessionTitle(row))),
     // Hover-action tips point out of the card, past its right edge, so they cover neither the other action nor the neighbouring cards.
     h('div', { className: 'sf-hover', 'data-sf-tip-anchor': true },
       row.archived !== true ? withMenu('snooze', h(IconButton, { label: 'Snooze session', name: 'Alarm', glyph: '◷', disabled, 'aria-haspopup': 'dialog', 'aria-expanded': snoozeOpen, tip: 'card', ...bare('snooze') }),
@@ -4465,6 +4513,8 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-redeem-lose{position:absolute;top:0;bottom:0;left:0;background:repeating-linear-gradient(135deg,var(--ui-orange,#db704b) 0 4px,color-mix(in srgb,var(--ui-orange,#db704b) 45%,transparent) 4px 8px)}
 .su-redeem-gain{position:absolute;top:0;right:0;bottom:0;display:flex;align-items:center;padding-right:5px;font-size:10px;font-variant-numeric:tabular-nums;color:var(--ui-green,#1f8a65)}
 @media(max-width:640px){.su{padding:12px}.su-window{grid-template-columns:minmax(60px,7rem) minmax(40px,1fr) 4rem;}.su-window-reset{display:none}}
+/* Last, so it overrides the ellipsis each rule above keeps for older clients. */
+${shortFade(':is(.su-tip-row>span:nth-child(2),.su-disclosure-names,.su-measure-text,.su-window-label)')}
 `;
 export default {
   id: 'hermes-t3sidebar', name: 'hermes-t3sidebar', defaultEnabled: true,
