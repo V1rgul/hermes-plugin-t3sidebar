@@ -417,7 +417,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       (change.discarded === undefined || typeof change.discarded === 'string');
     // settled: the focused session once its composer has been reconciled; until then it is being entered, and an empty composer there is
     // a copy not restored yet, never a deletion. unsaved / unshown: changed since last stored / since the cards last got the view.
-    const state = { key, running: null, settled: null, unsaved: false, unshown: false,
+    // reads: counts the reads of the focused composer, so that only the latest one applies.
+    const state = { key, running: null, settled: null, unsaved: false, unshown: false, reads: 0,
       cursor: Number.isSafeInteger(stored?.cursor) && stored.cursor >= 0 ? stored.cursor : 0,
       known: new Map(entries(stored?.known).filter(([, entry]) => validKnown(entry))),
       pending: new Map(entries(stored?.pending).filter(([, change]) => validPending(change))) };
@@ -457,8 +458,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
        without stored history, so the draft is put back (as it is into a composer that never held this draft);
      - any other difference is a local edit, kept as pending and sent with the next sync (blank text deletes the draft).
      Only a mounted composer is written. False means retry once it is: a failed write, or, when entering, a composer not mounted yet. */
-  async function reconcileDraft(scope, state, target, { mounted = () => false, entering = false } = {}) {
+  async function reconcileDraft(scope, state, target, { mounted = () => false, entering = false, current = () => true } = {}) {
     const raw = await readComposer(scope, target.address);
+    // A newer read has started since: it sees at least as recent a composer, and acts on it.
+    if (!current()) return true;
     if (raw === null) return !entering;
     const key = draftKeyFor(state, target), local = raw.trim() ? raw : '', localHash = draftHash(local);
     const known = state.known.get(key), pending = state.pending.get(key);
@@ -488,8 +491,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
   async function reconcileFocused(scope, state, target) {
     if (!ownsFocus(scope)) return false;
     const focused = () => ownsFocus(scope) && target.ids.includes(env.host.state?.focusedStoredSessionId?.get());
-    const done = await reconcileDraft(scope, state, target, { mounted: focused, entering: state.settled !== target.key });
-    if (done && focused()) state.settled = target.key;
+    // Reads complete out of order, also across leaving and re-entering one session: a read of a session no longer focused supersedes none.
+    const ticket = focused() ? ++state.reads : state.reads, current = () => state.reads === ticket;
+    const done = await reconcileDraft(scope, state, target, { mounted: focused, entering: state.settled !== target.key, current });
+    if (done && focused() && current()) state.settled = target.key;
     return done;
   }
   // A composer still holding the exact text of a draft deleted since (discarded here, sent or cleared elsewhere), which Desktop keeps until that
