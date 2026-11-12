@@ -417,9 +417,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       (change.discarded === undefined || typeof change.discarded === 'string');
     // settled: the focused session once its composer has been reconciled; until then it is being entered, and an empty composer there is
     // a copy not restored yet, never a deletion. unsaved / unshown: changed since last stored / since the cards last got the view.
-    // reads: counts the reads of the focused composer, so that only the latest one applies. deleted: sessions whose deletion was verified,
-    // which a sync answered or a composer read before it can no longer give a draft.
-    const state = { key, running: null, settled: null, unsaved: false, unshown: false, reads: 0, deleted: new Set(),
+    // reads: counts the reads of the focused composer, so that only the latest one applies.
+    // unanswered: one set per sync request in flight, of the sessions whose deletion was verified since it was sent: its answer predates that deletion.
+    const state = { key, running: null, settled: null, unsaved: false, unshown: false, reads: 0, unanswered: new Set(),
       cursor: Number.isSafeInteger(stored?.cursor) && stored.cursor >= 0 ? stored.cursor : 0,
       known: new Map(entries(stored?.known).filter(([, entry]) => validKnown(entry))),
       pending: new Map(entries(stored?.pending).filter(([, change]) => validPending(change))) };
@@ -465,7 +465,6 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     if (!current()) return true;
     if (raw === null) return !entering;
     const key = draftKeyFor(state, target), local = raw.trim() ? raw : '', localHash = draftHash(local);
-    if (state.deleted.has(key)) return true;
     const known = state.known.get(key), pending = state.pending.get(key);
     if (local === (pending ? pending.text : known?.text ?? '')) {
       if (known && !pending && known.seen !== localHash) { known.seen = localHash; state.unsaved = true; }
@@ -513,13 +512,15 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     if (text) state.pending.set(id, { text: '', cwd, edited_at: Date.now() / 1000, discarded: draftHash(text) });
   }
   // A deleted session's draft goes with it, so no draft-only card brings it back and no pending edit is sent for it again; the companion marks its own row deleted.
+  // The text its composer last held stays a deleted copy, like a discarded draft's, so a read of it, before or after the deletion, queues nothing; a new edit or a draft received later does count.
   function forgetDrafts(scope, ids) {
     const state = draftState(scope);
     for (const id of ids) {
-      state.deleted.add(id);
+      for (const deleted of state.unanswered) deleted.add(id);
+      const known = state.known.get(id), pending = state.pending.get(id);
       state.pending.delete(id);
-      const known = state.known.get(id);
-      if (known && known.text !== null) state.known.set(id, { ...known, text: null, edited_at: Date.now() / 1000 });
+      if (pending) state.known.set(id, { cwd: pending.cwd, project: null, ...known, text: null, edited_at: Date.now() / 1000, seen: pending.discarded ?? draftHash(pending.text) });
+      else if (known && known.text !== null) state.known.set(id, { ...known, text: null, edited_at: Date.now() / 1000 });
     }
     publishDrafts(scope, state);
   }
@@ -815,7 +816,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           for (const [id] of sent) tried.add(id);
           const body = { since: state.cursor, sent_at: Date.now() / 1000,
             changes: sent.map(([session_id, change]) => ({ session_id, text: change.text, edited_at: change.edited_at, ...(change.cwd ? { cwd: change.cwd } : {}) })) };
-          const value = await fenced(scope, () => ctx.rest('/drafts/sync', { method: 'POST', body }));
+          const deleted = new Set();
+          state.unanswered.add(deleted);
+          let value;
+          try { value = await fenced(scope, () => ctx.rest('/drafts/sync', { method: 'POST', body })); } finally { state.unanswered.delete(deleted); }
           if (value?.profile !== (route?.targetProfile || scope.profile) || !Number.isSafeInteger(value.cursor) || value.cursor < 0 || typeof value.reset !== 'boolean' ||
             !Array.isArray(value.drafts) || !value.drafts.every(validDraft)) throw new Error('Invalid current-profile drafts response.');
           // The companion returns the current row of every changed session, once: anything else is not an acknowledgment of what was sent.
@@ -826,17 +830,19 @@ export function createController(ctx, client = queryClient, env = { capture: cap
           if (value.reset) {
             for (const [id, entry] of state.known) if (entry.text !== null && !listed.has(id)) state.known.set(id, { ...entry, text: null });
           }
+          // A session deleted while this answer was on its way keeps its deletion; the next request, sent after it, asks again from the same point and gets that row's current version.
+          let cursor = value.cursor;
           for (const draft of value.drafts) {
-            if (state.deleted.has(draft.session_id)) continue;
+            if (deleted.has(draft.session_id)) { cursor = body.since; continue; }
             state.known.set(draft.session_id, { text: draft.text, cwd: draft.cwd, project: draft.project ?? null, edited_at: draft.edited_at, seen: state.known.get(draft.session_id)?.seen ?? null });
           }
           for (const [id, change] of sent) {
             // The composer held the sent text, so an edit that lost to a newer one is then replaced like any remote change.
             const known = state.known.get(id);
-            if (known) known.seen = change.discarded ?? draftHash(change.text);
+            if (known && !deleted.has(id)) known.seen = change.discarded ?? draftHash(change.text);
             if (state.pending.get(id) === change) state.pending.delete(id);
           }
-          state.cursor = value.cursor;
+          state.cursor = cursor;
           received ||= value.drafts.length > 0;
           more = [...state.pending].some(sendable);
           if (more) saveDraftState(state);
