@@ -195,7 +195,7 @@ class CompletionObserver:
 				self._receipts.pop(key, None)
 		while len(self._receipts) > self._capacity:
 			self._receipts.popitem(last=False)
-		# Receipts leave oldest first, so a turn still holding its receipt never loses a newer turn's entry.
+		# An end already in flight may outlive the entry of a newer turn here, so a missing entry means the order is unknown, never that the ending turn is current.
 		for root, key in list(self._latest.items()):
 			if key not in self._receipts:
 				del self._latest[root]
@@ -298,7 +298,7 @@ class CompletionObserver:
 				return None
 			with self._lock:
 				# A turn that began after this one in the same conversation replaced it, whether or not either start reached the ledger, so Done stays independent of timer writes.
-				if not self._closed and self._same_home() and self._latest.get(after.root, key) == key:
+				if not self._closed and self._same_home() and self._latest.get(after.root) == key:
 					# A turn whose start was recorded also yields to a turn the ledger names instead, such as one another process began.
 					self.store.record(after.root, turn_id, current_only=receipt[2])
 		except Exception as exc:
