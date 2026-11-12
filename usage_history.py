@@ -565,10 +565,14 @@ def _render(days, tz, now, buckets, window_end, series, missing):
 		label = provider or "unknown"
 		entry = {**arrays, "cost_usd": cost, "user_messages": users}
 		# The model view is split by model alone: one model billed through several providers (or an unrecorded one) is one series, naming its provider only while there is a single one. Both views sum the already-rounded (provider, model) series, so they always agree to the token.
-		model_bucket = models.setdefault(model, empty(model, model, label, model))
+		if model not in models:
+			models[model] = empty(model, model, label, model)
+		model_bucket = models[model]
 		if model_bucket["provider"] != label:
 			model_bucket["provider"] = None
-		for bucket in (model_bucket, providers.setdefault(label, empty(label, label, label, None))):
+		if label not in providers:
+			providers[label] = empty(label, label, label, None)
+		for bucket in (model_bucket, providers[label]):
 			for name in fields:
 				bucket[name] = [left + right for left, right in zip(bucket[name], entry[name])]
 			bucket["cost_usd"] = [left + right for left, right in zip(bucket["cost_usd"], cost)]
