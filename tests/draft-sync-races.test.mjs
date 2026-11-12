@@ -39,3 +39,67 @@ test('a composer read from an earlier entry of the focused session cannot overwr
   assert.equal(stored().pending.design.text, 'latest text');
   assert.equal(mock.control.mountedDrafts.design, 'latest text');
 });
+
+// The companion marks a deleted session's draft deleted before it answers the deletion; the fixture's delete route does not.
+function withDraftDeletion(rest) {
+  return async (path, options) => {
+    const value = await rest(path, options);
+    if (/^\/sessions\/[^/]+\/delete$/.test(path)) {
+      for (const draft of mock.control.serverDrafts) if (value.deleted_ids.includes(draft.session_id) && draft.text !== null) Object.assign(draft, { text: null, seq: ++mock.control.draftSeq });
+    }
+    return value;
+  };
+}
+
+test('a sync answered before a session\'s verified deletion cannot bring its draft back afterwards', async () => {
+  const scope = captureScope(), controller = make(), rest = mock.ctx.rest, ready = deferred(), release = deferred();
+  mock.control.serverDrafts = [{ session_id: 'readme', text: 'saved draft', cwd: '/projects/docs', project: null, seq: 1, edited_at: 100 }];
+  let hold = false;
+  const deleting = withDraftDeletion(rest);
+  mock.ctx.rest = async (path, options) => {
+    const value = await deleting(path, options);
+    if (path === '/drafts/sync' && hold) { hold = false; ready.resolve(); await release.promise; }
+    return value;
+  };
+  try {
+    await controller.syncDrafts(scope);
+    mock.host.state.focusedStoredSessionId.set('readme');
+    mock.control.mountedDrafts.readme = 'saved draft';
+    await controller.enterDraft(scope, target('readme'));
+    mock.control.mountedDrafts.readme = 'pending edit';
+    await controller.noteDraft(scope, target('readme'));
+    mock.host.state.focusedStoredSessionId.set('design');
+    // The companion applies the edit; its answer is delivered only after the deletion.
+    hold = true;
+    const sync = controller.syncDrafts(scope);
+    await ready.promise;
+    await controller.delete(scope, { id: 'readme', status: 'idle' });
+    assert.deepEqual(controller.localDrafts(scope).map(draft => draft.session_id), []);
+    release.resolve();
+    await sync;
+    assert.deepEqual(controller.localDrafts(scope).map(draft => draft.session_id), []);
+    assert.deepEqual(Object.keys(stored().pending), []);
+    assert.equal(stored().known.readme?.text ?? null, null);
+  } finally { release.resolve(); mock.ctx.rest = rest; }
+});
+
+test('leaving the focused session after its verified deletion does not queue its last text again', async () => {
+  const scope = captureScope(), controller = make(), rest = mock.ctx.rest;
+  mock.ctx.rest = withDraftDeletion(rest);
+  try {
+    mock.control.serverDrafts = [{ session_id: 'readme', text: 'saved draft', cwd: '/projects/docs', project: null, seq: 1, edited_at: 100 }];
+    await controller.syncDrafts(scope);
+    mock.host.state.focusedStoredSessionId.set('readme');
+    mock.control.mountedDrafts.readme = 'saved draft';
+    await controller.enterDraft(scope, target('readme'));
+    mock.control.mountedDrafts.readme = 'last pending text';
+    await controller.noteDraft(scope, target('readme'));
+    await controller.delete(scope, { id: 'readme', status: 'idle' });
+    assert.equal(mock.host.state.focusedStoredSessionId.get(), null, 'the deletion opened a fresh chat');
+    // As the sidebar does once focus has moved: the session left is reconciled one last time.
+    await controller.leaveDraft(scope, target('readme'));
+    await controller.syncDrafts(scope);
+    assert.deepEqual(mock.control.draftSyncs.slice(1).flatMap(body => body.changes.map(change => change.session_id)), []);
+    assert.deepEqual(controller.localDrafts(scope).map(draft => draft.session_id), []);
+  } finally { mock.ctx.rest = rest; }
+});

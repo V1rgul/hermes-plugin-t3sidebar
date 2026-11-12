@@ -417,8 +417,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       (change.discarded === undefined || typeof change.discarded === 'string');
     // settled: the focused session once its composer has been reconciled; until then it is being entered, and an empty composer there is
     // a copy not restored yet, never a deletion. unsaved / unshown: changed since last stored / since the cards last got the view.
-    // reads: counts the reads of the focused composer, so that only the latest one applies.
-    const state = { key, running: null, settled: null, unsaved: false, unshown: false, reads: 0,
+    // reads: counts the reads of the focused composer, so that only the latest one applies. deleted: sessions whose deletion was verified,
+    // which a sync answered or a composer read before it can no longer give a draft.
+    const state = { key, running: null, settled: null, unsaved: false, unshown: false, reads: 0, deleted: new Set(),
       cursor: Number.isSafeInteger(stored?.cursor) && stored.cursor >= 0 ? stored.cursor : 0,
       known: new Map(entries(stored?.known).filter(([, entry]) => validKnown(entry))),
       pending: new Map(entries(stored?.pending).filter(([, change]) => validPending(change))) };
@@ -464,6 +465,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     if (!current()) return true;
     if (raw === null) return !entering;
     const key = draftKeyFor(state, target), local = raw.trim() ? raw : '', localHash = draftHash(local);
+    if (state.deleted.has(key)) return true;
     const known = state.known.get(key), pending = state.pending.get(key);
     if (local === (pending ? pending.text : known?.text ?? '')) {
       if (known && !pending && known.seen !== localHash) { known.seen = localHash; state.unsaved = true; }
@@ -513,6 +515,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
   function forgetDrafts(scope, ids) {
     const state = draftState(scope);
     for (const id of ids) {
+      state.deleted.add(id);
       state.pending.delete(id);
       const known = state.known.get(id);
       if (known && known.text !== null) state.known.set(id, { ...known, text: null, edited_at: Date.now() / 1000 });
@@ -823,6 +826,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
             for (const [id, entry] of state.known) if (entry.text !== null && !listed.has(id)) state.known.set(id, { ...entry, text: null });
           }
           for (const draft of value.drafts) {
+            if (state.deleted.has(draft.session_id)) continue;
             state.known.set(draft.session_id, { text: draft.text, cwd: draft.cwd, project: draft.project ?? null, edited_at: draft.edited_at, seen: state.known.get(draft.session_id)?.seen ?? null });
           }
           for (const [id, change] of sent) {
