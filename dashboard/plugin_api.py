@@ -282,6 +282,30 @@ class HermesT3SidebarStore:
 			result["sessions"][key] = metadata
 		return result
 
+	def forget(self, session_ids) -> None:
+		"""Drop the organisation, Done marker and turn start of sessions whose native deletion was verified.
+
+		Delivery receipts stay, so a replayed end of their turns still cannot bring a Done back. Creates neither the store nor a table.
+		"""
+		if any(not isinstance(sid, str) or re.fullmatch(SESSION_ID_PATTERN, sid) is None for sid in session_ids):
+			raise ValueError("invalid session id")
+		if not session_ids or not self.path.is_file():
+			return
+		connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+		try:
+			connection.execute("BEGIN IMMEDIATE")
+			tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+			for table in ("session_metadata", "session_completions", "session_runs"):
+				if table in tables:
+					connection.executemany(f"DELETE FROM {table} WHERE session_id = ?", [(sid,) for sid in session_ids])
+			connection.execute("COMMIT")
+		except BaseException:
+			if connection.in_transaction:
+				connection.execute("ROLLBACK")
+			raise
+		finally:
+			connection.close()
+
 	def mutate(self, session_id: str, body: SessionAction) -> dict:
 		if not isinstance(session_id, str) or re.fullmatch(SESSION_ID_PATTERN, session_id) is None:
 			raise ValueError("invalid session id")
@@ -1322,6 +1346,11 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 		except Exception as exc:
 			# The verified deletion is still reported as such; the drafts left behind are only logged.
 			log.warning("Drafts of deleted sessions were not cleared (%s)", type(exc).__name__)
+		try:
+			# Otherwise read on every state poll, and kept as organised ids to backfill, for good.
+			await asyncio.to_thread(store().forget, value["deleted_ids"])
+		except Exception as exc:
+			log.warning("Metadata of deleted sessions was not cleared (%s)", type(exc).__name__)
 		return value
 
 	@api.post("/drafts/sync")
