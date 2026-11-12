@@ -975,10 +975,11 @@ def card_rows(db, rows):
 	result = []
 	for row, tip, provider in zip(rows, tips, providers):
 		chain = list(dict.fromkeys([row["id"], *(row.get("_lineage_ids") or [])]))
+		chain_ids = set(chain)
 		compressed = bool(row.get("_lineage_ids"))
 		usage = [segments.get(sid, {}) for sid in chain] if compressed else [row]
 		# A subagent reached from several segments of this conversation counts once.
-		children = {sid: counts for seed in chain for sid, counts in subagents.get(seed, {}).items() if sid not in chain}
+		children = {sid: counts for seed in chain for sid, counts in subagents.get(seed, {}).items() if sid not in chain_ids}
 		if provider is None:
 			candidates = set().union(*(billing.get(sid, set()) for sid in chain))
 			evidence = {name for segment in usage for name in (card_provider(segment.get("model_config")), provider_name(segment.get("billing_provider"))) if name}
