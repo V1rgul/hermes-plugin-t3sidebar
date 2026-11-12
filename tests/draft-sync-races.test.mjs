@@ -122,3 +122,25 @@ test('Discard retires the text its composer actually held when the clear fails, 
   await controller.syncDrafts(scope);
   assert.equal(mock.control.serverDrafts[0].text, null);
 });
+
+test('reopening keeps the source draft when only its folder changed during the handoff', async () => {
+  const scope = captureScope(), arrived = deferred(), release = deferred();
+  // The new session's workspace confirmation is held until the source draft has changed.
+  const host = Object.create(mock.host, { requestProfile: { value: async (route, method, params) => {
+    if (method === 'session.cwd.set') { arrived.resolve(); await release.promise; }
+    return mock.host.requestProfile(route, method, params);
+  } } });
+  const controller = make(host);
+  mock.control.serverDrafts = [{ session_id: 'gone', text: 'same text', cwd: '/robot', project: null, seq: 1, edited_at: 100 }];
+  await controller.syncDrafts(scope);
+  const opening = controller.openDraft(scope, { id: 'gone', _draftOnly: true, _liveOnly: true, cwd: '/robot' });
+  await arrived.promise;
+  Object.assign(mock.control.serverDrafts[0], { cwd: '/another-project', seq: 2, edited_at: Date.now() / 1000 });
+  await controller.syncDrafts(scope);
+  release.resolve();
+  await opening;
+  assert.equal(mock.control.mountedDrafts['fixture-created'], 'same text');
+  assert.equal(controller.localDrafts(scope).find(draft => draft.session_id === 'gone')?.cwd, '/another-project');
+  await controller.syncDrafts(scope);
+  assert.equal(mock.control.serverDrafts.find(draft => draft.session_id === 'gone')?.text, 'same text');
+});

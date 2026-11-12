@@ -884,6 +884,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       const text = id && (state.pending.has(id) ? state.pending.get(id).text : state.known.get(id)?.text);
       if (!text) throw new Error('This draft is no longer saved. Refresh and retry.');
       const cwd = state.pending.get(id)?.cwd ?? state.known.get(id)?.cwd ?? null;
+      // The version copied is its text in its folder, where it reopens: a change to either during the handoff is newer content, and stays.
+      const source = () => JSON.stringify([state.pending.has(id) ? state.pending.get(id).text : state.known.get(id)?.text, state.pending.get(id)?.cwd ?? state.known.get(id)?.cwd ?? null]);
+      const copied = source();
       const route = await routeFor(scope); check(scope);
       let created = null;
       if (cwd) created = await this.newChat(scope, { id: cwd, path: cwd }, `hermes-t3sidebar:draft:${id}:${draftHash(text)}`);
@@ -895,7 +898,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       if (!written) throw new Error('A new session opened, but the draft could not be put into its composer. It stays saved.');
       if (created) state.pending.set(created.stored_session_id, { text, cwd, edited_at: Date.now() / 1000 });
       // Only the version copied leaves: one received or typed during the handoff is newer, and stays.
-      if ((state.pending.has(id) ? state.pending.get(id).text : state.known.get(id)?.text) === text) dropDraft(state, id, cwd);
+      if (source() === copied) dropDraft(state, id, cwd);
       publishDrafts(scope, state);
       this.flushDrafts(scope);
     },
