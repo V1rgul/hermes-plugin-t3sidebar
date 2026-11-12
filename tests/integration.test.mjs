@@ -152,11 +152,12 @@ test('two clients sync one draft through the real HTTP companion: it appears, th
 		assert.ok(ready, `HTTP fixture did not start: ${fixture.stderr()}`);
 		const scope = { connectionId: 'fixture', profile: 'default', epoch: 1 };
 		const route = { connectionId: 'fixture', profile: 'default', targetProfile: 'default' };
-		// One Desktop per client: its own plugin storage, query cache and composers (only a mounted one, present in `composers`, accepts text).
-		const desktop = () => {
+		// One Desktop per client: its own plugin storage, query cache, composers (only a mounted one, present in `composers`, accepts text) and focused stored session.
+		const desktop = initialFocus => {
 			const storage = new Map(), composers = {}, cache = new QueryClient();
+			let focused = initialFocus;
 			const host = {
-				state: { focusedSessionOwner: { get: () => ({ connectionId: 'fixture', profile: 'default' }) } },
+				state: { focusedSessionOwner: { get: () => ({ connectionId: 'fixture', profile: 'default' }) }, focusedStoredSessionId: { get: () => focused } },
 				composer: {
 					getDraft: async id => composers[id] ?? null,
 					setDraft: async (id, text) => { if (!(id in composers)) return false; composers[id] = text; return true; }
@@ -165,9 +166,9 @@ test('two clients sync one draft through the real HTTP companion: it appears, th
 			const ctx = { rest, storage: { get: (key, fallback) => storage.has(key) ? structuredClone(storage.get(key)) : fallback, set: (key, value) => storage.set(key, structuredClone(value)) } };
 			const controller = createController(ctx, cache, { capture: () => scope, routes: async () => [route], host });
 			clients.push({ controller, cache });
-			return { controller, cache, composers };
+			return { controller, cache, composers, focus: id => { focused = id; } };
 		};
-		const a = desktop(), b = desktop();
+		const a = desktop('recent-1'), b = desktop('recent-2');
 		const target = { key: 'recent-1', ids: ['recent-1'], address: 'recent-1', cwd: '/recent' };
 		const elsewhere = { key: 'recent-2', ids: ['recent-2'], address: 'recent-2', cwd: '/recent' };
 		const listed = view => view.map(draft => draft.session_id);
@@ -180,6 +181,7 @@ test('two clients sync one draft through the real HTTP companion: it appears, th
 		const seen = await b.controller.syncDrafts(scope, () => elsewhere);
 		assert.deepEqual(listed(seen), ['recent-1']);
 		assert.equal(JSON.stringify(seen).includes('typed in A'), false, 'the card view carries presence, not text');
+		b.focus('recent-1');
 		b.composers['recent-1'] = '';
 		await b.controller.enterDraft(scope, target);
 		assert.equal(b.composers['recent-1'], 'typed in A');
