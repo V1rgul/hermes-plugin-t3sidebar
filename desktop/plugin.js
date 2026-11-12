@@ -3124,10 +3124,13 @@ function ScopedUsagePage({ ctx, scope, view }) {
     }
     // Recorded under the Source/profile rather than this page, so a page opened again or reached through another activation still waits for a newer read.
     // The map is looked up again here: another account's attempt may have recorded its own uncertainty under this Source/profile meanwhile, and replacing the map would forget it.
+    // A limits read already under way, in any activation of this Source/profile and with or without a page, may have been answered before the outcome, yet would finish after it: it is cancelled, so only a read started from here on can settle the account.
     const unsettle = () => {
       if (!unsettledRedeems.has(redeemScope)) unsettledRedeems.set(redeemScope, new Map());
       unsettledRedeems.get(redeemScope).set(id, Date.now());
       setUnsettledCount(count => count + 1);
+      const reads = { queryKey: [USAGE_ROOT, scope.connectionId, scope.profile], predicate: query => query.queryKey[4] === 'limits' };
+      void client.cancelQueries(reads).then(() => client.invalidateQueries(reads));
     };
     const reload = () => client.invalidateQueries({ queryKey: [...usageScopeKey(scope), 'limits'] });
     // An answer for a Source/profile no longer shown is never reported as a success here: it may have spent a credit there.
@@ -3136,10 +3139,10 @@ function ScopedUsagePage({ ctx, scope, view }) {
       if (!sameScope(scope, captureScope())) throw new Error('Source/profile changed; refresh before using a reset.');
       let result;
       try { result = await ctx.rest('/usage/limits/redeem', { method: 'POST', body: { provider, account } }); }
-      catch (error) { unsettle(); void reload(); throw new Error(`The reset could not be used: ${error?.message || 'request failed'}. Refresh to check whether it was spent.`); }
+      catch (error) { unsettle(); throw new Error(`The reset could not be used: ${error?.message || 'request failed'}. Refresh to check whether it was spent.`); }
       if (!sameScope(scope, captureScope())) { unsettle(); throw new Error(moved); }
       const failure = redeemFailure(result);
-      if (failure === UNCONFIRMED_REDEEM) { unsettle(); void reload(); }
+      if (failure === UNCONFIRMED_REDEEM) unsettle();
       if (failure) throw new Error(failure);
       await reload();
       if (!sameScope(scope, captureScope())) throw new Error(moved);

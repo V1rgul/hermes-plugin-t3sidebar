@@ -129,11 +129,11 @@ test('an outcome that returns after the Source changed is not a success, and the
   await act(async () => mock.switchScope('source-a'));
   await openLimits();
   assert.equal(buttonState(), 'usable|');
-  // The old page's request now succeeds; the read the new page shows predates it.
+  // The old page's request now succeeds; the read the new page shows predates it, and the newer read the outcome starts is held.
+  const release = holdReads();
   await act(async () => { gate.resolve({ status: 'reset', available_count: 1, windows_reset: 1 }); });
   await tick(); await tick();
   mock.control.redeemResult = { status: 'reset', available_count: 0, windows_reset: 1 };
-  const release = holdReads();
   await click(redeemButton());
   if (dialog()) { await click(confirmButton()); assert.match(alertText(), /Refresh to check whether it was spent\.$/); }
   assert.equal(posts(), 1, 'no second spend on a read older than the first outcome');
