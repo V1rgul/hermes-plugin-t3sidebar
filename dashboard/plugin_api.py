@@ -869,7 +869,14 @@ def card_projects(db):
 		return []
 
 
-def card_project(cwd, projects):
+def project_owners(projects):
+	"""Every registered folder with its project, longest first, so the first owner of a path is the one project_for_path picks; prepare it once per request."""
+	# A stable sort keeps catalog order among equally long folders, as max() did.
+	return sorted(((folder.path, project) for project in projects for folder in project.folders), key=lambda owner: -len(owner[0]))
+
+
+def card_project(cwd, projects, owners=None):
+	"""``owners``, when given, is project_owners(projects) prepared by the caller for many cards."""
 	if not isinstance(cwd, str) or not cwd.strip():
 		return {"id": "__no_project__", "name": "Home", "icon": None, "color": None, "cwd": None, "is_home": True}
 	try:
@@ -880,11 +887,9 @@ def card_project(cwd, projects):
 		return {"id": target, "name": Path(target).name or target, "icon": None, "color": None, "cwd": target}
 	target = _normalize_path(cwd)
 	# Match project_for_path's longest owning folder, including secondary folders, and its descendant test: either the OS separator or "/".
-	owners = [(folder.path, project) for project in projects for folder in project.folders
-		if target == folder.path or any(target.startswith(folder.path.rstrip("/\\") + separator) for separator in (os.sep, "/"))]
-	if owners:
-		folder, project = max(owners, key=lambda owner: len(owner[0]))
-		return {"id": project.id, "name": project.name, "icon": project.icon, "color": project.color, "cwd": folder}
+	for folder, project in (project_owners(projects) if owners is None else owners):
+		if target == folder or any(target.startswith(folder.rstrip("/\\") + separator) for separator in (os.sep, "/")):
+			return {"id": project.id, "name": project.name, "icon": project.icon, "color": project.color, "cwd": folder}
 	return {"id": target, "name": Path(target).name or target, "icon": None, "color": None, "cwd": target}
 
 
@@ -972,6 +977,7 @@ def card_rows(db, rows):
 		for sid in [row["id"], *(row.get("_lineage_ids") or [])]}
 	billing = card_billing_providers(db, billing_ids) if billing_ids else {}
 	projects = card_projects(db) if rows else []
+	owners = project_owners(projects)
 	result = []
 	for row, tip, provider in zip(rows, tips, providers):
 		chain = list(dict.fromkeys([row["id"], *(row.get("_lineage_ids") or [])]))
@@ -991,7 +997,7 @@ def card_rows(db, rows):
 			counts[key] = sum(values) if all(type(value) is int and value >= 0 for value in values) else None
 		item = {k: row[k] for k in LIST_FIELDS if k in row}
 		item["archived"] = bool(row.get("archived", False))
-		item.update(project=card_project(row.get("cwd"), projects), provider=provider,
+		item.update(project=card_project(row.get("cwd"), projects, owners), provider=provider,
 			model=tip.get("model"), source=tip.get("source", row.get("source")), **counts)
 		item["total_tokens"] = counts["input_tokens"] + counts["output_tokens"] if all(value is not None for value in counts.values()) else None
 		result.append(item)
@@ -1210,7 +1216,8 @@ def native_drafts(profile, drafts):
 			db.close()
 	except Exception:
 		projects = []
-	return [{**draft, "project": card_project(draft["cwd"], projects) if draft["text"] is not None and draft["cwd"] else None} for draft in drafts]
+	owners = project_owners(projects)
+	return [{**draft, "project": card_project(draft["cwd"], projects, owners) if draft["text"] is not None and draft["cwd"] else None} for draft in drafts]
 
 
 async def native_rename(request, profile, session_id, body):
