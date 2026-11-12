@@ -68,6 +68,8 @@ class ReseedOwnership(unittest.TestCase):
 		with closing(sqlite3.connect(self.db)) as conn, conn:
 			conn.execute("CREATE TABLE sessions(id TEXT PRIMARY KEY, source TEXT, model TEXT, cwd TEXT, title TEXT, title_source TEXT, started_at REAL, last_activity_at REAL, archived INTEGER DEFAULT 0)")
 			conn.execute("CREATE TABLE session_model_usage(session_id TEXT, first_seen REAL, last_seen REAL)")
+			# Hermes keeps session titles unique with this index.
+			conn.execute("CREATE UNIQUE INDEX idx_sessions_title_unique ON sessions(title) WHERE title IS NOT NULL")
 		ScratchSessionDB.opened, ScratchSessionDB.deleted = [], []
 		for patcher in (patch.object(seed, "DB_PATH", self.db), patch.object(seed, "OWNED", self.owned), patch.object(seed, "SessionDB", ScratchSessionDB),
 				patch.object(seed, "sqlite3", SimpleNamespace(connect=unsynced)), patch("builtins.print")):
@@ -97,15 +99,39 @@ class ReseedOwnership(unittest.TestCase):
 		self.assertEqual(self.ids(), second | {"manual-on-seed-model"})
 		self.assertEqual(set(ScratchSessionDB.opened), {self.db})
 
-	def test_sessions_from_before_the_record_are_recognised_by_every_seed_trait_together(self):
-		self.add("local-earlier-seed", "claude-opus-5-5", "Follow-up: Upgrade Vite to 7")
-		self.add("manual-on-seed-model", "gpt-5.6-sol", "My own checkout work")
-		self.add("local-free-model", "free-model", "Upgrade Vite to 7")
-		self.add("local-elsewhere", "gpt-5.6-sol", "Upgrade Vite to 7", cwd="/opt/data/workspace/scratch")
-		self.add("desktop-seed-title", "gpt-5.6-sol", "Upgrade Vite to 7", source="desktop")
+	def test_without_a_record_a_session_that_merely_looks_seeded_is_kept(self):
+		lookalike = "local-" + "ab" * 32
+		self.add(lookalike, "gpt-5.6-sol", "Speed up checkout by hand")
 		seed.main()
-		self.assertEqual(ScratchSessionDB.deleted, ["local-earlier-seed"])
-		self.assertTrue({"manual-on-seed-model", "local-free-model", "local-elsewhere", "desktop-seed-title"} <= self.ids())
+		self.assertEqual(ScratchSessionDB.deleted, [])
+		self.assertIn(lookalike, self.ids())
+		self.assertEqual(len(self.ids()), 79)
+
+	def test_without_a_record_a_session_on_a_seed_title_stops_the_seed_before_any_change(self):
+		manual = "local-" + "ab" * 32
+		self.add(manual, "gpt-5.6-sol", "Upgrade Vite to 7")
+		stopped = None
+		try:
+			seed.main()
+		except SystemExit as error:
+			stopped = str(error.code)
+		self.assertEqual((ScratchSessionDB.deleted, self.ids(), self.owned.exists()), ([], {manual}, False))
+		self.assertIn(manual, stopped or "")
+
+	def test_with_a_record_an_unrecorded_session_on_a_seed_title_stops_the_seed_before_any_change(self):
+		seed.main()
+		recorded = set(json.loads(self.owned.read_text())["ids"])
+		# A seed session deleted by hand, and a new one given its title.
+		with closing(sqlite3.connect(self.db)) as conn, conn:
+			gone = conn.execute("SELECT id FROM sessions WHERE title = 'Review: Upgrade Vite to 7'").fetchone()[0]
+			conn.execute("DELETE FROM sessions WHERE id = ?", (gone,))
+		self.add("manual-on-seed-title", "free-model", "Review: Upgrade Vite to 7")
+		with self.assertRaises(SystemExit) as stopped:
+			seed.main()
+		self.assertIn("manual-on-seed-title", str(stopped.exception.code))
+		self.assertEqual(ScratchSessionDB.deleted, [])
+		self.assertEqual(self.ids(), recorded - {gone} | {"manual-on-seed-title"})
+		self.assertEqual(set(json.loads(self.owned.read_text())["ids"]), recorded)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """Synthetic session history for the Usage page of the test Webapp container (tools/test-webapp), written through Hermes's own SessionDB.
 
-Runs inside that container only; every title, message and token count is invented. Sessions are spread over the past nine days on the same working rhythm as seed_limits.py, priced on models Hermes's price table knows, and archived so they fill the Archived shelf instead of the live list. Re-running replaces the sessions it wrote before, and only those: a session made by hand in the container survives, whatever its model.
+Runs inside that container only; every title, message and token count is invented. Sessions are spread over the past nine days on the same working rhythm as seed_limits.py, priced on models Hermes's price table knows, and archived so they fill the Archived shelf instead of the live list. Re-running replaces the sessions it recorded as written, and only those: a session made by hand in the container survives, whatever its model. A container seeded before that record existed keeps its earlier seed sessions, since nothing proves they are the seed's; they hold the seed's titles, so the seed lists them and changes nothing until they are deleted by hand.
 """
 
 from contextlib import closing
@@ -44,14 +44,18 @@ def busy(t):
 	return 9 <= hour < 12 or 14 <= hour < 23
 
 
-def owned_ids(conn):
-	"""Ids of the sessions earlier runs wrote. Runs from before the record existed are recognised by everything they set together: a local session with a seed id, on a seed model, in a seed project folder, under a generated title."""
-	if OWNED.exists():
-		return list(json.loads(OWNED.read_text(encoding="utf-8"))["ids"])
+def owned_ids():
+	"""Ids of the sessions the last run wrote. Without the record (a fresh container, or one seeded before the record existed) no session is known to be the seed's, so none is deleted: a model, folder or title the seed uses is no proof, since a session made by hand can share them."""
+	if not OWNED.exists():
+		return []
+	return list(json.loads(OWNED.read_text(encoding="utf-8"))["ids"])
+
+
+def taken_titles(conn, old):
+	"""Sessions outside the record that hold a title the seed writes. Hermes keeps titles unique, so the seed would fail on them halfway; they are reported before anything changes. Sessions seeded before the record existed show up here too."""
 	titles = {shown for items in WORK.values() for title in items for shown in (title, f"Follow-up: {title}", f"Review: {title}")}
-	folders = {f"{W}/{project}" for project in WORK}
-	rows = conn.execute(f"SELECT id, title, cwd FROM sessions WHERE source = 'local' AND model IN ({','.join('?' * len(ROUTES))})", [m for m, _, _ in ROUTES])
-	return [sid for sid, title, cwd in rows if sid.startswith("local-") and title in titles and cwd in folders]
+	owned = set(old)
+	return [(sid, title) for sid, title in conn.execute("SELECT id, title FROM sessions WHERE title IS NOT NULL") if title in titles and sid not in owned]
 
 
 def record_owned(ids):
@@ -67,8 +71,11 @@ def main():
 	# Each task runs three times (first pass, follow-up and review on other days), which fills the working hours like a real week.
 	titles = [(project, title) for project, items in WORK.items() for title in items] * 3
 	rng.shuffle(titles)
+	old = owned_ids()
 	with closing(sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)) as conn:
-		old = owned_ids(conn)
+		taken = taken_titles(conn, old)
+	if taken:
+		sys.exit("Not seeding: these sessions were not recorded as the seed's but hold titles it writes; delete them, then seed again:\n" + "\n".join(f"  {sid}  {title}" for sid, title in taken))
 	for sid in old:
 		db.delete_session(sid)
 	# Hermes never reuses a deleted id, so every run mints new ones. They are recorded before the first row is written, so an interrupted run still hands every id it may have written to the next one.
