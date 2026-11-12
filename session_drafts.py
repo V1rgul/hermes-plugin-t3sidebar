@@ -19,6 +19,8 @@ MAX_TEXT_LENGTH = 200_000
 # The client's sync interval: an edit reported in a sync happened at most this long before it, unless its client was offline.
 SYNC_SLOT_SECONDS = 30
 MARKER_DAYS = 30
+# Everything ensure_schema creates: a store missing any of them goes through the writer path once, which creates it.
+SCHEMA_OBJECTS = ("session_drafts", "session_drafts_seq", "session_drafts_sync")
 
 
 def validate_session_id(value):
@@ -82,6 +84,10 @@ class DraftStore:
 		# Polling alone never creates the store.
 		if not changes and not self.path.is_file():
 			return {"cursor": 0, "reset": True, "drafts": []}
+		if not changes:
+			value = self._quiet(since)
+			if value is not None:
+				return value
 		self.path.parent.mkdir(parents=True, exist_ok=True)
 		connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
 		connection.row_factory = sqlite3.Row
@@ -113,15 +119,48 @@ class DraftStore:
 				purged_seq = max(purged_seq, purged)
 			connection.execute("UPDATE session_drafts_sync SET seq = ?, purged_seq = ? WHERE id = 1", (seq, purged_seq))
 			reset = since == 0 or since < purged_seq or since > seq
-			rows = connection.execute(f"""
-				SELECT session_id, text, cwd, edited_at, seq FROM session_drafts
-				WHERE {"text IS NOT NULL" if reset else "seq > ?"} OR session_id IN (SELECT value FROM json_each(?)) ORDER BY seq
-			""", ((json.dumps(changed),) if reset else (since, json.dumps(changed)))).fetchall()
+			rows = self._changed_rows(connection, since, reset, changed)
 			connection.execute("COMMIT")
 		except BaseException:
 			if connection.in_transaction:
 				connection.execute("ROLLBACK")
 			raise
+		finally:
+			connection.close()
+		return {"cursor": seq, "reset": reset, "drafts": [dict(row) for row in rows]}
+
+	@staticmethod
+	def _changed_rows(connection, since, reset, changed):
+		return connection.execute(f"""
+			SELECT session_id, text, cwd, edited_at, seq FROM session_drafts
+			WHERE {"text IS NOT NULL" if reset else "seq > ?"} OR session_id IN (SELECT value FROM json_each(?)) ORDER BY seq
+		""", ((json.dumps(changed),) if reset else (since, json.dumps(changed)))).fetchall()
+
+	def _quiet(self, since):
+		"""The sync of a client with nothing to send, read from one read-only snapshot; None when the schema or a due purge needs the writer path.
+
+		Every client polls every sync slot, so this must not queue behind, or block, completion hooks and organisation writes. The writer path rechecks everything under its lock.
+		"""
+		connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30, isolation_level=None)
+		connection.row_factory = sqlite3.Row
+		try:
+			connection.execute("BEGIN")
+			if connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN (SELECT value FROM json_each(?))",
+				(json.dumps(SCHEMA_OBJECTS),)).fetchone()[0] != len(SCHEMA_OBJECTS):
+				return None
+			state = connection.execute("SELECT seq, purged_seq FROM session_drafts_sync WHERE id = 1").fetchone()
+			if state is None:
+				return None
+			now = float(self.clock())
+			if not math.isfinite(now):
+				raise ValueError("clock must return a finite UTC epoch timestamp")
+			if connection.execute("SELECT 1 FROM session_drafts WHERE text IS NULL AND updated_at < ? LIMIT 1",
+				(now - MARKER_DAYS * 86400,)).fetchone() is not None:
+				return None
+			seq, purged_seq = state
+			reset = since == 0 or since < purged_seq or since > seq
+			rows = self._changed_rows(connection, since, reset, [])
+			connection.execute("COMMIT")
 		finally:
 			connection.close()
 		return {"cursor": seq, "reset": reset, "drafts": [dict(row) for row in rows]}
