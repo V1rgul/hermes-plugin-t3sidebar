@@ -3120,7 +3120,12 @@ function ScopedUsagePage({ ctx, scope, view }) {
       marks.delete(id);
     }
     // Recorded under the Source/profile rather than this page, so a page opened again or reached through another activation still waits for a newer read.
-    const unsettle = () => { unsettledRedeems.set(redeemScope, marks.set(id, Date.now())); setUnsettledCount(count => count + 1); };
+    // The map is looked up again here: another account's attempt may have recorded its own uncertainty under this Source/profile meanwhile, and replacing the map would forget it.
+    const unsettle = () => {
+      if (!unsettledRedeems.has(redeemScope)) unsettledRedeems.set(redeemScope, new Map());
+      unsettledRedeems.get(redeemScope).set(id, Date.now());
+      setUnsettledCount(count => count + 1);
+    };
     const reload = () => client.invalidateQueries({ queryKey: [...usageScopeKey(scope), 'limits'] });
     // An answer for a Source/profile no longer shown is never reported as a success here: it may have spent a credit there.
     const moved = 'Source/profile changed before the reset was confirmed. Refresh to check whether it was spent.';
