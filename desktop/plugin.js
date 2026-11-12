@@ -704,8 +704,11 @@ export function createController(ctx, client = queryClient, env = { capture: cap
         try { await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}`, { method: 'POST', body: payload })); }
         catch (error) {
           // The companion refuses pinning or snoozing an archived session itself (HTTP 409 native_session_archived); the transport reports it as "409: <body>".
-          const message = String(error?.message ?? error);
-          if (['pin', 'snooze'].includes(payload.action) && /(?:^|error:\s*)409:/i.test(message) && message.includes('native_session_archived')) throw new Error('Unarchive this session before pinning or snoozing it.');
+          // Only that exact refusal is translated; any other status, detail or unparsable body keeps its own error.
+          const body = /(?:^|error:\s*)409:\s*(\{.*\})\s*$/is.exec(String(error?.message ?? error))?.[1];
+          let detail;
+          try { detail = body && JSON.parse(body).detail; } catch (_) { /* not the companion's JSON error body */ }
+          if (['pin', 'snooze'].includes(payload.action) && detail === 'native_session_archived') throw new Error('Unarchive this session before pinning or snoozing it.');
           throw error;
         }
         const value = verifyAction(validState(await fenced(scope, () => ctx.rest('/state'))), id, payload);
