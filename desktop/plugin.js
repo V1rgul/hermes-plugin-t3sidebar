@@ -506,9 +506,9 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     return pending ? pending.text === '' && pending.discarded === hash : known?.text === null && known.seen === hash;
   }
   // Deletes a draft with the next sync. Composers still holding its text are cleared when next focused, as for a draft sent elsewhere.
-  // local: the composer's text, for a draft this client has not synced yet.
+  // local: the composer's text when it was read; the copy it still holds, possibly typed since the last poll, is the one to retire.
   function dropDraft(state, id, cwd = null, local = null) {
-    const text = state.pending.get(id)?.text || state.known.get(id)?.text || local?.trim() && local;
+    const text = local?.trim() && local || state.pending.get(id)?.text || state.known.get(id)?.text;
     if (text) state.pending.set(id, { text: '', cwd, edited_at: Date.now() / 1000, discarded: draftHash(text) });
   }
   // A deleted session's draft goes with it, so no draft-only card brings it back and no pending edit is sent for it again; the companion marks its own row deleted.

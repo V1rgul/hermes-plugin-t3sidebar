@@ -103,3 +103,22 @@ test('leaving the focused session after its verified deletion does not queue its
     assert.deepEqual(controller.localDrafts(scope).map(draft => draft.session_id), []);
   } finally { mock.ctx.rest = rest; }
 });
+
+test('Discard retires the text its composer actually held when the clear fails, even if no poll had seen that text yet', async () => {
+  const scope = captureScope(), controller = make(), design = target('design');
+  mock.control.serverDrafts = [{ session_id: 'design', text: 'old synced text', cwd: null, project: null, seq: 1, edited_at: 100 }];
+  await controller.syncDrafts(scope);
+  mock.control.mountedDrafts.design = 'old synced text';
+  await controller.enterDraft(scope, design);
+  // Edited, then discarded before the next focused poll; the composer refuses the clear.
+  mock.control.mountedDrafts.design = 'text actually discarded';
+  mock.control.composerUnmounted = true;
+  await controller.discardDraft(scope, { id: 'design' });
+  assert.deepEqual(controller.localDrafts(scope).map(draft => draft.session_id), []);
+  mock.control.composerUnmounted = false;
+  await controller.noteDraft(scope, design);
+  assert.equal(mock.control.mountedDrafts.design, '');
+  assert.deepEqual(controller.localDrafts(scope).map(draft => draft.session_id), []);
+  await controller.syncDrafts(scope);
+  assert.equal(mock.control.serverDrafts[0].text, null);
+});
