@@ -231,6 +231,8 @@ const activationEpoch = sdk.atom(gatewayActivationEpoch());
 // Plugin pages currently mounted, newest last. Desktop mounts a route page in the workspace only while the router is on its path and exposes no route state to plugins, so each page publishes its own presence; the sidebar then drops the session highlight and lights the page's footer button, as the native sidebar does on its own pages.
 const shownPages = sdk.atom([]);
 const NO_SESSION = sdk.atom(null);
+// For a Desktop without host.state.awaitingResponse.
+const NO_FLAG = sdk.atom(false);
 function useShowPage(route) {
   useLayoutEffect(() => {
     shownPages.set([...shownPages.get(), route]);
@@ -2245,6 +2247,16 @@ function useDraftFocus({ controller, scope, rows, focusedId, focus }) {
     if (left) void controller.leaveDraft(scope, left).catch(() => {});
     if (entered) void controller.enterDraft(scope, entered).catch(() => {});
   }, [focusedId, controller, scope, targetFor]);
+  // Desktop raises it on a send from the focused composer, once it has emptied that composer and before the server answers: rereading at once drops the sent prompt's pencil and pending change without waiting up to DRAFT_FOCUS_MS. Only a read: whatever the composer holds then decides, so a rise without a send (focusing a session already waiting) changes nothing.
+  const awaiting = useValue(host.state.awaitingResponse ?? NO_FLAG), client = useQueryClient(), wasAwaiting = useRef(awaiting);
+  useEffect(() => {
+    const rose = awaiting && !wasAwaiting.current;
+    wasAwaiting.current = awaiting;
+    const target = rose && focusedId ? targetFor(focusedId) : null;
+    if (!target) return;
+    void client.refetchQueries({ queryKey: [...draftSyncKey(scope), 'focus', focusedId], type: 'active' }).catch(() => {});
+    void client.refetchQueries({ queryKey: ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, target.key], type: 'active' }).catch(() => {});
+  }, [awaiting, focusedId, client, scope, targetFor]);
 }
 function EmptySessionDraft({ row, active, controller, scope, onPresence, refreshAt }) {
   // Keep observing even while its card is absent: otherwise typing into a
