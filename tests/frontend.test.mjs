@@ -1935,9 +1935,9 @@ test('search never unfolds Snoozed; counts, manual opening and durable fold pref
 });
 
 test('search clear control is present for any text and rename uses an adjacent icon-only submit', async () => {
-  await mount(); assert.equal(button('Clear search'), undefined);
-  await input($('input[type=search]'), '  '); assert.ok(button('Clear search'));
-  await click(button('Clear search')); assert.equal($('input[type=search]').value, '');
+  await mount(); assert.equal(button('Clear search'), undefined); assert.equal($('.sf-search').dataset.active, 'false');
+  await input($('input[type=search]'), '  '); assert.ok(button('Clear search')); assert.equal($('.sf-search').dataset.active, 'true');
+  await click(button('Clear search')); assert.equal($('input[type=search]').value, ''); assert.equal($('.sf-search').dataset.active, 'false');
   assert.equal(document.activeElement, $('input[type=search]'));
   await click(button('Actions for Runtime classification')); await click(button('Rename'));
   const field = $('input[aria-label="Session title"]'), save = button('Save rename');

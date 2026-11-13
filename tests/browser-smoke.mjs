@@ -663,6 +663,13 @@ try {
   check('a reopened Project menu still shows Clear filter for the filtering folder', await projectMenu.getByRole('button', { name: 'Clear filter', exact: true }).count() === 1);
   await projectMenu.screenshot({ path: join(screenshotDir, 'project-clear-filter.png') });
   await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
+  // An unfocused query and an active project filter share one fill, the picker's selected-row background, so a narrowed list shows at a glance.
+  const activeSearch = page.locator('.sf-search');
+  await activeSearch.locator('input').fill('a'); await activeSearch.locator('input').blur(); await page.mouse.move(1100, 850); await page.waitForTimeout(150);
+  const activeFills = await page.evaluate(() => { const search = document.querySelector('.sf-search'), filter = document.querySelector('.sf-header .sf-icon[data-filtered=true]'), bg = el => el && getComputedStyle(el).backgroundColor; return { search: bg(search), filter: bg(filter), ring: getComputedStyle(search).boxShadow, active: search.dataset.active }; });
+  check('an unfocused query and an active project filter share one visible fill', activeFills.active === 'true' && activeFills.search === activeFills.filter && activeFills.search !== 'rgba(0, 0, 0, 0)' && activeFills.ring === 'none');
+  await activeSearch.locator('input').fill(''); await activeSearch.locator('input').blur(); await page.waitForTimeout(150);
+  check('an empty unfocused search field has no fill', await activeSearch.evaluate(el => el.dataset.active === 'false' && getComputedStyle(el).backgroundColor === 'rgba(0, 0, 0, 0)'));
   await checkPersistentTrigger('Filter sessions', 'Session filters');
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   const filters = page.getByRole('dialog', { name: 'Session filters', exact: true });
@@ -675,6 +682,7 @@ try {
     return selected.length === 1 && background(selected[0]) !== rest && background(selected[0]) !== background(other)
       && choices.every(el => el.querySelectorAll(':scope > svg').length === 0 && el.querySelector('.sf-project-path, .sf-project-name').parentElement.nextElementSibling === null);
   }));
+  check('the selected project row uses the same fill as the active filter button', await filters.locator('.sf-project-choice[aria-pressed=true]').evaluate(el => getComputedStyle(el).backgroundColor) === activeFills.filter);
   await filters.getByRole('button', { name: 'All projects', exact: true }).click();
   check('All projects clears active icon and closes filter picker', !await filters.count() && await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'false');
   // Project actions keep the menu open, so it is opened only when it is not already.
