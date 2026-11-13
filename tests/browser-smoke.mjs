@@ -347,7 +347,43 @@ try {
     const r = el.getBoundingClientRect(), d = el.querySelector('.sf-snooze-dur').getBoundingClientRect();
     return getComputedStyle(el.querySelector('.sf-snooze-at')).opacity === '0' && Math.abs(d.left + d.width / 2 - r.left - r.width / 2) < 1;
   }));
-  await hour.hover(); await page.waitForTimeout(400);
+  // Both labels must move together: sampled on every frame of the hover, relative to the button (the menu itself may still move), the share of its path each one has covered stays within a few percent of the other's.
+  // The smoke page runs in reduced motion, where the labels swap without sliding; this check needs the motion.
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await hour.evaluate(el => {
+    const dur = el.querySelector('.sf-snooze-dur'), at = el.querySelector('.sf-snooze-at'), frames = [];
+    const sample = () => { const r = el.getBoundingClientRect(); return [dur.getBoundingClientRect().left - r.left, at.getBoundingClientRect().left - r.left]; };
+    el.sfStart = sample(); el.sfFrames = frames; const t0 = performance.now();
+    const tick = () => { frames.push(sample()); if (performance.now() - t0 < 400) requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  });
+  await hour.hover(); await page.waitForTimeout(450);
+  check('hovering an hour button moves +1h and its wake time together, frame by frame', await hour.evaluate(el => {
+    const [d0, a0] = el.sfStart, [d1, a1] = el.sfFrames.at(-1);
+    const shares = el.sfFrames.map(([d, a]) => [(d - d0) / (d1 - d0), (a - a0) / (a1 - a0)]).filter(([d]) => d > .02 && d < .98);
+    el.sfShares = JSON.stringify({ d0, a0, d1, a1, shares });
+    return Math.abs(d1 - d0) > 5 && Math.abs(a1 - a0) > 5 && shares.length >= 3 && shares.every(([d, a]) => Math.abs(d - a) < .08);
+  }) || console.log(await hour.evaluate(el => el.sfShares)));
+  // Reversed midway, as a quick pass over the buttons does: leave after 70ms, come back 50ms later; the two labels must still have covered the same share of their paths on every frame.
+  const rested = await hour.evaluate(el => ({ end: el.sfFrames.at(-1) }));
+  await page.mouse.move(0, 0); await page.waitForTimeout(400);
+  const hourBox = await hour.boundingBox();
+  await hour.evaluate(el => {
+    const dur = el.querySelector('.sf-snooze-dur'), at = el.querySelector('.sf-snooze-at'), frames = [];
+    el.sfFrames = frames; const t0 = performance.now();
+    const tick = () => { const r = el.getBoundingClientRect(); frames.push([dur.getBoundingClientRect().left - r.left, at.getBoundingClientRect().left - r.left]); if (performance.now() - t0 < 600) requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  });
+  await page.mouse.move(hourBox.x + hourBox.width / 2, hourBox.y + hourBox.height / 2); await page.waitForTimeout(70);
+  await page.mouse.move(0, 0); await page.waitForTimeout(50);
+  await page.mouse.move(hourBox.x + hourBox.width / 2, hourBox.y + hourBox.height / 2); await page.waitForTimeout(500);
+  check('reversing an hour button midway keeps +1h and its wake time together', await hour.evaluate((el, { end }) => {
+    const [d0, a0] = el.sfStart, [d1, a1] = end;
+    const shares = el.sfFrames.map(([d, a]) => [(d - d0) / (d1 - d0), (a - a0) / (a1 - a0)]).filter(([d]) => d > .02 && d < .98);
+    return shares.length >= 3 && shares.every(([d, a]) => Math.abs(d - a) < .05);
+  }, rested));
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  check('reduced motion swaps the hour labels without sliding', await hour.evaluate(el => getComputedStyle(el).transitionDuration.split(',').every(value => parseFloat(value) === 0)));
   check('a hovered hour button shows +1h in primary and its wake time in secondary grey, edges equal to the gap', await hour.evaluate(el => {
     const r = el.getBoundingClientRect(), dur = el.querySelector('.sf-snooze-dur'), at = el.querySelector('.sf-snooze-at'), d = dur.getBoundingClientRect(), a = at.getBoundingClientRect();
     const probe = document.createElement('span'); probe.style.color = 'var(--ui-text-primary)'; el.append(probe); const primary = getComputedStyle(probe).color;
