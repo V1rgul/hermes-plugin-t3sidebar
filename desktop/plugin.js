@@ -65,6 +65,166 @@ function readShowTokens(ctx) {
 function useShowTokens(ctx) {
   return useQuery({ queryKey: SHOW_TOKENS_KEY, queryFn: () => readShowTokens(ctx), initialData: () => readShowTokens(ctx), staleTime: Infinity }).data;
 }
+// Desktop's own completion sound plays on every turn end, including one that leaves subagents or an awaited background command running, and plugins can neither add a sound to that setting, hold it back nor change it (host.settings does not expose it). This sound follows the Done and Input badges instead; off by default so it never doubles Desktop's cue unasked. Its choices are T3 Code's sound and Desktop's own presets, ported below.
+const COMPLETION_SOUND_KEY = ['hermes-t3sidebar-preferences', 'completion-sound'];
+const validCompletionSound = value => value === 'none' || value === 't3' || /^hermes-(?:[1-9]|1[0-4])$/.test(value);
+function readCompletionSound(ctx) {
+  try { const value = ctx.storage.get('completion-sound', 'none'); return validCompletionSound(value) ? value : 'none'; } catch (_) { return 'none'; }
+}
+function useCompletionSound(ctx) {
+  return useQuery({ queryKey: COMPLETION_SOUND_KEY, queryFn: () => readCompletionSound(ctx), initialData: () => readCompletionSound(ctx), staleTime: Infinity }).data;
+}
+// Desktop's own Completion Sound row (Settings → Notifications → Sounds), which the user switches there.
+const NATIVE_SOUND_SETTING = '/settings?tab=notifications&page=sounds&setting=completionSound';
+// Desktop's sound and mute preferences, read from the keys its own stores persist (store/completion-sound.ts, store/haptics.ts); read only, never written. Null when the keys are unreadable or unknown, so a renamed key shows an unknown state rather than a wrong one.
+export function readNativeSound(storage = globalThis.localStorage) {
+  try {
+    const muted = storage.getItem('hermes.desktop.hapticsMuted'), stored = storage.getItem('hermes.desktop.completionSoundVariantId');
+    const variant = stored === null ? 1 : Number(stored);
+    if (!Number.isInteger(variant) || variant < 0 || variant >= HERMES_SOUNDS.length || muted !== null && muted !== 'true' && muted !== 'false') return null;
+    return { variant, muted: muted === 'true' };
+  } catch (_) { return null; }
+}
+// T3 Code's notification-completion.mp3 (MIT, see THIRD_PARTY_NOTICES.md), inlined because a disk plugin is a single file.
+const T3_COMPLETION_MP3 = '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+f/7oEQzCgRjdj8pOzCWk49H1TNGEhKFovgsMMkKCTOgHPMNuB64dp9MRoRjVsu0nHR5uPPLIb9dX/5Hb/j/ZBUdbLxvbo5/R74ksAGApVoVjEQ8RVuEUGAAohQtPSMWV/jByzsineiieWSUgba0AmypZWkxcDsxHd85ZaoOVeTE2hCKCu+tZkUmk+dtELPRMx9m4tkbe9aWPiiBiD0pjLLC7/K/MH6MztXxhxAOutm44MLztWf7QVLO/xqYGHFa0di027ROds+Vum/dLd/eJ5+zvetG92fG75U4z+extBdFgTWVgjW5b0KplSylCGsSCqTiEdvjsctFV1h4yL6QZM0MmVRzrbC492xwUR8ka5pQUTQPUVmHLMTIw5sEt7JGxOzBKsWcdzSkmuUTcrfLNWFo569U+TlO2+tZ5ayn7tXfJctHGJJVrS3f/1+j89ORInDkf/yM2Rx2O14yXbXlHtslLZLl0WJG9Fq4m9Oi+ch9EdoAZbRiTaGocnTCAfQAiVeDdfxJYl5EqPJbOPCWtgMXBaqOXskSiY0lQMoGAwlFpFE0s9WRw5dTG7Hq4nZsKJZSDMywcBpUEOgqBgEBUgLY11UvZgYpgIUcMBL9SY/ZqArDVWVSDCjupMe3Dq4WHDXJqTZfnszKUPvSoVjWNBVDH8rklaJDOJDOMGgVAQkBkl9AWOhHSwGCBv/7EEQKj/BtBT2AYxgQDSCG4CRjAAAAAaQAAAAgAAA0gAAABLWLf4t/tUxBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//sQZB8P8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAEVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/+xBkQQ/wAABpAAAACAAADSAAAAEAAAGkAAAAIAAANIAAAARVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVf/7EGRjD/AAAGkAAAAIAAANIAAAAQAAAaQAAAAgAAA0gAAABFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//sQZIUP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAEVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/+xBkpw/wAABpAAAACAAADSAAAAEAAAGkAAAAIAAANIAAAARVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQ==';
+// Desktop's completion presets, ported from apps/desktop/src/lib/completion-sound.ts (Hermes Agent, MIT, see THIRD_PARTY_NOTICES.md): the same voices, notes and signal path, so a preset sounds as it does in Desktop's settings.
+function toneVoice(ac, master, t0, { freq, dur, gain = 0.5, attack = 0.006, type = 'sine', start = 0 }) {
+  const osc = ac.createOscillator(), env = ac.createGain(), at = t0 + start, end = at + dur;
+  osc.type = type; osc.frequency.setValueAtTime(freq, at);
+  env.gain.setValueAtTime(0.0001, at); env.gain.exponentialRampToValueAtTime(Math.max(gain, 0.0002), at + attack); env.gain.exponentialRampToValueAtTime(0.0001, end);
+  osc.connect(env); env.connect(master); osc.start(at); osc.stop(end + 0.02);
+}
+function pluckVoice(ac, master, t0, { freqFrom, freqTo, gain, decay, attack = 0.004, glide = 0.16, start = 0 }) {
+  const osc = ac.createOscillator(), env = ac.createGain(), at = t0 + start, end = at + decay;
+  osc.type = 'triangle'; osc.frequency.setValueAtTime(freqFrom, at); osc.frequency.exponentialRampToValueAtTime(freqTo, at + glide);
+  env.gain.setValueAtTime(0.0001, at); env.gain.exponentialRampToValueAtTime(Math.max(gain, 0.0002), at + attack); env.gain.exponentialRampToValueAtTime(0.0001, end);
+  osc.connect(env); env.connect(master); osc.start(at); osc.stop(end + 0.02);
+}
+function bloomVoice(ac, master, t0, { freq, freqTo, gain, attack, decay, hold = 0.08, detune = 0, type = 'sine', start = 0 }) {
+  const osc = ac.createOscillator(), env = ac.createGain(), at = t0 + start, end = at + attack + hold + decay;
+  osc.type = type; osc.frequency.setValueAtTime(freq, at);
+  if (freqTo) osc.frequency.exponentialRampToValueAtTime(freqTo, at + attack + hold * 0.6);
+  osc.detune.setValueAtTime(detune, at);
+  env.gain.setValueAtTime(0.0001, at); env.gain.exponentialRampToValueAtTime(Math.max(gain, 0.0002), at + attack);
+  env.gain.setValueAtTime(Math.max(gain, 0.0002), at + attack + hold); env.gain.exponentialRampToValueAtTime(0.0001, end);
+  osc.connect(env); env.connect(master); osc.start(at); osc.stop(end + 0.02);
+}
+function noiseSource(ac, seconds) {
+  const length = Math.floor(ac.sampleRate * seconds), buffer = ac.createBuffer(1, length, ac.sampleRate), data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
+  const source = ac.createBufferSource(); source.buffer = buffer;
+  return source;
+}
+function noiseVoice(ac, master, t0, seconds, { freq, freqTo, gain, decay, q, start = 0 }, rise) {
+  const source = noiseSource(ac, seconds), filter = ac.createBiquadFilter(), env = ac.createGain(), at = t0 + start, end = at + decay;
+  filter.type = 'bandpass'; filter.frequency.setValueAtTime(freq, at);
+  if (freqTo) filter.frequency.exponentialRampToValueAtTime(freqTo, end);
+  filter.Q.setValueAtTime(q, at);
+  env.gain.setValueAtTime(0.0001, at); env.gain.exponentialRampToValueAtTime(Math.max(gain, 0.0002), at + rise); env.gain.exponentialRampToValueAtTime(0.0001, end);
+  source.connect(filter); filter.connect(env); env.connect(master); source.start(at); source.stop(end + 0.02);
+}
+const airPuff = (ac, master, t0, { q = 1.2, ...spec }) => noiseVoice(ac, master, t0, 0.12, { ...spec, q }, 0.018);
+const whooshVoice = (ac, master, t0, { freqFrom, q = 0.8, ...spec }) => noiseVoice(ac, master, t0, 0.4, { ...spec, freq: freqFrom, q }, 0.03);
+function sweepVoice(ac, master, t0, { freqFrom, freqTo, gain, decay, attack = 0.003, type = 'triangle', start = 0 }) {
+  const osc = ac.createOscillator(), env = ac.createGain(), at = t0 + start, end = at + decay;
+  osc.type = type; osc.frequency.setValueAtTime(freqFrom, at); osc.frequency.exponentialRampToValueAtTime(freqTo, end - 0.02);
+  env.gain.setValueAtTime(0.0001, at); env.gain.exponentialRampToValueAtTime(Math.max(gain, 0.0002), at + attack); env.gain.exponentialRampToValueAtTime(0.0001, end);
+  osc.connect(env); env.connect(master); osc.start(at); osc.stop(end + 0.02);
+}
+const [A2, A3, A4, A5, B5, C3, C4, E4, E5, E6, G4, G5, C5, C6] = [110, 220, 440, 880, 987.77, 130.81, 261.63, 329.63, 659.25, 1318.51, 392, 783.99, 523.25, 1046.5];
+// Index = Desktop's variant id; 0 is its None.
+export const HERMES_SOUNDS = [null,
+  { name: 'Two-note comfort', play: (ac, m, t) => { toneVoice(ac, m, t, { freq: E4, dur: 0.22, gain: 0.05, attack: 0.03 }); toneVoice(ac, m, t + 0.08, { freq: C4, dur: 0.52, gain: 0.07, attack: 0.08 }); toneVoice(ac, m, t + 0.08, { freq: C3, dur: 0.46, gain: 0.02, attack: 0.1 }); } },
+  { name: 'Glass ping', play: (ac, m, t) => { toneVoice(ac, m, t, { freq: C6, dur: 0.55, gain: 0.032, attack: 0.002 }); toneVoice(ac, m, t + 0.01, { freq: E5, dur: 0.42, gain: 0.018, attack: 0.004 }); airPuff(ac, m, t, { freq: 3200, gain: 0.004, decay: 0.1, q: 1.4 }); } },
+  { name: 'Soft marimba', play: (ac, m, t) => { pluckVoice(ac, m, t, { freqFrom: E5, freqTo: G5, gain: 0.03, decay: 0.14, glide: 0.08 }); bloomVoice(ac, m, t + 0.04, { freq: C5, gain: 0.028, attack: 0.08, hold: 0.04, decay: 0.62 }); bloomVoice(ac, m, t + 0.06, { freq: G4, gain: 0.014, attack: 0.12, hold: 0.06, decay: 0.55 }); } },
+  { name: 'Tri-tone message', play: (ac, m, t) => { toneVoice(ac, m, t, { freq: C6, dur: 0.14, gain: 0.045, attack: 0.004 }); toneVoice(ac, m, t + 0.1, { freq: A5, dur: 0.16, gain: 0.04, attack: 0.004 }); toneVoice(ac, m, t + 0.2, { freq: G5, dur: 0.22, gain: 0.035, attack: 0.006 }); } },
+  { name: 'Airy whoosh', play: (ac, m, t) => { whooshVoice(ac, m, t, { freqFrom: 4200, freqTo: 900, gain: 0.022, decay: 0.28, q: 0.7 }); toneVoice(ac, m, t + 0.12, { freq: A5, dur: 0.35, gain: 0.02, attack: 0.02 }); } },
+  { name: 'Discovery cluster', play: (ac, m, t) => { [-14, -5, 0, 7, 12].forEach((detune, i) => bloomVoice(ac, m, t + i * 0.03, { freq: A3, gain: 0.012, attack: 0.38, hold: 0.12, decay: 1.05, detune })); bloomVoice(ac, m, t + 0.1, { freq: E4, gain: 0.008, attack: 0.45, hold: 0.08, decay: 0.9, detune: 3 }); } },
+  { name: 'Systems online', play: (ac, m, t) => { toneVoice(ac, m, t, { freq: C5, dur: 0.16, gain: 0.04, attack: 0.006 }); toneVoice(ac, m, t + 0.09, { freq: G5, dur: 0.28, gain: 0.042, attack: 0.008 }); toneVoice(ac, m, t + 0.09, { freq: C4, dur: 0.24, gain: 0.012, attack: 0.01 }); } },
+  { name: 'IBM terminal', play: (ac, m, t) => { toneVoice(ac, m, t, { freq: B5, dur: 0.12, gain: 0.038, attack: 0.002, type: 'square' }); toneVoice(ac, m, t + 0.14, { freq: E5, dur: 0.1, gain: 0.028, attack: 0.002, type: 'square' }); } },
+  { name: 'Modem chirp', play: (ac, m, t) => { sweepVoice(ac, m, t, { freqFrom: 320, freqTo: 2200, gain: 0.024, decay: 0.16 }); sweepVoice(ac, m, t + 0.1, { freqFrom: 480, freqTo: 1400, gain: 0.014, decay: 0.12, type: 'sine' }); } },
+  { name: 'Wind chimes', play: (ac, m, t) => [G5, C6, E5, A5].forEach((freq, i) => toneVoice(ac, m, t + i * 0.13, { freq, dur: 0.72, gain: 0.028 - i * 0.003, attack: 0.003 })) },
+  { name: 'Singing bowl', play: (ac, m, t) => { bloomVoice(ac, m, t, { freq: A3, gain: 0.022, attack: 0.58, hold: 0.16, decay: 1.35 }); bloomVoice(ac, m, t + 0.08, { freq: E4, gain: 0.01, attack: 0.62, hold: 0.12, decay: 1.2, detune: 4 }); bloomVoice(ac, m, t + 0.14, { freq: A4, gain: 0.006, attack: 0.68, hold: 0.08, decay: 1.05, detune: -3 }); } },
+  { name: 'Harp lift', play: (ac, m, t) => { [C5, E5, G5, C6].forEach((freq, i) => toneVoice(ac, m, t + i * 0.075, { freq, dur: 0.38, gain: 0.034 - i * 0.004, attack: 0.012 })); bloomVoice(ac, m, t + 0.2, { freq: C4, gain: 0.01, attack: 0.18, hold: 0.06, decay: 0.7 }); } },
+  { name: 'Sonar ping', play: (ac, m, t) => { toneVoice(ac, m, t, { freq: A2, dur: 0.95, gain: 0.036, attack: 0.008 }); toneVoice(ac, m, t + 0.42, { freq: A3, dur: 0.55, gain: 0.014, attack: 0.01 }); airPuff(ac, m, t, { freq: 600, gain: 0.005, decay: 0.2, q: 0.5 }); } },
+  { name: 'Music box', play: (ac, m, t) => [E6, C6, G5, E5].forEach((freq, i) => pluckVoice(ac, m, t + i * 0.09, { freqFrom: freq, freqTo: freq * 0.998, gain: 0.02 - i * 0.002, decay: 0.2, glide: 0.06 })) }
+];
+// The plugin's choices: None, T3 Code's sound, then Desktop's presets by their Desktop names.
+export const COMPLETION_SOUNDS = [{ id: 'none', label: 'None' }, { id: 't3', label: 'T3 Code', plugin: true },
+  ...HERMES_SOUNDS.flatMap((sound, id) => sound ? [{ id: `hermes-${id}`, label: sound.name }] : [])];
+// One lazily created AudioContext, only once a sound is wanted. Browsers keep it suspended until a gesture, so a gesture also resumes it and decodes T3's sound ahead of the first cue.
+export function createSoundPlayer(win = globalThis.window, data = T3_COMPLETION_MP3) {
+  let context = null, buffer = null, playingUntil = 0, reverb = null;
+  const audio = () => {
+    const Context = win?.AudioContext || win?.webkitAudioContext;
+    if (!Context) return null;
+    try { context ??= new Context(); } catch (_) { return null; }
+    if (context.state === 'suspended') void context.resume().catch(() => {});
+    return context;
+  };
+  const decoded = ac => buffer ??= Promise.resolve().then(() => ac.decodeAudioData(Uint8Array.from(win.atob(data), char => char.charCodeAt(0)).buffer))
+    .catch(error => { buffer = null; throw error; });
+  // Desktop's chain: voices → master → low-pass → dry + a short generated room reverb → out. Returns how long the preset lasts.
+  function synth(ac, sound) {
+    if (!reverb) {
+      const length = Math.floor(ac.sampleRate * 1.6);
+      reverb = ac.createBuffer(2, length, ac.sampleRate);
+      for (let channel = 0; channel < 2; channel++) { const samples = reverb.getChannelData(channel); for (let i = 0; i < length; i++) samples[i] = (Math.random() * 2 - 1) * (1 - i / length) ** 2.6; }
+    }
+    const now = ac.currentTime, master = ac.createGain(), tone = ac.createBiquadFilter(), dry = ac.createGain(), wet = ac.createGain(), room = ac.createConvolver();
+    tone.type = 'lowpass'; tone.frequency.setValueAtTime(3800, now); tone.Q.setValueAtTime(0.32, now);
+    master.gain.setValueAtTime(0.48, now); dry.gain.setValueAtTime(0.88, now); wet.gain.setValueAtTime(0.34, now); room.buffer = reverb;
+    master.connect(tone); tone.connect(dry); dry.connect(ac.destination); tone.connect(room); room.connect(wet); wet.connect(ac.destination);
+    sound.play(ac, master, now + 0.01);
+    return 0.6;
+  }
+  return {
+    unlock() { const ac = audio(); if (ac) void decoded(ac).catch(() => {}); },
+    async play(choice) {
+      const hermes = /^hermes-(\d+)$/.exec(choice)?.[1], preset = hermes && HERMES_SOUNDS[Number(hermes)];
+      if (choice !== 't3' && !preset) return false;
+      const ac = audio();
+      if (!ac) return false;
+      try {
+        const sound = preset ? null : await decoded(ac);
+        // Sessions settling together give one cue, not a clipped burst.
+        if (context !== ac || ac.currentTime < playingUntil) return false;
+        let length;
+        if (preset) length = synth(ac, preset);
+        else { const source = ac.createBufferSource(); source.buffer = sound; source.connect(ac.destination); source.start(); length = sound.duration; }
+        playingUntil = ac.currentTime + length;
+        return true;
+      } catch (_) { return false; }
+    },
+    dispose() { const ac = context; context = null; buffer = null; reverb = null; playingUntil = 0; void ac?.close?.().catch(() => {}); }
+  };
+}
+// The sound follows the cards' own Done and Input badges (cardStatus): it plays when a card newly shows Input, or when a new completion marker reaches a card that no Working status outranks. Done comes from the backend's completion markers, recorded only for a turn that leaves nothing to report back, so a turn ending while subagents or a notifying background command still run gives none. A marker that arrives while the card still reads Working waits for it to stop, even if the open session acknowledges it meanwhile, which hides its badge. The first snapshot and cards that only appear later (older history) set the baseline without a sound.
+const HELD_MARKER_LIMIT = 200;
+export function attentionCue(state, sections, completions) {
+  const rows = new Map(SECTIONS.flatMap(section => sections[section] || EMPTY_ROWS).map(row => [row.key, row]));
+  const status = new Map([...rows].map(([key, row]) => [key, cardStatus(row, false)]));
+  const input = new Set([...status].filter(([, value]) => value === 'input').map(([key]) => key));
+  const markers = new Map(Object.entries(completions || {}).filter(([, marker]) => marker?.done_token).map(([key, marker]) => [`${key}\n${marker.done_token}`, key]));
+  // Native unread has no marker identity: it counts only for cards already listed.
+  const unread = new Set([...rows.values()].filter(row => status.get(row.key) === 'done' && !row.completion?.done_token).map(row => `${row.key}\nunread`));
+  if (!state.seen) { Object.assign(state, { seen: new Set([...markers.keys(), ...unread]), held: new Map(), input, keys: new Set(rows.keys()) }); return false; }
+  let fire = [...input].some(key => state.keys.has(key) && !state.input.has(key))
+    || [...unread].some(id => !state.seen.has(id) && state.keys.has(id.slice(0, id.lastIndexOf('\n'))));
+  for (const [id, key] of markers) if (!state.seen.has(id)) { state.held.delete(key); state.held.set(key, id); }
+  for (const [key] of state.held) {
+    const value = status.get(key);
+    // Not listed yet (a session newer than the list), or still Working: keep waiting.
+    if (value === undefined || value === 'working') continue;
+    state.held.delete(key);
+    fire = true;
+  }
+  while (state.held.size > HELD_MARKER_LIMIT) state.held.delete(state.held.keys().next().value);
+  // A completion stays known while its marker exists, so a card that leaves Done (a new turn) and returns to it with the same marker stays silent.
+  state.seen = new Set([...markers.keys(), ...unread]);
+  state.input = input; state.keys = new Set(rows.keys());
+  return fire;
+}
 const activationEpoch = sdk.atom(gatewayActivationEpoch());
 // Plugin pages currently mounted, newest last. Desktop mounts a route page in the workspace only while the router is on its path and exposes no route state to plugins, so each page publishes its own presence; the sidebar then drops the session highlight and lights the page's footer button, as the native sidebar does on its own pages.
 const shownPages = sdk.atom([]);
@@ -1428,6 +1588,7 @@ const BUNDLED_ICONS = {
   ClockX: ['M20.926 13.15a9 9 0 1 0 -7.835 7.784', 'M12 7v5l2 2', 'M22 22l-5 -5', 'M17 22l5 -5'],
   // Derived from Tabler v3.44.0 arrow-bar-to-down (MIT) with the tip moved down to meet the bar's top edge, so the arrow visibly touches the floor.
   ArrowBarToDownTouching: ['M4 20h16', 'M12 4v14', 'M8 14l4 4l4 -4'],
+  ArrowRight: ['M5 12l14 0', 'M13 18l6 -6', 'M13 6l6 6'],
   AlertTriangle: ['M12 9v4', 'M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0', 'M12 16h.01'],
   Flag: ['M5 5a5 5 0 0 1 7 0a5 5 0 0 0 7 0v9a5 5 0 0 1 -7 0a5 5 0 0 0 -7 0v-9', 'M5 21v-7'],
   // A banked reset is a ticket, not a circular arrow: the Limits page's refresh button already draws one.
@@ -1549,9 +1710,9 @@ function SkeletonCards() {
     h('span', { className: 'sf-sr' }, 'Loading sessions…'),
     [0, 1, 2].map(index => h('div', { key: index, className: 'sf-skeleton-card', 'aria-hidden': true }, h('span', { className: 'sf-skeleton-meta' }), h('span', { className: 'sf-skeleton-title' }))));
 }
-function Settings({ ctx }) {
-  const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
-  const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [linesError, setLinesError] = useState(''), [tokensError, setTokensError] = useState('');
+function Settings({ ctx, sound = null }) {
+  const client = useQueryClient(), presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx), completionSound = useCompletionSound(ctx);
+  const [error, setError] = useState(''), [detailsError, setDetailsError] = useState(''), [linesError, setLinesError] = useState(''), [tokensError, setTokensError] = useState(''), [soundError, setSoundError] = useState('');
   // Write, exact readback, then publication to the mounted sidebar; a failure is reported under its own setting.
   const savePreference = (storageKey, queryKey, value, message, setFailure) => {
     try {
@@ -1567,6 +1728,8 @@ function Settings({ ctx }) {
   const saveDetails = on => savePreference('working-details', WORKING_DETAILS_KEY, on, 'The Working indicator setting was not saved.', setDetailsError);
   const saveLines = lines => savePreference('pinned-lines', PINNED_LINES_KEY, lines, 'The pinned session height setting was not saved.', setLinesError);
   const saveTokens = on => savePreference('show-tokens', SHOW_TOKENS_KEY, on, 'The token count setting was not saved.', setTokensError);
+  // Like Desktop's picker, choosing a sound plays it.
+  const saveSound = id => { if (!validCompletionSound(id)) return; savePreference('completion-sound', COMPLETION_SOUND_KEY, id, 'The completion sound setting was not saved.', setSoundError); void sound?.play(id); };
   // The host already supplies the page title and gutters; behavior notes live in docs/behavior.md.
   return h('div', null, h('style', null, SETTINGS_CSS), h(sdk.ListRow ?? SettingsRow, {
     title: 'Snooze preset time',
@@ -1588,7 +1751,51 @@ function Settings({ ctx }) {
     description: 'Show total input and output tokens on session cards.',
     checked: showTokens, onChange: saveTokens,
     below: tokensError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, tokensError) : null
-  }));
+  }), h(sdk.ListRow ?? SettingsRow, {
+    title: 'Done/Input sound',
+    description: 'Desktop’s Completion Sound plays at every turn end, including when the agent hands work to subagents or waits for a background command while the session is still Working. This one waits for Done or Input.',
+    action: h('div', { className: 'sf-sound' },
+      h(SoundPicker, { value: completionSound, onChange: saveSound }),
+      h(sdk.Button, { type: 'button', variant: 'outline', size: 'sm', className: 'gap-1.5', disabled: completionSound === 'none' || !sound, onClick: () => void sound?.play(completionSound) }, icon('Play', '▶'), 'Preview')),
+    below: soundError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, soundError) : null
+  }), h(NativeSoundStatus, { off: completionSound === 'none' }));
+}
+// Desktop's preset Select with T3 Code's sound added and starred; a plain select on clients without the SDK Select.
+function SoundPicker({ value, onChange }) {
+  // The star alone marks the sound the plugin adds; the Select's own selection styling marks the active one.
+  const label = option => option.plugin ? `★ ${option.label}` : option.label;
+  if ([sdk.Select, sdk.SelectTrigger, sdk.SelectValue, sdk.SelectContent, sdk.SelectItem].every(part => typeof part === 'function' || typeof part === 'object' && part)) {
+    return h(sdk.Select, { value, onValueChange: onChange },
+      h(sdk.SelectTrigger, { className: 'min-w-56 text-xs', 'aria-label': 'Done/Input sound' }, h(sdk.SelectValue)),
+      h(sdk.SelectContent, null, COMPLETION_SOUNDS.map(option => h(sdk.SelectItem, { key: option.id, value: option.id }, label(option)))));
+  }
+  return h('select', { className: 'sf-sound-select', 'aria-label': 'Done/Input sound', value, onChange: event => onChange(event.target.value) },
+    COMPLETION_SOUNDS.map(option => h('option', { key: option.id, value: option.id }, label(option))));
+}
+// Desktop's own sound, read again when another window changes it or this one comes back into view. Settings remounts this page on every return from Desktop's own row.
+function useNativeSound() {
+  const [native, setNative] = useState(readNativeSound);
+  useEffect(() => {
+    const update = () => setNative(readNativeSound()), target = globalThis.window;
+    target?.addEventListener('storage', update); target?.addEventListener('focus', update);
+    return () => { target?.removeEventListener('storage', update); target?.removeEventListener('focus', update); };
+  }, []);
+  return native;
+}
+// Desktop's sound also plays at every turn end unless it is None (or interface sounds are muted). A line under the row, across its full width (ListRow keeps `below` in the label column): the state on the left, green when Desktop's sound is off, orange while it still plays, neutral when it cannot be read or when this sound is off (then it says what plays instead); on the right the way to Desktop's setting.
+function NativeSoundStatus({ off }) {
+  const native = useNativeSound();
+  const muted = native?.muted, silent = native && (muted || native.variant === 0), name = native && !silent ? HERMES_SOUNDS[native.variant].name : null;
+  // With this sound off nothing conflicts: a neutral note on what plays instead.
+  const state = off ? 'neutral' : !native ? 'unknown' : silent ? 'ok' : 'warn';
+  const text = muted ? 'Interface sounds are muted: neither plays.'
+    : off ? (!native ? 'Only Desktop’s own Completion Sound plays.' : silent ? 'No completion sound plays: Desktop’s is None too.' : `Only Desktop’s own Completion Sound plays (${name}).`)
+    : !native ? 'Set Desktop sound to None, or both will play at the same time.'
+    : silent ? 'Desktop sound is None: only this one plays.'
+    : `Desktop sound is not None (${name}): both will play at the same time. Set it to None.`;
+  return h('div', { className: 'sf-native-row' },
+    h('span', { className: 'sf-native-hint', 'data-state': state }, text),
+    h(sdk.Button, { type: 'button', variant: 'outline', size: 'sm', className: 'sf-native gap-1.5', onClick: () => host.navigate(NATIVE_SOUND_SETTING) }, 'Go to setting', icon('ArrowRight', '→')));
 }
 // The settings page renders without the sidebar's stylesheet. Masking the native picker button keeps its click-to-open picker while drawing the same alarm as the hover Snooze control instead of a plain clock.
 const ALARM_MASK = `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>${BUNDLED_ICONS.Alarm.map(d => `<path d='${d}'/>`).join('')}</svg>`)}")`;
@@ -1597,7 +1804,16 @@ const SEGMENTED_FALLBACK_CSS = `.su-seg{display:inline-flex;gap:2px;padding:2px;
 .su-seg button{border:0;border-radius:3px;padding:2px 10px;font-size:11px;font-weight:500;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
 .su-seg button[aria-pressed=true]{background:var(--ui-bg-elevated,var(--ui-bg-tertiary));color:var(--ui-text-primary)}`;
 const SETTINGS_CSS = `${SEGMENTED_FALLBACK_CSS}
-.sf-snooze-time::-webkit-calendar-picker-indicator{background:currentColor;-webkit-mask:${ALARM_MASK} content-box center/contain no-repeat;mask:${ALARM_MASK} content-box center/contain no-repeat;cursor:pointer}`;
+.sf-snooze-time::-webkit-calendar-picker-indicator{background:currentColor;-webkit-mask:${ALARM_MASK} content-box center/contain no-repeat;mask:${ALARM_MASK} content-box center/contain no-repeat;cursor:pointer}
+.sf-sound{display:flex;align-items:center;gap:8px}
+.sf-sound-select{min-width:14rem;padding:4px 8px;border:1px solid var(--ui-stroke-secondary);border-radius:6px;background:transparent;color:inherit;font-size:12px}
+/* Tucked under the row's own 12px bottom padding. */
+.sf-native-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:-4px;padding-bottom:12px}
+.sf-native-hint{font-size:12px;color:var(--ui-text-tertiary)}
+.sf-native-hint[data-state=warn]{color:var(--ui-orange,#db704b)}
+.sf-native-hint[data-state=ok]{color:var(--ui-green,#1f8a65)}
+.sf-native{flex:none}
+.sf-native svg{width:13px;height:13px;flex:none}`;
 // Desktop clients older than the ListRow SDK export still get a usable row.
 function SettingsRow({ title, description, action, below }) {
   return h('div', { style: { display: 'grid', gap: 6, padding: '12px 0' } }, h('div', null, title), h('div', { style: { color: 'var(--ui-text-tertiary)' } }, description), h('div', null, action), below);
@@ -2341,13 +2557,13 @@ const SharedTips = memo(function SharedTips({ api, root }) {
     h('span', { className: 'sf-tip-layer', 'aria-hidden': true }, h(sdk.TooltipTrigger, { asChild: true }, h('span', { className: 'sf-tip-anchor', style: { left: tip.box.left, top: tip.box.top, width: tip.box.width, height: tip.box.height } }))),
     h(sdk.TooltipContent, { side: tip.side, placement: 'row', hideWhenDetached: false }, tip.card === null ? multiline(tip.label) : cardTipLabel(tip.label, tip.card)));
 });
-export function HermesT3Sidebar({ ctx, controller }) {
+export function HermesT3Sidebar({ ctx, controller, onAttention }) {
   const connectionId = useValue(host.state.connectionId), profile = useValue(host.state.profile);
   useValue(host.state.gateway);
   useValue(activationEpoch);
   const epoch = gatewayActivationEpoch();
   const scope = useMemo(() => ({ connectionId, profile: profile || 'default', epoch }), [connectionId, profile, epoch]);
-  return h(ScopedSidebar, { key: JSON.stringify(scopeKey(scope)), scope, controller, ctx });
+  return h(ScopedSidebar, { key: JSON.stringify(scopeKey(scope)), scope, controller, ctx, onAttention });
 }
 export function projectDisplayPath(path, home) {
   if (typeof path !== 'string') return '';
@@ -2444,7 +2660,7 @@ function ProjectChoice({ choice, selected, scope, controller, filterProject, bus
     h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
       onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject }) : null));
 }
-function ScopedSidebar({ ctx, controller, scope }) {
+function ScopedSidebar({ ctx, controller, scope, onAttention }) {
   const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
   // No session counts as viewed while a plugin page is shown, so the previous chat neither stays highlighted nor gets its Done/Woke markers acknowledged.
   const focusedId = useValue(host.state.focusedStoredSessionId), activeOwner = useValue(host.state.focusedSessionOwner), shownPage = useShownPage(), activeId = shownPage ? null : focusedId;
@@ -2534,6 +2750,9 @@ function ScopedSidebar({ ctx, controller, scope }) {
     return low ? snoozeDeadlines[low - 1] : 0;
   }, [snoozeDeadlines, now]);
   const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, liveCounts, { runtimeKnown, runtimeStale, now: classificationNow, draftIds }), [rows, metadata.data, liveCounts, runtimeKnown, runtimeStale, classificationNow, draftIds]);
+  // Badges are only read once both feeds answered, and not from a failed poll's leftover snapshot, whose statuses are unknown.
+  const attention = useRef({ seen: null, input: null, keys: null }), attentionReady = !!metadata.data && runtimeKnown && !runtimeStale;
+  useEffect(() => { if (attentionReady && attentionCue(attention.current, classified, metadata.data.completions)) onAttention?.(); }, [classified, attentionReady]);
   const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession && !row._draftOnly), [classified]);
   // Search keystrokes and toolbar state do not touch these observers, which cover hidden empty sessions too.
   const draftObservers = useMemo(() => emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
@@ -4630,13 +4849,20 @@ ${shortFade(':is(.su-tip-row>span:nth-child(2),.su-disclosure-names,.su-measure-
 export default {
   id: 'hermes-t3sidebar', name: 'hermes-t3sidebar', defaultEnabled: true,
   register(ctx) {
+    let disposed = false, pending = null;
+    const sound = createSoundPlayer();
     const controller = createController(ctx);
+    // Desktop's Mute interface sounds silences automatic cues; this is one.
+    const attention = () => { const choice = readCompletionSound(ctx); if (choice !== 'none' && !readNativeSound()?.muted) void sound.play(choice); };
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
-      data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller }) });
-    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx }) });
+      data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller, onAttention: attention }) });
+    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx, sound }) });
     ctx.register({ id: 'usage', area: sdk.ROUTES_AREA ?? 'routes', title: 'Usage', data: { path: USAGE_ROUTE }, render: () => h(UsagePage, { ctx, view: 'usage' }) });
     ctx.register({ id: 'limits', area: sdk.ROUTES_AREA ?? 'routes', title: 'Limits', data: { path: LIMITS_ROUTE }, render: () => h(UsagePage, { ctx, view: 'limits' }) });
-    let disposed = false, pending = null;
+    // Browsers start audio suspended until a gesture; Desktop clients without tracked listeners just rely on Electron's autoplay.
+    if (typeof ctx.addEventListener === 'function' && typeof window !== 'undefined') for (const type of ['pointerdown', 'keydown']) {
+      ctx.addEventListener(window, type, () => { if (readCompletionSound(ctx) !== 'none') sound.unlock(); }, { capture: true, passive: true });
+    }
     const disposeEvent = ctx.onEvent('*', event => {
       if (disposed) return;
       activationEpoch.set(gatewayActivationEpoch());
@@ -4665,6 +4891,6 @@ export default {
         return queryClient.invalidateQueries({ queryKey: scopeKey(scope), predicate: query => resources.includes(query.queryKey[4]), refetchType: 'active' }, { cancelRefetch: false });
       }).catch(() => { /* Query retains errors for the pane's normal recovery UI. */ });
     });
-    ctx.onDispose(() => { disposed = true; pending = null; controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-draft-sync', 'hermes-t3sidebar-preferences', 'hermes-t3sidebar-settings', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
+    ctx.onDispose(() => { disposed = true; pending = null; sound.dispose(); controller.dispose(); disposeEvent(); for (const root of ['hermes-t3sidebar', 'hermes-t3sidebar-drafts', 'hermes-t3sidebar-draft-sync', 'hermes-t3sidebar-preferences', 'hermes-t3sidebar-settings', USAGE_ROOT]) { void queryClient.cancelQueries({ queryKey: [root] }); queryClient.removeQueries({ queryKey: [root] }); } });
   }
 };

@@ -293,7 +293,8 @@ class CompletionObserver:
 				return None
 			if before is None:
 				return None
-			if (after is None or after.root != before.root or after.live or after.archived
+			# Work this turn leaves behind (a notifying background process, a child result still to deliver) reports back as another turn, whose end is the real completion.
+			if (pending or after is None or after.root != before.root or after.live or after.archived
 					or not after.delegations <= before.delegations):
 				return None
 			with self._lock:
