@@ -335,6 +335,27 @@ try {
     return choices.length === 6 && [0, 1, 2].every(i => sameColumn(choices[i], choices[i + 3]) && Math.abs(choices[i].width - choices[0].width) < .5)
       && day.querySelector('small').textContent === '9:00' && time.top >= icon.bottom - .5 && Math.abs(time.left + time.width / 2 - icon.left - icon.width / 2) < 1;
   }));
+  check('snooze title uses the session menu heading: 13px, medium, primary text, on a 24px line', await snoozeDialog.locator('.sf-snooze-head').evaluate(line => {
+    const heading = line.querySelector('.sf-menu-heading'), style = getComputedStyle(heading), probe = document.createElement('span');
+    probe.style.color = 'var(--ui-text-primary)'; line.append(probe); const primary = getComputedStyle(probe).color; probe.remove();
+    return style.fontSize === '13px' && style.fontWeight === '500' && style.color === primary && line.getBoundingClientRect().height >= 24 && !line.closest('form');
+  }));
+  check('snooze preset buttons carry no tooltip', await snoozeDialog.locator('.sf-snooze-choice').evaluateAll(nodes => nodes.length === 6 && nodes.every(node => !node.title && !node.closest('[data-sf-tip]'))));
+  // Hovering an hour button: +Nh keeps the primary colour and moves left, its wake time enters in secondary grey, and both edges equal the gap between them.
+  const hour = snoozeDialog.locator('.sf-snooze-hour').first();
+  check('an hour button at rest shows only +1h, centred', await hour.evaluate(el => {
+    const r = el.getBoundingClientRect(), d = el.querySelector('.sf-snooze-dur').getBoundingClientRect();
+    return getComputedStyle(el.querySelector('.sf-snooze-at')).opacity === '0' && Math.abs(d.left + d.width / 2 - r.left - r.width / 2) < 1;
+  }));
+  await hour.hover(); await page.waitForTimeout(400);
+  check('a hovered hour button shows +1h in primary and its wake time in secondary grey, edges equal to the gap', await hour.evaluate(el => {
+    const r = el.getBoundingClientRect(), dur = el.querySelector('.sf-snooze-dur'), at = el.querySelector('.sf-snooze-at'), d = dur.getBoundingClientRect(), a = at.getBoundingClientRect();
+    const probe = document.createElement('span'); probe.style.color = 'var(--ui-text-primary)'; el.append(probe); const primary = getComputedStyle(probe).color;
+    probe.style.color = 'var(--ui-text-secondary)'; const secondary = getComputedStyle(probe).color; probe.remove();
+    const left = d.left - r.left, gap = a.left - d.right, right = r.right - a.right;
+    return getComputedStyle(at).opacity === '1' && getComputedStyle(dur).color === primary && getComputedStyle(at).color === secondary && gap > 2 && Math.abs(left - gap) < 1 && Math.abs(right - gap) < 1;
+  }));
+  await page.mouse.move(0, 0);
   const check_ = snoozeDialog.getByRole('button', { name: 'Apply custom snooze', exact: true });
   const green = await check_.evaluate(el => { const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; });
   await snoozeDialog.locator('input[type=datetime-local]').fill('2020-01-01T12:00');
@@ -502,7 +523,7 @@ try {
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('Unpin returns the session to Ready without any Undo toast', await noUndo());
   await design.hover(); await snooze.click();
-  check('snooze offers +1h/+2h/+4h, then Tomorrow, Monday and Next week with their dates, without redundant Snooze prefixes', await snoozeDialog.locator('.sf-snooze-choice').evaluateAll(nodes => JSON.stringify(nodes.map(node => [node.getAttribute('aria-label'), node.querySelector('.sf-snooze-day-name')?.textContent ?? node.textContent])) === JSON.stringify([['In 1 hour', '+1h'], ['In 2 hours', '+2h'], ['In 4 hours', '+4h'], ['Tomorrow at 9:00', 'Tomorrow'], ['Monday at 9:00', 'Monday'], ['Next week at 9:00', 'Next week']])
+  check('snooze offers +1h/+2h/+4h, then Tomorrow, Monday and Next week with their dates, without redundant Snooze prefixes', await snoozeDialog.locator('.sf-snooze-choice').evaluateAll(nodes => JSON.stringify(nodes.map(node => [node.getAttribute('aria-label'), node.querySelector('.sf-snooze-day-name')?.textContent ?? node.querySelector('.sf-snooze-dur').textContent])) === JSON.stringify([['In 1 hour', '+1h'], ['In 2 hours', '+2h'], ['In 4 hours', '+4h'], ['Tomorrow at 9:00', 'Tomorrow'], ['Monday at 9:00', 'Monday'], ['Next week at 9:00', 'Next week']])
     && nodes.slice(3).every(node => /\d/.test(node.querySelector('.sf-snooze-day-date').textContent))) && !/Custom snooze/.test(await snoozeDialog.innerText()));
   const expectedMonday = await page.evaluate(() => {
     const monday = new Date(), offset = (8 - monday.getDay()) % 7 || 7;
