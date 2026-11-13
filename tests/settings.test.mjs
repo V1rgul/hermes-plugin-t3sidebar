@@ -49,7 +49,7 @@ test('preset time defaults to 09:00 and a verified settings save updates both op
 	const expected = snoozePresets(Date.now(), '14:35').days[0].wake_at;
 	await click(button('Tomorrow at 14:35'));
 	assert.equal(mock.control.metadata.sessions.design.wake_at, expected);
-	await click($('[data-session-id="design"] [aria-label="Snooze session"]'));
+	// The menu stays open on the snoozed card, so another preset reschedules it at once.
 	const monday = snoozePresets(Date.now(), '14:35').days[1].wake_at;
 	await click(button('Monday at 14:35'));
 	assert.equal(mock.control.metadata.sessions.design.wake_at, monday);

@@ -367,6 +367,10 @@ try {
   await page.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('hover Snooze saves the selected time without any Undo toast', await noUndo());
+  // The menu follows its card to Snoozed, still open, and now offers Unsnooze. Its placement is checked in the real Webapp: the mock places a new popover before its anchor ref exists.
+  await snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true }).waitFor();
+  check('Snooze menu stays open on the card moved to Snoozed', await design.getAttribute('data-menu-open') === 'true' && await snooze.getAttribute('aria-expanded') === 'true');
+  await page.keyboard.press('Escape');
   await design.click({ button: 'right' });
   check('snoozed context menu omits the redundant restore action', !await page.getByRole('button', { name: /^(Restore to Ready|Return to ready|Unsnooze)$/ }).count());
   await page.keyboard.press('Escape');
@@ -410,6 +414,7 @@ try {
   check('working Snooze presets and custom time are enabled', await snoozeDialog.getByRole('button', { name: 'In 1 hour', exact: true }).isEnabled() && await snoozeDialog.locator('input[type=datetime-local]').isEnabled());
   await snoozeDialog.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="root"]').waitFor();
+  await page.keyboard.press('Escape');
   await page.mouse.move(1100, 850);
   check('snoozed worker shows remaining time in non-bold theme purple instead of age', await worker.locator('.sf-snooze-time').evaluate(el => {
     const probe = document.createElement('span'); probe.style.color = 'var(--sf-purple)'; el.append(probe);
@@ -488,7 +493,7 @@ try {
   await page.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('snoozing a pinned session wins without clearing its pin', await design.locator('.sf-pin').count() === 1);
-  await design.hover(); await snooze.click();
+  // The menu stayed open on the moved card: Unsnooze is right there.
   await snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true }).click();
   await page.locator('section[aria-label="Pinned"] [data-session-id="design"]').waitFor();
   check('restoring a pinned snooze returns to Pinned, marked by the group pin instead of its own', !await design.locator('.sf-pin').count() && await page.locator('section[aria-label="Pinned"] > .sf-pinned-mark').count() === 1);
@@ -513,10 +518,10 @@ try {
     const fixture = window.hermesT3SidebarHarness;
     return fixture.calls.slice(mondayCallStart).some(call => call[0] === 'rest' && call[1] === '/sessions/design' && call[2]?.body?.action === 'snooze' && call[2].body.wake_at === expectedMonday) && fixture.control.metadata.sessions.design.wake_at === expectedMonday;
   }, { expectedMonday, mondayCallStart }) && await noUndo());
-  await design.hover(); await snooze.click();
   await snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('restoring the Monday snooze has no Undo toast', await noUndo());
+  await page.keyboard.press('Escape');
   await design.hover();
   await archive.click();
   await page.locator('section[aria-label="Archived"] [data-session-id="design"]').waitFor();
@@ -595,6 +600,12 @@ try {
   await projectMenu.getByRole('button', { name: 'Filter for /projects/hermes-t3sidebar', exact: true }).click();
   check('row project shortcut filters without grouping or changing native workspace', !await page.locator('[data-session-id="readme"]').count() && await page.locator('[data-session-id="design"]').count() === 1 && !await page.locator('.sf-group').count());
   check('active project filter replaces toolbar filter glyph with project icon', await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'true' && await page.getByRole('button', { name: 'Filter sessions', exact: true }).locator('[data-codicon="extensions"]').count() === 1);
+  check('the filtering folder\'s Filter turns into Clear filter while the Project menu stays open', await projectMenu.getByRole('button', { name: 'Clear filter', exact: true }).getAttribute('aria-pressed') === 'true' && !await projectMenu.getByRole('button', { name: 'Filter for /projects/hermes-t3sidebar', exact: true }).count());
+  await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
+  await design.click({ button: 'right' }); await context.getByRole('button', { name: 'Project', exact: true }).click(); await projectMenu.waitFor();
+  check('a reopened Project menu still shows Clear filter for the filtering folder', await projectMenu.getByRole('button', { name: 'Clear filter', exact: true }).count() === 1);
+  await projectMenu.screenshot({ path: join(screenshotDir, 'project-clear-filter.png') });
+  await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
   await checkPersistentTrigger('Filter sessions', 'Session filters');
   await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
   const filters = page.getByRole('dialog', { name: 'Session filters', exact: true });
@@ -609,7 +620,8 @@ try {
   }));
   await filters.getByRole('button', { name: 'All projects', exact: true }).click();
   check('All projects clears active icon and closes filter picker', !await filters.count() && await page.getByRole('button', { name: 'Filter sessions', exact: true }).getAttribute('data-filtered') === 'false');
-  const openProject = async () => { await design.click({ button: 'right' }); await context.getByRole('button', { name: 'Project', exact: true }).click(); await projectMenu.waitFor(); };
+  // Project actions keep the menu open, so it is opened only when it is not already.
+  const openProject = async () => { if (await projectMenu.count()) return; await design.click({ button: 'right' }); await context.getByRole('button', { name: 'Project', exact: true }).click(); await projectMenu.waitFor(); };
   await openProject();
   await projectMenu.getByRole('button', { name: 'Rename project', exact: true }).click();
   await projectMenu.getByRole('textbox', { name: 'Project name', exact: true }).fill('Renamed test project');
@@ -673,7 +685,8 @@ try {
   await projectMenu.getByRole('button', { name: 'Project icon: law', exact: true }).click();
   await page.locator('[data-session-id="readme"] [data-codicon="law"]').waitFor();
   check('filter project icon edit saves to the intended project only', !await design.locator('[data-codicon="law"]').count());
-  await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
+  check('a filter project edit keeps the picker and its Project menu open', await projectMenu.count() === 1 && await filters.count() === 1);
+  await page.keyboard.press('Escape');
   const docsChoice = filters.getByRole('button', { name: 'Filter by docs', exact: true });
   await docsChoice.focus(); await page.keyboard.press('Shift+F10'); await projectMenu.waitFor();
   check('filter project keyboard context shortcut opens the same categorized picker', await projectMenu.locator('.sf-project-icons button').count() === 64);
@@ -683,22 +696,24 @@ try {
   check('filter project rename preserves text caret navigation', await projectName.evaluate(el => el.selectionStart === el.value.length - 1));
   await projectName.press('Enter');
   await page.locator('[data-session-id="readme"] .sf-project-name').filter({ hasText: 'Docs renamed' }).waitFor();
-  await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
+  await page.keyboard.press('Escape');
   await filters.getByRole('button', { name: 'Filter by Docs renamed', exact: true }).click({ button: 'right' }); await projectMenu.waitFor();
   await projectMenu.getByRole('button', { name: 'Rename project', exact: true }).click();
   await projectName.fill('docs'); await projectName.press('Enter');
-  await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
+  await filters.getByRole('button', { name: 'Filter by docs', exact: true }).waitFor();
+  await page.keyboard.press('Escape');
   await filters.getByRole('button', { name: 'Filter by docs', exact: true }).click({ button: 'right' }); await projectMenu.waitFor();
   await projectMenu.getByRole('button', { name: 'Project color: Brown', exact: true }).click();
   await page.waitForFunction(() => window.hermesT3SidebarHarness.control.rows.find(row => row.id === 'readme').project.color === '#864e08');
   check('filter project color edit persists the exact approved brown', await page.locator('[data-session-id="readme"] .sf-project-icon').evaluate(el => getComputedStyle(el).color === 'rgb(134, 78, 8)'));
-  await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
+  await page.keyboard.press('Escape');
   await filters.getByRole('button', { name: 'Filter by docs', exact: true }).click({ button: 'right' }); await projectMenu.waitFor();
   await projectMenu.getByRole('button', { name: 'No color', exact: true }).click();
-  await page.getByRole('button', { name: 'Filter sessions', exact: true }).click();
+  await page.keyboard.press('Escape');
   await filters.getByRole('button', { name: 'Filter by docs', exact: true }).click({ button: 'right' }); await projectMenu.waitFor();
   await projectMenu.getByRole('button', { name: 'Default icon', exact: true }).click();
   await page.evaluate(() => window.removeEventListener('contextmenu', window.fixtureContextCoordinator, true));
+  await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
   await openProject(); await projectMenu.getByRole('button', { name: 'No color', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('[data-session-id="design"] .sf-project-icon').style.color);
   await openProject(); await projectMenu.getByRole('button', { name: 'Project icon: rocket', exact: true }).click();
@@ -708,6 +723,7 @@ try {
   await projectMenu.getByRole('button', { name: 'Project icon: rocket', exact: true }).click();
   await design.locator('[data-codicon="folder"]').waitFor();
   check('reselecting the chosen icon clears to the default glyph', !await design.locator('[data-codicon="rocket"]').count());
+  await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
   await design.click({ button: 'right' }); await context.getByRole('button', { name: 'Project', exact: true }).focus(); await page.keyboard.press('ArrowRight');
   await projectMenu.waitFor(); await projectMenu.getByRole('button', { name: 'Rename project', exact: true }).focus(); await page.keyboard.press('ArrowLeft');
   check('Project submenu opens with Right and closes with Left without dismissing session actions', !await projectMenu.count() && await context.count() === 1);
@@ -722,10 +738,10 @@ try {
   await page.getByRole('button', { name: 'In 1 hour', exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('direct Snooze control remains available without an Undo toast', await noUndo());
-  await design.hover(); await snooze.click();
   await snoozeDialog.getByRole('button', { name: 'Unsnooze', exact: true }).click();
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('Snooze menu Unsnooze remains available without an Undo toast', await noUndo());
+  await page.keyboard.press('Escape');
   await page.getByRole('searchbox').fill('release');
   await page.waitForFunction(() => !document.querySelector('[data-session-id="design"]'));
   check('search filters real React rows', await page.locator('[data-session-id="readme"]').count() === 1);

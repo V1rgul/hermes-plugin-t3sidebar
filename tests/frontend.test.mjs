@@ -407,8 +407,8 @@ test('session menu shows the start of a draft on its own line, read when it open
   assert.equal(line.querySelector('button').dataset.destructive, 'true');
   assert.equal(mock.queryClient.getQueryCache().getAll().some(query => JSON.stringify(query.state.data ?? null).includes('Friday snooze')), false, 'the text never enters the query cache');
   await click(button('Discard draft'));
-  assert.equal($('[role=dialog]'), null);
-  assert.equal($('.sf-session-menu'), null);
+  assert.equal(!!$('.sf-session-menu'), true, 'the menu stays open');
+  assert.equal(!!$('.sf-session-menu .sf-menu-draft'), false, 'its draft line leaves with the draft');
 });
 
 test('session menu toolbar explains why Delete and Move wait for an idle session', async () => {
@@ -440,8 +440,10 @@ test('a pinned working card keeps its Working status, stays undimmed and follows
   await refresh(); assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Pinned');
   await click(button('Actions for Runtime classification')); await click(button('Unpin'));
   assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Working');
-  await click(button('Actions for Runtime classification')); await click(button('Pin'));
+  // The menu followed the card to Working and is still open.
+  await click(button('Pin'));
   assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Pinned');
+  await dismiss();
   mock.control.live.find(item => item.id === 'runtime-worker').status = 'waiting';
   await refresh(); assert.equal(row('root').closest('section').getAttribute('aria-label'), 'Ready');
   assert.equal(row('root').querySelector('[data-status=input]')?.textContent, 'Input');
@@ -483,12 +485,73 @@ test('card Snooze opens time choices and confirms organization without opening t
   assert.equal($('[role=dialog]').textContent.includes('Settle'), false);
   await click(button('In 1 hour'));
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
-  assert.equal($('[role=dialog]') === null, true);
+  assert.equal($('[role=dialog]')?.getAttribute('aria-label'), 'Snooze session', 'the menu stays open on the moved card');
   assert.equal(mock.calls.some(call => call[0] === 'open'), false);
   assert.equal(button('Undo'), undefined); assert.equal($('.sf-undo') === null, true);
-  await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Unsnooze'));
+  await click(button('Unsnooze'));
   assert.equal(row('design').closest('section'), shelf('Ready'));
   assert.equal(row('approval').querySelector('[aria-label="Snooze session"]').disabled, false);
+});
+
+test('a moving card menu glides to its new place instead of jumping, including when its card changes shelf', async t => {
+  // A manual frame clock, the DOM's MutationObserver and popover boxes chosen per element: the first menu sits at y 0, the remounted one at y 300.
+  const frames = new Map(); let handle = 0, clock = 0;
+  const saved = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame, observer: globalThis.MutationObserver, rect: window.HTMLElement.prototype.getBoundingClientRect };
+  Object.assign(globalThis, { requestAnimationFrame: callback => { frames.set(++handle, callback); return handle; }, cancelAnimationFrame: id => frames.delete(id), MutationObserver: window.MutationObserver });
+  const boxes = new Map();
+  // As in a browser, the box includes the translate property.
+  window.HTMLElement.prototype.getBoundingClientRect = function () {
+    const [x = 0, y = 0] = (this.style.translate || '').split(' ').map(part => Number.parseFloat(part) || 0), top = (boxes.get(this) ?? 0) + y;
+    return { left: x, top, right: x + 300, bottom: top + 200, width: 300, height: 200, x, y: top };
+  };
+  t.after(() => { Object.assign(globalThis, { requestAnimationFrame: saved.raf, cancelAnimationFrame: saved.caf, MutationObserver: saved.observer }); window.HTMLElement.prototype.getBoundingClientRect = saved.rect; });
+  const run = async count => { for (let i = 0; i < count; i++) { clock += 16; const due = [...frames]; frames.clear(); for (const [, callback] of due) callback(clock); } await tick(); };
+  await mount();
+  await click(row('design').querySelector('[aria-label="Snooze session"]'));
+  const first = $('[role=dialog]');
+  // Radix places it again lower down (its anchor moved): it starts where it was and eases there.
+  boxes.set(first, 120);
+  await act(async () => { first.style.left = '1px'; }); await tick();
+  assert.equal(first.style.translate, '0px -120px');
+  await run(3);
+  const midway = Number(first.style.translate.split(' ')[1].replace('px', ''));
+  assert.ok(midway > -120 && midway < 0, first.style.translate);
+  await run(40);
+  assert.equal(first.style.translate, '', 'the glide ends on the new place');
+  // Snoozing moves the card to Snoozed, which remounts its menu: the new one starts from the old one's place (y 120), without a second enter animation.
+  const created = window.document.createElement.bind(window.document);
+  window.document.createElement = (...args) => { const node = created(...args); boxes.set(node, 300); return node; };
+  t.after(() => { window.document.createElement = created; });
+  await click(button('In 1 hour'));
+  window.document.createElement = created;
+  const second = $('[role=dialog]');
+  assert.equal(second !== first, true, 'the menu remounted with its card');
+  assert.equal(row('design').closest('section'), shelf('Snoozed'));
+  assert.equal(second.style.translate, '0px -180px');
+  assert.equal(second.style.animation, 'none');
+  await run(40);
+  assert.equal(second.style.translate, '');
+  // Reduced motion: the menu goes straight to its new place.
+  const media = globalThis.matchMedia; globalThis.matchMedia = () => ({ matches: true });
+  t.after(() => { globalThis.matchMedia = media; });
+  boxes.set(second, 500);
+  await act(async () => { second.style.left = '2px'; }); await tick();
+  assert.equal(second.style.translate, '');
+  globalThis.matchMedia = media;
+  await dismiss();
+});
+
+test('a menu whose card moves into a folded shelf closes, since its anchor is hidden', async () => {
+  await mount();
+  await click(button('Snoozed (1)'));
+  assert.equal(shelf('Snoozed').dataset.closed, 'true');
+  await click(row('design').querySelector('[aria-label="Snooze session"]'));
+  await click(button('In 1 hour'));
+  assert.equal(mock.control.metadata.sessions.design.state, 'snoozed');
+  assert.equal(button('Snoozed (2)').getAttribute('aria-expanded'), 'false');
+  assert.equal($('[role=dialog]') === null, true);
+  // Whether the folded shelf mounts the card or not, it holds no open menu.
+  assert.equal(row('design')?.dataset.menuOpen ?? 'false', 'false');
 });
 
 test('snooze countdown rounds to one whole unit with no left suffix or past durations', () => {
@@ -530,7 +593,7 @@ for (const status of ['working', 'starting', 'running children', 'waiting', 'unk
     assert.equal(row('root').closest('section'), shelf('Ready'), 'input/unknown safety remains visible');
     assert.equal(row('root').querySelector('.sf-snooze-time') === null, true);
   }
-  await click(row('root').querySelector('[aria-label="Snooze session"]'));
+  // The menu stayed open on the card, now showing its snooze.
   // The existing snooze is one line: wake time, time left, then Unsnooze, the menu's first enabled action.
   const information = all('form > .sf-snooze-info');
   assert.equal(information.length, 1);
@@ -543,7 +606,8 @@ for (const status of ['working', 'starting', 'running children', 'waiting', 'unk
   await click(button('Unsnooze'));
   assert.equal(mock.control.metadata.sessions.root.state, 'active');
   assert.equal(mock.control.metadata.sessions.root.wake_at, null);
-  assert.equal($('[role=dialog]') === null, true);
+  assert.equal($('[role=dialog]')?.getAttribute('aria-label'), 'Snooze session');
+  assert.equal(all('form > .sf-snooze-info').length, 0, 'the open menu drops the wake line');
   assert.equal(row('root').querySelector('.sf-snooze-time') === null, true);
   assert.equal(row('root').closest('section'), shelf(['waiting', 'unknown'].includes(status) ? 'Ready' : 'Working'));
   assert.deepEqual(mock.control.live, before);
@@ -560,7 +624,7 @@ test('Unsnooze only dismisses and removes the countdown after exact backend conf
   assert.ok(row('snoozed').querySelector('.sf-snooze-time'));
   mock.control.dropWrite = false;
   await click(button('Unsnooze'));
-  assert.equal($('[role=dialog]') === null, true);
+  assert.equal(button('Unsnooze'), undefined, 'the open menu drops the wake line');
   assert.equal(row('snoozed').closest('section'), shelf('Ready'));
   assert.equal(row('snoozed').querySelector('.sf-snooze-time') === null, true);
 });
@@ -592,7 +656,7 @@ test('snooze choices: +1h/+2h/+4h, then Tomorrow, Monday and Next week with thei
   await click(button('Monday at 9:00'));
   assert.equal(mock.control.metadata.sessions.design.wake_at, wake);
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
-  assert.equal($('[role=dialog]') === null, true); assert.equal($('.sf-undo') === null, true);
+  assert.ok(button('Unsnooze'), 'the menu stays open with the new snooze'); assert.equal($('.sf-undo') === null, true);
   assert.equal(button('Undo'), undefined); assert.equal(button('Dismiss undo'), undefined);
   assert.equal(mock.calls.some(call => call[0] === 'open'), false);
 });
@@ -636,7 +700,14 @@ test('menu triggers and their owning card retain open state until dismissal or s
   assert.equal(trigger().getAttribute('aria-expanded'), 'false'); assert.equal(row('design').dataset.menuOpen, 'false');
   await click(button('Actions for Sidebar layout'));
   assert.equal(row('design').dataset.menuOpen, 'true');
+  // Actions keep the menu open, even when the card moves to another shelf, and show their reverse.
   await click(button('Pin'));
+  assert.equal(row('design').closest('section'), shelf('Pinned'));
+  assert.equal(row('design').dataset.menuOpen, 'true'); assert.ok(button('Unpin'));
+  await click(button('Unpin'));
+  assert.equal(row('design').closest('section'), shelf('Ready'));
+  assert.equal(row('design').dataset.menuOpen, 'true'); assert.ok(button('Pin'));
+  await dismiss();
   assert.equal(row('design').dataset.menuOpen, 'false');
 });
 
@@ -661,7 +732,9 @@ test('React hover snooze preset and custom validation, no redundant context Rest
   assert.equal(button('Unsnooze'), undefined);
   await dismiss();
   await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Unsnooze')); assert.equal(row('design').closest('section'), shelf('Ready'));
-  await click(row('design').querySelector('[aria-label="Snooze session"]')); await input($('input[type=datetime-local]'), '2020-01-01T12:00');
+  // The snooze menu followed its card back to Ready and is still open.
+  assert.equal(row('design').dataset.menuOpen, 'true'); assert.equal(button('Unsnooze'), undefined);
+  await input($('input[type=datetime-local]'), '2020-01-01T12:00');
   assert.equal(button('Snooze until chosen time'), undefined);
   assert.equal(button('Apply custom snooze').dataset.valid, 'false', 'a past time is not marked valid');
   await click(button('Apply custom snooze')); assert.match($('[role=alert]').textContent, /future/);
@@ -1519,7 +1592,7 @@ test('Rename with AutoTitler dispatches rename-now for the surfaced tip and refr
   assert.deepEqual(dispatch.map(call => call[3]), [{ name: 'autotitler', arg: 'rename-now tip' }]);
   assert.equal(dispatch[0][1].connectionId, 'source-a');
   assert.equal(row('root').querySelector('.sf-row-title').textContent, 'Regenerated title');
-  assert.equal(button('Rename with AutoTitler'), undefined, 'menu closes after success');
+  assert.equal($('.sf-session-menu .sf-menu-heading').textContent, 'Regenerated title', 'the menu stays open and shows the new title');
 });
 
 test('Rename with AutoTitler reports skipped, foreign and switched-source results', async () => {
@@ -1877,7 +1950,7 @@ test('pin, archive and unarchive create no Undo even when native readback fails'
   await mount();
   for (const id of ['design', 'archived']) {
     await click(button('Actions for Hydraulic sizing')); await click(button(mock.control.metadata.sessions.pinned?.pinned ? 'Unpin' : 'Pin'));
-    assert.equal(button('Undo'), undefined);
+    assert.equal(button('Undo'), undefined); await dismiss();
     await click(row(id).querySelector(`[aria-label="${id === 'design' ? 'Archive' : 'Unarchive'} session"]`));
     assert.equal(button('Undo'), undefined);
   }
@@ -1892,11 +1965,13 @@ test('pin, snooze and restore are reversed through ordinary actions without any 
   const noUndo = () => { assert.equal(button('Undo'), undefined); assert.equal(button('Dismiss undo'), undefined); assert.equal($('.sf-undo') === null, true); };
   await click(button('Actions for Sidebar layout')); await click(button('Pin'));
   assert.equal(row('design').closest('section'), shelf('Pinned')); noUndo();
-  await click(button('Actions for Sidebar layout')); await click(button('Unpin'));
+  // The menus stay open on the moved card, so the reverse action is one click away.
+  await click(button('Unpin'));
   assert.equal(row('design').closest('section'), shelf('Ready')); noUndo();
+  await dismiss();
   await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('In 1 hour'));
   assert.equal(row('design').closest('section'), shelf('Snoozed')); noUndo();
-  await click(row('design').querySelector('[aria-label="Snooze session"]')); await click(button('Unsnooze'));
+  await click(button('Unsnooze'));
   assert.equal(row('design').closest('section'), shelf('Ready')); noUndo();
   await click(row('readme').querySelector('[aria-label="Snooze session"]')); await click(button('In 1 hour'));
   assert.equal(row('readme').closest('section'), shelf('Snoozed')); noUndo();

@@ -1,6 +1,6 @@
 // hermes-t3sidebar — independent T3-inspired session browser; plain disk-plugin ESM.
 import * as sdk from '@hermes/plugin-sdk';
-import { cloneElement, createElement as h, Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { cloneElement, createContext, createElement as h, Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useContext, useMemo, useRef, useState } from 'react';
 
 const { host, useValue, useQuery, useMutation, useQueryClient, queryClient, gatewayActivationEpoch } = sdk;
 export const SECTIONS = ['pinned', 'active', 'working', 'snoozed', 'archived'];
@@ -1668,6 +1668,61 @@ export const PROJECT_PALETTE = [
   { name: 'Dark crimson', value: '#ac0c47' },
 ];
 const PROJECT_MENU_STYLE = { padding: 0, width: 'max-content', maxWidth: 'calc(100vw - 16px)' };
+// The folder the session list is filtered by ('*' for none), read by the open project menus alone so a filter change re-renders no card.
+const ProjectFilter = createContext('*');
+// A menu stays open while its card moves (pinned, snoozed, unsnoozed, reordered, started working). Radix puts the popover at its anchor's new place at once; this glides it there from where it was shown, with the translate property, which composes with Radix's placement and Desktop's enter animation. Positions are read only when the popover is placed again, never on a timer: Radix writes each placement on its wrapper, whose box the translate leaves alone; without a wrapper (the test SDK) the content's own style changes are watched, ignoring the translate this writes. A card changing shelf remounts its menu, which starts from the place the previous one left in menuPlaces.
+const MENU_GLIDE_MS = 75, menuPlaces = new Map();
+const withoutTranslate = style => (style || '').replace(/(^|;)\s*translate:[^;]*;?/g, '$1').trim();
+export function useMenuGlide(key) {
+  const ref = useRef(null);
+  useLayoutEffect(() => {
+    const node = ref.current?.closest('[role=dialog]'), Observer = globalThis.MutationObserver;
+    if (!node || typeof Observer !== 'function' || typeof globalThis.requestAnimationFrame !== 'function') return undefined;
+    const wrapper = node.parentElement?.hasAttribute('data-radix-popper-content-wrapper') ? node.parentElement : null;
+    let offset = { x: 0, y: 0 }, natural = null, frame = 0, last = 0, scrolled = -Infinity;
+    const previous = menuPlaces.get(key);
+    menuPlaces.delete(key);
+    // A menu following its card is not opening again: no second enter animation.
+    const following = previous && performance.now() - previous.at < 300;
+    if (following) node.style.animation = 'none';
+    const show = () => { node.style.translate = offset.x || offset.y ? `${offset.x}px ${offset.y}px` : ''; };
+    const step = now => {
+      const k = 1 - Math.exp(-(last ? Math.min(64, now - last) : 16) / MENU_GLIDE_MS);
+      last = now;
+      offset = { x: offset.x * (1 - k), y: offset.y * (1 - k) };
+      if (Math.hypot(offset.x, offset.y) < 0.5) { offset = { x: 0, y: 0 }; frame = 0; last = 0; } else frame = requestAnimationFrame(step);
+      show();
+    };
+    const glide = delta => {
+      if (reducedMotion() || !delta.x && !delta.y) return;
+      offset = { x: offset.x + delta.x, y: offset.y + delta.y };
+      show();
+      if (!frame) frame = requestAnimationFrame(step);
+    };
+    const placed = records => {
+      if (records && !wrapper && records.every(record => withoutTranslate(record.oldValue) === withoutTranslate(node.getAttribute('style')))) return;
+      // Radix parks content it has not measured yet at translate(0, -200%).
+      if (/-200%/.test(wrapper?.style.transform || '')) return;
+      const box = (wrapper || node).getBoundingClientRect(), now = wrapper ? { x: box.left, y: box.top } : { x: box.left - offset.x, y: box.top - offset.y };
+      // Scrolling moves the menu with the list, rigidly.
+      if (natural && performance.now() - scrolled > 100) glide({ x: natural.x - now.x, y: natural.y - now.y });
+      else if (!natural && following) glide({ x: previous.x - now.x, y: previous.y - now.y });
+      natural = now;
+    };
+    const onScroll = () => { scrolled = performance.now(); };
+    const observer = new Observer(placed);
+    observer.observe(wrapper || node, { attributes: true, attributeFilter: ['style'], attributeOldValue: true });
+    node.ownerDocument.addEventListener('scroll', onScroll, true);
+    placed();
+    return () => {
+      observer.disconnect(); node.ownerDocument.removeEventListener('scroll', onScroll, true);
+      if (frame) cancelAnimationFrame(frame);
+      if (natural) menuPlaces.set(key, { x: natural.x + offset.x, y: natural.y + offset.y, at: performance.now() });
+      node.style.translate = '';
+    };
+  }, [key]);
+  return ref;
+}
 function projectMenuKeyDown(event, close) {
   const editing = ['INPUT', 'TEXTAREA'].includes(event.target.tagName) || event.target.isContentEditable;
   if (event.key === 'Escape' || event.key === 'ArrowLeft' && !editing) { event.preventDefault(); event.stopPropagation(); close(); }
@@ -1679,7 +1734,9 @@ function projectFolders(project, tree) {
   const listed = (tree?.projects || EMPTY_ROWS).filter(choice => !choice.isNoProject && choice.projectId === project?.id).map(choice => choice.path);
   return [...new Set([...own, ...listed])];
 }
-export function ProjectActions({ row, scope, controller, filterProject, close }) {
+// Its actions keep it open: each one shows its result in place, and a choice already in effect undoes itself (the active folder's Filter becomes Clear filter, the current color or icon resets).
+export function ProjectActions({ row, scope, controller, filterProject }) {
+  const filtered = useContext(ProjectFilter), glide = useMenuGlide(`${row.key ?? `picker:${row.cwd}`}:project`);
   const [renaming, setRenaming] = useState(false), [name, setName] = useState(row.project?.name || ''), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [copied, flashCopied] = useCopied();
   const alive = useRef(true);
@@ -1690,8 +1747,8 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
   const perform = async work => {
     if (busy) return;
     setBusy(true); setError('');
-    try { controller.check(scope); await work(); controller.check(scope); if (alive.current) close(); }
-    catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); }
+    try { controller.check(scope); await work(); controller.check(scope); return true; }
+    catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); return false; }
     finally { if (alive.current) setBusy(false); }
   };
   const copyPath = path => {
@@ -1699,32 +1756,35 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
     Promise.resolve().then(() => controller.copyProjectPath(scope, { ...project, cwd: path }))
       .then(() => { if (alive.current) flashCopied(path); }, err => { if (alive.current && sameScope(scope, captureScope())) setError(err.message); });
   };
-  const update = patch => void perform(() => controller.updateProject(scope, project, patch));
+  const update = (patch, done) => void perform(() => controller.updateProject(scope, project, patch)).then(ok => { if (ok && alive.current) done?.(); });
   // A tall button left of the palette or of the icon grid, as tall as the choices it resets.
   const reset = (label, pressed, content, onClick) => h('button', { type: 'button', className: 'sf-project-reset', 'aria-label': label, 'aria-pressed': pressed, ...sharedTip(label, 'top'), onClick }, content);
-  return h('div', { className: 'sf-menu sf-project-submenu', style: { '--sf-project-color': project?.color || 'var(--ui-text-tertiary)' } },
+  return h('div', { ref: glide, className: 'sf-menu sf-project-submenu', style: { '--sf-project-color': project?.color || 'var(--ui-text-tertiary)' } },
     // The glyph column holds the project mark on the name line, then a Filter button on each folder line.
     h('div', { className: 'sf-project-head' },
       h('span', { className: 'sf-project-head-mark', 'aria-hidden': true, style: { color: project?.color || undefined } }, projectMark(project)),
-      renaming ? h('form', { className: 'sf-menu-edit', onSubmit: event => { event.preventDefault(); update({ name }); } },
+      renaming ? h('form', { className: 'sf-menu-edit', onSubmit: event => { event.preventDefault(); update({ name }, () => setRenaming(false)); } },
         h('input', { value: name, autoFocus: true, 'aria-label': 'Project name', disabled: busy, onChange: event => setName(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
         h(IconButton, { type: 'submit', label: 'Save project rename', name: 'Check', glyph: '✓', disabled: busy || !name.trim() }))
         : h('span', { className: 'sf-menu-heading' }, project?.name || 'Project unavailable'),
       renaming ? null : h(MenuIcon, { label: 'Rename project', name: 'Pencil', glyph: '✎', disabled: busy || !editable, reason: 'Project editing requires a named project with a known folder.',
         onClick: () => { setName(project?.name || ''); setRenaming(true); } }),
-      ...folders.flatMap(path => [
-        h(MenuIcon, { key: `filter:${path}`, label: path ? `Filter for ${path}` : 'Filter for Home', name: 'ListFilter', glyph: '≡', disabled: busy,
-          onClick: () => void perform(() => filterProject(path ?? row.cwd ?? '')) }),
+      ...folders.flatMap(path => {
+        const target = path ?? row.cwd ?? '', active = filtered !== '*' && filtered === target;
+        return [
+        h(MenuIcon, { key: `filter:${path}`, label: active ? 'Clear filter' : path ? `Filter for ${path}` : 'Filter for Home', name: active ? 'X' : 'ListFilter', glyph: active ? '×' : '≡', disabled: busy,
+          'aria-pressed': active, onClick: () => void perform(() => filterProject(active ? '*' : target)) }),
         h('span', { key: `path:${path}`, className: 'sf-menu-path', ...sharedTip(path, 'top') }, path ?? 'Home'),
         h(MenuIcon, { key: `copy:${path}`, label: copied === path ? 'Copied' : 'Copy path', name: copied === path ? 'Check' : 'Copy', glyph: copied === path ? '✓' : '⧉', className: copied === path ? 'sf-copied' : '',
-          disabled: busy || !path, reason: 'Home has no project folder to copy.', onClick: () => copyPath(path) })])),
+          disabled: busy || !path, reason: 'Home has no project folder to copy.', onClick: () => copyPath(path) })];
+      })),
     tree.isError ? h('p', null, `Other folders unavailable: ${tree.error.message}`) : null,
     !editable ? h('p', null, 'Project editing requires a named project with a known folder.') : null,
     h('div', { className: 'sf-menu-separator', role: 'separator' }),
     h('fieldset', { className: 'sf-project-choices', disabled: busy || !editable, 'aria-label': 'Project color' },
       reset('No color', !project?.color, h(sdk.Codicon, { name: 'circle-slash', size: 16 }), () => update({ color: null })),
       h('div', { className: 'sf-project-colors' }, ...PROJECT_PALETTE.map(color => h('button', { key: color.value, type: 'button', 'aria-label': `Project color: ${color.name}`, ...sharedTip(color.name, 'top'),
-        'aria-pressed': project?.color?.toLowerCase() === color.value, style: { backgroundColor: color.value }, onClick: () => update({ color: color.value }) })))),
+        'aria-pressed': project?.color?.toLowerCase() === color.value, style: { backgroundColor: color.value }, onClick: () => update({ color: project?.color?.toLowerCase() === color.value ? null : color.value }) })))),
     h('fieldset', { className: 'sf-project-choices', disabled: busy || !editable, 'aria-label': 'Project icon' },
       reset('Default icon', !project?.icon, projectMark({ is_home: project?.is_home }), () => update({ icon: null })),
       h('div', { className: 'sf-project-icon-categories' }, ...PROJECT_ICON_GROUPS.map(group => h('fieldset', { key: group.label, className: 'sf-project-icon-category' },
@@ -1733,7 +1793,8 @@ export function ProjectActions({ row, scope, controller, filterProject, close })
           onClick: () => update({ icon: project?.icon === icon ? null : icon }) }, projectMark({ icon })))))))),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
-function MoveProjectActions({ row, scope, controller, close }) {
+function MoveProjectActions({ row, scope, controller }) {
+  const glide = useMenuGlide(`${row.key}:move`);
   const projects = useQuery({ queryKey: [...scopeKey(scope), 'projects'], queryFn: () => controller.projects(scope), retry: false, staleTime: 0 });
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
   const alive = useRef(true);
@@ -1741,7 +1802,7 @@ function MoveProjectActions({ row, scope, controller, close }) {
   const move = async project => {
     if (busy) return;
     setBusy(true); setError('');
-    try { await controller.moveProject(scope, row, project); controller.check(scope); if (alive.current) close(); }
+    try { await controller.moveProject(scope, row, project); controller.check(scope); }
     catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); }
     finally { if (alive.current) setBusy(false); }
   };
@@ -1749,7 +1810,7 @@ function MoveProjectActions({ row, scope, controller, close }) {
   const folderCounts = new Map();
   for (const project of choices) folderCounts.set(project.projectId, (folderCounts.get(project.projectId) || 0) + 1);
   const folderLabel = project => `${project.name}${folderCounts.get(project.projectId) > 1 ? ` · ${project.path}` : ''}`;
-  return h('div', { className: 'sf-menu' },
+  return h('div', { ref: glide, className: 'sf-menu' },
     h('div', { className: 'sf-menu-title' }, 'Move to project'),
     ...choices.map(project => h(sdk.Button, { key: project.id, variant: 'ghost', size: 'sm', disabled: busy || row.cwd === project.path,
       'aria-label': `Move to ${folderLabel(project)}`, onClick: () => void move(project) },
@@ -1770,12 +1831,14 @@ function DraftLine({ row, scope, controller, disabled, onDiscard }) {
     h('span', { className: 'sf-menu-draft-text' }, text || 'Unsent draft'),
     h(MenuIcon, { label: 'Discard draft', name: 'X', glyph: '×', destructive: true, disabled, onClick: onDiscard }));
 }
-function SnoozeActions({ row, mutate, disabled, close, presetTime, snoozeDetail, title }) {
+function SnoozeActions({ row, mutate, disabled, presetTime, snoozeDetail, title }) {
+  const glide = useMenuGlide(`${row.key}:snooze`);
   const [value, setValue] = useState(''), [error, setError] = useState('');
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const off = disabled || row.archived === true;
-  const run = payload => { void mutate(row, payload).then(ok => { if (ok && alive.current) close(); }); };
+  // The menu stays open: the wake line then shows the new snooze, with Unsnooze to undo it.
+  const run = payload => { void mutate(row, payload); };
   // An empty field is never valid; submitting validates again, so an invalid value can still be submitted to explain what is wrong.
   const customValid = !!value && (() => { try { parseLocalWake(value); return true; } catch (_) { return false; } })();
   const custom = event => {
@@ -1784,7 +1847,7 @@ function SnoozeActions({ row, mutate, disabled, close, presetTime, snoozeDetail,
   };
   const presets = snoozePresets(Date.now(), presetTime), wake = new Date(row.meta.wake_at * 1000);
   const at = date => `${longDay.format(date)}, ${shortTime.format(date)}`;
-  return h('div', { className: 'sf-menu sf-snooze-menu' }, title,
+  return h('div', { ref: glide, className: 'sf-menu sf-snooze-menu' }, title,
     h('form', { onSubmit: custom },
       // An existing snooze: its wake time and what is left on one line, then Unsnooze at the end of it.
       row.meta.state === 'snoozed' ? h('div', { className: 'sf-snooze-info' },
@@ -1810,21 +1873,22 @@ function SnoozeActions({ row, mutate, disabled, close, presetTime, snoozeDetail,
 }
 function RowActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, snoozeOnly = false, presetTime, snoozeDetail, hasDraft = false }) {
   const title = h('div', { className: 'sf-menu-title' }, sessionTitle(row));
-  if (snoozeOnly) return h(SnoozeActions, { row, mutate, disabled, close, presetTime, snoozeDetail, title });
+  if (snoozeOnly) return h(SnoozeActions, { row, mutate, disabled, presetTime, snoozeDetail, title });
   return h(SessionActions, { row, scope, controller, filterProject, deleteSession, mutate, disabled, close, hasDraft });
 }
 function SessionActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, hasDraft }) {
   const [error, setError] = useState(''), [renaming, setRenaming] = useState(false), [title, setTitle] = useState(row.title || ''), [busy, setBusy] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false), [moveOpen, setMoveOpen] = useState(false);
-  const [copied, flashCopied] = useCopied();
+  const [copied, flashCopied] = useCopied(), glide = useMenuGlide(`${row.key}:actions`);
   const autotitler = useQuery({ queryKey: [...scopeKey(scope), 'autotitler'], queryFn: () => controller.autotitlerAvailable(scope), retry: false, staleTime: 60_000 });
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const autotitlerReason = autotitler.data === true ? null : autotitler.isLoading ? 'Checking for the AutoTitler plugin…' : 'The AutoTitler plugin is not available on this backend.';
-  const run = payload => { void mutate(row, payload).then(ok => { if (ok && alive.current) close(); }); };
-  const perform = async work => {
+  // Actions keep the menu open and show their result in it (Pin turns into Unpin, a rename into the new title); only Delete hands over to its confirmation.
+  const run = payload => { void mutate(row, payload); };
+  const perform = async (work, done) => {
     setBusy(true); setError('');
-    try { controller.check(scope); await work(); controller.check(scope); if (alive.current) close(); }
+    try { controller.check(scope); await work(); controller.check(scope); if (alive.current) done?.(); }
     catch (err) { if (alive.current && sameScope(scope, captureScope())) setError(err.message); }
     finally { if (alive.current) setBusy(false); }
   };
@@ -1841,10 +1905,10 @@ function SessionActions({ row, scope, controller, filterProject, deleteSession, 
       trigger: button => h(sdk.PopoverTrigger, { asChild: true }, button) }),
     h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': label === 'Project' ? 'Project actions' : label,
       onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, content()));
-  return h('div', { className: 'sf-menu sf-session-menu' },
+  return h('div', { ref: glide, className: 'sf-menu sf-session-menu' },
     h('div', { className: 'sf-menu-line' },
       // The field starts from the title current now, not when the menu opened; once editing, a poll never replaces the typed text.
-      renaming ? h('form', { className: 'sf-menu-edit', onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title)); } },
+      renaming ? h('form', { className: 'sf-menu-edit', onSubmit: event => { event.preventDefault(); void perform(() => controller.rename(scope, row, title), () => setRenaming(false)); } },
         h('input', { type: 'text', value: title, autoFocus: true, 'aria-label': 'Session title', disabled: busy, onChange: event => setTitle(event.target.value), onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(false); } } }),
         h(IconButton, { type: 'submit', label: 'Save rename', name: 'Check', glyph: '✓', disabled: busy || !title.trim() }))
         : h('span', { className: 'sf-menu-heading' }, sessionTitle(row)),
@@ -1864,9 +1928,9 @@ function SessionActions({ row, scope, controller, filterProject, deleteSession, 
       row.archived !== true ? h(MenuIcon, { label: row.meta.pinned ? 'Unpin' : 'Pin', name: 'Pin', glyph: '♧', disabled: disabled || busy, onClick: () => run({ action: row.meta.pinned ? 'unpin' : 'pin' }) }) : null,
       h(MenuIcon, { label: 'Delete session', name: 'Trash2', glyph: '🗑', destructive: true, disabled: disabled || busy || !idle || typeof sdk.ConfirmDialog !== 'function', reason: !idle ? notIdle : typeof sdk.ConfirmDialog !== 'function' ? 'Deletion is unavailable in this Desktop version.' : null,
         onClick: () => { controller.check(scope); deleteSession(row); close(); } }),
-      submenu(moveOpen, setMoveOpen, 'Move to project', 'FolderSymlink', { glyph: '↪', disabled: disabled || busy || !idle, reason: idle ? null : notIdle }, () => h(MoveProjectActions, { row, scope, controller, close })),
+      submenu(moveOpen, setMoveOpen, 'Move to project', 'FolderSymlink', { glyph: '↪', disabled: disabled || busy || !idle, reason: idle ? null : notIdle }, () => h(MoveProjectActions, { row, scope, controller })),
       h('span', { className: 'sf-menu-toolbar-divider', 'aria-hidden': true }),
-      submenu(projectOpen, setProjectOpen, 'Project', 'FolderCog', { glyph: '⚙', disabled: busy }, () => h(ProjectActions, { row, scope, controller, filterProject, close }))),
+      submenu(projectOpen, setProjectOpen, 'Project', 'FolderCog', { glyph: '⚙', disabled: busy }, () => h(ProjectActions, { row, scope, controller, filterProject }))),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
 export function cardStatus(row, active = false) {
@@ -1993,13 +2057,21 @@ function useTitleReveal() {
   return { title, enter, leave };
 }
 // The sidebar has one menu, { key, kind: 'actions' | 'snooze', open }, held by the card that last opened it. Only that card mounts a popover around its trigger; every other card renders bare buttons, which keeps mounting a card cheap.
-function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, menu, setMenu, presetTime, snoozeDetail, workingDetails, showTokens }) {
+function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, menu, setMenu, holdMenu, presetTime, snoozeDetail, workingDetails, showTokens }) {
   const menuOpen = menu?.kind === 'actions' && menu.open, snoozeOpen = menu?.kind === 'snooze' && menu.open;
   const reveal = useTitleReveal();
   const openMenu = kind => setMenu({ key: row.key, kind, open: true });
   const setOpen = kind => open => setMenu(current => current?.key === row.key && current.kind === kind ? { ...current, open } : current);
-  // A card that leaves (scrolled out of a windowed list while closed, moved to another shelf, removed) drops its menu, as its own state did before.
-  useEffect(() => () => setMenu(current => current?.key === row.key ? null : current), [setMenu, row.key]);
+  // A card that leaves (scrolled out of a windowed list while closed, removed) drops its menu, as its own state did before. One that moves to another shelf (pinned, snoozed) keeps it: the copy mounting there holds it before the release lands.
+  useEffect(() => holdMenu(row.key), [holdMenu, row.key]);
+  const element = useRef(null);
+  // Mounting with an open menu means the card just moved shelves with it: bring the card, the menu's anchor, into view, or close the menu when its new shelf is folded.
+  useLayoutEffect(() => {
+    if (!menu?.open) return;
+    if (hidden) setOpen(menu.kind)(false);
+    else element.current?.scrollIntoView?.({ block: 'nearest' });
+  }, []);
+  useEffect(() => { if (hidden && menu?.open) setOpen(menu.kind)(false); }, [hidden]);
   // The held popover wraps the trigger, which then toggles it; a bare trigger opens it.
   const withMenu = (kind, trigger, content) => menu?.kind !== kind ? trigger : h(sdk.Popover, { open: menu.open, onOpenChange: setOpen(kind) },
     h(sdk.PopoverTrigger, { asChild: true }, trigger), h(sdk.PopoverContent, { align: 'start', side: 'right', style: PROJECT_MENU_STYLE, 'aria-label': kind === 'snooze' ? 'Snooze session' : 'Session actions' }, content()));
@@ -2018,7 +2090,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
     else onNavigate(event, row.key);
   };
   const details = [row.cwd, row.git_branch, row.status === 'waiting' ? 'Waiting for approval or answer' : isWorking(row) ? workingDetails && workingDetail(row) || 'working' : row.status, hasDraft && 'Unsent draft'].filter(Boolean);
-  return h('div', { className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': hasDraft, 'data-working': isWorking(row), 'data-unread': row.archived !== true && (!!(!active && row.completion?.done_token) || row.unread === true || row.woke) || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
+  return h('div', { ref: element, className: 'sf-row', 'data-menu-open': menuOpen || snoozeOpen, 'data-current': active, 'data-has-draft': hasDraft, 'data-working': isWorking(row), 'data-unread': row.archived !== true && (!!(!active && row.completion?.done_token) || row.unread === true || row.woke) || attention, 'data-dimmed': ['working', 'snoozed', 'archived'].includes(row.section), 'data-session-id': row.key,
     onPointerEnter: reveal.enter, onPointerLeave: reveal.leave,
     onContextMenu: event => { event.preventDefault(); openMenu('actions'); } },
     h('button', { type: 'button', className: 'sf-open', ref, 'aria-current': active ? 'page' : undefined,
@@ -2045,7 +2117,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
     // Hover-action tips point out of the card, past its right edge, so they cover neither the other action nor the neighbouring cards.
     h('div', { className: 'sf-hover', 'data-sf-tip-anchor': true },
       row.archived !== true ? withMenu('snooze', h(IconButton, { label: 'Snooze session', name: 'Alarm', glyph: '◷', disabled, 'aria-haspopup': 'dialog', 'aria-expanded': snoozeOpen, tip: 'card', ...bare('snooze') }),
-        () => h(RowActions, { row, scope, controller, mutate, disabled, presetTime, snoozeDetail, snoozeOnly: true, close: () => setOpen('snooze')(false) })) : null,
+        () => h(RowActions, { row, scope, controller, mutate, disabled, presetTime, snoozeDetail, snoozeOnly: true })) : null,
       h(sdk.Button, { type: 'button', variant: 'ghost', size: 'xs', className: 'sf-icon sf-archive', 'aria-label': row.archived === true ? 'Unarchive session' : 'Archive session', disabled: disabled || (row.archived !== true && row.status !== 'idle'),
         ...sharedTip(row.archived === true ? 'Unarchive session' : 'Archive session'),
         onClick: () => void mutate(row, { action: row.archived === true ? 'unarchive' : 'archive' }) }, icon(row.archived === true ? 'ArchiveRestore' : 'Archive', '▤'), row.archived === true ? 'Unarchive' : 'Archive')),
@@ -2338,7 +2410,7 @@ export function ProjectPicker({ controller, scope, close, mode = 'new', selected
   const entries = projects.data?.projects || EMPTY_ROWS;
   const prepared = useMemo(() => prepareProjectGroups(entries, home.data), [entries, home.data]);
   const groups = useMemo(() => filterProjectGroups(prepared, query), [prepared, query]);
-  const choiceProps = { scope, controller, filterProject, close, busy };
+  const choiceProps = { scope, controller, filterProject, busy };
   const renderChoice = (choice, pathOnly = false) => h(ProjectChoice, { ...choiceProps, key: choice.id, choice, pathOnly,
     selected: filtering && selected === choice.path, label: `${filtering ? 'Filter by' : 'New session in'} ${choice.name}${pathOnly ? `: ${prepared.paths.get(choice)}` : ''}`,
     displayPath: prepared.paths.get(choice), onSelect: () => void select(choice) });
@@ -2357,7 +2429,7 @@ export function ProjectPicker({ controller, scope, close, mode = 'new', selected
     busy ? h('div', { role: 'status' }, 'Creating session…') : null,
     error ? h('div', { role: 'alert' }, error) : null);
 }
-function ProjectChoice({ choice, selected, scope, controller, filterProject, close, busy, label, displayPath, onSelect, heading = false, pathOnly = false }) {
+function ProjectChoice({ choice, selected, scope, controller, filterProject, busy, label, displayPath, onSelect, heading = false, pathOnly = false }) {
   const [open, setOpen] = useState(false);
   const openMenu = event => { event.preventDefault(); event.stopPropagation(); if (busy) return; controller.check(scope); setOpen(true); };
   return h(sdk.Popover, { open, onOpenChange: setOpen },
@@ -2370,7 +2442,7 @@ function ProjectChoice({ choice, selected, scope, controller, filterProject, clo
       !pathOnly ? h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)) : null,
       h('span', { className: 'sf-project-details' }, !pathOnly ? h('span', { className: 'sf-project-name' }, choice.name) : null, !heading ? h('span', { className: 'sf-project-path' }, displayPath) : null))))),
     h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
-      onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject, close }) : null));
+      onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject }) : null));
 }
 function ScopedSidebar({ ctx, controller, scope }) {
   const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
@@ -2383,6 +2455,18 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const [query, setQuery] = useState(''), [project, setProject] = useState('*'), [filterOpen, setFilterOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false), [deleteTarget, setDeleteTarget] = useState(null);
   const [collapsed, setCollapsed] = useState(() => readFolds(ctx, scope)), [limit, setLimit] = useState(0), [archiveLimit, setArchiveLimit] = useState(0), [actionError, setActionError] = useState('');
   const [emptyDrafts, setEmptyDrafts] = useState(() => new Set()), [menu, setMenu] = useState(null);
+  // Mounted cards per key. A card moving to another shelf unmounts and mounts again in one commit, so its menu is dropped only if no copy holds it once that commit's effects have run.
+  const menuHolders = useRef(new Map());
+  const holdMenu = useCallback(key => {
+    const holders = menuHolders.current;
+    holders.set(key, (holders.get(key) || 0) + 1);
+    return () => {
+      const left = holders.get(key) - 1;
+      if (left) { holders.set(key, left); return; }
+      holders.delete(key);
+      queueMicrotask(() => { if (!holders.has(key)) setMenu(current => current?.key === key ? null : current); });
+    };
+  }, []);
   const onDraftPresence = useCallback((id, present) => setEmptyDrafts(previous => {
     if (previous.has(id) === present) return previous;
     const next = new Set(previous); if (present) next.add(id); else next.delete(id); return next;
@@ -2475,7 +2559,8 @@ function ScopedSidebar({ ctx, controller, scope }) {
     && !(section === 'active' && sections.active.some(row => row.status === 'waiting' || row.status === 'unknown')) ? [] : sections[section]), [sections, collapsed, searching]);
   // Only a filtered toolbar names its project; a card with the native project name is preferred over a bare folder.
   const selectedProject = project === '*' ? null : projectCatalog.data?.projects.find(choice => choice.path === project) || projectFromRows(rows, project);
-  const selectProject = useCallback(cwd => { controller.check(scope); setProject(cwd); setFilterOpen(false); }, [controller, scope]);
+  // Pickers close themselves after a choice; a project menu filtering the list stays open to show its Clear filter.
+  const selectProject = useCallback(cwd => { controller.check(scope); setProject(cwd); }, [controller, scope]);
   latest.current = { rows, sections, visible, metadata: metadata.data, disabled: !metadata.data || metadata.isError || sessions.data?.capped || !archives.data || archives.isError || mutation.isPending };
   // A background acknowledgment notice describes one thread's marker; it is stale once a later acknowledgment succeeds or another thread is shown, and must not hide an unrelated action error.
   const shownThread = useRef(activeId);
@@ -2567,7 +2652,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const focusRow = useCallback(id => { focused.current = id; }, []);
   const rowRef = useCallback((id, element) => { if (element) rowRefs.current.set(id, element); else rowRefs.current.delete(id); }, []);
   const disabled = latest.current.disabled;
-  const renderRow = row => h(MemoSessionRow, { key: row.key, row, menu: menu?.key === row.key ? menu : null, setMenu, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
+  const renderRow = row => h(MemoSessionRow, { key: row.key, row, menu: menu?.key === row.key ? menu : null, setMenu, holdMenu, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
     draftPresent: row.newSession && emptyDrafts.has(draftIdentity(row)),
     presetTime, workingDetails, showTokens, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
@@ -2634,7 +2719,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
   const noMatch = !hasMatches && filtering && !sessions.isLoading;
   const clearSearch = () => { setQuery(''); search.current?.focus(); };
   // React events also bubble here from the sidebar's popovers (card menus, project pickers), so their shared tips follow the same layer.
-  return h('aside', { ref: root, className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
+  return h(ProjectFilter.Provider, { value: project }, h('aside', { ref: root, className: 'sf', 'aria-label': 'hermes-t3sidebar', onKeyDown: event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); search.current?.focus(); }
     if (event.key === 'Escape' && event.target === search.current) { setQuery(''); search.current?.blur(); }
   }, onPointerOver: event => paneTips.current?.over(event), onPointerOut: event => paneTips.current?.out(event), onPointerDownCapture: () => paneTips.current?.close(),
@@ -2668,7 +2753,7 @@ function ScopedSidebar({ ctx, controller, scope }) {
     typeof sdk.ConfirmDialog === 'function' ? h(sdk.ConfirmDialog, { open: !!deleteTarget, onClose: () => setDeleteTarget(null),
       title: 'Delete session?', description: `Delete “${deleteTarget ? sessionTitle(deleteTarget) : ''}”? Stored history will be permanently removed. This cannot be undone.`,
       confirmLabel: 'Delete', busyLabel: 'Deleting…', doneLabel: 'Session deleted', destructive: true,
-      onConfirm: async () => { controller.check(scope); await controller.delete(scope, deleteTarget); controller.check(scope); } }) : null);
+      onConfirm: async () => { controller.check(scope); await controller.delete(scope, deleteTarget); controller.check(scope); } }) : null));
 }
 // ───────────────────────────── Usage page ───────────────────────────── Everything from here to the default export belongs to the /t3sidebar-usage and /t3sidebar-limits pages and the sidebar footer buttons that open them. The backend contract (GET /usage/history and /usage/limits) is frozen in the plugin's usage design notes.
 export const USAGE_ROUTE = '/t3sidebar-usage';

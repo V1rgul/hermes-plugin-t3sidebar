@@ -107,7 +107,8 @@ for (const mode of ['filter', 'new']) {
 			await click(button('Project icon: rocket'));
 			const write = mock.calls.find(call => call[2] === 'projects.update');
 			assert.deepEqual(write[3], { id: 'p_multi', icon: 'rocket' });
-			assert.equal(selected.length, 0); assert.equal(closed.length, 1);
+			assert.equal(selected.length, 0); assert.equal(closed.length, 0, 'an edit keeps the picker and the project menu open');
+			assert.equal(button('Project icon: rocket').getAttribute('aria-pressed'), 'true');
 		} finally { window.removeEventListener('contextmenu', coordinator, true); }
 	});
 

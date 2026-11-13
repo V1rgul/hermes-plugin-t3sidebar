@@ -246,21 +246,36 @@ test('Project menu: name line with Rename, one line per folder with Filter and C
   const nameInput = dialog().querySelector('[aria-label="Project name"]');
   await act(async () => nameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })));
   assert.ok(dialog()); assert.equal(dialog().querySelector('[aria-label="Project name"]'), nameInput);
+  // Every action keeps the menu open and shows its result there; a choice already in effect undoes itself.
   await click(button('Project icon: rocket', dialog()));
-  assert.equal(dialog(), null);
+  assert.ok(dialog());
   assert.ok(document.querySelector('[data-session-id="design"] [data-codicon="rocket"]'));
-  await open(); await click(button('Project color: Amber', dialog()));
+  assert.equal(button('Project icon: rocket', dialog()).getAttribute('aria-pressed'), 'true');
+  await click(button('Project color: Amber', dialog()));
   assert.equal(mock.control.rows.find(row => row.id === 'design').project.color, approved.colors[3].value);
-  await open(); await click(button('No color', dialog()));
+  assert.equal(button('Project color: Amber', dialog()).getAttribute('aria-pressed'), 'true');
+  await click(button('Project color: Amber', dialog()));
+  assert.equal(mock.control.rows.find(row => row.id === 'design').project.color, null, 'the current color resets');
+  await click(button('Project color: Amber', dialog())); await click(button('No color', dialog()));
   assert.equal(mock.control.rows.find(row => row.id === 'design').project.color, null);
-  await open(); await click(button('Default icon', dialog()));
+  await click(button('Default icon', dialog()));
   assert.equal(mock.control.rows.find(row => row.id === 'design').project.icon, null);
-  await open(); await click(button('Copy path', dialog()));
+  await click(button('Copy path', dialog()));
   assert.deepEqual(mock.calls.find(call => call[0] === 'clipboard'), ['clipboard', '/projects/hermes-t3sidebar']);
   assert.ok(button('Copied', dialog()), 'Copy answers with a check mark and keeps the menu open');
+  // Filter becomes Clear filter for as long as that folder filters the list, the menu reopened included.
   await click(button('Filter for /projects/hermes-t3sidebar', dialog()));
-  assert.equal(dialog(), null);
+  assert.ok(dialog());
   assert.equal(document.querySelector('[data-session-id="readme"]'), null);
+  assert.equal(button('Filter for /projects/hermes-t3sidebar', dialog()), undefined);
+  assert.equal(button('Clear filter', dialog()).getAttribute('aria-pressed'), 'true');
+  await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))); await tick();
+  await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))); await tick();
+  assert.equal(dialog(), null);
+  await open();
+  await click(button('Clear filter', dialog()));
+  assert.ok(document.querySelector('[data-session-id="readme"]'));
+  assert.equal(button('Filter for /projects/hermes-t3sidebar', dialog()).getAttribute('aria-pressed'), 'false');
 });
 
 test('project write errors stay visible in submenu and do not close or fabricate success', async () => {
@@ -312,7 +327,10 @@ test('a multi-folder project lists each folder with its own Filter and Copy', as
   await click(button('Copy path', dialog().querySelectorAll('.sf-project-head > .sf-menu-tool-wrap')[4]));
   assert.ok(mock.calls.some(call => call[0] === 'clipboard' && call[1] === '/multi/second'));
   await click(button('Filter for /multi/second', dialog()));
-  assert.equal(dialog(), null);
+  assert.ok(dialog(), 'the project menu and its picker stay open');
+  assert.ok(button('Filter for /multi/first', dialog()));
+  assert.equal(button('Clear filter', dialog()).closest('.sf-tip-wrap').nextElementSibling.textContent, '/multi/second');
+  assert.equal(button('Filter sessions').getAttribute('data-filtered'), 'true');
   assert.ok(!mock.calls.some(call => ['open', 'newChat'].includes(call[0]) || call[2] === 'session.create'));
 });
 
@@ -337,16 +355,14 @@ test('filter project right-click opens the same appearance menu without selectin
   assert.ok(document.querySelector('[data-session-id="readme"]'));
   assert.ok(!mock.calls.some(call => ['open', 'newChat'].includes(call[0]) || call[2] === 'session.create'));
   await click(button('Project icon: law', dialog()));
-  assert.equal(dialog(), null);
+  assert.ok(dialog());
   assert.ok(mock.control.rows.filter(row => row.project.name === 'docs').every(row => row.project.icon === 'law'));
   assert.ok(mock.control.rows.filter(row => row.project.name !== 'docs').every(row => row.project.icon !== 'law'));
   assert.deepEqual(rpcCalls().filter(call => call[2] !== 'projects.tree').slice(-3).map(call => call[2]), ['projects.list', 'projects.update', 'projects.get']);
-  await click(button('Filter sessions')); await context(button('Filter by docs'));
   assert.equal(button('Project icon: law', dialog()).getAttribute('aria-pressed'), 'true');
   await click(button('Project color: Brown', dialog()));
   const brown = approved.colors.find(color => color.name === 'Brown').value;
   assert.ok(mock.control.rows.filter(row => row.project.name === 'docs').every(row => row.project.color === brown));
-  await click(button('Filter sessions')); await context(button('Filter by docs'));
   assert.equal(button('Project color: Brown', dialog()).getAttribute('aria-pressed'), 'true');
   await click(button('No color', dialog()));
   assert.ok(mock.control.rows.filter(row => row.project.name === 'docs').every(row => row.project.color === null));

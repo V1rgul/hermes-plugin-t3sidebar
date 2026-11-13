@@ -68,7 +68,7 @@
 
 ![Project filter menu with search, All projects and project choices](docs/images/filter.png)
 
-- Right-click: title with rename and AutoTitler, session ID with copy, the start of an unsent draft with discard, then pin, delete, move to project and **Project**. **Project** menu: rename, then filter and copy path for each folder, color and icon.
+- Right-click: title with rename and AutoTitler, session ID with copy, the start of an unsent draft with discard, then pin, delete, move to project and **Project**. **Project** menu: rename, then filter (a cross while that folder filters the list) and copy path for each folder, color and icon. Session, Project and Snooze menus stay open after an action, showing its reverse.
 
 ![Session right-click menu with the Project submenu expanded: project actions, colors and icons](docs/images/session-project.png)
 
