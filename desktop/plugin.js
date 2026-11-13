@@ -3798,10 +3798,13 @@ async function readUsage(ctx, scope, path, validate) {
 // Orders limits reads, unknown banked-reset outcomes and reset confirmations by when each began. Numbers rather than times, so two events within one millisecond still compare.
 let usageOrder = 0;
 const nextUsageOrder = () => ++usageOrder;
+// This client's monotonic clock, in milliseconds: the cooldown counts elapsed time since a payload arrived, which a change of the wall clock must not shift.
+const monotonicNow = () => globalThis.performance.now();
 // The Limits page and the sidebar footer build the limits query the same way, so with equal preferences they share one cache entry and one five-minute poll instead of fetching the same history twice.
 // Each result carries, as `readNumber`, the number its read took before its request left, because the time the cache received a result says nothing about when the backend answered it. The number lives in the cache entry of its own Source/profile, activation and lookback and goes with it; being different for every read, it also keeps structural sharing from folding an equal answer into the previous object, which would carry the older number.
+// Each result also carries `receivedAt`, this client's monotonic time (monotonicNow) when it arrived, from which the Refresh button counts the backend's cooldown down.
 const limitsQueryOptions = (ctx, scope, hours) => ({ queryKey: [...usageScopeKey(scope), 'limits', hours], staleTime: 60_000, refetchInterval: 300_000, retry: false,
-  queryFn: () => { const readNumber = nextUsageOrder(); return readUsage(ctx, scope, `/usage/limits?hours=${hours}`, value => ({ ...validUsageLimits(value), readNumber })); } });
+  queryFn: () => { const readNumber = nextUsageOrder(); return readUsage(ctx, scope, `/usage/limits?hours=${hours}`, value => ({ ...validUsageLimits(value), readNumber, receivedAt: monotonicNow() })); } });
 // Usage preferences live in plugin storage; this query mirrors them in memory so the footer follows a lookback or provider chosen on an open Limits page (storage itself has no change events).
 const USAGE_PREFERENCES_QUERY = ['hermes-t3sidebar-preferences', 'usage'];
 function useUsagePreferences(ctx) {
@@ -3839,6 +3842,61 @@ function Segmented({ label, options, value, onChange, showLabel = true, sizing, 
 }
 // Banked-reset redemptions by Source/profile and account. Each request mints a new upstream idempotency key, so a second request is a second spend: a confirmation while one is in flight joins it, and after an outcome that neither confirms nor refuses the reset the account waits for a limits read started after that outcome, whose number its mark holds.
 const redeemsInFlight = new Map(), unsettledRedeems = new Map();
+// The Limits page's Refresh asks the backend to read every provider now (POST /usage/limits/collect), then reads the limits again; a click while one is under way joins it. The backend alone decides when the next may start, for all its clients, and says so in every limits payload (`sampler.next_collect_at`), which the button follows.
+const limitsCollects = new Map();
+function collectLimits(ctx, client, scope) {
+  const id = JSON.stringify([scope.connectionId, scope.profile]);
+  if (limitsCollects.has(id)) return limitsCollects.get(id);
+  const run = (async () => {
+    if (!sameScope(scope, captureScope())) return;
+    try { await ctx.rest('/usage/limits/collect', { method: 'POST' }); }
+    catch (_) { /* A backend without the route or without a sampler still has its stored readings, read again below. */ }
+    // Every limits read of this Source/profile, in any activation (a page reconnected meanwhile reads under a new one), is started again once the collection has ended: reads under way are cancelled first, since invalidation alone would join a first read that left before the collection ended. Never rejects: every button that follows this collection only needs to know it ended.
+    const reads = { queryKey: [USAGE_ROOT, scope.connectionId, scope.profile], predicate: query => query.queryKey[4] === 'limits' };
+    try { await client.cancelQueries(reads); await client.invalidateQueries(reads); } catch (_) { /* the limits query shows its own error */ }
+  })().finally(() => limitsCollects.delete(id));
+  limitsCollects.set(id, run);
+  return run;
+}
+// When a limits payload says the next collection may start, on monotonicNow's clock: the backend's wait, counted from when the payload arrived, so a client clock set wrong or changed meanwhile does not shift it. 0 when it may start now or the backend does not say.
+export function collectAllowedAt(data) {
+  const wait = data?.sampler?.next_collect_at - data?.generated_at;
+  // Whole milliseconds: epoch-sized floats leave a residue (30.000000004 s) that would show one second too many.
+  return Number.isFinite(wait) && wait > 0 && Number.isFinite(data?.receivedAt) ? data.receivedAt + Math.round(wait * 1000) : 0;
+}
+// Its own component, so the cooldown's countdown renders only the button.
+function UsageRefresh({ ctx, scope, query, collect }) {
+  const client = useQueryClient(), id = JSON.stringify([scope.connectionId, scope.profile]);
+  const [collecting, setCollecting] = useState(() => collect && limitsCollects.has(id));
+  // A collection started from this page or one closed meanwhile: the button follows it until it ends, whichever component started it.
+  useEffect(() => {
+    if (!collecting) return undefined;
+    const flight = limitsCollects.get(id);
+    if (!flight) { setCollecting(false); return undefined; }
+    let mounted = true;
+    void flight.finally(() => { if (mounted) setCollecting(false); });
+    return () => { mounted = false; };
+  }, [collecting, id]);
+  // Read at render, so the countdown is current whenever anything renders the button; the tick only schedules the next whole second.
+  const [tick, setTick] = useState(0), now = monotonicNow();
+  // Whole milliseconds first: performance.now() is fractional, so the sum and difference leave a residue that would show one second too many.
+  const until = collect ? collectAllowedAt(query.data) : 0, left = Math.ceil(Math.round(until - now) / 1000);
+  useEffect(() => {
+    if (left <= 0) return undefined;
+    const timer = setTimeout(() => setTick(value => value + 1), (until - monotonicNow()) % 1000 || 1000);
+    return () => clearTimeout(timer);
+  }, [until, tick, left]);
+  const busy = collecting || query.isFetching, cooling = !busy && left > 0;
+  const onClick = () => {
+    if (cooling) return;
+    if (!collect) { void query.refetch(); return; }
+    void collectLimits(ctx, client, scope);
+    setCollecting(true);
+  };
+  const label = busy ? 'Updating…' : cooling ? `Refresh available in ${left} s` : 'Refresh';
+  // A refetch behind data already on screen spins the refresh icon instead of adding text; screen readers hear the busy state. The cooldown only marks the button disabled, so hovering it still shows when it comes back.
+  return pageTipped(label, h('button', { type: 'button', className: 'su-icon su-refresh', 'aria-label': busy ? 'Updating' : label, 'aria-busy': busy, 'aria-disabled': cooling || undefined, 'data-spinning': !!(busy && query.data), disabled: busy, onClick }, icon('RefreshCw', '↻')));
+}
 function ScopedUsagePage({ ctx, scope, view }) {
   const client = useQueryClient(), shared = useUsagePreferences(ctx), tipRoot = useRef(null), pageTips = useRef(null);
   // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made on the other page.
@@ -3903,8 +3961,7 @@ function ScopedUsagePage({ ctx, scope, view }) {
   }, [ctx, scope, client, redeemScope]);
   const toolbar = h(Fragment, null,
     h('span', { className: 'su-spacer' }),
-    // A refetch behind data already on screen spins the refresh icon instead of adding text; screen readers hear the busy state.
-    pageTipped(active.isFetching ? 'Updating…' : 'Refresh', h('button', { type: 'button', className: 'su-icon su-refresh', 'aria-label': active.isFetching ? 'Updating' : 'Refresh', 'aria-busy': active.isFetching, 'data-spinning': !!(active.isFetching && active.data), disabled: active.isFetching, onClick: () => void active.refetch() }, icon('RefreshCw', '↻'))));
+    h(UsageRefresh, { ctx, scope, query: active, collect: view === 'limits' }));
   return h('div', { ref: tipRoot, className: 'su', 'data-view': view, onPointerOver: event => pageTips.current?.over(event), onPointerOut: event => pageTips.current?.out(event), onPointerDownCapture: () => pageTips.current?.close(),
     onFocus: event => pageTips.current?.focus(event), onBlur: () => pageTips.current?.close(), onScrollCapture: () => pageTips.current?.close() }, h('style', null, USAGE_CSS),
     sharedTips() ? h(SharedTips, { api: pageTips, root: tipRoot }) : null,
@@ -4731,7 +4788,7 @@ const USAGE_CSS = `
 ${SEGMENTED_FALLBACK_CSS}
 .su-spacer{flex:1}.su-muted{color:var(--ui-text-tertiary);font-size:11px}
 .su-icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
-.su-icon:hover:not(:disabled){background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.su-icon:disabled{opacity:.5;cursor:default}
+.su-icon:hover:not(:disabled):not([aria-disabled=true]){background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.su-icon:disabled,.su-icon[aria-disabled=true]{opacity:.5;cursor:default}
 /* A spinning icon already says busy, so it keeps full opacity rather than the disabled dimming. */
 .su-refresh[data-spinning=true]:disabled{opacity:1}.su-refresh[data-spinning=true]>*{animation:su-spin .8s linear infinite}
 @keyframes su-spin{to{transform:rotate(360deg)}}

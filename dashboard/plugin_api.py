@@ -1456,6 +1456,27 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise HTTPException(503, "usage_limits_unavailable") from exc
 		return {**value, "profile": profile}
 
+	@api.post("/usage/limits/collect")
+	async def collect_usage_limits(request: Request, response: Response):
+		# The page's Refresh: read every provider now, through the sampler, whose cooldown (shared by every client) refuses a collection started too soon after the previous one.
+		response.headers["Cache-Control"] = "no-store"
+		profile = listing_profile(request)
+		running = sampler()
+		if running is None:
+			raise HTTPException(503, "limits_sampler_unavailable")
+		try:
+			# Only the request that starts the collection takes a worker thread for its blocking provider reads; the others wait on the event loop.
+			value = await running.collect_now_async()
+		except Exception as exc:
+			raise HTTPException(503, "limits_collect_unavailable") from exc
+		if value.get("status") == "collected" and value.get("error"):
+			# The whole collection failed (collector or store); accounts that merely failed to read are recorded per account and are not this.
+			raise HTTPException(503, "limits_collect_failed")
+		if value.get("status") == "cooldown":
+			wait = (value.get("next_collect_at") or 0) - (value.get("generated_at") or 0)
+			response.headers["Retry-After"] = str(max(0, math.ceil(wait)))
+		return {**value, "profile": profile}
+
 	@api.post("/usage/limits/redeem")
 	async def redeem_banked_reset(body: BankedResetRedeem, request: Request, response: Response):
 		response.headers["Cache-Control"] = "no-store"

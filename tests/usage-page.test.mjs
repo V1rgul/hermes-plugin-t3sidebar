@@ -739,7 +739,8 @@ test('preferences persist through a remount and the page shows empty and error s
 
 test('a refetch behind shown data spins the refresh icon on both pages instead of showing text', async () => {
   plugin.register(mock.ctx);
-  for (const contribution of [page(), limitsPage()]) {
+  // The Limits page's Refresh then waits out the backend's cooldown.
+  for (const [contribution, after] of [[page(), 'Refresh'], [limitsPage(), 'Refresh available in 30 s']]) {
     await render(contribution);
     const refresh = () => $('.su-refresh');
     assert.deepEqual([refresh().dataset.spinning, refresh().getAttribute('aria-label')], ['false', 'Refresh']);
@@ -748,9 +749,145 @@ test('a refetch behind shown data spins the refresh icon on both pages instead o
     assert.deepEqual([refresh().dataset.spinning, refresh().getAttribute('aria-busy'), refresh().getAttribute('aria-label'), refresh().disabled], ['true', 'true', 'Updating', true]);
     assert.ok(!document.body.textContent.includes('Updating'), 'no visible Updating text');
     mock.control.usageGate = null; release(); await tick(); await tick();
-    assert.deepEqual([refresh().dataset.spinning, refresh().getAttribute('aria-label')], ['false', 'Refresh']);
+    assert.deepEqual([refresh().dataset.spinning, refresh().getAttribute('aria-label')], ['false', after]);
     await act(async () => root.unmount()); root = null;
   }
+});
+
+const restCalls = path => mock.calls.filter(call => call[0] === 'rest' && call[1].startsWith(path)).map(call => call[1]);
+// One controlled time for the page's monotonic clock and the mock backend's wall clock.
+function controlledClock() {
+  const realNow = Date.now, realMonotonic = performance.now;
+  let wall = realNow(), elapsed = realMonotonic.call(performance);
+  Date.now = () => wall; performance.now = () => elapsed;
+  return { advance(ms) { wall += ms; elapsed += ms; }, restore() { Date.now = realNow; performance.now = realMonotonic; } };
+}
+test('the Limits page\'s Refresh reads the providers once, then follows the cooldown the backend publishes', async () => {
+  const clock = controlledClock();
+  try {
+    plugin.register(mock.ctx); await render(limitsPage());
+    mock.calls.length = 0;
+    await click($('.su-refresh'));
+    // The collection is asked for first, then the limits are read again.
+    assert.deepEqual(mock.calls.filter(call => call[0] === 'rest').map(call => call[1].split('?')[0]), ['/usage/limits/collect', '/usage/limits']);
+    assert.equal(mock.calls[0][2].method, 'POST');
+    const refresh = () => $('.su-refresh');
+    assert.deepEqual([refresh().getAttribute('aria-disabled'), refresh().getAttribute('aria-label'), refresh().disabled], ['true', 'Refresh available in 30 s', false]);
+    // Disabled only by ARIA, so its tip still says when it comes back, and a click asks nothing.
+    await click(refresh());
+    assert.deepEqual(restCalls('/usage/limits/collect'), ['/usage/limits/collect']);
+    // A page opened again within the wait counts it down from the payload it holds.
+    await act(async () => root.unmount()); clock.advance(12_000);
+    await render(limitsPage());
+    assert.equal(refresh().getAttribute('aria-label'), 'Refresh available in 18 s');
+    // Once it has passed, Refresh asks again.
+    await act(async () => root.unmount()); clock.advance(18_000);
+    await render(limitsPage());
+    assert.deepEqual([refresh().getAttribute('aria-disabled'), refresh().getAttribute('aria-label')], [null, 'Refresh']);
+    await click(refresh());
+    assert.equal(restCalls('/usage/limits/collect').length, 2);
+    assert.equal(refresh().getAttribute('aria-label'), 'Refresh available in 30 s');
+    // Another Source/profile is another sampler, with its own wait.
+    await act(async () => root.unmount()); root = null;
+    await act(async () => mock.switchScope('collect-elsewhere'));
+    await render(limitsPage());
+    assert.equal(refresh().getAttribute('aria-label'), 'Refresh');
+  } finally { clock.restore(); }
+});
+
+test('the countdown of an open page moves on its own at each whole second', async () => {
+  const clock = controlledClock();
+  try {
+    const server = Date.now() / 1000;
+    mock.control.usageLimits = { ...mock.syntheticUsageLimits(168), generated_at: server, sampler: { interval_s: 300, last_collect_at: server - 9.98, next_collect_at: server + 20.02 } };
+    plugin.register(mock.ctx); await render(limitsPage());
+    assert.equal($('.su-refresh').getAttribute('aria-label'), 'Refresh available in 21 s');
+    // The next timer is due when the count changes, 20 ms from now.
+    clock.advance(1000);
+    await tick(); await tick();
+    assert.equal($('.su-refresh').getAttribute('aria-label'), 'Refresh available in 20 s');
+  } finally { clock.restore(); }
+});
+
+test('a Limits page opened again during a collection follows it to its end', async () => {
+  let release;
+  mock.control.collectResult = () => new Promise(resolve => { release = () => resolve({ status: 'collected', error: null }); });
+  plugin.register(mock.ctx); await render(limitsPage());
+  await click($('.su-refresh'));
+  assert.equal($('.su-refresh').getAttribute('aria-label'), 'Updating');
+  // The page is left and opened again while the providers are still being read.
+  await act(async () => root.unmount()); root = null;
+  await render(limitsPage());
+  assert.deepEqual([$('.su-refresh').getAttribute('aria-label'), $('.su-refresh').disabled], ['Updating', true]);
+  await act(async () => release()); await tick(); await tick();
+  assert.deepEqual([$('.su-refresh').getAttribute('aria-label'), $('.su-refresh').disabled], ['Refresh', false]);
+  assert.equal(restCalls('/usage/limits/collect').length, 1);
+});
+
+test('a collection\'s end cancels limits reads that left before it, in every lookback and activation of the Source/profile', async () => {
+  let release;
+  mock.control.collectResult = () => new Promise(resolve => { release = () => resolve({ status: 'collected', error: null }); });
+  plugin.register(mock.ctx); await render(limitsPage());
+  const shown = mock.queryClient.getQueryCache().findAll().find(query => query.queryKey[4] === 'limits').queryKey;
+  await click($('.su-refresh'));
+  // First reads with no data yet, under another lookback and under a later activation, leave while the providers are being read.
+  let answer;
+  const held = new Promise(resolve => { answer = resolve; });
+  const others = [[...shown.slice(0, 5), 1], [...shown.slice(0, 3), 'later-activation', 'limits', shown[5]]];
+  const reads = others.map(queryKey => mock.queryClient.fetchQuery({ queryKey, queryFn: () => held, retry: false }).catch(error => error));
+  await act(async () => release()); await tick(); await tick();
+  answer({ stale: 'read before the collection' }); await tick();
+  for (const [index, queryKey] of others.entries()) {
+    assert.equal(mock.queryClient.getQueryData(queryKey), undefined, `no pre-collection answer lands for ${JSON.stringify(queryKey)}`);
+    assert.equal((await reads[index])?.constructor?.name, 'CancelledError');
+  }
+});
+
+test('a cooldown another client started shows from the backend\'s own times, whatever this client\'s clock says', async () => {
+  const clock = controlledClock();
+  try {
+    // Another client had the providers read 10 s ago, by the backend's clock, which runs an hour ahead of this one and goes on whatever this client's wall clock does. Every read answers at the backend's current time, so a page whose query was collected and read again sees the same wait.
+    const start = Date.now() / 1000 + 3600, began = performance.now(), fixture = mock.syntheticUsageLimits(168);
+    Object.defineProperty(mock.control, 'usageLimits', { configurable: true, enumerable: true, get: () => {
+      const server = start + (performance.now() - began) / 1000;
+      return { ...fixture, generated_at: server, sampler: { interval_s: 300, last_collect_at: start - 10, next_collect_at: Math.max(server, start + 20) } };
+    } });
+    plugin.register(mock.ctx); await render(limitsPage());
+    const refresh = () => $('.su-refresh');
+    assert.deepEqual([refresh().getAttribute('aria-disabled'), refresh().getAttribute('aria-label')], ['true', 'Refresh available in 20 s']);
+    await click(refresh());
+    assert.deepEqual(restCalls('/usage/limits/collect'), []);
+    // Setting this client's wall clock back an hour does not stretch the wait.
+    await act(async () => root.unmount()); clock.advance(20_000); Date.now = (now => () => now - 3_600_000)(Date.now());
+    await render(limitsPage());
+    assert.equal(refresh().getAttribute('aria-label'), 'Refresh');
+  } finally { clock.restore(); }
+});
+
+test('the wait until the next collection counts from the payload\'s arrival, and only when the backend gives one', () => {
+  const payload = { generated_at: 5000, receivedAt: 1_000_000, sampler: { next_collect_at: 5012.5 } };
+  assert.equal(usage.collectAllowedAt(payload), 1_012_500);
+  assert.equal(usage.collectAllowedAt({ ...payload, sampler: { next_collect_at: 5000 } }), 0);
+  assert.equal(usage.collectAllowedAt({ ...payload, sampler: { next_collect_at: null } }), 0);
+  assert.equal(usage.collectAllowedAt({ ...payload, sampler: null }), 0);
+  assert.equal(usage.collectAllowedAt({ ...payload, receivedAt: undefined }), 0);
+  assert.equal(usage.collectAllowedAt(undefined), 0);
+});
+
+test('a failed collection still reads the stored limits without inventing a wait; the Usage page never asks for one', async () => {
+  plugin.register(mock.ctx); await render(limitsPage());
+  mock.control.collectResult = () => { throw new Error('404 route not found'); };
+  mock.calls.length = 0;
+  await click($('.su-refresh'));
+  assert.deepEqual(mock.calls.filter(call => call[0] === 'rest').map(call => call[1].split('?')[0]), ['/usage/limits/collect', '/usage/limits']);
+  assert.equal($('.su-refresh').getAttribute('aria-label'), 'Refresh');
+  assert.equal($('.su-state[role=alert]'), null, 'the page keeps its readings');
+  await act(async () => root.unmount()); root = null;
+  await render(page());
+  mock.calls.length = 0;
+  await click($('.su-refresh'));
+  assert.deepEqual(restCalls('/usage/'), [restCalls('/usage/history')[0]]);
+  assert.equal($('.su-refresh').getAttribute('aria-label'), 'Refresh');
 });
 
 async function slide(node, value) {

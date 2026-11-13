@@ -1,6 +1,6 @@
 """Provider limit history for the Usage page: a background sampler plus a plugin-owned SQLite store.
 
-Hermes keeps provider limit snapshots only in process memory and only fetches them on demand, so the page would have no history while Desktop is closed. A sampler therefore reads every account every few minutes, Codex through Hermes's public per-credential fetch and Anthropic with one read of its own, and records the readings.
+Hermes keeps provider limit snapshots only in process memory and only fetches them on demand, so the page would have no history while Desktop is closed. A sampler therefore reads every account every few minutes, and on the page's Refresh at most once per ``COLLECT_COOLDOWN_S``, Codex through Hermes's public per-credential fetch and Anthropic with one read of its own, and records the readings.
 
 Read-only toward credentials, by construction, except that an expired Claude Code login is handed to Hermes's own refresh (below):
 - Pool rows come from ``read_credential_pool`` (a plain auth.json read), never ``load_pool`` (which can seed, heal and persist the store) or ``pool.select()``.
@@ -32,6 +32,8 @@ LOG = logging.getLogger(__name__)
 DEFAULT_INTERVAL_S = 300
 FIRST_TICK_DELAY_S = 5.0
 JOIN_TIMEOUT_S = 30.0
+# The page's Refresh reads every provider; it may start a collection only this long after the previous one began, whichever clients ask, so repeated clicks cannot flood the providers.
+COLLECT_COOLDOWN_S = 30.0
 # Matches Hermes's own SNAPSHOT_STALE_AFTER_S so the page and the model picker agree on "live".
 STALE_AFTER_S = 15 * 60.0
 RETENTION_S = 35 * 86400.0
@@ -1025,13 +1027,21 @@ def _status_error(value):
 # ─── Payload ───
 
 
-def _sampler_block(status):
+def _sampler_block(status, now=None):
+	"""The payload's sampler block. ``next_collect_at`` is re-expressed against the payload's own ``now``, so a client counts down from ``generated_at`` alone; from a stored status (no running sampler) both collect times are None and the page never waits."""
 	status = status if isinstance(status, dict) else {}
+	sampled_at, upcoming = _finite(status.get("generated_at")), _finite(status.get("next_collect_at"))
+	now = _finite(now)
+	next_collect_at = None
+	if upcoming is not None and sampled_at is not None:
+		next_collect_at = (now if now is not None else sampled_at) + max(0.0, upcoming - sampled_at)
 	return {
 		"interval_s": _finite(status.get("interval_s")),
 		"started_at": _finite(status.get("started_at")),
 		"last_run_at": _finite(status.get("last_run_at")),
 		"last_error": _status_error(status.get("last_error")),
+		"last_collect_at": _finite(status.get("last_collect_at")),
+		"next_collect_at": next_collect_at,
 	}
 
 
@@ -1159,7 +1169,7 @@ def limits_payload(store, *, hours, now, sampler_status=None):
 		result.append({**block, "error": None if logged_out else block["error"], "auth": "logged_out" if logged_out else "ok", "auth_reason": None, "accounts": accounts, "history": history})
 	if sampler_status is None:
 		sampler_status = store.read_status()
-	return {"generated_at": now, "sampler": _sampler_block(sampler_status), "providers": result}
+	return {"generated_at": now, "sampler": _sampler_block(sampler_status, now), "providers": result}
 
 
 # ─── Sampler ───
@@ -1259,11 +1269,33 @@ def _home_scope(home):
 		reset_hermes_home_override(token)
 
 
+class _Admission:
+	"""Which collection may start, for one process and Hermes home. Shared by every sampler that ever serves that home, so replacing a sampler (re-registration, disable and enable) neither resets the cooldown nor lets a second collection start while the old one is still reading."""
+
+	def __init__(self):
+		self.cond = threading.Condition()
+		# Monotonic start of the latest collection, which the cooldown runs on; its wall-clock start is only reported.
+		self.began = None
+		self.began_at = None
+		# Set when the collection under way ends; None while none runs. At most one collection per home runs at a time.
+		self.flight = None
+
+
+_ADMISSIONS_LOCK = threading.Lock()
+_ADMISSIONS = {}
+
+
+def _admission_for(home):
+	key = _home_key(home)
+	with _ADMISSIONS_LOCK:
+		return _ADMISSIONS.setdefault(key, _Admission())
+
+
 class LimitsSampler:
-	"""One daemon thread per process and Hermes home, ticking ``run_once`` every ``interval_s``."""
+	"""One daemon thread per process and Hermes home, ticking every ``interval_s``; collections of a home never overlap and are admitted by ``admit``."""
 
 	def __init__(self, store, home_resolver=None, interval_s=DEFAULT_INTERVAL_S, collector=None, clock=time.time,
-			first_delay_s=FIRST_TICK_DELAY_S, join_timeout_s=JOIN_TIMEOUT_S):
+			first_delay_s=FIRST_TICK_DELAY_S, join_timeout_s=JOIN_TIMEOUT_S, cooldown_s=COLLECT_COOLDOWN_S, monotonic=time.monotonic):
 		if _finite(interval_s) is None or interval_s <= 0:
 			raise ValueError("interval_s must be positive")
 		self.store = store
@@ -1273,17 +1305,56 @@ class LimitsSampler:
 		self.clock = clock
 		self.first_delay_s = max(0.0, float(first_delay_s))
 		self.join_timeout_s = float(join_timeout_s)
+		self.cooldown_s = max(0.0, float(cooldown_s))
+		self.monotonic = monotonic
 		self.home = None
 		self.started_at = None
 		self.last_run_at = None
 		self.last_error = None
-		self._lock = threading.Lock()
+		self._admission_state = None
 		self._thread = None
 		self._stop = threading.Event()
 		self._registry_key = None
 
 	def status(self):
-		return {"interval_s": self.interval_s, "started_at": self.started_at, "last_run_at": self.last_run_at, "last_error": self.last_error}
+		return {"interval_s": self.interval_s, "started_at": self.started_at, "last_run_at": self.last_run_at, "last_error": self.last_error, **self.collect_window()}
+
+	def _admission(self):
+		if self._admission_state is None:
+			self._admission_state = _admission_for(self.home or Path(self.home_resolver()))
+		return self._admission_state
+
+	def collect_window(self):
+		"""When the latest collection began (``last_collect_at``) and the earliest a Refresh may start the next (``next_collect_at``), as epoch times next to this process's ``generated_at``, so clients can count down without trusting their own clocks; both None before the first collection."""
+		admission = self._admission()
+		with admission.cond:
+			now = float(self.clock())
+			if admission.began is None:
+				return {"generated_at": now, "last_collect_at": None, "next_collect_at": None}
+			wait = max(0.0, admission.began + self.cooldown_s - self.monotonic())
+			return {"generated_at": now, "last_collect_at": admission.began_at, "next_collect_at": now + wait}
+
+	def admit(self, mode):
+		"""Whether the caller starts a collection now: ``("run", flight)``, which the caller must pass to ``_run_admitted``, or why not.
+
+		- ``"manual"``, the page's Refresh: joins the collection under way (``"joined"``), else is refused within ``cooldown_s`` of the latest start (``"cooldown"``). Never blocks.
+		- ``"tick"``, the scheduled sampling: skipped (``"skipped"``) while a collection runs or within ``min(cooldown_s, interval_s)`` of the latest start, when a Refresh has just read everything. Never blocks.
+		- ``"force"``, the reading after a reset, which must postdate it: waits for the collection under way, then always starts.
+		Admission only reserves the collection; ``_run_admitted`` records its start when it really begins, so time spent before (a thread starting) never counts against the cooldown.
+		"""
+		admission = self._admission()
+		with admission.cond:
+			if mode == "force":
+				while admission.flight is not None:
+					admission.cond.wait()
+			elif admission.flight is not None:
+				return ("joined" if mode == "manual" else "skipped"), admission.flight
+			else:
+				spacing = self.cooldown_s if mode == "manual" else min(self.cooldown_s, self.interval_s)
+				if admission.began is not None and self.monotonic() - admission.began < spacing:
+					return ("cooldown" if mode == "manual" else "skipped"), None
+			admission.flight = threading.Event()
+			return "run", admission.flight
 
 	def is_running(self):
 		thread = self._thread
@@ -1323,7 +1394,7 @@ class LimitsSampler:
 		while not stop.wait(delay):
 			began = time.monotonic()
 			try:
-				self.run_once()
+				self.tick()
 			except Exception as exc:  # a sampler thread must outlive anything one tick throws
 				LOG.debug("t3sidebar limits sampler tick crashed: %s", type(exc).__name__)
 			# Floor the wait so a tick that overran its interval cannot turn into a hot loop.
@@ -1334,12 +1405,39 @@ class LimitsSampler:
 			return self.collector()
 		return collect_native(join_timeout=self.join_timeout_s, clock=self.clock)
 
+	def tick(self):
+		"""The scheduled collection, unless one runs or a Refresh has just read everything; None when skipped."""
+		decision, flight = self.admit("tick")
+		return self._run_admitted(flight) if decision == "run" else None
+
 	def run_once(self):
-		"""One collection + store write inside the sampler's home; returns a small summary, never raises for collector/store failures."""
+		"""One collection + store write inside the sampler's home, after any collection under way and whatever the cooldown (the reading after a reset); returns a small summary, never raises for collector/store failures."""
+		_decision, flight = self.admit("force")
+		return self._run_admitted(flight)
+
+	def _run_admitted(self, flight):
+		admission = self._admission()
+		try:
+			with admission.cond:
+				admission.began, admission.began_at = self.monotonic(), float(self.clock())
+			return self._collect_and_record()
+		finally:
+			self._release(flight)
+
+	def _release(self, flight):
+		"""End an admitted collection, run or not: later callers may be admitted, and everyone waiting on it wakes."""
+		admission = self._admission()
+		with admission.cond:
+			if admission.flight is flight:
+				admission.flight = None
+			admission.cond.notify_all()
+		flight.set()
+
+	def _collect_and_record(self):
 		home = self.home or Path(self.home_resolver())
 		checked_at = float(self.clock())
 		inserted, error = 0, None
-		with self._lock, _home_scope(home):
+		with _home_scope(home):
 			try:
 				readings = self._collect()
 			except Exception as exc:
@@ -1359,3 +1457,43 @@ class LimitsSampler:
 			except Exception as exc:
 				LOG.debug("t3sidebar limits sampler status write failed: %s", type(exc).__name__)
 		return {"inserted": inserted, "error": self.last_error}
+
+	def _collect_answer(self, decision, result):
+		"""``collected`` (this request ran it; ``error`` says whether the whole collection failed), ``joined`` (one under way has ended meanwhile) or ``cooldown`` (none started)."""
+		status = {"run": "collected", "joined": "joined"}.get(decision, "cooldown")
+		error = (result or {}).get("error") if decision == "run" else None
+		return {"status": status, "error": error, **self.collect_window()}
+
+	def collect_now(self):
+		"""The page's Refresh, blocking: a collection now unless one runs (joined: waits for its end, which its own timeouts bound) or began less than ``cooldown_s`` ago (refused). Returns ``_collect_answer``'s dict."""
+		decision, flight = self.admit("manual")
+		result = None
+		if decision == "run":
+			result = self._run_admitted(flight)
+		elif decision == "joined":
+			flight.wait()
+		return self._collect_answer(decision, result)
+
+	async def collect_now_async(self):
+		"""``collect_now`` for the HTTP route. The collection runs in a thread of its own, started at once: it never waits in the executor that other routes share, and a cancelled request (a closed page) cannot stop it before it starts and releases its admission. Every request, the one that started it included, waits for its end on the event loop."""
+		import asyncio
+
+		decision, flight = self.admit("manual")
+		result = {}
+		if decision == "run":
+			def work():
+				try:
+					result.update(self._run_admitted(flight) or {})
+				except Exception as exc:
+					result["error"] = f"collector_failed:{type(exc).__name__}"
+			# Copies the request's context like asyncio.to_thread would, so profile-scoped values follow the collection.
+			thread = threading.Thread(target=contextvars.copy_context().run, args=(work,), name="t3sidebar-limits-collect", daemon=True)
+			try:
+				thread.start()
+			except BaseException:
+				self._release(flight)
+				raise
+		if flight is not None:
+			while not flight.is_set():
+				await asyncio.sleep(0.2)
+		return self._collect_answer(decision, result)
