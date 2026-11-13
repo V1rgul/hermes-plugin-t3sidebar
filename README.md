@@ -23,7 +23,7 @@
 - Right-click a session → the AI pencil beside its title (**Rename with AutoTitler**): AutoTitler retitles it from its current topic, or keeps the title.
 - Needs the [hermes-auto-titler](https://github.com/Vocllum/hermes-auto-titler) plugin loaded on the backend; otherwise the action stays visible, disabled, with the reason on hover.
 
-![Session right-click menu with Autotitler: rename now highlighted below Rename](docs/images/autotitler.png)
+![Session right-click menu: Rename with AutoTitler hovered beside Rename, at the end of the title line](docs/images/autotitler.png)
 
 ### Detailed Working indicator
 
@@ -70,14 +70,14 @@
 
 - Right-click: title with rename and AutoTitler, session ID with copy, the start of an unsent draft with discard, then pin, delete, move to project and **Project**. **Project** menu: rename, then filter (a cross while that folder filters the list) and copy path for each folder, color and icon. Session, Project and Snooze menus stay open after an action, showing its reverse.
 
-![Session right-click menu with the Project submenu expanded: project actions, colors and icons](docs/images/session-project.png)
+![Session right-click menu with the Project menu open: folder path with filter and copy, colors and icons](docs/images/session-project.png)
 
 ### Snooze
 
 - +1h, +2h, +4h; Tomorrow, Monday or Next week at the preset time; or a custom local date and time.
 - Never stops or resumes an agent.
 
-![Snoozed session menu: wake date and time left, Unsnooze, presets and custom date input](docs/images/snooze.png)
+![Snoozed session menu: wake date and time left, Unsnooze, +1h, +2h, +4h, Tomorrow, Monday and Next week at 9:00, custom date input](docs/images/snooze.png)
 
 ### Settings
 
