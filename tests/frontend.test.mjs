@@ -687,7 +687,7 @@ test('snooze choices: +1h/+2h/+4h, then Tomorrow, Monday and Next week with thei
   assert.deepEqual(choices.slice(0, 3).map(node => node.querySelector('.sf-snooze-dur').textContent), ['+1h', '+2h', '+4h']);
   // The hour buttons hold their wake time for the hover reveal, hidden from assistive technology; the description reads it out, like the day buttons'.
   const wakeAt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-  assert.deepEqual(choices.slice(0, 3).map((node, index) => node.querySelector('.sf-snooze-at').textContent.endsWith(wakeAt.format(new Date(presets.relative[index].wake_at * 1000)))), [true, true, true]);
+  assert.deepEqual(choices.slice(0, 3).map(node => node.querySelector('.sf-snooze-at').textContent), presets.relative.map(preset => wakeAt.format(new Date(preset.wake_at * 1000))), 'the time alone, without a weekday even on another day');
   assert.ok(choices.slice(0, 3).every(node => !/[AP]M/i.test(node.querySelector('.sf-snooze-at').textContent)), 'the revealed time uses the 24-hour clock, which fits beside +Nh');
   assert.deepEqual(choices.slice(0, 3).map(node => node.querySelector('.sf-snooze-at').getAttribute('aria-hidden')), ['true', 'true', 'true']);
   assert.ok(choices.every(node => /^Wakes /.test(node.getAttribute('aria-description'))));
