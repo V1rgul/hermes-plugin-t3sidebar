@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom';
 import React, { act } from 'react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import * as mock from './sdk.mock.mjs';
-import { createController, HermesT3Sidebar, UsagePage, USAGE_ROUTE, LIMITS_ROUTE } from '../desktop/plugin.js';
+import { captureScope, createController, HermesT3Sidebar, UsagePage, USAGE_ROUTE, LIMITS_ROUTE } from '../desktop/plugin.js';
 
 const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', { url: 'http://localhost' });
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, KeyboardEvent: dom.window.KeyboardEvent, IS_REACT_ACT_ENVIRONMENT: true });
@@ -144,6 +144,21 @@ test('the draft pencil marks every card with a draft, the viewed one included, f
 	mock.control.mountedDrafts.design = '';
 	await readComposers();
 	assert.equal(!!mark('design'), false, 'an emptied or sent composer drops the pencil');
+});
+
+test('sending from the viewed composer drops its pencil and pending change at once, not at the next two-second read', async () => {
+	await mount();
+	const mark = id => row(id).querySelector('.sf-draft-mark');
+	mock.control.mountedDrafts.design = 'the prompt';
+	await act(async () => mock.queryClient.refetchQueries({ queryKey: ['hermes-t3sidebar-drafts'], type: 'active' })); await tick();
+	await controller.noteDraft(captureScope(), { key: 'design', ids: ['design'], address: 'design', cwd: null });
+	assert.ok(mark('design'));
+	assert.deepEqual(controller.localDrafts(captureScope()).map(draft => draft.session_id), ['design']);
+	// Desktop empties the composer, then raises awaitingResponse; no periodic read runs here.
+	mock.control.mountedDrafts.design = '';
+	await act(async () => mock.host.state.awaitingResponse.set(true)); await tick();
+	assert.equal(!!mark('design'), false);
+	assert.deepEqual(controller.localDrafts(captureScope()), []);
 });
 
 test('card details open one shared tooltip on hover instead of a native title', async () => {
