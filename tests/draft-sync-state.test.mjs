@@ -103,6 +103,47 @@ test('an unsynced draft erased by Desktop\'s prune is put back on return, while 
 // A pending change as an older run of this client stored it.
 const change = (text, edited_at = 100) => ({ text, cwd: null, edited_at });
 
+for (const synced of [false, true]) {
+	test(`a prompt sent and left before the next focused poll is not kept as a draft (${synced ? 'synced' : 'not synced yet'})`, async () => {
+		const scope = captureScope(), controller = make(), design = target('design');
+		mock.host.state.focusedStoredSessionId.set('design'); mock.control.mountedDrafts.design = 'the prompt';
+		await controller.enterDraft(scope, design);
+		if (synced) await controller.syncDrafts(scope);
+		// Sent: Desktop empties the composer, and focus moves on before the 2 s poll sees it; Desktop copies the empty composer as it leaves.
+		mock.control.mountedDrafts.design = '';
+		mock.host.state.focusedStoredSessionId.set('alpha');
+		delete mock.control.mountedDrafts.design; mock.control.drafts.design = '';
+		await controller.leaveDraft(scope, design);
+		assert.deepEqual(controller.localDrafts(scope), []);
+		// Back on it, the sent text is not put into its composer again.
+		mock.control.mountedDrafts.design = '';
+		mock.host.state.focusedStoredSessionId.set('design');
+		await controller.enterDraft(scope, design);
+		assert.equal(mock.control.mountedDrafts.design, '');
+		await controller.syncDrafts(scope);
+		assert.equal(lastSent('design')?.text, '');
+		assert.equal(mock.control.serverDrafts.find(draft => draft.session_id === 'design')?.text ?? null, null);
+	});
+}
+
+test('leaving a session whose entry never reconciled its composer keeps its draft, whose local copy may be pruned', async () => {
+	const scope = captureScope(), controller = make(), design = target('design');
+	mock.control.serverDrafts = [{ session_id: 'design', text: 'kept', cwd: null, project: null, seq: 1, edited_at: Date.now() / 1000 }];
+	await controller.syncDrafts(scope);
+	// Its composer matched the draft once, then focus left with a local copy.
+	mock.host.state.focusedStoredSessionId.set('design'); mock.control.mountedDrafts.design = 'kept';
+	await controller.enterDraft(scope, design);
+	mock.host.state.focusedStoredSessionId.set('alpha');
+	delete mock.control.mountedDrafts.design; mock.control.drafts.design = 'kept';
+	await controller.leaveDraft(scope, design);
+	// Desktop's prune erases the copy; focus passes through the session and leaves before its composer mounts.
+	delete mock.control.drafts.design;
+	mock.host.state.focusedStoredSessionId.set('design');
+	mock.host.state.focusedStoredSessionId.set('alpha');
+	await controller.leaveDraft(scope, design);
+	assert.deepEqual(controller.localDrafts(scope).map(draft => draft.session_id), ['design']);
+});
+
 test('a large backlog goes up in batches the companion accepts, and a text it would refuse stays pending here without blocking the rest', async () => {
 	const pending = { oversized: change('x'.repeat(200_001)) };
 	for (let index = 0; index < 450; index++) pending[`backlog-${index}`] = change(`draft ${index}`);

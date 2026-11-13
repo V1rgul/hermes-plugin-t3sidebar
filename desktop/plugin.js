@@ -469,8 +469,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
        without stored history, so the draft is put back (as it is into a composer that never held this draft);
      - any other difference is a local edit, kept as pending and sent with the next sync (blank text deletes the draft).
      Only a mounted composer is written. False means retry once it is: a failed write, or, when entering, a composer not mounted yet. */
-  async function reconcileDraft(scope, state, target, { mounted = () => false, entering = false, current = () => true } = {}) {
-    const raw = await readComposer(scope, target.address);
+  async function reconcileDraft(scope, state, target, { mounted = () => false, entering = false, current = () => true, left = false } = {}) {
+    const raw = await readComposer(scope, target.address, left);
     // A newer read has started since: it sees at least as recent a composer, and acts on it.
     if (!current()) return true;
     if (raw === null) return !entering;
@@ -535,10 +535,11 @@ export function createController(ctx, client = queryClient, env = { capture: cap
   }
   const ownsFocus = scope => { const owner = env.host.state?.focusedSessionOwner?.get(); return owner?.connectionId === (scope.connectionId ?? 'local') && owner?.profile === scope.profile; };
   // Text of one composer, or null when nothing answers for it (an unmounted session falls back to Desktop's local copy until its prune).
-  async function readComposer(scope, address) {
+  // left: the session focus has just left, whose local copy Desktop wrote from its composer as focus moved, before any prune can erase it; Desktop's getter answers an empty copy with null, which then means empty.
+  async function readComposer(scope, address, left = false) {
     const composer = env.host.composer;
     if (typeof composer?.getDraft !== 'function' || !address) return null;
-    try { const text = await fenced(scope, () => composer.getDraft(address)); return typeof text === 'string' ? text : null; }
+    try { const text = await fenced(scope, () => composer.getDraft(address)); return typeof text === 'string' ? text : left && text === null ? '' : null; }
     catch (_) { check(scope); return null; }
   }
   // Only a mounted composer accepts text; false tells the caller to retry once it is.
@@ -909,8 +910,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     },
     async leaveDraft(scope, target) {
       const state = draftState(scope);
-      if (state.settled === target.key) state.settled = null;
-      await reconcileDraft(scope, state, target);
+      // Only a session entered and reconciled had its composer copied as focus left; a prompt sent and left before the next focused poll leaves that copy empty, and its text must not stay pending as a draft.
+      const settled = state.settled === target.key;
+      if (settled) state.settled = null;
+      await reconcileDraft(scope, state, target, { left: settled });
       publishDrafts(scope, state);
     },
     // A draft whose session has no stored history and no live runtime here reopens in a new session in the same folder, then moves onto it.

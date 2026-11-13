@@ -23,7 +23,8 @@ const composer = {
     if (control.draftError) throw new Error('fixture draft unavailable');
     if (control.readDraft) return control.readDraft(sessionId);
     if (Object.hasOwn(control.mountedDrafts, sessionId)) return control.mountedDrafts[sessionId];
-    return control.drafts[sessionId] ?? null;
+    // Desktop's fallback is its local copy, and an empty copy reads null like a missing one.
+    return control.drafts[sessionId] || null;
   },
   // Like Desktop, only a mounted composer (the focused session, a tile, or the fresh 'new' draft) accepts text.
   async setDraft(sessionId, text) {
