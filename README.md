@@ -16,7 +16,7 @@
 - Cards: project, provider icon, token count including subagents.
 - Pins, snoozes and completion markers shared between Desktop clients through the backend companion.
 
-![Session sidebar: orange draft background on Installation guide review, Input and Done badges, pinned sessions, Working, Snoozed and folded Archived shelves, Limits and Usage footer](docs/images/draft.png)
+![Session sidebar: yellow draft background on Installation guide review, Input and Done badges, pinned sessions, Working, Snoozed and folded Archived shelves, Limits and Usage footer](docs/images/draft.png)
 
 ### AutoTitler: rename now
 
