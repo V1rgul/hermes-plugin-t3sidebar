@@ -1606,6 +1606,7 @@ const BUNDLED_ICONS = {
   // Derived from Tabler v3.44.0 arrow-bar-to-down (MIT) with the tip moved down to meet the bar's top edge, so the arrow visibly touches the floor.
   ArrowBarToDownTouching: ['M4 20h16', 'M12 4v14', 'M8 14l4 4l4 -4'],
   ArrowRight: ['M5 12l14 0', 'M13 18l6 -6', 'M13 6l6 6'],
+  Ban: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M5.7 5.7l12.6 12.6'],
   AlertTriangle: ['M12 9v4', 'M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0', 'M12 16h.01'],
   Flag: ['M5 5a5 5 0 0 1 7 0a5 5 0 0 0 7 0v9a5 5 0 0 1 -7 0a5 5 0 0 0 -7 0v-9', 'M5 21v-7'],
   // A banked reset is a ticket, not a circular arrow: the Limits page's refresh button already draws one.
@@ -1779,15 +1780,17 @@ function Settings({ ctx, sound = null }) {
 }
 // Desktop's preset Select with T3 Code's sound added and starred; a plain select on clients without the SDK Select.
 function SoundPicker({ value, onChange }) {
-  // The star alone marks the sound the plugin adds; the Select's own selection styling marks the active one.
-  const label = option => option.plugin ? `★ ${option.label}` : option.label;
+  // A fixed icon column: a ban sign before None, a star before the sound the plugin adds, and an empty one before Desktop's presets, so every name starts at the same place. The Select's own styling marks the active choice.
+  const mark = option => option.id === 'none' ? icon('Ban', '⊘') : option.plugin ? '★' : null;
+  const label = option => h('span', { className: 'sf-sound-option' }, h('span', { className: 'sf-sound-mark', 'aria-hidden': true }, mark(option)), option.label);
   if ([sdk.Select, sdk.SelectTrigger, sdk.SelectValue, sdk.SelectContent, sdk.SelectItem].every(part => typeof part === 'function' || typeof part === 'object' && part)) {
     return h(sdk.Select, { value, onValueChange: onChange },
       h(sdk.SelectTrigger, { className: 'min-w-56 text-xs', 'aria-label': 'Done/Input sound' }, h(sdk.SelectValue)),
       h(sdk.SelectContent, null, COMPLETION_SOUNDS.map(option => h(sdk.SelectItem, { key: option.id, value: option.id }, label(option)))));
   }
+  // A native select draws text only.
   return h('select', { className: 'sf-sound-select', 'aria-label': 'Done/Input sound', value, onChange: event => onChange(event.target.value) },
-    COMPLETION_SOUNDS.map(option => h('option', { key: option.id, value: option.id }, label(option))));
+    COMPLETION_SOUNDS.map(option => h('option', { key: option.id, value: option.id }, option.plugin ? `★ ${option.label}` : option.label)));
 }
 // Desktop's own sound, read again when another window changes it or this one comes back into view. Settings remounts this page on every return from Desktop's own row.
 function useNativeSound() {
@@ -1823,6 +1826,9 @@ const SEGMENTED_FALLBACK_CSS = `.su-seg{display:inline-flex;gap:2px;padding:2px;
 const SETTINGS_CSS = `${SEGMENTED_FALLBACK_CSS}
 .sf-snooze-time::-webkit-calendar-picker-indicator{background:currentColor;-webkit-mask:${ALARM_MASK} content-box center/contain no-repeat;mask:${ALARM_MASK} content-box center/contain no-repeat;cursor:pointer}
 .sf-sound{display:flex;align-items:center;gap:8px}
+.sf-sound-option{display:inline-flex;align-items:center;gap:6px}
+.sf-sound-mark{display:inline-flex;align-items:center;justify-content:center;width:14px;flex:none}
+.sf-sound-mark svg{width:13px;height:13px}
 .sf-sound-select{min-width:14rem;padding:4px 8px;border:1px solid var(--ui-stroke-secondary);border-radius:6px;background:transparent;color:inherit;font-size:12px}
 /* Tucked under the row's own 12px bottom padding. */
 .sf-native-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:-4px;padding-bottom:12px}
