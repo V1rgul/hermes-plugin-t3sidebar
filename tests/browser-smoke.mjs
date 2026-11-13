@@ -379,6 +379,18 @@ try {
   const disabledDelete = page.getByRole('button', { name: 'Delete session', exact: true });
   check('working session Delete remains disabled, icon-only, and its tooltip says why', await disabledDelete.isDisabled() && await disabledDelete.locator('svg').count() === 1 && await disabledDelete.textContent() === '' && await disabledDelete.evaluate(el => el.closest('.sf-menu-tool-wrap').dataset.sfTip === 'Delete session\nAvailable once the session is idle.'));
   check('disabled Delete icon and text retain the red theme color and dimming', await deleteIsRed(disabledDelete) && await disabledDelete.evaluate(el => Number(getComputedStyle(el).opacity) < 1));
+  // The shared tip's anchor sits in the sidebar at the hovered button's place, here the menu beside it. In Desktop the sidebar's container scrolls, so an anchor overflowing the sidebar raised a scrollbar and shrank the whole sidebar, moving its footer up.
+  {
+    const pin = page.getByRole('button', { name: 'Pin', exact: true }), box = await pin.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 3 });
+    await page.locator('.mock-tip').waitFor();
+    const tipped = await page.evaluate(() => {
+      const aside = document.querySelector('aside.sf'), anchor = document.querySelector('.sf-tip-anchor').getBoundingClientRect(), pin = document.querySelector('[aria-label="Pin"]').getBoundingClientRect();
+      return { overflow: aside.scrollWidth > aside.clientWidth || aside.scrollHeight > aside.clientHeight, onPin: Math.abs(anchor.left - pin.left) < 1 && Math.abs(anchor.top - pin.top) < 1, outside: anchor.left > aside.getBoundingClientRect().right };
+    });
+    check('a menu button tooltip anchors on the button outside the sidebar without making the sidebar overflow', tipped.onPin && tipped.outside && !tipped.overflow);
+    await page.mouse.move(5, 5);
+  }
   await page.getByRole('button', { name: 'Pin', exact: true }).click();
   await page.locator('section[aria-label="Pinned"] [data-session-id="root"]').waitFor();
   await page.mouse.move(1100, 850);

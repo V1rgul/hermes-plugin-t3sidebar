@@ -1289,7 +1289,7 @@ const CSS = `
 /* No-match state at the top of the list, under the search field. */
 .sf-empty.sf-no-match{display:flex;flex-direction:column;gap:2px;flex-shrink:0;padding:6px 10px 8px;font-size:12px;color:var(--ui-text-tertiary)}.sf-no-match-hint{font-size:11px;color:var(--ui-text-quaternary)}.sf-no-match-actions{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 0 -6px}
 /* The cards' shared tooltip anchor: an empty box laid over the hovered part, never hit by the pointer. */
-.sf-tip-anchor{position:absolute;pointer-events:none}.sf-tip-wrap{display:flex;flex-direction:column}.sf-tip-wrap>:disabled{pointer-events:none}
+/* The shared tip's anchor copies the hovered element's box, which may lie outside the sidebar (a menu beside it). Desktop's sidebar container scrolls, so an anchor overflowing the sidebar would raise a scrollbar and shrink the whole sidebar: the clipping layer keeps it out of the overflow while its box still places the tip. */.sf-tip-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none}.sf-tip-anchor{position:absolute;pointer-events:none}.sf-tip-wrap{display:flex;flex-direction:column}.sf-tip-wrap>:disabled{pointer-events:none}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-row .sf-project{gap:4px}/* Start the glyph at the title's left edge; Codicons also carry a 1/16em side bearing. */.sf-row .sf-project-icon{width:auto;min-width:13px;justify-content:flex-start}.sf-row .sf-project-icon>.codicon{margin-left:calc(-1em / 16)}/* Outranks the Working time color: a snoozed card can still be running. */
 .sf-row .sf-time.sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--sf-purple);font-weight:400}.sf-snooze-time svg{width:16px;height:16px;flex-shrink:0;stroke-width:1.6}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
@@ -2264,7 +2264,7 @@ const SharedTips = memo(function SharedTips({ api, root }) {
   }, [api, root]);
   if (!tip) return null;
   return h(sdk.Tooltip, { open: true, onOpenChange: open => { if (!open) api.current?.close(); } },
-    h(sdk.TooltipTrigger, { asChild: true }, h('span', { className: 'sf-tip-anchor', 'aria-hidden': true, style: { left: tip.box.left, top: tip.box.top, width: tip.box.width, height: tip.box.height } })),
+    h('span', { className: 'sf-tip-layer', 'aria-hidden': true }, h(sdk.TooltipTrigger, { asChild: true }, h('span', { className: 'sf-tip-anchor', style: { left: tip.box.left, top: tip.box.top, width: tip.box.width, height: tip.box.height } }))),
     h(sdk.TooltipContent, { side: tip.side, placement: 'row', hideWhenDetached: false }, tip.card === null ? multiline(tip.label) : cardTipLabel(tip.label, tip.card)));
 });
 export function HermesT3Sidebar({ ctx, controller }) {
