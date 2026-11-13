@@ -1563,6 +1563,63 @@ try {
     await motion.close();
   }
   {
+    // Metadata motion on cards that stay in place: the open card's pencil, a ticking Working timer and a Pinned card's status.
+    const meta = await browser.newPage({ viewport: { width: 900, height: 760 } });
+    meta.on('pageerror', error => errors.push(error));
+    await meta.emulateMedia({ reducedMotion: 'no-preference' });
+    await meta.goto(`http://127.0.0.1:${server.address().port}`);
+    await meta.waitForSelector('[data-session-id="root"][data-working=true]');
+    // Runs `act`, then samples `probe` on every frame for `ms`; both are function sources evaluated in the page.
+    const frames = (act, probe, ms) => meta.evaluate(async ({ act, probe, ms }) => {
+      const read = new Function(`return (${probe})()`), samples = [], start = performance.now();
+      await new Function(`return (${act})()`)();
+      while (performance.now() - start < ms) { samples.push(read()); await new Promise(resolve => requestAnimationFrame(resolve)); }
+      return samples;
+    }, { act, probe, ms });
+    const open = await meta.evaluate(() => document.querySelector('[data-section=active] .sf-row').dataset.sessionId);
+    await meta.locator(`[data-session-id="${open}"] .sf-open`).click();
+    await meta.waitForSelector(`[data-session-id="${open}"][data-current=true]`);
+    await meta.waitForTimeout(300);
+    const pencil = `() => { const row = document.querySelector('[data-session-id="${open}"]'), marks = row.querySelectorAll('.sf-draft-mark'), mark = marks[marks.length - 1];
+      return { time: row.querySelector('.sf-time').getBoundingClientRect().left, marks: marks.length, labelled: row.querySelectorAll('.sf-draft-mark[aria-label]').length, opacity: mark ? Number(getComputedStyle(mark).opacity) : null, width: mark ? mark.getBoundingClientRect().width : null }; }`;
+    // The focused composer is read every 2 s, so each sample run covers one read and the motion after it.
+    const typing = await frames(`() => { window.hermesT3SidebarHarness.control.mountedDrafts['${open}'] = 'typing'; }`, pencil, 2700);
+    const shown = typing.filter(sample => sample.marks), [rest, typed] = [typing[0], typing.at(-1)];
+    check('typing on the open card first slides the time aside, with the pencil invisible, then fades the pencil in', shown.some(sample => sample.width > 1 && sample.width < 12 && sample.opacity === 0 && sample.time < rest.time - 1 && sample.time > typed.time + 1)
+      && shown.some(sample => sample.width > 12.5 && sample.opacity > 0.1 && sample.opacity < 0.9) && typed.opacity === 1 && Math.abs(typed.width - 13) < 0.5);
+    const clearing = await frames(`() => { window.hermesT3SidebarHarness.control.mountedDrafts['${open}'] = ''; }`, pencil, 2700);
+    const leaving = clearing.filter(sample => sample.marks && !sample.labelled);
+    check('emptying the composer fades the pencil out first, then closes its room, and removes the unlabelled copy', leaving.some(sample => sample.width > 12.5 && sample.opacity > 0.1 && sample.opacity < 0.9)
+      && leaving.some(sample => sample.opacity === 0 && sample.width > 1 && sample.width < 12) && !clearing.at(-1).marks && Math.abs(clearing.at(-1).time - rest.time) < 0.5);
+    // 59s to 1m: a same-width tick, then a narrower value.
+    await meta.evaluate(() => { const fixture = window.hermesT3SidebarHarness; fixture.control.live.find(item => item.id === 'runtime-worker').turn_started_at = Date.now() / 1000 - 58.3; return fixture.queryClient.invalidateQueries(); });
+    await meta.waitForFunction(() => document.querySelector('[data-session-id="root"] .sf-working-duration')?.textContent === '58s');
+    const ticks = await frames('() => {}', `() => { const label = document.querySelector('[data-session-id="root"] .sf-working-duration'), fx = label.querySelector('.sf-roll-fx'), fall = fx?.querySelector('.sf-roll-in');
+      return { text: label.firstChild.nodeValue, width: label.getBoundingClientRect().width, hidden: getComputedStyle(label).webkitTextFillColor === 'rgba(0, 0, 0, 0)', fx: !!fx, fallLeft: fall?.getBoundingClientRect().left, fallTop: fall?.getBoundingClientRect().top }; }`, 2600);
+    const tick = ticks.filter(sample => sample.fx && sample.text === '59s'), minute = ticks.filter(sample => sample.fx && sample.text === '1m'), settled = ticks.filter(sample => !sample.fx);
+    check('a same-width tick drops its new digit straight down over the transparent label, without resizing it', tick.length > 3 && tick.every(sample => sample.hidden && Math.abs(sample.width - settled[0].width) < 0.1 && sample.fallLeft === tick[0].fallLeft) && tick.at(-1).fallTop > tick[0].fallTop);
+    check('a narrower value slides its slot while the new characters only fall, and the overlay leaves once done', minute.length > 3 && minute.some(sample => sample.width < minute[0].width - 0.5 && sample.width > settled.at(-1).width + 0.5)
+      && minute.every(sample => sample.fallLeft === minute[0].fallLeft) && !ticks.at(-1).fx && !ticks.at(-1).hidden && ticks.at(-1).text === '1m');
+    // The fixture's pinned idle session starts a turn and finishes it: Pinned keeps it, so its time slot swaps in place.
+    await meta.evaluate(() => { const fixture = window.hermesT3SidebarHarness; fixture.control.live.push({ id: 'runtime-pinned', session_key: 'pinned', status: 'working', turn_started_at: Date.now() / 1000 - 30 }); return fixture.queryClient.invalidateQueries(); });
+    await meta.waitForSelector('[data-section=pinned] [data-session-id="pinned"] [data-status=working]');
+    await meta.waitForTimeout(400);
+    const swap = await frames(`() => { const fixture = window.hermesT3SidebarHarness; fixture.control.live.find(item => item.id === 'runtime-pinned').status = 'idle'; return fixture.queryClient.invalidateQueries(); }`,
+      `() => { const time = document.querySelector('[data-section=pinned] [data-session-id="pinned"] .sf-time'), ghost = time.querySelector('.sf-meta-ghost'), fresh = [...time.children].find(child => !child.classList.contains('sf-meta-ghost'));
+        return { ghost: ghost ? Number(getComputedStyle(ghost).opacity) : null, fresh: Number(getComputedStyle(fresh).opacity), age: fresh.classList.contains('sf-age'), width: time.getBoundingClientRect().width }; }`, 900);
+    const swapped = swap.filter(sample => sample.age);
+    check('a Pinned card changing status fades the old badge out, slides its slot, then fades the new one in', swapped.some(sample => sample.ghost > 0.1 && sample.ghost < 0.9 && sample.fresh === 0 && Math.abs(sample.width - swap[0].width) < 0.1)
+      && swapped.some(sample => sample.ghost === null && sample.fresh === 0 && sample.width < swap[0].width - 1 && sample.width > swap.at(-1).width + 1) && swap.at(-1).fresh === 1 && swap.at(-1).ghost === null);
+    // Reduced motion changes everything at once; a roll already in flight finishes first.
+    await meta.emulateMedia({ reducedMotion: 'reduce' });
+    await meta.waitForTimeout(400);
+    // Only script-started animations count: the project name's cut fade is a scroll-driven CSS animation that is always present.
+    const still = await frames(`() => { window.hermesT3SidebarHarness.control.mountedDrafts['${open}'] = 'again'; }`, `() => ({ animations: document.getAnimations().filter(animation => !(animation instanceof CSSAnimation || animation instanceof CSSTransition) && animation.effect?.target?.closest?.('.sf-card-meta')).length, fx: !!document.querySelector('.sf-roll-fx, .sf-meta-ghost'), pencil: !!document.querySelector('[data-session-id="${open}"] .sf-draft-mark') })`, 2700);
+    console.log(`META REDUCED: ${JSON.stringify({ pencil: still.at(-1).pencil, animated: still.filter(sample => sample.animations).length, overlays: still.filter(sample => sample.fx).length, samples: still.length })}`);
+    check('reduced motion shows the pencil and ticks the timer without any metadata animation', still.at(-1).pencil && still.every(sample => !sample.animations && !sample.fx));
+    await meta.close();
+  }
+  {
     // Re-revealing an already-focused small-list card must not queue focus for the next outside click.
     const focus = await browser.newPage({ viewport: { width: 900, height: 400 } });
     focus.on('pageerror', error => errors.push(error));

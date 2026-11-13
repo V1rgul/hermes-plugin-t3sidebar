@@ -1438,6 +1438,12 @@ const CSS = `
 .sf .sf-row>.sf-open:focus-visible{outline:none}.sf-row:has(>.sf-open:focus-visible){box-shadow:inset 0 0 0 2px var(--ui-accent)}
 /* The draft tint is colour-only; a pencil in the same orange names it, inline on the project line so the card keeps its height and the title its left edge. */
 .sf-draft-mark{display:inline-flex;flex-shrink:0;color:var(--ui-orange,#db704b)}.sf-draft-mark svg{width:13px;height:13px}
+/* Metadata motion (useMetaMotion): animated items keep their content on their right edge, so a width narrower than the content during a slide spills to the left, never past the card's right edge where a scroll container would grow. A rolling number's own text turns transparent under the overlay drawing the roll; the leaving characters and the time slot's previous content are laid over the slot's right edge. */
+.sf-draft-mark,.sf-time,.sf-row [data-roll]{justify-content:flex-end}.sf-time,.sf-row [data-roll]{position:relative}.sf-row [data-roll]{display:inline-flex}
+.sf-row [data-rolling]{-webkit-text-fill-color:transparent}
+.sf-roll-fx{position:absolute;top:0;right:0;display:flex;white-space:pre;pointer-events:none;-webkit-text-fill-color:currentColor}.sf-roll-keep,.sf-roll-in,.sf-roll-out,.sf-roll-hold{display:inline-block;white-space:pre}
+.sf-roll-was{position:absolute;top:0;right:0;display:flex}.sf-roll-hold{visibility:hidden}
+.sf-time>.sf-meta-ghost{position:absolute;top:0;right:0;bottom:0;display:inline-flex;align-items:center}.sf-time>.sf-meta-ghost.sf-age{color:var(--ui-text-secondary)}
 /* Recede only the neutral title so status labels, colored icons and metadata stay readable. */
 .sf-row[data-dimmed=true]:not([data-unread=true]) .sf-row-title{color:var(--ui-text-secondary)}.sf-row[data-dimmed=true]:hover .sf-row-title,.sf-row[data-dimmed=true]:focus-within .sf-row-title,.sf-row[data-dimmed=true][data-menu-open=true] .sf-row-title{color:var(--ui-text-primary)}
 /* Native semantic blue is independent of the user's configurable accent. */
@@ -1646,21 +1652,149 @@ const secondTicker = (() => {
     return () => { listeners.delete(listener); if (!listeners.size) { clearInterval(timer); timer = null; } };
   };
 })();
+// Card metadata motion, only on a card that stays mounted where it is (typing in the open session, a Pinned card changing status); a card that mounts, moves shelves or scrolls into view shows its line at once. An item that appears first slides its neighbours aside, then fades in; one that leaves fades out first, then they slide back. A changed number drops its changed characters in from above while the old ones fall out below.
+// Everything runs on Web Animations after React's commit, without re-rendering: a layout read happens only when an item or a value's width changes, never for a same-width tick such as 12s to 13s.
+const META_SLIDE_MS = 200, META_FADE_IN_MS = 160, META_FADE_OUT_MS = 120, META_ROLL_MS = 200, META_ROLL_DELAY_MS = 100;
+const META_EASE_IN_OUT = 'cubic-bezier(.42,0,.58,1)', META_EASE_OUT = 'cubic-bezier(0,0,.58,1)', META_EASE_IN = 'cubic-bezier(.42,0,1,1)';
+// Below this width change a slide is too short to wait for: the new status fades in while the slot adjusts.
+const META_SLIDE_WAIT_PX = 6;
+const metaMotion = node => !!node && typeof node.animate === 'function' && !node.ownerDocument?.hidden && !reducedMotion();
+const metaGap = node => { try { return parseFloat(node.ownerDocument.defaultView.getComputedStyle(node.parentNode).columnGap) || 0; } catch (_) { return 0; } };
+const metaWidth = node => node.getBoundingClientRect().width;
+// Motion is decoration: a failure inside it is reported outside React's commit, where it would otherwise unmount the whole list.
+const metaSafely = run => { try { run(); } catch (error) { queueMicrotask(() => { throw error; }); } };
+// A leaving item's clone, cleaned of a number roll caught mid-flight (its overlay and hidden text).
+function metaGhost(node) {
+  const ghost = exitGhost(node);
+  // data-exiting names leaving cards; this is a part of a card that stays.
+  delete ghost.dataset.exiting;
+  ghost.removeAttribute('role'); ghost.removeAttribute('aria-label');
+  for (const fx of ghost.querySelectorAll('.sf-roll-fx')) fx.remove();
+  for (const rolling of [ghost, ...ghost.querySelectorAll('[data-rolling]')]) rolling.removeAttribute('data-rolling');
+  return ghost;
+}
+// Opens an item's room from `from` pixels (0, or a leaving copy's current width), then fades the item in.
+function metaEnter(node, from = 0) {
+  if (!metaMotion(node)) return;
+  const width = metaWidth(node), gap = metaGap(node);
+  node.animate([{ width: `${from}px`, marginLeft: `${(Math.min(from, width) / (width || 1) - 1) * gap}px` }, { width: `${width}px`, marginLeft: '0px' }], { duration: META_SLIDE_MS, easing: META_EASE_IN_OUT, fill: 'backwards' });
+  node.animate([{ opacity: 0 }, { opacity: 1 }], { duration: META_FADE_IN_MS, delay: META_SLIDE_MS, easing: META_EASE_OUT, fill: 'backwards' });
+}
+// Puts a removed item's copy back where it stood, fades it out, then closes its room; returns the copy, removed once closed.
+function metaExit(node, parent, before) {
+  if (!node || !parent?.isConnected || !metaMotion(parent)) return null;
+  const ghost = metaGhost(node);
+  parent.insertBefore(ghost, before?.parentNode === parent ? before : null);
+  const width = metaWidth(ghost), gap = metaGap(ghost);
+  ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: META_FADE_OUT_MS, easing: META_EASE_IN, fill: 'forwards' });
+  const close = ghost.animate([{ width: `${width}px`, marginLeft: '0px' }, { width: '0px', marginLeft: `${-gap}px` }], { duration: META_SLIDE_MS, delay: META_FADE_OUT_MS, easing: META_EASE_IN_OUT, fill: 'forwards' });
+  close.finished.then(() => ghost.remove(), () => ghost.remove());
+  return ghost;
+}
+// Replaces the time slot's content (age, Working, Input, Done, Woke): the old content's copy, laid over the slot's right edge, fades out, the slot slides to the new width, then the new content fades in.
+function metaSwap(slot, old, fresh) {
+  if (!slot || !old || !fresh || !metaMotion(slot)) return;
+  for (const animation of slot.getAnimations()) animation.cancel();
+  slot.querySelector(':scope>.sf-meta-ghost')?.remove();
+  const ghost = metaGhost(old);
+  ghost.classList.add('sf-meta-ghost');
+  slot.append(ghost);
+  const to = metaWidth(slot), from = metaWidth(ghost), change = Math.abs(to - from);
+  ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: META_FADE_OUT_MS, easing: META_EASE_IN, fill: 'forwards' }).finished.then(() => ghost.remove(), () => ghost.remove());
+  if (change > .5) slot.animate([{ width: `${from}px` }, { width: `${to}px` }], { duration: META_SLIDE_MS, delay: META_FADE_OUT_MS, easing: META_EASE_IN_OUT, fill: 'backwards' });
+  fresh.animate([{ opacity: 0 }, { opacity: 1 }], { duration: META_FADE_IN_MS, delay: META_FADE_OUT_MS + (change > META_SLIDE_WAIT_PX ? META_SLIDE_MS : 0), easing: META_EASE_OUT, fill: 'backwards' });
+}
+// Same length with only digits changed keeps the width: the counts and times use tabular figures.
+const sameMetaWidth = (a, b) => a.length === b.length && [...a].every((char, index) => char === b[index] || (/\d/.test(char) && /\d/.test(b[index])));
+const metaRolls = new WeakMap();
+// Rolls a [data-roll] element whose only content is React's text: the unchanged start and end stay, the changed middle falls in vertically at its final place while the old one falls out below. The text stays React's; an overlay draws the motion over it while it is transparent. A wider or narrower value slides its slot, the unchanged start moving with it, and the new middle starts falling once its room is opening.
+function metaRoll(node, prev, next) {
+  if (!node || prev === next || !metaMotion(node)) return;
+  metaRolls.get(node)?.();
+  let start = 0, end = 0;
+  while (start < prev.length && start < next.length && prev[start] === next[start]) start++;
+  while (end < prev.length - start && end < next.length - start && prev[prev.length - 1 - end] === next[next.length - 1 - end]) end++;
+  const doc = node.ownerDocument, part = (text, className) => { const span = doc.createElement('span'); span.className = className; span.textContent = text; return span; };
+  const keep = part(next.slice(0, start), 'sf-roll-keep'), drop = part(next.slice(start, next.length - end), 'sf-roll-in');
+  const out = part(prev.slice(start, prev.length - end), 'sf-roll-out'), was = doc.createElement('span');
+  was.className = 'sf-roll-was';
+  was.append(part(prev.slice(0, start), 'sf-roll-hold'), out, part(prev.slice(prev.length - end), 'sf-roll-hold'));
+  const fx = doc.createElement('span');
+  fx.className = 'sf-roll-fx'; fx.setAttribute('aria-hidden', 'true');
+  fx.append(keep, drop, next.slice(next.length - end), was);
+  node.append(fx); node.dataset.rolling = '';
+  // Both widths are read before any animation exists, in one layout pass; a same-width change reads none.
+  const width = sameMetaWidth(prev, next) ? 0 : metaWidth(node), shift = width && width - metaWidth(was), moves = Math.abs(shift) > .5, animations = [];
+  if (moves) {
+    animations.push(node.animate([{ width: `${width - shift}px` }, { width: `${width}px` }], { duration: META_SLIDE_MS, easing: META_EASE_IN_OUT, fill: 'backwards' }));
+    animations.push(keep.animate([{ transform: `translateX(${shift}px)` }, { transform: 'none' }], { duration: META_SLIDE_MS, easing: META_EASE_IN_OUT }));
+  }
+  const fall = drop.animate([{ opacity: 0, transform: 'translateY(-.55em)' }, { opacity: 1, transform: 'none' }], { duration: META_ROLL_MS, delay: moves ? META_ROLL_DELAY_MS : 0, easing: META_EASE_IN_OUT, fill: 'backwards' });
+  const leave = out.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(.55em)' }], { duration: META_ROLL_MS, easing: META_EASE_IN_OUT, fill: 'forwards' });
+  const done = () => { if (metaRolls.get(node) !== stop) return; metaRolls.delete(node); fx.remove(); delete node.dataset.rolling; };
+  const stop = () => { for (const animation of animations) animation.cancel(); done(); };
+  metaRolls.set(node, stop);
+  Promise.all([leave.finished, fall.finished].map(promise => promise.catch(() => {}))).then(done);
+}
+// Wires one card's metadata line: callback refs record the animated nodes (and the node React removes), and one layout effect compares each commit with the previous one.
+function useMetaMotion({ time, draft, running, tokens, age, hidden }) {
+  const [refs] = useState(() => {
+    const nodes = {}, removed = {}, exits = {};
+    const track = name => node => { if (node) nodes[name] = node; else { if (nodes[name]) removed[name] = nodes[name]; nodes[name] = null; } };
+    const timeChild = track('timeChild'), ageNode = track('age');
+    return { nodes, removed, exits, line: track('line'), time: track('time'), timeChild, age: ageNode, ageTime: node => { timeChild(node); ageNode(node); }, token: track('token'), draft: track('draft'), running: track('running') };
+  });
+  const last = useRef(null), armed = useRef(false);
+  // Changes before the card's first paint are part of its mounting, not motion.
+  useEffect(() => { armed.current = true; }, []);
+  useLayoutEffect(() => {
+    const { nodes, removed, exits } = refs, prev = last.current, gone = { ...removed };
+    for (const name in removed) delete removed[name];
+    last.current = { time, draft, running, tokens, age, token: nodes.token, ageNode: nodes.age };
+    if (!prev || hidden || !armed.current) return;
+    metaSafely(() => {
+      if (prev.time !== time) metaSwap(nodes.time, gone.timeChild, nodes.timeChild);
+      else if (prev.age !== age && prev.ageNode === nodes.age) metaRoll(nodes.age, prev.age, age);
+      if (prev.tokens !== tokens && prev.token === nodes.token) metaRoll(nodes.token, prev.tokens, tokens);
+      const presence = (name, shown, before) => {
+        const leaving = exits[name];
+        if (shown) {
+          // Typing again while the pencil leaves reopens its room from where the leaving copy is.
+          const from = leaving?.isConnected ? metaWidth(leaving) : 0;
+          leaving?.remove(); exits[name] = null;
+          metaEnter(nodes[name], from);
+        } else exits[name] = metaExit(gone[name], nodes.line, before);
+      };
+      if (prev.draft !== draft) presence('draft', draft, null);
+      if (prev.running !== running) presence('running', running, nodes.time);
+    });
+  }, [time, draft, running, tokens, age, hidden]);
+  return refs;
+}
 function WorkingDuration({ startedAt, hidden = false }) {
   const [duration, setDuration] = useState(() => formatWorkingDuration(Date.now() - startedAt * 1000));
-  const previous = useRef(duration);
+  const previous = useRef(duration), label = useRef(null), shown = useRef(duration), armed = useRef(false), refreshed = useRef(null);
+  useEffect(() => { armed.current = true; }, []);
+  // Only the shared ticker's changes roll; the refresh on reopening a shelf or starting a turn replaces the label at once.
+  useLayoutEffect(() => {
+    const prev = shown.current, instant = refreshed.current === duration;
+    shown.current = duration; refreshed.current = null;
+    if (armed.current && !hidden && !instant) metaSafely(() => metaRoll(label.current, prev, duration));
+  }, [duration]);
   useLayoutEffect(() => {
     if (hidden) return;
     const update = () => {
       const next = formatWorkingDuration(Date.now() - startedAt * 1000);
-      if (next !== previous.current) { previous.current = next; setDuration(next); }
+      if (next === previous.current) return false;
+      previous.current = next; setDuration(next);
+      return true;
     };
     // Reopening or changing turns must refresh before paint, not on the next shared tick.
-    update();
+    if (update()) refreshed.current = previous.current;
     return secondTicker(update);
   }, [startedAt, hidden]);
   // Decorative: the label already announces Working, and a per-second change would be noisy.
-  return h('span', { className: 'sf-working-duration', 'aria-hidden': true }, duration);
+  return h('span', { className: 'sf-working-duration', 'data-roll': true, ref: label, 'aria-hidden': true }, duration);
 }
 function icon(name, fallback) {
   if (BUNDLED_ICONS[name]) return h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true, 'data-icon': name }, BUNDLED_ICONS[name].map(d => h('path', { key: d, d })));
@@ -2364,6 +2498,9 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   const hasDraft = (row.newSession ? draftPresent : draft.data === true && !draft.isError) || !active && row.drafted;
   const attention = row.status === 'waiting', snoozed = row.section === 'snoozed', badge = snoozed ? null : cardStatus(row, active);
   const tokens = showTokens ? compactTokens(row) : null, provider = providerMark(row.provider);
+  // The time slot's content is keyed by kind, so a status change replaces its node and the motion can fade the old one out.
+  const timeKind = badge || 'age', snoozeRunning = snoozed && isWorking(row);
+  const motion = useMetaMotion({ time: timeKind, draft: hasDraft, running: snoozeRunning, tokens, age, hidden });
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
     if (event.target !== event.currentTarget) return;
@@ -2381,7 +2518,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
       'aria-description': details.join(', ') || undefined,
       onClick: open, onFocus: () => onFocus(row.key), onBlur: () => onFocus(null), onKeyDown: keyDown,
       ...sharedTip([sessionTitle(row), ...details].join('\n'), 'right', ROW_TIP_DELAY_MS, row.cwd ? 1 : 0) },
-      h('span', { className: 'sf-card-meta' },
+      h('span', { className: 'sf-card-meta', ref: motion.line },
         h('span', { className: 'sf-project' },
           h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: row.project?.color || undefined } }, projectMark(row.project)),
           // Inside Pinned the group's single pin marks every card; elsewhere (a snoozed pinned card) the card keeps its own.
@@ -2389,12 +2526,15 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
           row.project?.name || !row.newSession ? h('span', { className: 'sf-project-name' }, row.project?.name || 'Project unavailable') : null),
         row.status === 'unknown' ? h('span', { className: 'sf-wait', role: 'img', 'aria-label': 'Status unknown' }, '?') : null,
         provider ? h('span', { className: 'sf-provider', role: 'img', 'aria-label': `Provider: ${row.provider}`, ...sharedTip(row.provider) }, provider) : null,
-        showTokens ? h('span', { className: 'sf-token', 'aria-label': `Total tokens: ${tokens}`, ...sharedTip('Total input and output tokens, including subagents') }, tokens) : null,
+        showTokens ? h('span', { className: 'sf-token', 'data-roll': true, ref: motion.token, 'aria-label': `Total tokens: ${tokens}`, ...sharedTip('Total input and output tokens, including subagents') }, tokens) : null,
         // A running snoozed card stays in Snoozed but still shows its Working status, between tokens and the countdown.
-        snoozed && isWorking(row) ? h('span', { className: 'sf-time sf-snooze-working' }, statusBadge('working', row, hidden, workingDetails)) : null,
-        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time' }, snoozed ? icon('AlarmSnooze', '◷') : null, badge ? statusBadge(badge, row, hidden, workingDetails) : snoozed ? h('span', { className: 'sf-snooze-duration' }, age) : age),
+        snoozeRunning ? h('span', { className: 'sf-time sf-snooze-working', ref: motion.running }, statusBadge('working', row, hidden, workingDetails)) : null,
+        h('span', { className: snoozed ? 'sf-time sf-snooze-time' : 'sf-time', ref: motion.time }, snoozed ? icon('AlarmSnooze', '◷') : null,
+          badge ? cloneElement(statusBadge(badge, row, hidden, workingDetails), { key: badge, ref: motion.timeChild })
+            : snoozed ? h('span', { className: 'sf-snooze-duration', 'data-roll': true, ref: motion.age }, age)
+            : h('span', { key: 'age', className: 'sf-age', 'data-roll': true, ref: motion.ageTime }, age)),
         // The tint alone is colour-only (and absent on the viewed card); the pencil marks every card with a draft, the viewed one included, following its focused composer read. It closes the metadata line, right of the time and the status badge, where the hover actions cover it like the rest of that side: the card's own tip and description name the draft instead.
-        hasDraft ? h('span', { className: 'sf-draft-mark', role: 'img', 'aria-label': 'Unsent draft' }, icon('Pencil', '✎')) : null),
+        hasDraft ? h('span', { className: 'sf-draft-mark', ref: motion.draft, role: 'img', 'aria-label': 'Unsent draft' }, icon('Pencil', '✎')) : null),
       h('span', { className: 'sf-row-title', ref: reveal.title }, sessionTitle(row))),
     // Hover-action tips point out of the card, past its right edge, so they cover neither the other action nor the neighbouring cards.
     h('div', { className: 'sf-hover', 'data-sf-tip-anchor': true },
