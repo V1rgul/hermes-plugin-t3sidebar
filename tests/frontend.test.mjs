@@ -652,7 +652,16 @@ test('snooze choices: +1h/+2h/+4h, then Tomorrow, Monday and Next week with thei
   await click(row('design').querySelector('[aria-label="Snooze session"]'));
   const choices = [...$('[role=dialog]').querySelectorAll('.sf-snooze-choice')];
   assert.deepEqual(choices.map(node => node.getAttribute('aria-label')), ['In 1 hour', 'In 2 hours', 'In 4 hours', 'Tomorrow at 9:00', 'Monday at 9:00', 'Next week at 9:00']);
-  assert.deepEqual(choices.slice(0, 3).map(node => node.textContent), ['+1h', '+2h', '+4h']);
+  assert.deepEqual(choices.slice(0, 3).map(node => node.querySelector('.sf-snooze-dur').textContent), ['+1h', '+2h', '+4h']);
+  // The hour buttons hold their wake time for the hover reveal, hidden from assistive technology; the description reads it out, like the day buttons'.
+  const wakeAt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  assert.deepEqual(choices.slice(0, 3).map((node, index) => node.querySelector('.sf-snooze-at').textContent.endsWith(wakeAt.format(new Date(presets.relative[index].wake_at * 1000)))), [true, true, true]);
+  assert.ok(choices.slice(0, 3).every(node => !/[AP]M/i.test(node.querySelector('.sf-snooze-at').textContent)), 'the revealed time uses the 24-hour clock, which fits beside +Nh');
+  assert.deepEqual(choices.slice(0, 3).map(node => node.querySelector('.sf-snooze-at').getAttribute('aria-hidden')), ['true', 'true', 'true']);
+  assert.ok(choices.every(node => /^Wakes /.test(node.getAttribute('aria-description'))));
+  assert.ok(choices.every(node => !node.dataset.sfTip && !node.title && !node.closest('[data-sf-tip]')), 'snooze choices carry no tooltip');
+  assert.equal($('[role=dialog] .sf-snooze-head .sf-menu-heading').textContent, row('design').querySelector('.sf-row-title').textContent, 'the title uses the session menu heading');
+  assert.equal(!!$('[role=dialog] .sf-menu-title'), false);
   const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'short' }), day = { format: date => `${weekday.format(date)} ${date.getDate()}` };
   assert.deepEqual(choices.slice(3).map(node => [node.querySelector('.sf-snooze-day-name').textContent, node.querySelector('.sf-snooze-day-date').textContent]),
     presets.days.map(preset => [preset.label, day.format(preset.date)]));

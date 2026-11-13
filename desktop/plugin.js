@@ -31,6 +31,8 @@ const shortDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'short' });
 const shortTime = new Intl.DateTimeFormat(undefined, { timeStyle: 'short' });
 // Snooze day buttons: a short weekday then the day number under each word (Sat 14 in every locale, where en-US alone would write 14 Sat), the full date in the tooltip.
 const shortWeekday = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
+// The Snooze menu's hour buttons reveal their wake time beside +Nh, where a 12-hour "10:38 PM" does not fit: they use the 24-hour clock, like the preset time under the calendar.
+const hourTime = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dayLabel = { format: date => `${shortWeekday.format(date)} ${date.getDate()}` };
 const longDay = new Intl.DateTimeFormat(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
 const SNOOZE_TIME_KEY = ['hermes-t3sidebar-preferences', 'snooze-time'];
@@ -1460,6 +1462,15 @@ const CSS = `
 .sf-row .sf-time.sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--sf-purple);font-weight:400}.sf-snooze-time svg{width:16px;height:16px;flex-shrink:0;stroke-width:1.6}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
 /* Snooze menu: an existing snooze on one purple line ending with Unsnooze, then rows that lead with their icon outside the buttons (hours from now, days at the preset time written under the calendar), and the custom field aligned with the buttons. */.sf-menu.sf-snooze-menu{box-sizing:border-box;width:300px;max-width:calc(100vw - 18px)}.sf-menu .sf-snooze-info{display:flex;flex-direction:row;align-items:center;gap:6px;padding-left:2px;color:var(--sf-purple);font-size:12px;white-space:nowrap}.sf-snooze-info-mark{display:inline-flex}.sf-snooze-info-mark svg{width:14px;height:14px}.sf-snooze-remaining{margin-left:auto;text-align:right}.sf-menu .sf-snooze-info .sf-unsnooze{color:var(--ui-green,#1f8a65)}
 .sf-menu .sf-snooze-grid,.sf-menu .sf-snooze-custom{display:grid;grid-template-columns:28px repeat(3,minmax(0,1fr));gap:4px;align-items:center}.sf-menu .sf-snooze-custom{grid-template-columns:28px minmax(0,1fr) auto}.sf-snooze-lead{display:flex;flex-direction:column;align-items:center;gap:2px;color:var(--ui-text-secondary)}.sf-snooze-lead svg{width:16px;height:16px}.sf-snooze-lead small{font-size:10px;line-height:1;font-variant-numeric:tabular-nums}.sf-menu .sf-snooze-choice{justify-content:center;min-width:0;height:26px;padding:0 4px;background:color-mix(in srgb,var(--ui-text-primary) 6%,transparent);font-variant-numeric:tabular-nums}.sf-menu .sf-snooze-choice:hover:not(:disabled){background:var(--ui-control-hover-background,color-mix(in srgb,var(--ui-text-primary) 12%,transparent))}.sf-menu .sf-snooze-day{display:flex;flex-direction:column;align-items:center;height:auto;padding:4px 2px;gap:0;line-height:1.2}.sf-snooze-day-name,.sf-snooze-day-date{display:block;white-space:nowrap}.sf-snooze-day-name{font-size:12px}.sf-snooze-day-date{font-size:11px;color:var(--ui-text-secondary)}
+/* The snooze menu's title line keeps the session menu's 24px height, set there by its buttons. */.sf-menu .sf-snooze-head{min-height:24px}
+/* Hour buttons on hover or focus: +Nh moves to the left within the button (standard curve), the wake time enters from beyond the right edge in secondary grey (decelerate) and leaves faster (accelerate, 70%). --sf-edge, measured per button, makes both edges equal the gap. Both labels are absolute, so the button never changes size. */
+.sf-menu .sf-snooze-hour{position:relative;overflow:hidden}.sf-snooze-dur,.sf-snooze-at{position:absolute;top:50%;white-space:nowrap}
+.sf-snooze-dur{left:50%;transform:translate(-50%,-50%);transition:left 154ms cubic-bezier(.4,0,.2,1),transform 154ms cubic-bezier(.4,0,.2,1)}
+.sf-snooze-at{right:var(--sf-edge,6px);opacity:0;color:var(--ui-text-secondary);transform:translate(calc(100% + var(--sf-edge,6px)),-50%);transition:transform 154ms cubic-bezier(.4,0,1,1),opacity 154ms cubic-bezier(.4,0,1,1)}
+.sf-snooze-hour:not(:disabled):is(:hover,:focus-visible) .sf-snooze-dur{left:var(--sf-edge,6px);transform:translate(0,-50%);transition-duration:220ms}
+.sf-snooze-hour:not(:disabled):is(:hover,:focus-visible) .sf-snooze-at{transform:translate(0,-50%);opacity:1;transition-duration:220ms;transition-timing-function:cubic-bezier(0,0,.2,1)}
+.sf-snooze-at:has(small){display:flex;flex-direction:column;align-items:flex-end;line-height:1}.sf-snooze-at small{font-size:9px;margin-bottom:1px}
+@media (prefers-reduced-motion:reduce){.sf-snooze-dur,.sf-snooze-at{transition:none}}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}.sf-project-choice[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-project-picker .sf-project-choice[aria-pressed=true]{background:color-mix(in srgb,var(--ui-text-primary) 10%,transparent);color:var(--ui-text-primary)}
 .sf-project-picker{box-sizing:border-box;width:min(440px,calc(100vw - 18px));min-width:0;max-width:none;max-height:min(720px,calc(100dvh - 24px),calc(var(--radix-popover-content-available-height,100dvh) - 2px));overflow:hidden}.sf-project-picker>strong,.sf-project-picker>input{flex-shrink:0}.sf-project-picker>input{box-sizing:border-box;min-width:0}.sf-menu.sf-project-picker>.sf-project-options{gap:0;overflow-y:auto;overscroll-behavior:contain;min-height:0}.sf-project-picker .sf-project-choice{box-sizing:border-box;flex-shrink:0;width:100%;height:24px;min-height:24px;padding:4px 8px;font-size:12px;line-height:16px;gap:8px;border:0}.sf-project-picker .sf-project-icon{width:14px;height:14px}.sf-project-details{display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left}.sf-project-details>.sf-project-name,.sf-project-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.sf-project-details>.sf-project-name{max-width:55%}.sf-project-path{flex:1;margin-left:auto;text-align:right;font-size:11px;font-weight:400;line-height:16px;color:var(--ui-text-tertiary)}
 .sf-project-group{display:flex;flex-direction:column;gap:0;flex-shrink:0}.sf-project-picker .sf-project-folder{padding-left:30px}.sf-project-folder .sf-project-path{text-align:left;margin-left:0}.sf-project-heading .sf-project-name{max-width:100%}.sf-project-heading[aria-disabled=true]{opacity:1;cursor:default}
@@ -2066,6 +2077,14 @@ function SnoozeActions({ row, mutate, disabled, presetTime, snoozeDetail, title 
   };
   const presets = snoozePresets(Date.now(), presetTime), wake = new Date(row.meta.wake_at * 1000);
   const at = date => `${longDay.format(date)}, ${shortTime.format(date)}`;
+  // Hovered, an hour button shows +Nh at its left and its wake time at its right; both edges and the gap between them share the room the labels leave, measured once their text is laid out.
+  const hours = useRef(null);
+  useLayoutEffect(() => {
+    const buttons = [...(hours.current?.querySelectorAll('.sf-snooze-hour') ?? [])];
+    const edges = buttons.map(button => (button.clientWidth - button.querySelector('.sf-snooze-dur').offsetWidth - button.querySelector('.sf-snooze-at').offsetWidth) / 3);
+    buttons.forEach((button, index) => button.style.setProperty('--sf-edge', `${Math.max(2, edges[index])}px`));
+  });
+  const today = new Date().toDateString();
   return h('div', { ref: glide, className: 'sf-menu sf-snooze-menu' }, title,
     h('form', { onSubmit: custom },
       // An existing snooze: its wake time and what is left on one line, then Unsnooze at the end of it.
@@ -2075,14 +2094,18 @@ function SnoozeActions({ row, mutate, disabled, presetTime, snoozeDetail, title 
         h('span', { className: 'sf-snooze-remaining' }, snoozeDetail),
         h(MenuIcon, { label: 'Unsnooze', name: 'AlarmOff', glyph: '⏰', className: 'sf-unsnooze', disabled: off, onClick: () => run({ action: 'restore' }) })) : null,
       row.meta.state === 'snoozed' ? h('div', { className: 'sf-menu-separator', role: 'separator' }) : null,
-      // Each row leads with its icon outside the buttons: hours from now, then days at the preset time written under the calendar.
-      h('div', { className: 'sf-snooze-grid' },
+      // Each row leads with its icon outside the buttons: hours from now, then days at the preset time written under the calendar. The buttons have no tooltip: the day buttons show their date, the hour buttons their wake time on hover or focus.
+      h('div', { ref: hours, className: 'sf-snooze-grid' },
         h('span', { className: 'sf-snooze-lead', 'aria-hidden': true }, icon('Clock', '◷')),
-        ...presets.relative.map(preset => h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-choice', disabled: off, 'aria-label': preset.name,
-          ...sharedTip(at(new Date(preset.wake_at * 1000)), 'top'), onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) }, preset.label)),
+        ...presets.relative.map(preset => { const date = new Date(preset.wake_at * 1000);
+          return h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-choice sf-snooze-hour', disabled: off, 'aria-label': preset.name,
+            'aria-description': `Wakes ${at(date)}`, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) },
+            h('span', { className: 'sf-snooze-dur' }, preset.label),
+            // Another day stacks its weekday small above the time: beside +Nh there is no room for both on one line.
+            h('span', { className: 'sf-snooze-at', 'aria-hidden': true }, date.toDateString() === today ? null : h('small', null, shortWeekday.format(date)), hourTime.format(date))); }),
         h('span', { className: 'sf-snooze-lead sf-snooze-lead-day' }, h('span', { 'aria-hidden': true }, icon('Calendar', '▦')), h('small', null, presets.labelTime)),
         ...presets.days.map(preset => h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-choice sf-snooze-day', disabled: off,
-          'aria-label': `${preset.label} at ${presets.labelTime}`, 'aria-description': `Wakes ${at(preset.date)}`, ...sharedTip(at(preset.date), 'top'), onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) },
+          'aria-label': `${preset.label} at ${presets.labelTime}`, 'aria-description': `Wakes ${at(preset.date)}`, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) },
           h('span', { className: 'sf-snooze-day-name' }, preset.label), h('span', { className: 'sf-snooze-day-date' }, dayLabel.format(preset.date))))),
       // Custom time: a calendar with a clock in the same icon column, the field aligned with the buttons above, and its checkmark, green once the value is a valid future local time.
       h('label', { className: 'sf-snooze-custom sf-custom-time' }, h('span', { className: 'sf-snooze-lead', 'aria-hidden': true }, icon('CalendarTime')),
@@ -2091,8 +2114,11 @@ function SnoozeActions({ row, mutate, disabled, presetTime, snoozeDetail, title 
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
 function RowActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, snoozeOnly = false, presetTime, snoozeDetail, hasDraft = false }) {
-  const title = h('div', { className: 'sf-menu-title' }, sessionTitle(row));
-  if (snoozeOnly) return h(SnoozeActions, { row, mutate, disabled, presetTime, snoozeDetail, title });
+  if (snoozeOnly) {
+    // The same title line as the session menu's, on its 24px line though no button sits beside it.
+    const title = h('div', { className: 'sf-menu-line sf-snooze-head' }, h('span', { className: 'sf-menu-heading' }, sessionTitle(row)));
+    return h(SnoozeActions, { row, mutate, disabled, presetTime, snoozeDetail, title });
+  }
   return h(SessionActions, { row, scope, controller, filterProject, deleteSession, mutate, disabled, close, hasDraft });
 }
 function SessionActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, hasDraft }) {
