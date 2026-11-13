@@ -11,6 +11,7 @@ Previously the badge relied exclusively on backend unread. Native `last_read_at 
 - Record completions from the supported server-side agent lifecycle, not polling idle history, watching a frontend WebSocket or inferring completion from timestamps/message counts.
 - Require explicit successful completion, a real turn identity and the owning profile/home's stored human conversation. Reject failure, interruption, missing ownership and internal/cron runs. Resolve compression lineage without modifying native history.
 - Do not mistake an orchestrator's dispatch response for a final result while children are running. A later child finishing is not by itself proof that the parent has produced a new successful result.
+- Do not mark a turn Done when it leaves work that will report back as another turn: a background process started with `notify_on_complete` or watch patterns (native `awaits_notification`, every lineage id), or a child that finished during the turn with its result still undelivered. The turn that receives the result records the marker.
 - Persist only compact session/turn identifiers and backend completion time. Do not retain prompts, result text, composer contents or raw events.
 - Keep Input, Working and Woke precedence independent. A parent with authoritative active children remains Working even if a prior unseen completion exists.
 

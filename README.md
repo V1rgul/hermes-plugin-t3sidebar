@@ -85,6 +85,7 @@
 - Working indicator: Normal or Detailed
 - Pinned sessions: 1 or 2 lines
 - Show token counts
+- Done/Input sound: T3 Code's or one of Desktop's presets, played when a session shows Done or Input
 
 ![Plugin settings page: Snooze preset time field with alarm-clock picker, Working indicator Normal or Detailed, Pinned sessions 1 or 2 lines, Show token counts switch](docs/images/settings.png)
 

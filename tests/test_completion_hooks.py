@@ -435,6 +435,25 @@ class CompletionHookTests(unittest.TestCase):
 		self.end(turn="fast-result")
 		self.assertFalse(self.runs()["human"]["pending"])
 
+	def test_done_waits_for_work_that_reports_back(self):
+		# A notifying background process: the notice's turn, not this one, completes the work.
+		self.begin(turn="user")
+		with patch.object(hooks, "awaits_processes", return_value=True):
+			self.end(turn="user")
+		self.assertEqual(self.markers(), {})
+		self.begin(turn="process-notice")
+		with patch.object(hooks, "awaits_processes", return_value=False):
+			self.end(turn="process-notice")
+		self.assertEqual(self.markers()["human"]["done_token"], "process-notice")
+		# A child already running when the turn began finishes during it: its result still has to wake the conversation.
+		self.delegate("slow")
+		self.begin(turn="meanwhile")
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			connection.execute("UPDATE async_delegations SET state = 'completed', delivery_state = 'pending' WHERE delegation_id = 'slow'")
+			connection.commit()
+		self.end(turn="meanwhile")
+		self.assertEqual(self.markers()["human"]["done_token"], "process-notice")
+
 	def test_processes_spawned_before_compression_still_count(self):
 		self.db.end_session("human", "compression")
 		self.db.create_session("tip", "cli", parent_session_id="human")

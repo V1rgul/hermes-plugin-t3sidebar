@@ -39,7 +39,10 @@ test('only supported import specifiers; opt-in left-pane registration and dispos
   assert.equal(JSON.parse(manifest).name, plugin.id); assert.equal(JSON.parse(manifest).label, plugin.name);
   assert.equal(JSON.parse(packageJson).name, plugin.id); assert.equal(JSON.parse(lock).name, plugin.id); assert.equal(JSON.parse(lock).packages[''].name, plugin.id);
   assert.equal(yaml.split('\n')[0], `name: ${plugin.id}`);
-  assert.doesNotMatch(source, /document\.|window\.|localStorage|__reactFiber|restartGateway/);
+  assert.doesNotMatch(source, /document\.|window\.|__reactFiber|restartGateway/);
+  // Desktop's own sound and mute preferences are read, never written.
+  assert.deepEqual([...source.matchAll(/localStorage\S*/g)].map(match => match[0]), ['localStorage)'], 'one injectable storage default');
+  assert.doesNotMatch(source, /\.(setItem|removeItem)\(/);
   // Polls drive every other clock; the sole interval is the shared, subscriber-gated Working timer.
   assert.equal(source.match(/setInterval/g)?.length, 1);
   assert.match(source, /const secondTicker = [^]*?setInterval\(/);
