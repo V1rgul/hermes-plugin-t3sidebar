@@ -171,6 +171,29 @@ test('card details open one shared tooltip on hover instead of a native title', 
 	assert.equal(all('[role=tooltip]').length, 0);
 });
 
+test('a trigger whose menu is open shows no tip, even when the pointer armed it before the click', async t => {
+	// Hovering the card starts its title reveal, which runs on animation frames.
+	const saved = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame };
+	Object.assign(globalThis, { requestAnimationFrame: callback => setTimeout(() => callback(performance.now()), 16), cancelAnimationFrame: clearTimeout });
+	t.after(() => Object.assign(globalThis, { requestAnimationFrame: saved.raf, cancelAnimationFrame: saved.caf }));
+	await mount();
+	const over = target => act(async () => { target.dispatchEvent(new window.MouseEvent('pointerover', { bubbles: true })); });
+	const snooze = () => row('design').querySelector('[aria-label="Snooze session"]');
+	await over(snooze());
+	await act(async () => snooze().click()); await tick();
+	// Opening the menu remounts the trigger, whose pointerover arms the tip again.
+	await over(snooze());
+	await tick(300);
+	assert.equal(snooze().getAttribute('aria-expanded'), 'true');
+	assert.equal(all('[role=tooltip]').length, 0, 'the tip would cover the menu and take its first Escape');
+	// Once the menu is closed, the same trigger shows its tip again.
+	await act(async () => { document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); }); await tick();
+	await act(async () => { row('design').dispatchEvent(new window.MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body })); });
+	await over(snooze());
+	await tick(300);
+	assert.equal($('[role=tooltip]')?.textContent, 'Snooze session');
+});
+
 test('re-clicking the shown page\'s footer button returns to the session it covered, also after switching pages', async () => {
 	await mount();
 	await click(button('Usage'));

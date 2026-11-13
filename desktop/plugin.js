@@ -1455,6 +1455,7 @@ const CSS = `
 .sf-empty.sf-no-match{display:flex;flex-direction:column;gap:2px;flex-shrink:0;padding:6px 10px 8px;font-size:12px;color:var(--ui-text-tertiary)}.sf-no-match-hint{font-size:11px;color:var(--ui-text-quaternary)}.sf-no-match-actions{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 0 -6px}
 /* The cards' shared tooltip anchor: an empty box laid over the hovered part, never hit by the pointer. */
 /* The shared tip's anchor copies the hovered element's box, which may lie outside the sidebar (a menu beside it). Desktop's sidebar container scrolls, so an anchor overflowing the sidebar would raise a scrollbar and shrink the whole sidebar: the clipping layer keeps it out of the overflow while its box still places the tip. */.sf-tip-layer{position:absolute;inset:0;overflow:hidden;pointer-events:none}.sf-tip-anchor{position:absolute;pointer-events:none}.sf-tip-wrap{display:flex;flex-direction:column}.sf-tip-wrap>:disabled{pointer-events:none}
+/* Plugin menus fade in while sliding 6px out of the side they open from (from the left for a menu opening on the right of its card), and only fade out. Radix keeps the closing popover mounted until its animation ends. A menu remounted to follow its moving card skips the enter. */@keyframes sf-popover-in{from{opacity:0;transform:var(--sf-popover-from)}}@keyframes sf-popover-out{to{opacity:0}}.sf-popover{--sf-popover-from:translateX(-6px)}.sf-popover[data-side=left]{--sf-popover-from:translateX(6px)}.sf-popover[data-side=bottom]{--sf-popover-from:translateY(-6px)}.sf-popover[data-side=top]{--sf-popover-from:translateY(6px)}.sf-popover[data-state=open]:not([data-sf-following]){animation:sf-popover-in 150ms cubic-bezier(.2,.7,.3,1)}.sf-popover[data-state=closed]{animation:sf-popover-out 150ms ease-in forwards}@media (prefers-reduced-motion:reduce){.sf-popover{--sf-popover-from:none}}
 .sf-menu{display:flex;flex-direction:column;gap:4px;padding:8px;min-width:200px;max-width:290px;color:var(--ui-text-primary)}.sf-menu button{justify-content:flex-start}.sf-menu-title{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sf-menu label{font-size:11px}.sf-menu input{width:100%;background:var(--ui-bg-quaternary);color:var(--ui-text-primary);border:1px solid var(--ui-stroke-secondary);padding:5px}.sf-menu p{font-size:10px;color:var(--ui-text-tertiary);margin:4px 0}.sf-error{color:var(--ui-accent)}
 .sf-row .sf-project{gap:4px}/* Start the glyph at the title's left edge; Codicons also carry a 1/16em side bearing. */.sf-row .sf-project-icon{width:auto;min-width:13px;justify-content:flex-start}.sf-row .sf-project-icon>.codicon{margin-left:calc(-1em / 16)}/* Outranks the Working time color: a snoozed card can still be running. */
 .sf-row .sf-time.sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--sf-purple);font-weight:400}.sf-snooze-time svg{width:16px;height:16px;flex-shrink:0;stroke-width:1.6}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
@@ -1889,8 +1890,8 @@ export const PROJECT_PALETTE = [
 const PROJECT_MENU_STYLE = { padding: 0, width: 'max-content', maxWidth: 'calc(100vw - 16px)' };
 // The folder the session list is filtered by ('*' for none), read by the open project menus alone so a filter change re-renders no card.
 const ProjectFilter = createContext('*');
-// A menu stays open while its card moves (pinned, snoozed, unsnoozed, reordered, started working). Radix puts the popover at its anchor's new place at once; this glides it there from where it was shown, with the translate property, which composes with Radix's placement and Desktop's enter animation. Positions are read only when the popover is placed again, never on a timer: Radix writes each placement on its wrapper, whose box the translate leaves alone; without a wrapper (the test SDK) the content's own style changes are watched, ignoring the translate this writes. A card changing shelf remounts its menu, which starts from the place the previous one left in menuPlaces.
-const MENU_GLIDE_MS = 75, menuPlaces = new Map();
+// A menu stays open while its card moves (pinned, snoozed, unsnoozed, reordered, started working). Radix puts the popover at its anchor's new place at once; this glides it there from where it was shown, with the translate property, which composes with Radix's placement and Desktop's enter animation. Positions are read only when the popover is placed again, never on a timer: Radix writes each placement on its wrapper, whose box the translate leaves alone; without a wrapper (the test SDK) the content's own style changes are watched, ignoring the translate this writes. A card changing shelf remounts its menu, which starts from the place the previous one left in menuPlaces. A menu taken away while still shown with no follower (its card moved into a folded shelf or left the list, or another card's menu replaced it) leaves an inert copy that fades out where it was. A closing menu never moves.
+const MENU_GLIDE_MS = 75, MENU_FADE_MS = 150, menuPlaces = new Map();
 const withoutTranslate = style => (style || '').replace(/(^|;)\s*translate:[^;]*;?/g, '$1').trim();
 export function useMenuGlide(key) {
   const ref = useRef(null);
@@ -1901,11 +1902,13 @@ export function useMenuGlide(key) {
     let offset = { x: 0, y: 0 }, natural = null, frame = 0, last = 0, scrolled = -Infinity;
     const previous = menuPlaces.get(key);
     menuPlaces.delete(key);
-    // A menu following its card is not opening again: no second enter animation.
+    // A menu following its card is not opening again: it skips the enter animation, but keeps the fade out for when it closes.
     const following = previous && performance.now() - previous.at < 300;
-    if (following) node.style.animation = 'none';
+    if (following) node.dataset.sfFollowing = '';
     const show = () => { node.style.translate = offset.x || offset.y ? `${offset.x}px ${offset.y}px` : ''; };
+    const closing = () => node.dataset.state === 'closed';
     const step = now => {
+      if (closing()) { frame = 0; last = 0; return; }
       const k = 1 - Math.exp(-(last ? Math.min(64, now - last) : 16) / MENU_GLIDE_MS);
       last = now;
       offset = { x: offset.x * (1 - k), y: offset.y * (1 - k) };
@@ -1913,10 +1916,10 @@ export function useMenuGlide(key) {
       show();
     };
     const glide = delta => {
-      if (reducedMotion() || !delta.x && !delta.y) return;
+      if (!delta.x && !delta.y || reducedMotion() && !closing()) return;
       offset = { x: offset.x + delta.x, y: offset.y + delta.y };
       show();
-      if (!frame) frame = requestAnimationFrame(step);
+      if (!frame && !closing()) frame = requestAnimationFrame(step);
     };
     const placed = records => {
       if (records && !wrapper && records.every(record => withoutTranslate(record.oldValue) === withoutTranslate(node.getAttribute('style')))) return;
@@ -1936,8 +1939,22 @@ export function useMenuGlide(key) {
     return () => {
       observer.disconnect(); node.ownerDocument.removeEventListener('scroll', onScroll, true);
       if (frame) cancelAnimationFrame(frame);
-      if (natural) menuPlaces.set(key, { x: natural.x + offset.x, y: natural.y + offset.y, at: performance.now() });
+      const entry = natural ? { x: natural.x + offset.x, y: natural.y + offset.y, at: performance.now() } : null;
+      if (entry) menuPlaces.set(key, entry);
+      // Still in the page here: React removes the popover after this cleanup. A normal close ends at opacity 0, so it leaves no copy.
+      const shown = wrapper || node, parent = shown.parentElement, read = Number.parseFloat(node.ownerDocument.defaultView?.getComputedStyle(node).opacity), opacity = Number.isNaN(read) ? 1 : read;
+      const ghost = entry && parent && opacity > 0 && typeof shown.animate === 'function' ? shown.cloneNode(true) : null;
       node.style.translate = '';
+      // A follower mounting in the same commit has taken the entry by the time this microtask runs.
+      if (ghost) queueMicrotask(() => {
+        if (menuPlaces.get(key) !== entry) return;
+        const content = wrapper ? ghost.firstElementChild : ghost;
+        ghost.classList.add('sf-menu-ghost'); ghost.setAttribute('aria-hidden', 'true'); ghost.inert = true; ghost.style.pointerEvents = 'none';
+        for (const element of [ghost, ...ghost.querySelectorAll('[id], [role=dialog]')]) { element.removeAttribute('id'); if (element.getAttribute('role') === 'dialog') element.removeAttribute('role'); }
+        if (content) content.style.animation = 'none';
+        parent.append(ghost);
+        ghost.animate([{ opacity }, { opacity: 0 }], { duration: MENU_FADE_MS * opacity, easing: 'ease-in', fill: 'forwards' }).finished.then(() => ghost.remove(), () => ghost.remove());
+      });
     };
   }, [key]);
   return ref;
@@ -2122,7 +2139,7 @@ function SessionActions({ row, scope, controller, filterProject, deleteSession, 
   const submenu = (open, setOpen, label, name, props, content) => h(sdk.Popover, { open, onOpenChange: setOpen },
     h(MenuIcon, { label, name, ...props, 'aria-expanded': open, onKeyDown: event => { if (event.key === 'ArrowRight') { event.preventDefault(); setOpen(true); } },
       trigger: button => h(sdk.PopoverTrigger, { asChild: true }, button) }),
-    h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': label === 'Project' ? 'Project actions' : label,
+    h(sdk.PopoverContent, { side: 'right', align: 'start', className: 'sf-popover', style: PROJECT_MENU_STYLE, 'aria-label': label === 'Project' ? 'Project actions' : label,
       onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, content()));
   return h('div', { ref: glide, className: 'sf-menu sf-session-menu' },
     h('div', { className: 'sf-menu-line' },
@@ -2292,8 +2309,9 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   }, []);
   useEffect(() => { if (hidden && menu?.open) setOpen(menu.kind)(false); }, [hidden]);
   // The held popover wraps the trigger, which then toggles it; a bare trigger opens it.
-  const withMenu = (kind, trigger, content) => menu?.kind !== kind ? trigger : h(sdk.Popover, { open: menu.open, onOpenChange: setOpen(kind) },
-    h(sdk.PopoverTrigger, { asChild: true }, trigger), h(sdk.PopoverContent, { align: 'start', side: 'right', style: PROJECT_MENU_STYLE, 'aria-label': kind === 'snooze' ? 'Snooze session' : 'Session actions' }, content()));
+  // A card mounting hidden (moved into a folded shelf) never shows its menu, so nothing fades out where it cannot be seen.
+  const withMenu = (kind, trigger, content) => menu?.kind !== kind ? trigger : h(sdk.Popover, { open: menu.open && !hidden, onOpenChange: setOpen(kind) },
+    h(sdk.PopoverTrigger, { asChild: true }, trigger), h(sdk.PopoverContent, { align: 'start', side: 'right', className: 'sf-popover', style: PROJECT_MENU_STYLE, 'aria-label': kind === 'snooze' ? 'Snooze session' : 'Session actions' }, content()));
   const bare = kind => menu?.kind === kind ? {} : { onClick: () => openMenu(kind) };
   const ref = useCallback(element => rowRef(row.key, element), [rowRef, row.key]);
   const draft = useSessionDraft({ row, active, hidden: hidden || row.newSession, controller, scope });
@@ -2524,6 +2542,8 @@ const SharedTips = memo(function SharedTips({ api, root }) {
     const show = target => {
       const element = root.current, label = target.getAttribute('data-sf-tip');
       if (!element || !label || !target.isConnected) return;
+      // A trigger whose menu is open shows no tip: it would cover that menu and take its first Escape. Checked when the delay ends, since a click opens the menu after the pointer arms the tip.
+      if (target.matches('[aria-expanded=true]') || target.querySelector('[aria-expanded=true]')) return;
       // A card's own tip points from the whole card, so it starts past the card's edge rather than inside its padding.
       const anchor = target.closest('[data-sf-tip-anchor]') || (target.matches('.sf-open') ? target.closest('.sf-row') : target), box = anchor.getBoundingClientRect(), base = element.getBoundingClientRect();
       const side = target.getAttribute('data-sf-tip-side') || 'right', card = target.getAttribute('data-sf-tip-card');
@@ -2660,8 +2680,8 @@ function ProjectChoice({ choice, selected, scope, controller, filterProject, bus
       onKeyDown: event => { if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') openMenu(event); } },
       !pathOnly ? h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)) : null,
       h('span', { className: 'sf-project-details' }, !pathOnly ? h('span', { className: 'sf-project-name' }, choice.name) : null, !heading ? h('span', { className: 'sf-project-path' }, displayPath) : null))))),
-    h(sdk.PopoverContent, { side: 'right', align: 'start', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
-      onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, open ? h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject }) : null));
+    h(sdk.PopoverContent, { side: 'right', align: 'start', className: 'sf-popover', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
+      onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject })));
 }
 function ScopedSidebar({ ctx, controller, scope, onAttention }) {
   const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
@@ -2952,11 +2972,12 @@ function ScopedSidebar({ ctx, controller, scope, onAttention }) {
       h(sdk.Popover, { open: filterOpen, onOpenChange: setFilterOpen },
         h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'Filter sessions', name: 'ListFilter', glyph: '≡', 'data-filtered': project !== '*', tipSide: 'bottom', title: project === '*' ? 'Filter sessions' : `Filter sessions: ${selectedProject.name}` },
           project !== '*' ? h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: selectedProject.color || undefined } }, projectMark(selectedProject)) : null)),
-        h(sdk.PopoverContent, { align: 'end', style: PROJECT_MENU_STYLE, 'aria-label': 'Session filters' }, filterOpen ? h(ProjectPicker, { mode: 'filter', selected: project, controller, scope, filterProject: selectProject, close: () => setFilterOpen(false) }) : null)),
+        // Radix mounts popover content only while open or fading out, so the pickers keep their content during the fade.
+        h(sdk.PopoverContent, { align: 'end', className: 'sf-popover', style: PROJECT_MENU_STYLE, 'aria-label': 'Session filters' }, h(ProjectPicker, { mode: 'filter', selected: project, controller, scope, filterProject: selectProject, close: () => setFilterOpen(false) }))),
 
       h(sdk.Popover, { open: pickerOpen, onOpenChange: setPickerOpen },
         h(sdk.PopoverTrigger, { asChild: true }, h(IconButton, { label: 'New session', name: 'SquarePen', glyph: '+', tipSide: 'bottom' })),
-        h(sdk.PopoverContent, { align: 'end', style: PROJECT_MENU_STYLE, 'aria-label': 'New session project' }, pickerOpen ? h(ProjectPicker, { controller, scope, filterProject: selectProject, close: () => setPickerOpen(false) }) : null))),
+        h(sdk.PopoverContent, { align: 'end', className: 'sf-popover', style: PROJECT_MENU_STYLE, 'aria-label': 'New session project' }, h(ProjectPicker, { controller, scope, filterProject: selectProject, close: () => setPickerOpen(false) })))),
     problems.length ? h(StatusStrip, { problems, onRetry: refresh }) : null,
     // While the whole list's runtime status is unknown, the strip says so once and the cards drop their visible "?" (their labels still say it).
     h('div', { className: 'sf-scroll', 'data-pinned-lines': pinnedLines, 'data-runtime-unknown': runtimeUnknown },

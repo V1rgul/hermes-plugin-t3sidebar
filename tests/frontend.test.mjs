@@ -531,7 +531,9 @@ test('a moving card menu glides to its new place instead of jumping, including w
   assert.equal(second !== first, true, 'the menu remounted with its card');
   assert.equal(row('design').closest('section'), shelf('Snoozed'));
   assert.equal(second.style.translate, '0px -180px');
-  assert.equal(second.style.animation, 'none');
+  assert.equal(second.hasAttribute('data-sf-following'), true, 'it skips the enter animation');
+  assert.equal(first.hasAttribute('data-sf-following'), false, 'an ordinary opening plays it');
+  assert.equal(second.style.animation, '', 'and keeps the fade out for when it closes');
   await run(40);
   assert.equal(second.style.translate, '');
   // Reduced motion: the menu goes straight to its new place.
@@ -544,7 +546,14 @@ test('a moving card menu glides to its new place instead of jumping, including w
   await dismiss();
 });
 
-test('a menu whose card moves into a folded shelf closes, since its anchor is hidden', async () => {
+test('a menu whose card moves into a folded shelf closes, fading out in place since its anchor is hidden', async t => {
+  // The fade runs in the browser: frames, the DOM's MutationObserver and Web Animations stand in here.
+  const frames = new Map(); let handle = 0;
+  const saved = { raf: globalThis.requestAnimationFrame, caf: globalThis.cancelAnimationFrame, observer: globalThis.MutationObserver, animate: window.HTMLElement.prototype.animate };
+  const fades = [];
+  Object.assign(globalThis, { requestAnimationFrame: callback => { frames.set(++handle, callback); return handle; }, cancelAnimationFrame: id => frames.delete(id), MutationObserver: window.MutationObserver });
+  window.HTMLElement.prototype.animate = function (keyframes, options) { let end; const finished = new Promise(resolve => { end = resolve; }); fades.push({ node: this, keyframes, options, end }); return { finished }; };
+  t.after(() => { Object.assign(globalThis, { requestAnimationFrame: saved.raf, cancelAnimationFrame: saved.caf, MutationObserver: saved.observer }); window.HTMLElement.prototype.animate = saved.animate; });
   await mount();
   await click(button('Snoozed (1)'));
   assert.equal(shelf('Snoozed').dataset.closed, 'true');
@@ -555,6 +564,29 @@ test('a menu whose card moves into a folded shelf closes, since its anchor is hi
   assert.equal($('[role=dialog]') === null, true);
   // Whether the folded shelf mounts the card or not, it holds no open menu.
   assert.equal(row('design')?.dataset.menuOpen ?? 'false', 'false');
+  // What was shown fades out where it was: an inert copy, out of the accessibility tree.
+  const ghost = $('.sf-menu-ghost');
+  assert.ok(ghost, 'a fading copy of the menu');
+  assert.equal(ghost.getAttribute('aria-hidden'), 'true');
+  assert.equal(ghost.inert, true);
+  assert.equal(ghost.querySelector('[role=dialog], [id]') === null, true);
+  assert.ok(ghost.querySelector('.sf-snooze-menu'));
+  const fade = fades.find(item => item.node === ghost);
+  assert.deepEqual(fade.keyframes, [{ opacity: 1 }, { opacity: 0 }]);
+  assert.equal(fade.options.duration, 150);
+  await act(async () => { fade.end(); }); await tick();
+  assert.equal($('.sf-menu-ghost') === null, true, 'removed once faded');
+  // A card moving into a shown shelf takes its menu along: nothing is left behind.
+  await click(button('Snoozed (2)'));
+  await click(row('readme').querySelector('[aria-label="Snooze session"]'));
+  await click(button('In 1 hour'));
+  assert.equal(row('readme').closest('section'), shelf('Snoozed'));
+  assert.ok($('[role=dialog]'));
+  assert.equal($('.sf-menu-ghost') === null, true);
+  await dismiss();
+  // The test popover closes by unmounting, which leaves a copy too: finish every fade so none outlives the test.
+  await act(async () => { for (const item of fades) item.end(); }); await tick();
+  assert.equal($('.sf-menu-ghost') === null, true);
 });
 
 test('snooze countdown rounds to one whole unit with no left suffix or past durations', () => {
