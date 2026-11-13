@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { snoozePresets, snoozePreciseRemaining } from '../desktop/plugin.js';
 
-test('calendar snooze presets use configurable local times, defaulting to 09:00 across weekdays and DST', () => {
+test('calendar snooze presets: +1 day, the next Monday and +1 week at configurable local times, defaulting to 09:00 across weekdays and DST', () => {
 	const previous = process.env.TZ;
 	try {
 		for (const timezone of ['UTC', 'Europe/Paris', 'America/New_York']) {
@@ -16,8 +16,8 @@ test('calendar snooze presets use configurable local times, defaulting to 09:00 
 				['2026-10-22T17:00:00', '2026-10-26T09:00:00'],
 				['2026-10-23T17:00:00', '2026-10-26T09:00:00'],
 				['2026-10-24T17:00:00', '2026-10-26T09:00:00'],
-				// On a Sunday, Monday is tomorrow: the Monday button moves on a week so it never repeats Tomorrow.
-				['2026-10-25T23:59:59', '2026-11-02T09:00:00'],
+				// On a Sunday, Monday is tomorrow; on a Monday, it is next week's.
+				['2026-10-25T23:59:59', '2026-10-26T09:00:00'],
 				['2026-10-26T08:59:59', '2026-11-02T09:00:00'],
 				['2026-03-27T23:45:59', '2026-03-30T09:00:00'],
 				['2026-03-06T17:00:00', '2026-03-09T09:00:00'],
@@ -29,18 +29,25 @@ test('calendar snooze presets use configurable local times, defaulting to 09:00 
 				assert.equal(presets.labelTime, '9:00');
 				assert.deepEqual(presets.relative.map(preset => [preset.label, preset.name, preset.wake_at]),
 					[['+1h', 'In 1 hour', now / 1000 + 3600], ['+2h', 'In 2 hours', now / 1000 + 7200], ['+4h', 'In 4 hours', now / 1000 + 14400]]);
-				assert.deepEqual(presets.days.map(preset => preset.label), ['Tomorrow', 'Monday', 'Next week']);
-				const wake = new Date(presets.days[1].wake_at * 1000);
+				// Monday merges with the choice it equals, +1 day on a Sunday or +1 week on a Monday, into one button spanning two columns.
+				const weekday = new Date(now).getDay(), monday = weekday === 0 ? 0 : 1;
+				assert.deepEqual(presets.days.map(preset => [preset.label, preset.name, preset.span]), weekday === 0
+					? [['+1 day = Monday', 'Tomorrow, Monday', 2], ['+1 week', 'In 1 week', 1]]
+					: weekday === 1 ? [['+1 day', 'Tomorrow', 1], ['Monday = +1 week', 'Monday, in 1 week', 2]]
+					: [['+1 day', 'Tomorrow', 1], ['Monday', 'Monday', 1], ['+1 week', 'In 1 week', 1]]);
+				assert.equal(presets.days.reduce((columns, preset) => columns + preset.span, 0), 3);
+				const wake = new Date(presets.days[monday].wake_at * 1000);
 				assert.equal(wake.getTime(), new Date(expected).getTime(), `${timezone}: ${input}`);
 				assert.equal(wake.getDay(), 1); assert.equal(wake.getHours(), 9);
 				assert.equal(wake.getMinutes(), 0); assert.equal(wake.getSeconds(), 0);
 				assert.ok(wake.getTime() > now);
-				assert.notEqual(presets.days[1].wake_at, presets.days[0].wake_at);
+				assert.equal(new Set(presets.days.map(preset => preset.wake_at)).size, presets.days.length, 'no two day choices wake at the same moment');
 				for (const time of ['00:00', '07:15', '14:35', '23:59']) {
 					const [hour, minute] = time.split(':').map(Number), custom = snoozePresets(now, time);
 					const at = days => { const date = new Date(now); date.setDate(date.getDate() + days); date.setHours(hour, minute, 0, 0); return date.getTime() / 1000; };
-					const monday = new Date(expected); monday.setHours(hour, minute, 0, 0);
-					assert.deepEqual(custom.days.map(preset => preset.wake_at), [at(1), monday.getTime() / 1000, at(7)]);
+					const mondayAt = new Date(expected); mondayAt.setHours(hour, minute, 0, 0);
+					assert.deepEqual(custom.days.map(preset => preset.wake_at), weekday === 0 || weekday === 1 ? [at(1), at(7)] : [at(1), mondayAt.getTime() / 1000, at(7)]);
+					assert.ok(custom.days.some(preset => preset.wake_at === mondayAt.getTime() / 1000));
 					assert.deepEqual(custom.days.map(preset => preset.date.getTime() / 1000), custom.days.map(preset => preset.wake_at));
 					assert.equal(custom.labelTime, `${hour}:${String(minute).padStart(2, '0')}`);
 					assert.deepEqual(custom.relative, presets.relative);
