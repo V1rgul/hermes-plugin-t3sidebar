@@ -12,7 +12,7 @@
 
 - **Input**, **Done**, **Woke** badges: question or approval waiting, finished turn, expired snooze.
 - Shelves: **Pinned** (one outlined group under a single pin, optionally one line per session), **Working** (elapsed time), **Snoozed**, **Archived** (history kept).
-- Orange pencil: unsent draft, with an orange background in a session you are not viewing. Drafts are synced across every Desktop connected to the same Hermes; a draft whose session no longer exists reopens in a new session in its folder.
+- Yellow pencil: unsent draft, with a yellow background in a session you are not viewing. Drafts are synced across every Desktop connected to the same Hermes; a draft whose session no longer exists reopens in a new session in its folder.
 - Cards: project, provider icon, token count including subagents.
 - Pins, snoozes and completion markers shared between Desktop clients through the backend companion.
 

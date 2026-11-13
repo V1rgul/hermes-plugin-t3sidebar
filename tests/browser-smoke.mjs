@@ -911,15 +911,15 @@ try {
   await page.locator('[data-session-id="readme"] .sf-open').click();
   await page.waitForFunction(() => document.querySelector('[data-session-id="design"]')?.dataset.current === 'false');
   await page.mouse.move(1100, 850);
-  check('unfocused unsent composer text gives the card a dim orange background off hover', await design.evaluate(el => {
-    const probe = document.createElement('span'); probe.style.backgroundColor = 'color-mix(in srgb,var(--ui-orange) 10%,transparent)'; el.append(probe);
+  check('unfocused unsent composer text gives the card a dim yellow background off hover', await design.evaluate(el => {
+    const probe = document.createElement('span'); probe.style.backgroundColor = 'color-mix(in srgb,var(--ui-yellow) 10%,transparent)'; el.append(probe);
     const expected = getComputedStyle(probe).backgroundColor, actual = getComputedStyle(el).backgroundColor; probe.remove();
     return actual === expected;
   }));
   check('draft query cache retains booleans, never composer text', await page.evaluate(() => window.hermesT3SidebarHarness.queryClient.getQueryCache().findAll({ queryKey: ['hermes-t3sidebar-drafts'] }).every(query => query.state.data === undefined || typeof query.state.data === 'boolean')));
   await design.locator('.sf-open').click();
   await page.mouse.move(1100, 850);
-  check('returning to a drafted session immediately removes orange while retaining draft presence', await design.getAttribute('data-has-draft') === 'true' && await design.evaluate(el => getComputedStyle(el).backgroundColor) === focusedBackground);
+  check('returning to a drafted session immediately removes its draft tint while retaining draft presence', await design.getAttribute('data-has-draft') === 'true' && await design.evaluate(el => getComputedStyle(el).backgroundColor) === focusedBackground);
   await page.evaluate(() => { window.hermesT3SidebarHarness.control.drafts.design = ''; });
   await page.waitForFunction(() => document.querySelector('[data-session-id="design"]')?.dataset.hasDraft === 'false');
   check('focused composer polling still tracks draft clearing without highlighting editor', true);

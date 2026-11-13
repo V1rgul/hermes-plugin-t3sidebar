@@ -1787,7 +1787,7 @@ test('React draft tint follows typing and clearing with boolean-only independent
   assert.doesNotMatch(document.body.textContent, /SYNTHETIC private/);
   assert.deepEqual([...mock.storageData], stored);
   const css = $('style').textContent;
-  assert.match(css, /\.sf-row\[data-has-draft=true\]\[data-current=false\]\{background:color-mix\(in srgb,var\(--ui-orange[^)]*\) 10%,transparent\)/);
+  assert.match(css, /\.sf-row\[data-has-draft=true\]\[data-current=false\]\{background:color-mix\(in srgb,var\(--ui-yellow[^)]*\) 10%,transparent\)/);
   assert.match(css, /\.sf-row\[data-has-draft=true\]\[data-current=false\]:hover,\.sf-row\[data-has-draft=true\]\[data-current=false\]:focus-within[^}]*14%,transparent/);
   assert.ok([...css.matchAll(/([^{}]+)\{[^{}]*background:color-mix\(in srgb,var\(--ui-orange[^{}]+\}/g)].every(match => match[1].split(',').every(selector => selector.includes('[data-current=false]'))));
   assert.match(css, /\.sf-row\[data-current=true\][^}]*box-shadow:inset 2px 0 var\(--ui-accent\)/);
