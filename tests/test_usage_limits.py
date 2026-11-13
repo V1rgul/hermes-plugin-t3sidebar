@@ -2,6 +2,7 @@
 
 from contextlib import closing
 import ast
+import asyncio
 import contextvars
 from datetime import UTC, datetime
 import importlib.util
@@ -132,7 +133,7 @@ class StoreTests(unittest.TestCase):
 		self.assertEqual([h["t"] for h in provider["history"]], [[NOW - 1800]])
 		self.assertEqual(provider["accounts"][0]["windows"][0]["used_percent"], 20.0)
 		self.assertTrue(provider["accounts"][0]["stale"])
-		self.assertEqual(payload["sampler"], {"interval_s": 300.0, "started_at": 1.0, "last_run_at": 2.0, "last_error": None})
+		self.assertEqual(payload["sampler"], {"interval_s": 300.0, "started_at": 1.0, "last_run_at": 2.0, "last_error": None, "last_collect_at": None, "next_collect_at": None})
 		self.assertEqual(payload["generated_at"], NOW)
 		fresh = limits.limits_payload(self.store, hours=2, now=NOW - 1800 + 899)["providers"][0]
 		self.assertFalse(fresh["accounts"][0]["stale"])
@@ -179,7 +180,7 @@ class StoreTests(unittest.TestCase):
 	def test_missing_store_reads_empty_without_creating(self):
 		payload = limits.limits_payload(self.store, hours=24, now=NOW)
 		self.assertEqual(payload["providers"], [])
-		self.assertEqual(payload["sampler"], {"interval_s": None, "started_at": None, "last_run_at": None, "last_error": None})
+		self.assertEqual(payload["sampler"], {"interval_s": None, "started_at": None, "last_run_at": None, "last_error": None, "last_collect_at": None, "next_collect_at": None})
 		self.assertFalse(self.path.exists())
 
 
@@ -586,6 +587,181 @@ class SamplerTests(unittest.TestCase):
 		self.assertEqual(sampler.run_once(), {"inserted": 1, "error": None})
 		payload = limits.limits_payload(self.store, hours=1, now=NOW, sampler_status=sampler.status())
 		self.assertEqual(payload["sampler"]["interval_s"], 300.0)
+
+	def held_collector(self, calls):
+		"""A collector that stays in its provider reads until the test releases it."""
+		entered, release = threading.Event(), threading.Event()
+		self.addCleanup(release.set)
+
+		def collector():
+			calls.append(1)
+			entered.set()
+			release.wait(5)
+			return []
+		return collector, entered, release
+
+	def in_thread(self, results, name, call):
+		thread = threading.Thread(target=lambda: results.__setitem__(name, call()))
+		thread.start()
+		self.addCleanup(thread.join, 5)
+		return thread
+
+	def test_collect_now_reads_the_providers_at_most_once_per_cooldown_counting_every_collection(self):
+		calls, clock = [], [100.0]
+		# The wall clock runs far from the monotonic one; reported times are wall times, the cooldown runs on the monotonic clock.
+		sampler = self.sampler(lambda: calls.append(1) or [], cooldown_s=30, monotonic=lambda: clock[0], clock=lambda: NOW + clock[0])
+		self.assertEqual(sampler.collect_window(), {"generated_at": NOW + 100, "last_collect_at": None, "next_collect_at": None})
+		self.assertEqual(sampler.collect_now(), {"status": "collected", "error": None, "generated_at": NOW + 100, "last_collect_at": NOW + 100, "next_collect_at": NOW + 130})
+		clock[0] += 10
+		self.assertEqual(sampler.collect_now(), {"status": "cooldown", "error": None, "generated_at": NOW + 110, "last_collect_at": NOW + 100, "next_collect_at": NOW + 130})
+		# A scheduled tick right after a Refresh is skipped too: everything was just read.
+		self.assertIsNone(sampler.tick())
+		self.assertEqual(len(calls), 1)
+		clock[0] += 20
+		self.assertEqual(sampler.collect_now()["status"], "collected")
+		# The reading after a reset is never refused, and starts the wait like any collection; the status every limits read carries says so.
+		clock[0] += 5
+		sampler.run_once()
+		clock[0] += 5
+		status = sampler.status()
+		self.assertEqual((status["last_collect_at"], status["next_collect_at"]), (NOW + 135, NOW + 165))
+		self.assertEqual(sampler.collect_now()["status"], "cooldown")
+		clock[0] += 30
+		self.assertEqual(sampler.tick(), {"inserted": 0, "error": None})
+		self.assertEqual(len(calls), 4)
+		# The stored status is unchanged: collect times live only in the running process.
+		self.assertNotIn("next_collect_at", self.store.read_status())
+
+	def test_a_whole_collection_failure_is_reported_by_the_request_that_ran_it(self):
+		def broken():
+			raise ValueError("token=abc")
+		answer = self.sampler(broken).collect_now()
+		self.assertEqual((answer["status"], answer["error"]), ("collected", "collector_failed:ValueError"))
+
+	def test_requests_during_a_collection_join_it_even_past_the_cooldown_and_start_none(self):
+		calls, clock, results = [], [100.0], {}
+		collector, entered, release = self.held_collector(calls)
+		sampler = self.sampler(collector, cooldown_s=30, monotonic=lambda: clock[0])
+		first = self.in_thread(results, "first", sampler.collect_now)
+		self.assertTrue(entered.wait(5))
+		# The collection outlasts the cooldown: a later request still joins it rather than queueing a second one.
+		clock[0] += 45
+		second = self.in_thread(results, "second", sampler.collect_now)
+		second.join(0.2)
+		self.assertTrue(second.is_alive(), "the joining request waits for the collection under way")
+		self.assertIsNone(sampler.tick(), "a scheduled tick never overlaps a collection")
+		release.set()
+		first.join(5)
+		second.join(5)
+		self.assertEqual((results["first"]["status"], results["second"]["status"], len(calls)), ("collected", "joined", 1))
+
+	def test_a_request_admitted_just_before_its_collection_starts_reading_is_still_joined(self):
+		# The first caller has been admitted but has not reached its collector yet: a second caller must still wait for it.
+		calls, results = [], {}
+		collector, entered, release = self.held_collector(calls)
+		sampler = self.sampler(collector, cooldown_s=30)
+		decision, flight = sampler.admit("manual")
+		self.assertEqual(decision, "run")
+		second = self.in_thread(results, "second", sampler.collect_now)
+		second.join(0.2)
+		self.assertTrue(second.is_alive())
+		first = self.in_thread(results, "first", lambda: sampler._run_admitted(flight))
+		self.assertTrue(entered.wait(5))
+		release.set()
+		first.join(5)
+		second.join(5)
+		self.assertEqual((results["second"]["status"], len(calls)), ("joined", 1))
+
+	def test_the_reading_after_a_reset_waits_for_the_collection_under_way_then_runs_its_own(self):
+		calls, results = [], {}
+		collector, entered, release = self.held_collector(calls)
+		sampler = self.sampler(collector, cooldown_s=30)
+		first = self.in_thread(results, "first", sampler.collect_now)
+		self.assertTrue(entered.wait(5))
+		forced = self.in_thread(results, "forced", sampler.run_once)
+		forced.join(0.2)
+		self.assertEqual(len(calls), 1, "never two collections at once")
+		release.set()
+		first.join(5)
+		forced.join(5)
+		self.assertEqual(len(calls), 2, "a reading that postdates the reset")
+
+	def test_a_replacement_sampler_of_the_same_home_keeps_the_cooldown_and_the_collection_under_way(self):
+		calls, results = [], {}
+		collector, entered, release = self.held_collector(calls)
+		old = self.sampler(collector, cooldown_s=30)
+		first = self.in_thread(results, "first", old.collect_now)
+		self.assertTrue(entered.wait(5))
+		# Re-registration creates a new sampler while the old one still reads.
+		new = self.sampler(collector, cooldown_s=30)
+		self.assertEqual(new.admit("manual")[0], "joined")
+		release.set()
+		first.join(5)
+		self.assertEqual(new.collect_now()["status"], "cooldown")
+		self.assertEqual(len(calls), 1)
+
+	def test_the_async_request_waits_on_the_event_loop_and_collects_in_a_thread_of_its_own(self):
+		calls, results = [], {}
+		collector, entered, release = self.held_collector(calls)
+		sampler = self.sampler(collector, cooldown_s=30)
+		first = self.in_thread(results, "first", sampler.collect_now)
+		self.assertTrue(entered.wait(5))
+		threading.Timer(0.3, release.set).start()
+		workers = []
+		original = asyncio.to_thread
+
+		async def counted(*args):
+			workers.append(args)
+			return await original(*args)
+		with patch.object(asyncio, "to_thread", new=counted):
+			answer = asyncio.run(sampler.collect_now_async())
+			first.join(5)
+			self.assertEqual((answer["status"], len(calls)), ("joined", 1))
+			# The request that starts a collection waits for it like the others: the shared executor is never used.
+			names = []
+			unthrottled = self.sampler(lambda: names.append(threading.current_thread().name) or [], cooldown_s=0)
+			self.assertEqual(asyncio.run(unthrottled.collect_now_async())["status"], "collected")
+		self.assertEqual((workers, names), ([], ["t3sidebar-limits-collect"]))
+
+	def test_a_cancelled_request_neither_stops_its_collection_nor_strands_the_admission(self):
+		calls = []
+		collector, entered, release = self.held_collector(calls)
+		sampler = self.sampler(collector, cooldown_s=30)
+
+		async def leave_early():
+			task = asyncio.create_task(sampler.collect_now_async())
+			await asyncio.sleep(0.05)
+			task.cancel()
+			with self.assertRaises(asyncio.CancelledError):
+				await task
+		asyncio.run(leave_early())
+		self.assertTrue(entered.wait(5), "the collection still runs")
+		release.set()
+		# Its end releases the admission: the reading after a reset is admitted rather than waiting forever.
+		forced = threading.Thread(target=sampler.run_once)
+		forced.start()
+		forced.join(5)
+		self.assertFalse(forced.is_alive())
+		self.assertEqual(len(calls), 2)
+
+	def test_the_cooldown_counts_from_when_the_collection_really_begins(self):
+		clock = [100.0]
+		sampler = self.sampler(lambda: [], cooldown_s=30, monotonic=lambda: clock[0], clock=lambda: NOW + clock[0])
+		decision, flight = sampler.admit("manual")
+		self.assertEqual(decision, "run")
+		# Admitted, but its thread only starts reading 40 s later.
+		clock[0] += 40
+		sampler._run_admitted(flight)
+		clock[0] += 10
+		self.assertEqual(sampler.collect_now()["status"], "cooldown")
+		self.assertEqual(sampler.collect_window()["last_collect_at"], NOW + 140)
+
+	def test_the_payload_states_the_next_collection_against_its_own_generated_at(self):
+		status = {"interval_s": 300.0, "started_at": 1.0, "last_run_at": 2.0, "last_error": None, "generated_at": 500.0, "last_collect_at": 490.0, "next_collect_at": 512.5}
+		payload = limits.limits_payload(self.store, hours=1, now=NOW, sampler_status=status)
+		self.assertEqual(payload["sampler"], {"interval_s": 300.0, "started_at": 1.0, "last_run_at": 2.0, "last_error": None, "last_collect_at": 490.0, "next_collect_at": NOW + 12.5})
+		past = limits.limits_payload(self.store, hours=1, now=NOW, sampler_status={**status, "next_collect_at": 500.0})
+		self.assertEqual(past["sampler"]["next_collect_at"], NOW)
 
 
 class CreditTests(unittest.TestCase):
