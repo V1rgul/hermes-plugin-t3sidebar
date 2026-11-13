@@ -559,8 +559,12 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     try { return currentRoute(scope, await fenced(scope, () => pending.work)); }
     finally { if (pendingRoutes === pending) pendingRoutes = null; }
   }
+  // The scope is always the active source and profile, which host.request and a route-less openSession reach directly, as the native Sessions list does. A click must not wait for routeFor: host.profileRoutes() enumerates every registry source and waits for the slowest (Desktop allows each 10 s), which delayed every open and project list by seconds while one source was unreachable. The epoch fence still refuses the work after a source or profile switch.
+  const activeRequest = (scope, method, params) => fenced(scope, () => env.host.request(method, params));
+  // Without a route, the tree comes from the active backend; an operation that already holds a route reuses it.
   async function projectsFor(scope, route) {
-    const value = await fenced(scope, () => env.host.requestProfile(route, 'projects.tree', { preview_limit: 0 }));
+    const params = { preview_limit: 0 };
+    const value = await (route === undefined ? activeRequest(scope, 'projects.tree', params) : fenced(scope, () => env.host.requestProfile(route, 'projects.tree', params)));
     if (!Array.isArray(value?.projects)) throw new Error('Invalid native project tree.');
     const home = { id: '__no_project__', name: 'Home', path: null, isNoProject: true };
     const projects = value.projects.filter(p => p.id !== home.id && !p.isNoProject).flatMap(p => {
@@ -1159,9 +1163,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     },
     async open(scope, row) {
       if (row._draftOnly) return this.openDraft(scope, row);
-      const route = await routeFor(scope); check(scope);
       try {
-        await fenced(scope, () => env.host.openSession(row.resolved_id || row.id, { route, profile: route?.profile || scope.profile, intent: 'in-place' }));
+        await fenced(scope, () => env.host.openSession(row.resolved_id || row.id, { profile: scope.profile, intent: 'in-place' }));
       } catch (error) {
         // Another client's unsaved session has no stored history to resume here; its draft still reopens in its folder.
         if (row._liveOnly && row.drafted) return this.openDraft(scope, row);
@@ -1172,7 +1175,7 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       check(scope); refresh(scope, { queryKey: [...scopeKey(scope), 'sessions'] });
     },
     async projects(scope) {
-      return projectsFor(scope, await routeFor(scope));
+      return projectsFor(scope);
     },
 
     async projectHome(scope) {
@@ -1183,11 +1186,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     },
 
     async newChat(scope, project, idempotencyKey) {
-      const route = await routeFor(scope); check(scope);
-      if (project === undefined) return fenced(scope, () => env.host.newChat(route)); // Preserve archive-and-advance fallback.
+      if (project === undefined) { const route = await routeFor(scope); return fenced(scope, () => env.host.newChat(route)); } // Preserve archive-and-advance fallback.
       if (project.isNoProject || project.id === '__no_project__') throw new Error('Home creation is unavailable: the public Desktop SDK cannot select a detached workspace. No session was created. Use native Home new chat.');
       if (typeof project.path !== 'string' || !project.path || !idempotencyKey) throw new Error('Choose a project folder before creating a session.');
-      const create = params => fenced(scope, () => env.host.requestProfile(route, 'session.create', params));
+      const create = params => activeRequest(scope, 'session.create', params);
       let created;
       try {
         created = await create({ source: 'desktop', cwd: project.path, cwd_explicit: true, close_on_disconnect: false, idempotency_key: idempotencyKey });
@@ -1198,14 +1200,14 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       }
       if (!created?.stored_session_id || !created?.session_id) throw new Error('Session creation did not return stored and runtime identities.');
       await fenced(scope, () => env.host.openSession(created.stored_session_id, {
-        route, profile: route?.profile || scope.profile, intent: 'in-place', awaitHydration: true, expectHistory: false
+        profile: scope.profile, intent: 'in-place', awaitHydration: true, expectHistory: false
       }));
       const owner = env.host.state.focusedSessionOwner.get();
       if (env.host.state.focusedStoredSessionId.get() !== created.stored_session_id ||
         owner?.connectionId !== (scope.connectionId ?? 'local') || owner?.profile !== scope.profile) {
         throw new Error('Workspace handoff cancelled: selection changed after session creation. No final workspace update was sent.');
       }
-      const info = await fenced(scope, () => env.host.requestProfile(route, 'session.cwd.set', { session_id: created.session_id, cwd: project.path }));
+      const info = await activeRequest(scope, 'session.cwd.set', { session_id: created.session_id, cwd: project.path });
       if (info?.cwd !== project.path) throw new Error('The session workspace was not confirmed. Do not send a message until the native workspace is checked.');
       return created;
     }

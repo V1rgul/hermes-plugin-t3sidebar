@@ -62,10 +62,18 @@ export const host = {
   state: { connectionId: atom('source-a'), profile: atom('default'), gateway: atom('open'), activeSessionId: atom('runtime-design'), focusedSessionId: atom('runtime-design'), focusedStoredSessionId: atom('design'), focusedSessionOwner: atom({ connectionId: 'source-a', profile: 'default' }) },
   profileRoutes: async () => [{ connectionId: host.state.connectionId.get(), profile: host.state.profile.get(), targetProfile: host.state.profile.get(), mode: 'remote' }],
   async listPersistedSessions(route, options) { calls.push(['list', route, options]); if (control.listError) throw new Error('fixture list unavailable'); return { sessions: clone(control.rows), total: control.total || control.rows.length, limit: 500, offset: 0 }; },
-  async request(method, params) { calls.push([method, params]); if (method === 'session.active_list') { if (control.runtimeError) throw new Error('fixture runtime disconnected'); return { sessions: clone(control.live) }; } if (method === 'session.list') return { sessions: clone(control.extra || []).slice(0, params.limit) }; throw new Error(`Unexpected RPC ${method}`); },
+  // The active backend's door. Listings keep their original record; other methods share the routed handlers below and are recorded with the routed shape, a null route standing for the active backend.
+  async request(method, params) {
+    if (method === 'session.active_list') { calls.push([method, params]); if (control.runtimeError) throw new Error('fixture runtime disconnected'); return { sessions: clone(control.live) }; }
+    if (method === 'session.list') { calls.push([method, params]); return { sessions: clone(control.extra || []).slice(0, params.limit) }; }
+    calls.push(['request', null, method, clone(params)]);
+    return host._rpc(method, params);
+  },
   async requestProfile(route, method, params) {
     calls.push(['requestProfile', route, method, clone(params)]);
-
+    return host._rpc(method, params);
+  },
+  async _rpc(method, params) {
     if (method === 'session.workspace.move') {
       if (control.moveError) throw new Error('fixture move unavailable');
       const rows = [...control.rows, ...(control.extra || [])].filter(row => row.id === params.session_key || row._lineage_root_id === params.session_key || row._lineage_ids?.includes(params.session_key));
@@ -155,7 +163,7 @@ export const host = {
     calls.push(['open', id, options]);
     if (control.openError) throw new Error('fixture open unavailable');
     for (const row of control.rows) if (row.id === id || row._lineage_root_id === id || row._lineage_ids?.includes(id)) row.unread = false;
-    host.state.focusedStoredSessionId.set(id); host.state.focusedSessionOwner.set(options.route); control.afterOpen?.();
+    host.state.focusedStoredSessionId.set(id); host.state.focusedSessionOwner.set(options.route ?? { connectionId: host.state.connectionId.get(), profile: options.profile || host.state.profile.get() }); control.afterOpen?.();
   }, newChat(route) { calls.push(['new', route]); host.state.focusedStoredSessionId.set(null); }, navigate(path) { calls.push(['navigate', path]); }, notify(value) { calls.push(['notify', value]); }
 };
 export function switchScope(source = 'source-b', profile = 'default') { epoch++; host.state.connectionId.set(source); host.state.profile.set(profile); host.state.gateway.set('open'); }

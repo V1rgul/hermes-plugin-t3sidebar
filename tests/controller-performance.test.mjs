@@ -185,18 +185,29 @@ function routedFixture(t, routes) {
   return { client, controller, scope: captureScope() };
 }
 
-test('concurrent scoped reads and open share only in-flight route discovery, not a settled route cache', async t => {
+test('concurrent scoped reads share only in-flight route discovery, not a settled route cache', async t => {
   const discovery = gate(); let calls = 0;
   t.after(discovery.release);
   const f = routedFixture(t, async () => { calls++; await discovery.wait(); return mock.host.profileRoutes(); });
-  const work = Promise.all([f.controller.list(f.scope), f.controller.runtime(f.scope), f.controller.archives(f.scope), f.controller.open(f.scope, { id: 'design' })]);
+  const work = Promise.all([f.controller.list(f.scope), f.controller.runtime(f.scope), f.controller.archives(f.scope)]);
   await discovery.started;
   assert.equal(calls, 1);
   discovery.release(); await work;
-  await f.controller.open(f.scope, { id: 'design' });
+  await f.controller.newChat(f.scope);
   assert.equal(calls, 2, 'a subsequent action must revalidate routes');
   await f.controller.mutate(f.scope, 'design', { action: 'archive' });
   assert.equal(calls, 3, 'native writes must not reuse settled route authority');
+});
+
+test('opening a session and reading projects never wait for route discovery', async t => {
+  // Desktop's route inventory waits for the slowest registry source; a click on the active backend must not.
+  let calls = 0;
+  const f = routedFixture(t, () => { calls++; return new Promise(() => {}); });
+  await f.controller.open(f.scope, { id: 'design' });
+  assert.ok((await f.controller.projects(f.scope)).projects.length > 1);
+  assert.equal(calls, 0);
+  assert.deepEqual(mock.calls.find(call => call[0] === 'open'), ['open', 'design', { profile: 'default', intent: 'in-place' }]);
+  assert.deepEqual(mock.calls.find(call => call[2] === 'projects.tree').slice(0, 2), ['request', null]);
 });
 
 test('failed route discovery is shared and removed so a subsequent action can retry', async t => {
@@ -206,7 +217,7 @@ test('failed route discovery is shared and removed so a subsequent action can re
   const work = Promise.allSettled([f.controller.list(f.scope), f.controller.runtime(f.scope), f.controller.archives(f.scope)]);
   await discovery.started; assert.equal(calls, 1); discovery.release();
   for (const result of await work) { assert.equal(result.status, 'rejected'); assert.match(result.reason.message, /route discovery failed/); }
-  await f.controller.open(f.scope, { id: 'design' });
+  await f.controller.newChat(f.scope);
   assert.equal(calls, 2);
 });
 
@@ -217,24 +228,24 @@ test('in-flight route sharing is epoch-qualified and old completion cannot clear
     const call = ++calls, routes = await mock.host.profileRoutes();
     await (call === 1 ? oldGate : newGate).wait(); return routes;
   });
-  const old = track(f.controller.open(f.scope, { id: 'design' }));
+  const old = track(f.controller.newChat(f.scope));
   await oldGate.started;
   mock.switchScope(); mock.switchScope('source-a');
-  const nextScope = captureScope(), next = f.controller.open(nextScope, { id: 'design' });
+  const nextScope = captureScope(), next = f.controller.newChat(nextScope);
   await newGate.started; assert.equal(calls, 2);
   oldGate.release(); await old.done;
   assert.match(old.error?.message || '', /Source\/profile changed/);
-  const shared = f.controller.projects(nextScope);
+  const shared = f.controller.runtime(nextScope);
   assert.equal(calls, 2, 'old cleanup must not clear the current in-flight discovery');
   newGate.release(); await Promise.all([next, shared]);
-  assert.equal(mock.calls.filter(call => call[0] === 'open').length, 1);
+  assert.equal(mock.calls.filter(call => call[0] === 'new').length, 1);
 });
 
 test('disposal rejects shared route waiters before any native action', async t => {
   const discovery = gate(); let calls = 0;
   t.after(discovery.release);
   const f = routedFixture(t, async () => { calls++; await discovery.wait(); return mock.host.profileRoutes(); });
-  const work = Promise.allSettled([f.controller.open(f.scope, { id: 'design' }), f.controller.newChat(f.scope)]);
+  const work = Promise.allSettled([f.controller.mutate(f.scope, 'design', { action: 'archive' }), f.controller.newChat(f.scope)]);
   await discovery.started; f.controller.dispose(); discovery.release();
   for (const result of await work) { assert.equal(result.status, 'rejected'); assert.match(result.reason.message, /Source\/profile changed/); }
   assert.equal(calls, 1);

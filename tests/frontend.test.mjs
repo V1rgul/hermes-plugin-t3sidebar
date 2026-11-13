@@ -858,15 +858,15 @@ test('React route switch resets scoped metadata without Undo or cross-source cac
   const keys = mock.queryClient.getQueryCache().getAll().map(q => q.queryKey); assert.ok(keys.some(key => key[1] === 'source-b'));
 });
 
-test('async route discovery fences list/open/new across switches and ABA', async () => {
-  for (const method of ['list', 'open', 'newChat']) {
+test('async route discovery fences list/new across switches and ABA', async () => {
+  for (const method of ['list', 'newChat']) {
     for (const aba of [false, true]) {
       const original = { connectionId: 'a', profile: 'default', epoch: 1 }; let current = original, finish; const effects = [];
       const c = flow.createController({ rest: async () => { effects.push('rest'); } }, mock.queryClient, {
         capture: () => current, routes: () => new Promise(resolve => { finish = resolve; }),
         host: { listPersistedSessions: () => effects.push('list'), openSession: () => effects.push('open'), newChat: () => effects.push('new') }
       });
-      const pending = c[method](original, { id: 'same-id' });
+      const pending = method === 'list' ? c.list(original) : c.newChat(original);
       current = aba ? { ...original, epoch: 3 } : { ...original, connectionId: 'b', epoch: 2 };
       finish([{ connectionId: 'a', profile: 'default' }]);
       await assert.rejects(pending, /Source\/profile changed/); assert.deepEqual(effects, []); c.dispose();
@@ -874,14 +874,26 @@ test('async route discovery fences list/open/new across switches and ABA', async
   }
 });
 
-test('open/new preserve exact source route despite same profile and stored id collisions', async () => {
+test('open and project creation refuse a captured scope that a switch or ABA has replaced, before any native action', async () => {
+  for (const aba of [false, true]) {
+    const original = { connectionId: 'a', profile: 'default', epoch: 1 }; const effects = [];
+    const current = aba ? { ...original, epoch: 3 } : { ...original, connectionId: 'b', epoch: 2 };
+    const c = flow.createController({}, mock.queryClient, { capture: () => current, routes: () => { effects.push('routes'); return new Promise(() => {}); },
+      host: { openSession: () => effects.push('open'), request: async method => effects.push(method) } });
+    await assert.rejects(c.open(original, { id: 'same-id' }), /Source\/profile changed/);
+    await assert.rejects(c.newChat(original, { id: 'p', path: '/p' }, 'key'), /Source\/profile changed/);
+    assert.deepEqual(effects, []); c.dispose();
+  }
+});
+
+test('open targets the active backend without a route; new preserves exact source route despite same profile collisions', async () => {
   const scope = { connectionId: 'a', profile: 'alias', epoch: 1 };
   const route = { connectionId: 'a', profile: 'alias', targetProfile: 'actual', mode: 'remote' }, calls = [];
   const c = flow.createController({}, mock.queryClient, { capture: () => scope,
     routes: async () => [{ ...route, connectionId: 'b' }, route],
     host: { openSession: async (...args) => calls.push(args), newChat: (...args) => calls.push(args) } });
   await c.open(scope, { id: 'root', resolved_id: 'tip' }); await c.newChat(scope);
-  assert.deepEqual(calls, [['tip', { route, profile: 'alias', intent: 'in-place' }], [route]]); c.dispose();
+  assert.deepEqual(calls, [['tip', { profile: 'alias', intent: 'in-place' }], [route]]); c.dispose();
 });
 
 test('foreign runtime profile cannot inject rows or contaminate matching stored id', async () => {
@@ -1023,7 +1035,7 @@ test('public native tree always includes synthetic Home and expands multiple fol
   assert.deepEqual(result.projects[0], { id: '__no_project__', name: 'Home', path: null, isNoProject: true });
   assert.deepEqual(result.projects.slice(1).map(p => p.path), ['/fixture/one', '/fixture/two']);
   assert.ok(result.projects.slice(1).every(p => p.icon === 'tools' && p.color === '#123456'));
-  assert.equal(mock.calls.find(c => c[0] === 'requestProfile')[2], 'projects.tree');
+  assert.deepEqual(mock.calls.find(c => c[2] === 'projects.tree').slice(0, 2), ['request', null], 'the tree comes from the active backend without a route');
 });
 
 test('new-session picker renders native project icons without Home or its warning', async () => {
@@ -1035,7 +1047,7 @@ test('new-session picker renders native project icons without Home or its warnin
   assert.equal(infra.querySelector('.sf-project-path').textContent, '/fixture/infra');
   assert.equal(button('New session in Home'), undefined);
   assert.doesNotMatch($('[role=dialog]').textContent, /Home|detached|unavailable/);
-  assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.create'), false);
+  assert.equal(mock.calls.some(c => c[2] === 'session.create'), false);
 });
 
 test('unsupported Add project is absent while the existing-project picker remains available', async () => {
@@ -1043,7 +1055,7 @@ test('unsupported Add project is absent while the existing-project picker remain
   assert.equal(Boolean(button('Add project')), false);
   await click(button('New session')); assert.ok(button('New session in Synthetic Sidebar'));
   assert.equal(button('New session in Home'), undefined);
-  assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.create'), false);
+  assert.equal(mock.calls.some(c => c[2] === 'session.create'), false);
   assert.equal(button('Cancel'), undefined);
   await dismiss();
 });
@@ -1056,13 +1068,13 @@ test('Home-only native project trees show no usable projects and retain the crea
   assert.equal(button('New session in Home'), undefined);
   const { projects } = await controller.projects(flow.captureScope());
   await assert.rejects(controller.newChat(flow.captureScope(), projects[0], 'guard-test'), /Home creation is unavailable/);
-  assert.equal(mock.calls.some(call => call[0] === 'requestProfile' && call[2] === 'session.create'), false);
+  assert.equal(mock.calls.some(call => call[2] === 'session.create'), false);
 });
 
-test('named project uses real route create/open/cwd contract and stable key, not native newChat or a prompt', async () => {
+test('named project uses the active backend create/open/cwd contract and stable key, not native newChat or a prompt', async () => {
   await mount(); await click(button('New session')); await click(button('New session in Synthetic Sidebar'));
-  const create = mock.calls.find(c => c[0] === 'requestProfile' && c[2] === 'session.create');
-  assert.equal(create[1].connectionId, 'source-a');
+  const create = mock.calls.find(c => c[2] === 'session.create');
+  assert.deepEqual(create.slice(0, 2), ['request', null]);
   assert.deepEqual({ ...create[3], idempotency_key: 'stable' }, { source: 'desktop', cwd: '/projects/hermes-t3sidebar', cwd_explicit: true, close_on_disconnect: false, idempotency_key: 'stable' });
   const open = mock.calls.find(c => c[0] === 'open'); assert.equal(open[1], 'fixture-created');
   assert.equal(open[2].awaitHydration, true); assert.equal(open[2].expectHistory, false);
@@ -1079,7 +1091,7 @@ test('project creation never sends final cwd setter after selection or source dr
       if (drift === 'scope') mock.switchScope();
     };
     await assert.rejects(controller.newChat(scope, { id: 'fixture', path: '/fixture/project' }, 'stable-key'), /cancelled|Source\/profile changed/);
-    assert.equal(mock.calls.some(c => c[0] === 'requestProfile' && c[2] === 'session.cwd.set'), false);
+    assert.equal(mock.calls.some(c => c[2] === 'session.cwd.set'), false);
     controller.dispose();
   }
 });
@@ -1250,7 +1262,7 @@ test('picker retry keeps the same idempotency key after failed create', async ()
   mock.control.createError = true; await mount(); await click(button('New session'));
   await click(button('New session in Synthetic Sidebar')); mock.control.createError = false;
   await click(button('New session in Synthetic Sidebar'));
-  const creates = mock.calls.filter(c => c[0] === 'requestProfile' && c[2] === 'session.create');
+  const creates = mock.calls.filter(c => c[2] === 'session.create');
   assert.equal(creates.length, 2); assert.equal(creates[0][3].idempotency_key, creates[1][3].idempotency_key);
 });
 

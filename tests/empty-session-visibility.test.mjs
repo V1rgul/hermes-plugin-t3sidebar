@@ -195,7 +195,7 @@ test('a saved draft whose session is gone reopens in a new session in its folder
 	assert.equal(card.querySelector('.sf-project-name').textContent, 'Robot');
 	assert.equal(card.dataset.hasDraft, 'true');
 	await act(async () => card.querySelector('.sf-open').click()); await tick(); await tick(); await tick();
-	const create = mock.calls.find(call => call[0] === 'requestProfile' && call[2] === 'session.create');
+	const create = mock.calls.find(call => call[2] === 'session.create');
 	assert.equal(create[3].cwd, '/robot');
 	assert.equal(mock.control.composerCwd, '/robot');
 	assert.equal(mock.control.mountedDrafts['fixture-created'], 'Reopen me');

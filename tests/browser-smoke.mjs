@@ -780,14 +780,14 @@ try {
     const icon = el.querySelector('.sf-project-icon').getBoundingClientRect(), name = el.querySelector('.sf-project-details').getBoundingClientRect();
     return icon.right <= name.left && Math.abs(icon.top + icon.height / 2 - name.top - name.height / 2) < 2;
   }));
-  check('project picker does not create a session until a supported project is selected', !await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[0] === 'requestProfile' && call[2] === 'session.create')));
+  check('project picker does not create a session until a supported project is selected', !await page.evaluate(() => window.hermesT3SidebarHarness.calls.some(call => call[2] === 'session.create')));
   await page.getByRole('button', { name: 'New session in hermes-t3sidebar', exact: true }).click();
   await page.waitForFunction(() => window.hermesT3SidebarHarness.control.composerCwd === '/projects/hermes-t3sidebar');
   check('named project public create/open/cwd handoff; no hidden prompt', await page.evaluate(() => {
     const calls = window.hermesT3SidebarHarness.calls;
-    const create = calls.find(c => c[0] === 'requestProfile' && c[2] === 'session.create');
+    const create = calls.find(c => c[2] === 'session.create');
     const open = calls.find(c => c[0] === 'open' && c[1] === 'fixture-created');
-    return create[3].cwd_explicit && !create[3].close_on_disconnect && open[2].awaitHydration && open[2].expectHistory === false && !calls.some(c => c[0] === 'new' || /prompt/.test(c[2] || ''));
+    return create[0] === 'request' && create[3].cwd_explicit && !create[3].close_on_disconnect && open[2].awaitHydration && open[2].expectHistory === false && !calls.some(c => c[0] === 'new' || /prompt/.test(c[2] || ''));
   }));
   check('unsupported Add project button is absent', await page.getByRole('button', { name: 'Add project', exact: true }).count() === 0);
   await page.evaluate(async () => {

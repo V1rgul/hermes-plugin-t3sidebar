@@ -96,7 +96,7 @@ test('move requires exact workspace readback and fences profile switches', async
 	assert.equal(mock.queryClient.getQueryData(key).sessions[0].cwd, row.cwd);
 });
 
-test('move reuses one asynchronously discovered route but later project reads and moves discover independently', async () => {
+test('move reuses one asynchronously discovered route, later moves discover independently and project reads need none', async () => {
 	const project = target(), scope = captureScope(), row = { ...mock.control.rows.find(row => row.id === 'design'), status: 'idle' };
 	let discoveries = 0;
 	controller = createController(mock.ctx, mock.queryClient, { capture: captureScope, routes: async () => {
@@ -108,9 +108,9 @@ test('move reuses one asynchronously discovered route but later project reads an
 	const move = mock.calls.find(call => call[2] === 'session.workspace.move');
 	assert.equal(tree[1], move[1], 'tree and move use the same operation authority');
 	await controller.projects(scope);
-	assert.equal(discoveries, 2, 'public projects() must discover its own fresh route');
+	assert.equal(discoveries, 1, 'public projects() reads the active backend without route discovery');
 	await controller.moveProject(scope, row, project);
-	assert.equal(discoveries, 3, 'another move must not reuse a settled route');
+	assert.equal(discoveries, 2, 'another move must not reuse a settled route');
 });
 
 test('move route discovery failure retries and tree reads remain scope/epoch fenced', async () => {

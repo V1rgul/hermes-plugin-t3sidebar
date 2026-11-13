@@ -126,9 +126,9 @@ test('Discard retires the text its composer actually held when the clear fails, 
 test('reopening keeps the source draft when only its folder changed during the handoff', async () => {
   const scope = captureScope(), arrived = deferred(), release = deferred();
   // The new session's workspace confirmation is held until the source draft has changed.
-  const host = Object.create(mock.host, { requestProfile: { value: async (route, method, params) => {
+  const host = Object.create(mock.host, { request: { value: async (method, params) => {
     if (method === 'session.cwd.set') { arrived.resolve(); await release.promise; }
-    return mock.host.requestProfile(route, method, params);
+    return mock.host.request(method, params);
   } } });
   const controller = make(host);
   mock.control.serverDrafts = [{ session_id: 'gone', text: 'same text', cwd: '/robot', project: null, seq: 1, edited_at: 100 }];

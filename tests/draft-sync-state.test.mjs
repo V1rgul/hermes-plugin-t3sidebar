@@ -158,9 +158,9 @@ test('reopening a draft deletes only the version it copied: a newer one received
 	let release, reached;
 	const gate = new Promise(resolve => { release = resolve; }), arrived = new Promise(resolve => { reached = resolve; });
 	// The new session's workspace confirmation is held until the test lets it through.
-	const host = Object.create(mock.host, { requestProfile: { value: async (route, method, params) => {
+	const host = Object.create(mock.host, { request: { value: async (method, params) => {
 		if (method === 'session.cwd.set') { reached(); await gate; }
-		return mock.host.requestProfile(route, method, params);
+		return mock.host.request(method, params);
 	} } });
 	const controller = createController(mock.ctx, mock.queryClient, { capture: captureScope, routes: () => mock.host.profileRoutes(), host }), scope = captureScope();
 	controllers.push(controller);
