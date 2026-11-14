@@ -534,12 +534,12 @@ export function snoozePresets(now = Date.now(), presetTime = '09:00') {
   const labelTime = `${hour}:${String(minute).padStart(2, '0')}`;
   // Calendar arithmetic preserves the configured local time across daylight-saving changes.
   const day = offset => { const date = new Date(now); date.setDate(date.getDate() + offset); date.setHours(hour, minute, 0, 0); return date; };
-  // Next Monday is never today and never tomorrow: on a Sunday it is eight days away, so it never repeats the Tomorrow button.
+  const preset = (label, name, offset, span = 1) => { const date = day(offset); return { label, name, span, date, wake_at: Math.floor(date.getTime() / 1000) }; };
+  // Monday is the next Monday, never today. On a Sunday it is also +1 day, on a Monday also +1 week: the two choices then merge into one button spanning both columns.
   const mondayOffset = (8 - new Date(now).getDay()) % 7 || 7;
-  const days = [['Tomorrow', 1], ['Monday', mondayOffset === 1 ? 8 : mondayOffset], ['Next week', 7]].map(([label, offset]) => {
-    const date = day(offset);
-    return { label, date, wake_at: Math.floor(date.getTime() / 1000) };
-  });
+  const days = mondayOffset === 1 ? [preset('+1 day = Monday', 'Tomorrow, Monday', 1, 2), preset('+1 week', 'In 1 week', 7)]
+    : mondayOffset === 7 ? [preset('+1 day', 'Tomorrow', 1), preset('Monday = +1 week', 'Monday, in 1 week', 7, 2)]
+    : [preset('+1 day', 'Tomorrow', 1), preset('Monday', 'Monday', mondayOffset), preset('+1 week', 'In 1 week', 7)];
   const relative = [1, 2, 4].map(hours => ({ label: `+${hours}h`, name: `In ${hours} hour${hours > 1 ? 's' : ''}`, wake_at: Math.floor(now / 1000) + hours * 3600 }));
   return { labelTime, relative, days };
 }
@@ -1473,16 +1473,10 @@ const CSS = `
 .sf-row .sf-project{gap:4px}/* Start the glyph at the title's left edge; Codicons also carry a 1/16em side bearing. */.sf-row .sf-project-icon{width:auto;min-width:13px;justify-content:flex-start}.sf-row .sf-project-icon>.codicon{margin-left:calc(-1em / 16)}/* Outranks the Working time color: a snoozed card can still be running. */
 .sf-row .sf-time.sf-snooze-time{display:inline-flex;align-items:center;gap:4px;color:var(--sf-purple);font-weight:400}.sf-snooze-time svg{width:16px;height:16px;flex-shrink:0;stroke-width:1.6}.sf-menu button.sf-unsnooze{color:var(--ui-green,#1f8a65)}
 /* Snooze menu: an existing snooze on one purple line ending with Unsnooze, then rows that lead with their icon outside the buttons (hours from now, days at the preset time written under the calendar), and the custom field aligned with the buttons. */.sf-menu.sf-snooze-menu{box-sizing:border-box;width:300px;max-width:calc(100vw - 18px)}.sf-menu .sf-snooze-info{display:flex;flex-direction:row;align-items:center;gap:6px;padding-left:2px;color:var(--sf-purple);font-size:12px;white-space:nowrap}.sf-snooze-info-mark{display:inline-flex}.sf-snooze-info-mark svg{width:14px;height:14px}.sf-snooze-remaining{margin-left:auto;text-align:right}.sf-menu .sf-snooze-info .sf-unsnooze{color:var(--ui-green,#1f8a65)}
-.sf-menu .sf-snooze-grid,.sf-menu .sf-snooze-custom{display:grid;grid-template-columns:28px repeat(3,minmax(0,1fr));gap:4px;align-items:center}.sf-menu .sf-snooze-custom{grid-template-columns:28px minmax(0,1fr) auto}.sf-snooze-lead{display:flex;flex-direction:column;align-items:center;gap:2px;color:var(--ui-text-secondary)}.sf-snooze-lead svg{width:16px;height:16px}.sf-snooze-lead small{font-size:10px;line-height:1;font-variant-numeric:tabular-nums}.sf-menu .sf-snooze-choice{justify-content:center;min-width:0;height:26px;padding:0 4px;background:color-mix(in srgb,var(--ui-text-primary) 6%,transparent);font-variant-numeric:tabular-nums}.sf-menu .sf-snooze-choice:hover:not(:disabled){background:var(--ui-control-hover-background,color-mix(in srgb,var(--ui-text-primary) 12%,transparent))}.sf-menu .sf-snooze-day{display:flex;flex-direction:column;align-items:center;height:auto;padding:4px 2px;gap:0;line-height:1.2}.sf-snooze-day-name,.sf-snooze-day-date{display:block;white-space:nowrap}.sf-snooze-day-name{font-size:12px}.sf-snooze-day-date{font-size:11px;color:var(--ui-text-secondary)}
+.sf-menu .sf-snooze-grid,.sf-menu .sf-snooze-custom{display:grid;grid-template-columns:28px repeat(3,minmax(0,1fr));gap:4px;align-items:center}.sf-menu .sf-snooze-custom{grid-template-columns:28px minmax(0,1fr) auto}.sf-snooze-lead{display:flex;flex-direction:column;align-items:center;gap:2px;color:var(--ui-text-secondary)}.sf-snooze-lead svg{width:16px;height:16px}.sf-snooze-lead small{font-size:10px;line-height:1;font-variant-numeric:tabular-nums}.sf-menu .sf-snooze-choice{justify-content:center;min-width:0;height:26px;padding:0 4px;background:color-mix(in srgb,var(--ui-text-primary) 6%,transparent);font-variant-numeric:tabular-nums}.sf-menu .sf-snooze-choice:hover:not(:disabled){background:var(--ui-control-hover-background,color-mix(in srgb,var(--ui-text-primary) 12%,transparent))}.sf-menu .sf-snooze-choice.sf-snooze-hour,.sf-menu .sf-snooze-choice.sf-snooze-day{display:flex;flex-direction:column;align-items:center;height:auto;padding:4px 2px;gap:0;line-height:1.2}.sf-menu .sf-snooze-span{grid-column:span 2}.sf-snooze-label,.sf-snooze-detail{display:block;white-space:nowrap}
+/* Two lines per button: the choice in primary text at Desktop's button weight, then where it lands, smaller, regular and tertiary, so the two read apart at a glance. */.sf-snooze-label{font-size:12px;font-weight:500;color:var(--ui-text-primary)}.sf-snooze-detail{font-size:11px;font-weight:400;color:var(--ui-text-tertiary)}
+/* The custom field takes the buttons' fill, corners (Desktop's Button is rounded-[2.5px]) and hover instead of an input border; Desktop's select chevron is laid over the native picker button, which stays clickable but transparent. */.sf-snooze-field{position:relative;display:flex;min-width:0}.sf-menu .sf-snooze-field input{flex:1;height:28px;padding:0 8px 0 10px;border:0;border-radius:2.5px;background:color-mix(in srgb,var(--ui-text-primary) 6%,transparent);font-size:12px;font-variant-numeric:tabular-nums;color-scheme:inherit;transition:background-color 100ms cubic-bezier(.4,0,.2,1)}.sf-menu .sf-snooze-field input:hover:not(:disabled){background:var(--ui-control-hover-background,color-mix(in srgb,var(--ui-text-primary) 12%,transparent))}.sf-snooze-field input::-webkit-calendar-picker-indicator{width:16px;height:16px;margin:0;padding:0;opacity:0;cursor:pointer}.sf-snooze-chevron{position:absolute;right:8px;top:50%;transform:translateY(-50%);display:inline-flex;pointer-events:none;color:var(--ui-text-primary);opacity:.6}.sf-snooze-field:hover .sf-snooze-chevron{opacity:1}
 /* The snooze menu's title line keeps the session menu's 24px height, set there by its buttons. */.sf-menu .sf-snooze-head{min-height:24px}
-/* Hour buttons on hover or focus: +Nh moves to the left within the button while the wake time enters from beyond the right edge in secondary grey. One registered value, --sf-snooze-p, runs from 0 to 1 on the standard curve (220ms in, 154ms out) and both labels derive their place from it, so they always move together, even when a quick pass over the buttons reverses them midway (a transition per label property desynchronised on reversal and left them at odd positions). The button keeps Desktop's own 100ms colour and background transition. --sf-edge, measured per button, makes both edges equal the gap. Both labels are absolute, so the button never changes size. */
-@property --sf-snooze-p{syntax:'<number>';inherits:true;initial-value:0}
-.sf-menu .sf-snooze-hour{position:relative;overflow:hidden;--sf-snooze-p:0;transition:all 100ms cubic-bezier(.4,0,.2,1),--sf-snooze-p 154ms cubic-bezier(.4,0,.2,1)}
-.sf-menu .sf-snooze-hour:not(:disabled):is(:hover,:focus-visible){--sf-snooze-p:1;transition:all 100ms cubic-bezier(.4,0,.2,1),--sf-snooze-p 220ms cubic-bezier(.4,0,.2,1)}
-.sf-snooze-dur,.sf-snooze-at{position:absolute;top:50%;white-space:nowrap}
-.sf-snooze-dur{left:calc(50% + (var(--sf-edge,6px) - 50%) * var(--sf-snooze-p));transform:translate(calc(-50% * (1 - var(--sf-snooze-p))),-50%)}
-.sf-snooze-at{right:var(--sf-edge,6px);opacity:var(--sf-snooze-p);color:var(--ui-text-secondary);transform:translate(calc((100% + var(--sf-edge,6px)) * (1 - var(--sf-snooze-p))),-50%)}
-/* Important: Desktop's button utilities would otherwise bring the transition back. */@media (prefers-reduced-motion:reduce){.sf-menu .sf-snooze-hour{transition:none!important}}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}.sf-project-choice[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-project-picker .sf-project-choice[aria-pressed=true]{background:var(--sf-active-fill);color:var(--ui-text-primary)}
 .sf-project-picker{box-sizing:border-box;width:min(440px,calc(100vw - 18px));min-width:0;max-width:none;max-height:min(720px,calc(100dvh - 24px),calc(var(--radix-popover-content-available-height,100dvh) - 2px));overflow:hidden}.sf-project-picker>strong,.sf-project-picker>input{flex-shrink:0}.sf-project-picker>input{box-sizing:border-box;min-width:0}.sf-menu.sf-project-picker>.sf-project-options{gap:0;overflow-y:auto;overscroll-behavior:contain;min-height:0}.sf-project-picker .sf-project-choice{box-sizing:border-box;flex-shrink:0;width:100%;height:24px;min-height:24px;padding:4px 8px;font-size:12px;line-height:16px;gap:8px;border:0}.sf-project-picker .sf-project-icon{width:14px;height:14px}.sf-project-details{display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left}.sf-project-details>.sf-project-name,.sf-project-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.sf-project-details>.sf-project-name{max-width:55%}.sf-project-path{flex:1;margin-left:auto;text-align:right;font-size:11px;font-weight:400;line-height:16px;color:var(--ui-text-tertiary)}
 .sf-project-group{display:flex;flex-direction:column;gap:0;flex-shrink:0}.sf-project-picker .sf-project-folder{padding-left:30px}.sf-project-folder .sf-project-path{text-align:left;margin-left:0}.sf-project-heading .sf-project-name{max-width:100%}.sf-project-heading[aria-disabled=true]{opacity:1;cursor:default}
@@ -1624,7 +1618,7 @@ const BUNDLED_ICONS = {
   TicketLocked: ['M15 5l0 2', 'M11 19h-6a2 2 0 0 1 -2 -2v-3a2 2 0 0 0 0 -4v-3a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v2', 'M14 16h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1', 'M15 16v-2a2.5 2.5 0 0 1 5 0v2'],
   // Tabler v3.44.0 calendar: the snooze menu's day row, beside its preset time.
   Calendar: ['M4 7a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12z', 'M16 3v4', 'M8 3v4', 'M4 11h16'],
-  CalendarTime: ['M11.795 21h-6.795a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v4', 'M14 18a4 4 0 1 0 8 0a4 4 0 1 0 -8 0', 'M15 3v4', 'M7 3v4', 'M3 11h16', 'M18 16.496v1.504l1 1'],
+  CalendarCog: ['M12 21h-6a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v5', 'M16 3v4', 'M8 3v4', 'M4 11h16', 'M17.001 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M19.001 15.5v1.5', 'M19.001 21v1.5', 'M22.032 17.25l-1.299 .75', 'M17.27 20l-1.3 .75', 'M15.97 17.25l1.3 .75', 'M20.733 20l1.3 .75'],
   FolderCog: ['M12.5 19h-7.5a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v3', 'M17.001 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M19.001 15.5v1.5', 'M19.001 21v1.5', 'M22.032 17.25l-1.299 .75', 'M17.27 20l-1.3 .75', 'M15.97 17.25l1.3 .75', 'M20.733 20l1.3 .75'],
   FolderSymlink: ['M3 21v-4a3 3 0 0 1 3 -3h5', 'M8 17l3 -3l-3 -3', 'M3 11v-5a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8'],
   Alarm: ['M5 13a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M12 10l0 3l2 0', 'M7 4l-2.75 2', 'M17 4l2.75 2'],
@@ -2239,13 +2233,10 @@ function SnoozeActions({ row, mutate, disabled, presetTime, snoozeDetail, title 
   };
   const presets = snoozePresets(Date.now(), presetTime), wake = new Date(row.meta.wake_at * 1000);
   const at = date => `${longDay.format(date)}, ${shortTime.format(date)}`;
-  // Hovered, an hour button shows +Nh at its left and its wake time at its right; both edges and the gap between them share the room the labels leave, measured once their text is laid out.
-  const hours = useRef(null);
-  useLayoutEffect(() => {
-    const buttons = [...(hours.current?.querySelectorAll('.sf-snooze-hour') ?? [])];
-    const edges = buttons.map(button => (button.clientWidth - button.querySelector('.sf-snooze-dur').offsetWidth - button.querySelector('.sf-snooze-at').offsetWidth) / 3);
-    buttons.forEach((button, index) => button.style.setProperty('--sf-edge', `${Math.max(2, edges[index])}px`));
-  });
+  // Every preset is two lines: what was chosen, then where it lands in lighter text. The buttons have no tooltip, as both lines are already visible.
+  const choice = (key, className, label, detail, name, date, wake_at, span = 1) => h(sdk.Button, { key, type: 'button', variant: 'ghost', size: 'sm', className: `sf-snooze-choice ${className}${span === 2 ? ' sf-snooze-span' : ''}`, disabled: off,
+    'aria-label': name, 'aria-description': `Wakes ${at(date)}`, onClick: () => run({ action: 'snooze', wake_at }) },
+    h('span', { className: 'sf-snooze-label' }, label), h('span', { className: 'sf-snooze-detail' }, detail));
   return h('div', { ref: glide, className: 'sf-menu sf-snooze-menu' }, title,
     h('form', { onSubmit: custom },
       // An existing snooze: its wake time and what is left on one line, then Unsnooze at the end of it.
@@ -2255,22 +2246,19 @@ function SnoozeActions({ row, mutate, disabled, presetTime, snoozeDetail, title 
         h('span', { className: 'sf-snooze-remaining' }, snoozeDetail),
         h(MenuIcon, { label: 'Unsnooze', name: 'AlarmOff', glyph: '⏰', className: 'sf-unsnooze', disabled: off, onClick: () => run({ action: 'restore' }) })) : null,
       row.meta.state === 'snoozed' ? h('div', { className: 'sf-menu-separator', role: 'separator' }) : null,
-      // Each row leads with its icon outside the buttons: hours from now, then days at the preset time written under the calendar. The buttons have no tooltip: the day buttons show their date, the hour buttons their wake time on hover or focus.
-      h('div', { ref: hours, className: 'sf-snooze-grid' },
+      // Each row leads with its icon outside the buttons: hours from now with their wake time, then days at the preset time written under the calendar.
+      h('div', { className: 'sf-snooze-grid' },
         h('span', { className: 'sf-snooze-lead', 'aria-hidden': true }, icon('Clock', '◷')),
-        ...presets.relative.map(preset => { const date = new Date(preset.wake_at * 1000);
-          return h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-choice sf-snooze-hour', disabled: off, 'aria-label': preset.name,
-            'aria-description': `Wakes ${at(date)}`, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) },
-            h('span', { className: 'sf-snooze-dur' }, preset.label),
-            // The time alone, even when it falls tomorrow: an evening's +4h reads as the next morning without a weekday.
-            h('span', { className: 'sf-snooze-at', 'aria-hidden': true }, hourTime.format(date))); }),
+        // The time alone, even when it falls tomorrow: an evening's +4h reads as the next morning without a weekday.
+        ...presets.relative.map(preset => { const date = new Date(preset.wake_at * 1000); return choice(preset.label, 'sf-snooze-hour', preset.label, hourTime.format(date), preset.name, date, preset.wake_at); }),
         h('span', { className: 'sf-snooze-lead sf-snooze-lead-day' }, h('span', { 'aria-hidden': true }, icon('Calendar', '▦')), h('small', null, presets.labelTime)),
-        ...presets.days.map(preset => h(sdk.Button, { key: preset.label, type: 'button', variant: 'ghost', size: 'sm', className: 'sf-snooze-choice sf-snooze-day', disabled: off,
-          'aria-label': `${preset.label} at ${presets.labelTime}`, 'aria-description': `Wakes ${at(preset.date)}`, onClick: () => run({ action: 'snooze', wake_at: preset.wake_at }) },
-          h('span', { className: 'sf-snooze-day-name' }, preset.label), h('span', { className: 'sf-snooze-day-date' }, dayLabel.format(preset.date))))),
-      // Custom time: a calendar with a clock in the same icon column, the field aligned with the buttons above, and its checkmark, green once the value is a valid future local time.
-      h('label', { className: 'sf-snooze-custom sf-custom-time' }, h('span', { className: 'sf-snooze-lead', 'aria-hidden': true }, icon('CalendarTime')),
-        h('input', { type: 'datetime-local', value, disabled: off, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
+        ...presets.days.map(preset => choice(preset.label, 'sf-snooze-day', preset.label, dayLabel.format(preset.date), `${preset.name} at ${presets.labelTime}`, preset.date, preset.wake_at, preset.span))),
+      // Custom time: a calendar with a gear (a date of your own) in the icon column, the field styled as the buttons above with the select chevron over its picker button, and its checkmark, green once the value is a valid future local time.
+      h('label', { className: 'sf-snooze-custom sf-custom-time' }, h('span', { className: 'sf-snooze-lead', 'aria-hidden': true }, icon('CalendarCog')),
+        h('span', { className: 'sf-snooze-field' },
+          h('input', { type: 'datetime-local', value, disabled: off, 'aria-label': 'Custom snooze date and time', onChange: event => { setValue(event.target.value); setError(''); } }),
+          // Desktop's own select chevron, drawn over the field's picker button, which stays clickable underneath.
+          h('span', { className: 'sf-snooze-chevron', 'aria-hidden': true }, sdk.Codicon ? h(sdk.Codicon, { name: 'chevron-down', size: 16 }) : '⌄')),
         h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: off || !value, 'data-valid': customValid }))),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
@@ -3939,10 +3927,13 @@ async function readUsage(ctx, scope, path, validate) {
 // Orders limits reads, unknown banked-reset outcomes and reset confirmations by when each began. Numbers rather than times, so two events within one millisecond still compare.
 let usageOrder = 0;
 const nextUsageOrder = () => ++usageOrder;
+// This client's monotonic clock, in milliseconds: the cooldown counts elapsed time since a payload arrived, which a change of the wall clock must not shift.
+const monotonicNow = () => globalThis.performance.now();
 // The Limits page and the sidebar footer build the limits query the same way, so with equal preferences they share one cache entry and one five-minute poll instead of fetching the same history twice.
 // Each result carries, as `readNumber`, the number its read took before its request left, because the time the cache received a result says nothing about when the backend answered it. The number lives in the cache entry of its own Source/profile, activation and lookback and goes with it; being different for every read, it also keeps structural sharing from folding an equal answer into the previous object, which would carry the older number.
+// Each result also carries `receivedAt`, this client's monotonic time (monotonicNow) when it arrived, from which the Refresh button counts the backend's cooldown down.
 const limitsQueryOptions = (ctx, scope, hours) => ({ queryKey: [...usageScopeKey(scope), 'limits', hours], staleTime: 60_000, refetchInterval: 300_000, retry: false,
-  queryFn: () => { const readNumber = nextUsageOrder(); return readUsage(ctx, scope, `/usage/limits?hours=${hours}`, value => ({ ...validUsageLimits(value), readNumber })); } });
+  queryFn: () => { const readNumber = nextUsageOrder(); return readUsage(ctx, scope, `/usage/limits?hours=${hours}`, value => ({ ...validUsageLimits(value), readNumber, receivedAt: monotonicNow() })); } });
 // Usage preferences live in plugin storage; this query mirrors them in memory so the footer follows a lookback or provider chosen on an open Limits page (storage itself has no change events).
 const USAGE_PREFERENCES_QUERY = ['hermes-t3sidebar-preferences', 'usage'];
 function useUsagePreferences(ctx) {
@@ -3980,6 +3971,61 @@ function Segmented({ label, options, value, onChange, showLabel = true, sizing, 
 }
 // Banked-reset redemptions by Source/profile and account. Each request mints a new upstream idempotency key, so a second request is a second spend: a confirmation while one is in flight joins it, and after an outcome that neither confirms nor refuses the reset the account waits for a limits read started after that outcome, whose number its mark holds.
 const redeemsInFlight = new Map(), unsettledRedeems = new Map();
+// The Limits page's Refresh asks the backend to read every provider now (POST /usage/limits/collect), then reads the limits again; a click while one is under way joins it. The backend alone decides when the next may start, for all its clients, and says so in every limits payload (`sampler.next_collect_at`), which the button follows.
+const limitsCollects = new Map();
+function collectLimits(ctx, client, scope) {
+  const id = JSON.stringify([scope.connectionId, scope.profile]);
+  if (limitsCollects.has(id)) return limitsCollects.get(id);
+  const run = (async () => {
+    if (!sameScope(scope, captureScope())) return;
+    try { await ctx.rest('/usage/limits/collect', { method: 'POST' }); }
+    catch (_) { /* A backend without the route or without a sampler still has its stored readings, read again below. */ }
+    // Every limits read of this Source/profile, in any activation (a page reconnected meanwhile reads under a new one), is started again once the collection has ended: reads under way are cancelled first, since invalidation alone would join a first read that left before the collection ended. Never rejects: every button that follows this collection only needs to know it ended.
+    const reads = { queryKey: [USAGE_ROOT, scope.connectionId, scope.profile], predicate: query => query.queryKey[4] === 'limits' };
+    try { await client.cancelQueries(reads); await client.invalidateQueries(reads); } catch (_) { /* the limits query shows its own error */ }
+  })().finally(() => limitsCollects.delete(id));
+  limitsCollects.set(id, run);
+  return run;
+}
+// When a limits payload says the next collection may start, on monotonicNow's clock: the backend's wait, counted from when the payload arrived, so a client clock set wrong or changed meanwhile does not shift it. 0 when it may start now or the backend does not say.
+export function collectAllowedAt(data) {
+  const wait = data?.sampler?.next_collect_at - data?.generated_at;
+  // Whole milliseconds: epoch-sized floats leave a residue (30.000000004 s) that would show one second too many.
+  return Number.isFinite(wait) && wait > 0 && Number.isFinite(data?.receivedAt) ? data.receivedAt + Math.round(wait * 1000) : 0;
+}
+// Its own component, so the cooldown's countdown renders only the button.
+function UsageRefresh({ ctx, scope, query, collect }) {
+  const client = useQueryClient(), id = JSON.stringify([scope.connectionId, scope.profile]);
+  const [collecting, setCollecting] = useState(() => collect && limitsCollects.has(id));
+  // A collection started from this page or one closed meanwhile: the button follows it until it ends, whichever component started it.
+  useEffect(() => {
+    if (!collecting) return undefined;
+    const flight = limitsCollects.get(id);
+    if (!flight) { setCollecting(false); return undefined; }
+    let mounted = true;
+    void flight.finally(() => { if (mounted) setCollecting(false); });
+    return () => { mounted = false; };
+  }, [collecting, id]);
+  // Read at render, so the countdown is current whenever anything renders the button; the tick only schedules the next whole second.
+  const [tick, setTick] = useState(0), now = monotonicNow();
+  // Whole milliseconds first: performance.now() is fractional, so the sum and difference leave a residue that would show one second too many.
+  const until = collect ? collectAllowedAt(query.data) : 0, left = Math.ceil(Math.round(until - now) / 1000);
+  useEffect(() => {
+    if (left <= 0) return undefined;
+    const timer = setTimeout(() => setTick(value => value + 1), (until - monotonicNow()) % 1000 || 1000);
+    return () => clearTimeout(timer);
+  }, [until, tick, left]);
+  const busy = collecting || query.isFetching, cooling = !busy && left > 0;
+  const onClick = () => {
+    if (cooling) return;
+    if (!collect) { void query.refetch(); return; }
+    void collectLimits(ctx, client, scope);
+    setCollecting(true);
+  };
+  const label = busy ? 'Updating…' : cooling ? `Refresh available in ${left} s` : 'Refresh';
+  // A refetch behind data already on screen spins the refresh icon instead of adding text; screen readers hear the busy state. The cooldown only marks the button disabled, so hovering it still shows when it comes back.
+  return pageTipped(label, h('button', { type: 'button', className: 'su-icon su-refresh', 'aria-label': busy ? 'Updating' : label, 'aria-busy': busy, 'aria-disabled': cooling || undefined, 'data-spinning': !!(busy && query.data), disabled: busy, onClick }, icon('RefreshCw', '↻')));
+}
 function ScopedUsagePage({ ctx, scope, view }) {
   const client = useQueryClient(), shared = useUsagePreferences(ctx), tipRoot = useRef(null), pageTips = useRef(null);
   // Local state applies a change in the same render as the input event: the query cache notifies a tick later, and a controlled range input would snap back in between (two quick arrow presses moved one stop). The shared copy still brings in changes made on the other page.
@@ -4044,8 +4090,7 @@ function ScopedUsagePage({ ctx, scope, view }) {
   }, [ctx, scope, client, redeemScope]);
   const toolbar = h(Fragment, null,
     h('span', { className: 'su-spacer' }),
-    // A refetch behind data already on screen spins the refresh icon instead of adding text; screen readers hear the busy state.
-    pageTipped(active.isFetching ? 'Updating…' : 'Refresh', h('button', { type: 'button', className: 'su-icon su-refresh', 'aria-label': active.isFetching ? 'Updating' : 'Refresh', 'aria-busy': active.isFetching, 'data-spinning': !!(active.isFetching && active.data), disabled: active.isFetching, onClick: () => void active.refetch() }, icon('RefreshCw', '↻'))));
+    h(UsageRefresh, { ctx, scope, query: active, collect: view === 'limits' }));
   return h('div', { ref: tipRoot, className: 'su', 'data-view': view, onPointerOver: event => pageTips.current?.over(event), onPointerOut: event => pageTips.current?.out(event), onPointerDownCapture: () => pageTips.current?.close(),
     onFocus: event => pageTips.current?.focus(event), onBlur: () => pageTips.current?.close(), onScrollCapture: () => pageTips.current?.close() }, h('style', null, USAGE_CSS),
     sharedTips() ? h(SharedTips, { api: pageTips, root: tipRoot }) : null,
@@ -4872,7 +4917,7 @@ const USAGE_CSS = `
 ${SEGMENTED_FALLBACK_CSS}
 .su-spacer{flex:1}.su-muted{color:var(--ui-text-tertiary);font-size:11px}
 .su-icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
-.su-icon:hover:not(:disabled){background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.su-icon:disabled{opacity:.5;cursor:default}
+.su-icon:hover:not(:disabled):not([aria-disabled=true]){background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.su-icon:disabled,.su-icon[aria-disabled=true]{opacity:.5;cursor:default}
 /* A spinning icon already says busy, so it keeps full opacity rather than the disabled dimming. */
 .su-refresh[data-spinning=true]:disabled{opacity:1}.su-refresh[data-spinning=true]>*{animation:su-spin .8s linear infinite}
 @keyframes su-spin{to{transform:rotate(360deg)}}

@@ -324,15 +324,17 @@ try {
     const leads = [...form.querySelectorAll('.sf-snooze-lead svg')].map(el => el.getBoundingClientRect()), centre = r => r.left + r.width / 2;
     const custom = form.querySelector('.sf-snooze-custom'), input = custom.querySelector('input').getBoundingClientRect();
     const firsts = [...form.querySelectorAll('.sf-snooze-grid > .sf-snooze-choice')].filter((_, index) => index % 3 === 0).map(el => el.getBoundingClientRect());
-    return !/Custom|local time/.test(custom.textContent) && custom.querySelector('[data-icon=CalendarTime]') && leads.length === 3 && leads.every(r => r.width === 16 && Math.abs(centre(r) - centre(leads[0])) < .5)
+    return !/Custom|local time/.test(custom.textContent) && custom.querySelector('[data-icon=CalendarCog]') && leads.length === 3 && leads.every(r => r.width === 16 && Math.abs(centre(r) - centre(leads[0])) < .5)
       && firsts.length === 2 && firsts.every(r => Math.abs(r.left - input.left) < .5) && leads.every(r => r.right < input.left);
   });
-  check('custom time has a calendar-clock in the row icon column and its field starts where the buttons do, without a text label', await customTimeAligned());
-  check('snooze rows: three equal buttons each, the day buttons under the hour buttons, 9:00 under the calendar', await snoozeDialog.locator('.sf-snooze-grid').evaluate(grid => {
-    const choices = [...grid.querySelectorAll('.sf-snooze-choice')].map(el => el.getBoundingClientRect());
-    const sameColumn = (a, b) => Math.abs(a.left - b.left) < .5 && Math.abs(a.width - b.width) < .5;
+  check('custom time has a calendar with a gear in the row icon column and its field starts where the buttons do, without a text label', await customTimeAligned());
+  check('snooze rows: three equal hour buttons, the day buttons on the same columns (a merged one spanning two), 9:00 under the calendar', await snoozeDialog.locator('.sf-snooze-grid').evaluate(grid => {
+    const hours = [...grid.querySelectorAll('.sf-snooze-hour')].map(el => el.getBoundingClientRect()), days = [...grid.querySelectorAll('.sf-snooze-day')];
+    const edges = new Set(hours.flatMap(r => [Math.round(r.left), Math.round(r.right)]));
+    const spans = days.map(el => el.classList.contains('sf-snooze-span') ? 2 : 1), merged = days.length === 2;
     const day = grid.querySelector('.sf-snooze-lead-day'), icon = day.querySelector('svg').getBoundingClientRect(), time = day.querySelector('small').getBoundingClientRect();
-    return choices.length === 6 && [0, 1, 2].every(i => sameColumn(choices[i], choices[i + 3]) && Math.abs(choices[i].width - choices[0].width) < .5)
+    return hours.length === 3 && hours.every(r => Math.abs(r.width - hours[0].width) < .5) && spans.reduce((a, b) => a + b, 0) === 3 && (merged || days.length === 3)
+      && days.every(el => { const r = el.getBoundingClientRect(); return edges.has(Math.round(r.left)) && edges.has(Math.round(r.right)); })
       && day.querySelector('small').textContent === '9:00' && time.top >= icon.bottom - .5 && Math.abs(time.left + time.width / 2 - icon.left - icon.width / 2) < 1;
   }));
   check('snooze title uses the session menu heading: 13px, medium, primary text, on a 24px line', await snoozeDialog.locator('.sf-snooze-head').evaluate(line => {
@@ -340,58 +342,31 @@ try {
     probe.style.color = 'var(--ui-text-primary)'; line.append(probe); const primary = getComputedStyle(probe).color; probe.remove();
     return style.fontSize === '13px' && style.fontWeight === '500' && style.color === primary && line.getBoundingClientRect().height >= 24 && !line.closest('form');
   }));
-  check('snooze preset buttons carry no tooltip', await snoozeDialog.locator('.sf-snooze-choice').evaluateAll(nodes => nodes.length === 6 && nodes.every(node => !node.title && !node.closest('[data-sf-tip]'))));
-  // Hovering an hour button: +Nh keeps the primary colour and moves left, its wake time enters in secondary grey, and both edges equal the gap between them.
+  check('snooze preset buttons carry no tooltip', await snoozeDialog.locator('.sf-snooze-choice').evaluateAll(nodes => nodes.length >= 5 && nodes.every(node => !node.title && !node.closest('[data-sf-tip]'))));
+  // Every preset shows two lines at rest: the choice in primary text, then its wake time or date smaller, regular and tertiary; hovering changes neither.
+  const twoLines = () => snoozeDialog.locator('.sf-snooze-choice').evaluateAll(nodes => {
+    const probe = document.createElement('span'); nodes[0].append(probe);
+    probe.style.color = 'var(--ui-text-primary)'; const primary = getComputedStyle(probe).color;
+    probe.style.color = 'var(--ui-text-tertiary)'; const tertiary = getComputedStyle(probe).color; probe.remove();
+    return nodes.every(node => {
+      const label = node.querySelector('.sf-snooze-label'), detail = node.querySelector('.sf-snooze-detail'), l = getComputedStyle(label), d = getComputedStyle(detail), lr = label.getBoundingClientRect(), dr = detail.getBoundingClientRect(), r = node.getBoundingClientRect();
+      return l.color === primary && d.color === tertiary && l.fontSize === '12px' && d.fontSize === '11px' && +d.fontWeight < +l.fontWeight && dr.top >= lr.bottom - .5
+        && lr.left >= r.left && lr.right <= r.right && dr.left >= r.left && dr.right <= r.right && Math.abs(lr.left + lr.width / 2 - r.left - r.width / 2) < 1 && d.opacity === '1';
+    });
+  });
+  check('each snooze preset shows its choice in primary text over its wake time or date in smaller tertiary text, inside the button', await twoLines());
   const hour = snoozeDialog.locator('.sf-snooze-hour').first();
-  check('an hour button at rest shows only +1h, centred', await hour.evaluate(el => {
-    const r = el.getBoundingClientRect(), d = el.querySelector('.sf-snooze-dur').getBoundingClientRect();
-    return getComputedStyle(el.querySelector('.sf-snooze-at')).opacity === '0' && Math.abs(d.left + d.width / 2 - r.left - r.width / 2) < 1;
-  }));
-  // Both labels must move together: sampled on every frame of the hover, relative to the button (the menu itself may still move), the share of its path each one has covered stays within a few percent of the other's.
-  // The smoke page runs in reduced motion, where the labels swap without sliding; this check needs the motion.
-  await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await hour.evaluate(el => {
-    const dur = el.querySelector('.sf-snooze-dur'), at = el.querySelector('.sf-snooze-at'), frames = [];
-    const sample = () => { const r = el.getBoundingClientRect(); return [dur.getBoundingClientRect().left - r.left, at.getBoundingClientRect().left - r.left]; };
-    el.sfStart = sample(); el.sfFrames = frames; const t0 = performance.now();
-    const tick = () => { frames.push(sample()); if (performance.now() - t0 < 400) requestAnimationFrame(tick); };
-    requestAnimationFrame(tick);
-  });
-  await hour.hover(); await page.waitForTimeout(450);
-  check('hovering an hour button moves +1h and its wake time together, frame by frame', await hour.evaluate(el => {
-    const [d0, a0] = el.sfStart, [d1, a1] = el.sfFrames.at(-1);
-    const shares = el.sfFrames.map(([d, a]) => [(d - d0) / (d1 - d0), (a - a0) / (a1 - a0)]).filter(([d]) => d > .02 && d < .98);
-    el.sfShares = JSON.stringify({ d0, a0, d1, a1, shares });
-    return Math.abs(d1 - d0) > 5 && Math.abs(a1 - a0) > 5 && shares.length >= 3 && shares.every(([d, a]) => Math.abs(d - a) < .08);
-  }) || console.log(await hour.evaluate(el => el.sfShares)));
-  // Reversed midway, as a quick pass over the buttons does: leave after 70ms, come back 50ms later; the two labels must still have covered the same share of their paths on every frame.
-  const rested = await hour.evaluate(el => ({ end: el.sfFrames.at(-1) }));
-  await page.mouse.move(0, 0); await page.waitForTimeout(400);
-  const hourBox = await hour.boundingBox();
-  await hour.evaluate(el => {
-    const dur = el.querySelector('.sf-snooze-dur'), at = el.querySelector('.sf-snooze-at'), frames = [];
-    el.sfFrames = frames; const t0 = performance.now();
-    const tick = () => { const r = el.getBoundingClientRect(); frames.push([dur.getBoundingClientRect().left - r.left, at.getBoundingClientRect().left - r.left]); if (performance.now() - t0 < 600) requestAnimationFrame(tick); };
-    requestAnimationFrame(tick);
-  });
-  await page.mouse.move(hourBox.x + hourBox.width / 2, hourBox.y + hourBox.height / 2); await page.waitForTimeout(70);
-  await page.mouse.move(0, 0); await page.waitForTimeout(50);
-  await page.mouse.move(hourBox.x + hourBox.width / 2, hourBox.y + hourBox.height / 2); await page.waitForTimeout(500);
-  check('reversing an hour button midway keeps +1h and its wake time together', await hour.evaluate((el, { end }) => {
-    const [d0, a0] = el.sfStart, [d1, a1] = end;
-    const shares = el.sfFrames.map(([d, a]) => [(d - d0) / (d1 - d0), (a - a0) / (a1 - a0)]).filter(([d]) => d > .02 && d < .98);
-    return shares.length >= 3 && shares.every(([d, a]) => Math.abs(d - a) < .05);
-  }, rested));
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  check('reduced motion swaps the hour labels without sliding', await hour.evaluate(el => getComputedStyle(el).transitionDuration.split(',').every(value => parseFloat(value) === 0)));
-  check('a hovered hour button shows +1h in primary and its wake time in secondary grey, edges equal to the gap', await hour.evaluate(el => {
-    const r = el.getBoundingClientRect(), dur = el.querySelector('.sf-snooze-dur'), at = el.querySelector('.sf-snooze-at'), d = dur.getBoundingClientRect(), a = at.getBoundingClientRect();
-    const probe = document.createElement('span'); probe.style.color = 'var(--ui-text-primary)'; el.append(probe); const primary = getComputedStyle(probe).color;
-    probe.style.color = 'var(--ui-text-secondary)'; const secondary = getComputedStyle(probe).color; probe.remove();
-    const left = d.left - r.left, gap = a.left - d.right, right = r.right - a.right;
-    return getComputedStyle(at).opacity === '1' && getComputedStyle(dur).color === primary && getComputedStyle(at).color === secondary && gap > 2 && Math.abs(left - gap) < 1 && Math.abs(right - gap) < 1;
-  }));
+  await hour.hover();
+  check('hovering an hour button keeps both of its lines in place', await twoLines());
   await page.mouse.move(0, 0);
+  // The custom field reads as one of the buttons: their fill, Desktop Button's 2.5px corners (the harness button differs), no border, and Desktop's select chevron at its right over the native picker button, which stays the click target.
+  check('custom field has the buttons\' fill and corners without a border, and Desktop\'s chevron-down over its picker button', await snoozeDialog.locator('form').evaluate(form => {
+    const input = form.querySelector('.sf-snooze-field input'), button = form.querySelector('.sf-snooze-day'), i = getComputedStyle(input), b = getComputedStyle(button);
+    const chevron = form.querySelector('.sf-snooze-chevron'), glyph = chevron.querySelector('.codicon-chevron-down, [data-codicon=chevron-down]') ?? chevron.firstElementChild, c = chevron.getBoundingClientRect(), r = input.getBoundingClientRect();
+    const hit = document.elementFromPoint(c.left + c.width / 2, c.top + c.height / 2);
+    return i.backgroundColor === b.backgroundColor && i.borderTopWidth === '0px' && i.borderTopLeftRadius === '2.5px' && r.height === 28 && !!glyph
+      && Math.abs(c.width - 16) < .5 && c.right <= r.right - 6 && Math.abs(c.top + c.height / 2 - r.top - r.height / 2) < 1 && getComputedStyle(chevron).pointerEvents === 'none' && hit === input;
+  }));
   const check_ = snoozeDialog.getByRole('button', { name: 'Apply custom snooze', exact: true });
   const green = await check_.evaluate(el => { const probe = document.createElement('span'); probe.style.color = 'var(--ui-green)'; el.append(probe); const c = getComputedStyle(probe).color; probe.remove(); return c; });
   await snoozeDialog.locator('input[type=datetime-local]').fill('2020-01-01T12:00');
@@ -528,10 +503,10 @@ try {
   }));
   check('custom calendar and field also align with the presets in an existing snooze menu', await customTimeAligned());
   await snoozeDialog.screenshot({ path: join(screenshotDir, 'snoozed-menu.png') });
-  check('snooze rows lead with Clock, Calendar and CalendarTime, each centred on its row', await snoozeDialog.locator('form').evaluate(form => {
+  check('snooze rows lead with Clock, Calendar and CalendarCog, each centred on its row', await snoozeDialog.locator('form').evaluate(form => {
     const leads = [...form.querySelectorAll('.sf-snooze-lead')], names = leads.map(el => el.querySelector('svg')?.dataset.icon), middle = box => box.top + box.height / 2;
     const rows = [form.querySelector('.sf-snooze-grid > .sf-snooze-choice'), form.querySelectorAll('.sf-snooze-grid > .sf-snooze-choice')[3], form.querySelector('.sf-snooze-custom input')];
-    return JSON.stringify(names) === JSON.stringify(['Clock', 'Calendar', 'CalendarTime']) && leads.every((lead, i) => !lead.closest('button') && Math.abs(middle(lead.getBoundingClientRect()) - middle(rows[i].getBoundingClientRect())) < 1);
+    return JSON.stringify(names) === JSON.stringify(['Clock', 'Calendar', 'CalendarCog']) && leads.every((lead, i) => !lead.closest('button') && Math.abs(middle(lead.getBoundingClientRect()) - middle(rows[i].getBoundingClientRect())) < 1);
   }));
   check('Unsnooze alarm-off icon inherits the green action color', await unsnooze.evaluate(el => getComputedStyle(el.querySelector('[data-icon=AlarmOff]')).color === getComputedStyle(el).color));
   await unsnooze.hover();
@@ -559,17 +534,19 @@ try {
   await page.locator('section[aria-label="Ready"] [data-session-id="design"]').waitFor();
   check('Unpin returns the session to Ready without any Undo toast', await noUndo());
   await design.hover(); await snooze.click();
-  check('snooze offers +1h/+2h/+4h, then Tomorrow, Monday and Next week with their dates, without redundant Snooze prefixes', await snoozeDialog.locator('.sf-snooze-choice').evaluateAll(nodes => JSON.stringify(nodes.map(node => [node.getAttribute('aria-label'), node.querySelector('.sf-snooze-day-name')?.textContent ?? node.querySelector('.sf-snooze-dur').textContent])) === JSON.stringify([['In 1 hour', '+1h'], ['In 2 hours', '+2h'], ['In 4 hours', '+4h'], ['Tomorrow at 9:00', 'Tomorrow'], ['Monday at 9:00', 'Monday'], ['Next week at 9:00', 'Next week']])
-    && nodes.slice(3).every(node => /\d/.test(node.querySelector('.sf-snooze-day-date').textContent))) && !/Custom snooze/.test(await snoozeDialog.innerText()));
-  const expectedMonday = await page.evaluate(() => {
-    const monday = new Date(), offset = (8 - monday.getDay()) % 7 || 7;
-    // On a Sunday, Monday is tomorrow: the Monday button moves on a week.
-    monday.setDate(monday.getDate() + (offset === 1 ? 8 : offset));
-    monday.setHours(9, 0, 0, 0);
-    return monday.getTime() / 1000;
+  // Monday is the next Monday; on a Sunday it merges with +1 day, on a Monday with +1 week.
+  const { expectedMonday, mondayName, dayChoices } = await page.evaluate(() => {
+    const monday = new Date(), weekday = monday.getDay();
+    monday.setDate(monday.getDate() + ((8 - weekday) % 7 || 7)); monday.setHours(9, 0, 0, 0);
+    const dayChoices = weekday === 0 ? [['Tomorrow, Monday at 9:00', '+1 day = Monday'], ['In 1 week at 9:00', '+1 week']]
+      : weekday === 1 ? [['Tomorrow at 9:00', '+1 day'], ['Monday, in 1 week at 9:00', 'Monday = +1 week']]
+      : [['Tomorrow at 9:00', '+1 day'], ['Monday at 9:00', 'Monday'], ['In 1 week at 9:00', '+1 week']];
+    return { expectedMonday: monday.getTime() / 1000, mondayName: dayChoices.find(([, label]) => /Monday/.test(label))[0], dayChoices };
   });
+  check('snooze offers +1h/+2h/+4h, then +1 day, Monday and +1 week, each over its time or date, without redundant Snooze prefixes', await snoozeDialog.locator('.sf-snooze-choice').evaluateAll((nodes, dayChoices) => JSON.stringify(nodes.map(node => [node.getAttribute('aria-label'), node.querySelector('.sf-snooze-label').textContent])) === JSON.stringify([['In 1 hour', '+1h'], ['In 2 hours', '+2h'], ['In 4 hours', '+4h'], ...dayChoices])
+    && nodes.slice(0, 3).every(node => /^\d\d:\d\d$/.test(node.querySelector('.sf-snooze-detail').textContent)) && nodes.slice(3).every(node => /\d/.test(node.querySelector('.sf-snooze-detail').textContent)), dayChoices) && !/Custom snooze/.test(await snoozeDialog.innerText()));
   const mondayCallStart = await page.evaluate(() => window.hermesT3SidebarHarness.calls.length);
-  await snoozeDialog.getByRole('button', { name: 'Monday at 9:00', exact: true }).click();
+  await snoozeDialog.getByRole('button', { name: mondayName, exact: true }).click();
   await page.locator('section[aria-label="Snoozed"] [data-session-id="design"]').waitFor();
   check('Monday Snooze preset sends next calendar Monday 09:00 in client local time and lands in Snoozed without a toast', await page.evaluate(({ expectedMonday, mondayCallStart }) => {
     const fixture = window.hermesT3SidebarHarness;
@@ -1371,11 +1348,11 @@ try {
   await page.reload();
   await page.getByRole('button', { name: 'Plugin settings', exact: true }).click();
   const presetSetting = page.locator('[aria-label="Snooze preset time"]');
-  check('plugin settings default the shared Tomorrow/Monday time to 09:00', await presetSetting.inputValue() === '09:00');
+  check('plugin settings default the shared day preset time to 09:00', await presetSetting.inputValue() === '09:00');
   await presetSetting.fill('14:35');
   const settingsDesign = page.locator('[data-session-id="design"]');
   await settingsDesign.hover(); await settingsDesign.getByRole('button', { name: 'Snooze session', exact: true }).click();
-  check('settings change updates both calendar snooze choices without a reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Monday at 14:35', exact: true }).count() === 1);
+  check('settings change updates both calendar snooze choices without a reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'In 1 week at 14:35', exact: true }).count() === 1);
   const configuredTomorrow = await page.evaluate(() => { const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(14, 35, 0, 0); return tomorrow.getTime() / 1000; });
   await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).click();
   await page.waitForFunction(expected => window.hermesT3SidebarHarness.control.metadata.sessions.design?.wake_at === expected, configuredTomorrow);
@@ -1385,7 +1362,7 @@ try {
   check('configured preset time persists across actual browser reload', await presetSetting.inputValue() === '14:35');
   await page.locator('[data-session-id="design"]').hover();
   await page.locator('[data-session-id="design"]').getByRole('button', { name: 'Snooze session', exact: true }).click();
-  check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'Monday at 14:35', exact: true }).count() === 1);
+  check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'In 1 week at 14:35', exact: true }).count() === 1);
   await page.keyboard.press('Escape');
   await presetSetting.fill('09:00');
   const detailsGroup = page.getByRole('group', { name: 'Working indicator', exact: true });

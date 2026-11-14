@@ -58,6 +58,8 @@ function draftsRoute(path, options) {
   const rows = drafts.filter(draft => changed.has(draft.session_id) || (reset ? draft.text !== null : draft.seq > body.since));
   return { profile: control.draftsProfile || host.state.profile.get(), cursor: control.draftSeq, reset, drafts: clone(rows) };
 }
+// Each Source/profile is its own backend sampler, with its own collect cooldown.
+const collectKey = () => `${host.state.connectionId.get()}|${host.state.profile.get()}`;
 export const host = {
   composer,
   state: { connectionId: atom('source-a'), profile: atom('default'), gateway: atom('open'), activeSessionId: atom('runtime-design'), focusedSessionId: atom('runtime-design'), focusedStoredSessionId: atom('design'), focusedSessionOwner: atom({ connectionId: 'source-a', profile: 'default' }), awaitingResponse: atom(false) },
@@ -188,6 +190,13 @@ export const ctx = {
     if (path.startsWith('/drafts')) return draftsRoute(path, options);
     // The redeem route answers control.redeemResult (a value, or a function of the posted body that may throw like a failed request).
     if (path === '/usage/limits/redeem') return clone(typeof control.redeemResult === 'function' ? await control.redeemResult(options?.body) : control.redeemResult ?? { status: 'reset', available_count: 1, windows_reset: 2, profile: host.state.profile.get() || 'default' });
+    // The collect route answers control.collectResult when set (a value, or a function that may throw like a failed request); otherwise it acts as the backend: a collection unless one began less than 30 s ago, whose times every later limits read of that Source/profile carries.
+    if (path === '/usage/limits/collect') {
+      if (control.collectResult !== undefined) return clone(typeof control.collectResult === 'function' ? await control.collectResult() : control.collectResult);
+      const now = Date.now() / 1000, state = (control.collects ??= {})[collectKey()] ??= { last: null, next: null }, due = !(state.next > now);
+      if (due) Object.assign(state, { last: now, next: now + 30 });
+      return { status: due ? 'collected' : 'cooldown', error: null, generated_at: now, last_collect_at: state.last, next_collect_at: state.next, profile: host.state.profile.get() || 'default' };
+    }
     if (path.startsWith('/usage/')) {
       if (control.usageError) throw new Error(control.usageError);
       // A pending promise here holds every usage read in flight until the test resolves it.
@@ -195,7 +204,12 @@ export const ctx = {
       const params = new URLSearchParams(path.split('?')[1] || '');
       // control.usageHistory is one payload for every period, or a function of the requested days (the README capture kit serves real history per period that way).
       if (path.startsWith('/usage/history?')) return clone(typeof control.usageHistory === 'function' ? control.usageHistory(Number(params.get('days'))) : control.usageHistory ?? syntheticUsageHistory(Number(params.get('days')), params.get('tz')));
-      if (path.startsWith('/usage/limits?')) return clone(control.usageLimits ?? syntheticUsageLimits(Math.min(840, Number(params.get('hours')) || 168), control.limitsScenario));
+      if (path.startsWith('/usage/limits?')) {
+        const payload = control.usageLimits ?? syntheticUsageLimits(Math.min(840, Number(params.get('hours')) || 168), control.limitsScenario);
+        // Like the backend, the next allowed collection is given against the payload's own generated_at.
+        const state = control.collects?.[collectKey()], wait = state?.next == null ? null : Math.max(0, state.next - Date.now() / 1000);
+        return clone(state ? { ...payload, sampler: { ...payload.sampler, last_collect_at: state.last, next_collect_at: wait === null ? null : payload.generated_at + wait } } : payload);
+      }
     }
     if (path === '/environment') return { profile: control.homeProfile || host.state.profile.get(), home: control.home || '/home/fixture' };
     if (path === '/state') {

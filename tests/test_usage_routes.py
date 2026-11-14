@@ -190,6 +190,35 @@ class UsageRouteTests(unittest.TestCase):
 		self.assertEqual(client.post(f"{PREFIX}/usage/limits/redeem?profile=other", json={"provider": "openai-codex", "account": "7ad3ca"}).status_code, 422)
 		self.assertEqual(calls, [])
 
+	def test_collect_reads_the_providers_through_the_sampler_and_reports_its_cooldown(self):
+		answers = [{"status": "collected", "error": None, "generated_at": NOW, "last_collect_at": NOW, "next_collect_at": NOW + 30}, {"status": "cooldown", "error": None, "generated_at": NOW + 17.7, "last_collect_at": NOW, "next_collect_at": NOW + 30}]
+		class Sampler(FakeSampler):
+			async def collect_now_async(self):
+				return answers.pop(0)
+		client = self.client(limits_sampler=Sampler)
+		first = client.post(f"{PREFIX}/usage/limits/collect?profile=default")
+		self.assertEqual(first.status_code, 200, first.text)
+		self.assertEqual(first.json(), {"status": "collected", "error": None, "generated_at": NOW, "last_collect_at": NOW, "next_collect_at": NOW + 30, "profile": "default"})
+		self.assertEqual(first.headers["cache-control"], "no-store")
+		self.assertNotIn("retry-after", first.headers)
+		second = client.post(f"{PREFIX}/usage/limits/collect")
+		self.assertEqual((second.status_code, second.json()["status"], second.headers["retry-after"]), (200, "cooldown", "13"))
+		self.assertEqual(client.post(f"{PREFIX}/usage/limits/collect?profile=other").status_code, 422)
+		self.assertEqual(client.get(f"{PREFIX}/usage/limits/collect").status_code, 405)
+		self.assertEqual(answers, [])
+
+	def test_collect_without_a_sampler_or_with_a_failing_one_is_unavailable(self):
+		class Broken(FakeSampler):
+			async def collect_now_async(self):
+				raise RuntimeError("Bearer secret-token")
+		class Failed(FakeSampler):
+			async def collect_now_async(self):
+				return {"status": "collected", "error": "collector_failed:ValueError", "generated_at": NOW, "last_collect_at": NOW, "next_collect_at": NOW + 30}
+		for starter, detail in ((None, "limits_sampler_unavailable"), (Broken, "limits_collect_unavailable"), (Failed, "limits_collect_failed")):
+			response = self.client(limits_sampler=starter).post(f"{PREFIX}/usage/limits/collect")
+			self.assertEqual((response.status_code, response.json()["detail"]), (503, detail))
+			self.assertNotIn("secret", response.text)
+
 
 	def test_there_is_no_experimental_settings_route(self):
 		# Every Codex account's banked-reset list is always read; the switch and its routes are gone.

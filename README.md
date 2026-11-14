@@ -74,7 +74,7 @@
 
 ### Snooze
 
-- +1h, +2h, +4h; Tomorrow, Monday or Next week at the preset time; or a custom local date and time.
+- +1h, +2h, +4h; +1 day, Monday or +1 week at the preset time; or a custom local date and time.
 - Never stops or resumes an agent.
 
 ![Snoozed session menu: wake date and time left, Unsnooze, +1h, +2h, +4h, Tomorrow, Monday and Next week at 9:00, custom date input](docs/images/snooze.png)

@@ -669,7 +669,7 @@ test('snooze rows lead with their icon outside the buttons, the preset time unde
   await click(row('snoozed').querySelector('[aria-label="Snooze session"]'));
   const dialog = $('[role=dialog]');
   const leads = [...dialog.querySelectorAll('.sf-snooze-lead')];
-  assert.deepEqual(leads.map(node => node.querySelector('svg')?.dataset.icon), ['Clock', 'Calendar', 'CalendarTime']);
+  assert.deepEqual(leads.map(node => node.querySelector('svg')?.dataset.icon), ['Clock', 'Calendar', 'CalendarCog']);
   assert.equal(leads[1].querySelector('small').textContent, '9:00');
   for (const node of leads) assert.equal(node.closest('button'), null, 'row icons sit outside the buttons');
   assert.deepEqual([...dialog.querySelectorAll('.sf-snooze-choice')].map(node => node.querySelector('svg')), [null, null, null, null, null, null], 'choices carry no icon of their own');
@@ -678,31 +678,55 @@ test('snooze rows lead with their icon outside the buttons, the preset time unde
   assert.equal(info.querySelector('.sf-unsnooze svg')?.dataset.icon, 'AlarmOff');
 });
 
-test('snooze choices: +1h/+2h/+4h, then Tomorrow, Monday and Next week with their dates; Monday persists next Monday at 09:00 without a toast or opening a session', async () => {
-  await mount();
-  const presets = flow.snoozePresets(), wake = presets.days[1].wake_at;
-  await click(row('design').querySelector('[aria-label="Snooze session"]'));
-  const choices = [...$('[role=dialog]').querySelectorAll('.sf-snooze-choice')];
-  assert.deepEqual(choices.map(node => node.getAttribute('aria-label')), ['In 1 hour', 'In 2 hours', 'In 4 hours', 'Tomorrow at 9:00', 'Monday at 9:00', 'Next week at 9:00']);
-  assert.deepEqual(choices.slice(0, 3).map(node => node.querySelector('.sf-snooze-dur').textContent), ['+1h', '+2h', '+4h']);
-  // The hour buttons hold their wake time for the hover reveal, hidden from assistive technology; the description reads it out, like the day buttons'.
-  const wakeAt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-  assert.deepEqual(choices.slice(0, 3).map(node => node.querySelector('.sf-snooze-at').textContent), presets.relative.map(preset => wakeAt.format(new Date(preset.wake_at * 1000))), 'the time alone, without a weekday even on another day');
-  assert.ok(choices.slice(0, 3).every(node => !/[AP]M/i.test(node.querySelector('.sf-snooze-at').textContent)), 'the revealed time uses the 24-hour clock, which fits beside +Nh');
-  assert.deepEqual(choices.slice(0, 3).map(node => node.querySelector('.sf-snooze-at').getAttribute('aria-hidden')), ['true', 'true', 'true']);
-  assert.ok(choices.every(node => /^Wakes /.test(node.getAttribute('aria-description'))));
-  assert.ok(choices.every(node => !node.dataset.sfTip && !node.title && !node.closest('[data-sf-tip]')), 'snooze choices carry no tooltip');
-  assert.equal($('[role=dialog] .sf-snooze-head .sf-menu-heading').textContent, row('design').querySelector('.sf-row-title').textContent, 'the title uses the session menu heading');
-  assert.equal(!!$('[role=dialog] .sf-menu-title'), false);
-  const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'short' }), day = { format: date => `${weekday.format(date)} ${date.getDate()}` };
-  assert.deepEqual(choices.slice(3).map(node => [node.querySelector('.sf-snooze-day-name').textContent, node.querySelector('.sf-snooze-day-date').textContent]),
-    presets.days.map(preset => [preset.label, day.format(preset.date)]));
-  await click(button('Monday at 9:00'));
-  assert.equal(mock.control.metadata.sessions.design.wake_at, wake);
-  assert.equal(row('design').closest('section'), shelf('Snoozed'));
-  assert.ok(button('Unsnooze'), 'the menu stays open with the new snooze'); assert.equal($('.sf-undo') === null, true);
-  assert.equal(button('Undo'), undefined); assert.equal(button('Dismiss undo'), undefined);
-  assert.equal(mock.calls.some(call => call[0] === 'open'), false);
+test('snooze choices: +1h/+2h/+4h, then +1 day, Monday and +1 week, each over its wake time or date; Monday persists next Monday at 09:00 without a toast or opening a session', async () => {
+  // A Friday afternoon, so the three day choices are distinct whatever the real weekday is.
+  const realNow = Date.now, now = new Date('2026-11-13T14:32:00').getTime(); Date.now = () => now;
+  try {
+    await mount();
+    const presets = flow.snoozePresets(now), wake = presets.days[1].wake_at;
+    await click(row('design').querySelector('[aria-label="Snooze session"]'));
+    const choices = [...$('[role=dialog]').querySelectorAll('.sf-snooze-choice')];
+    assert.deepEqual(choices.map(node => node.getAttribute('aria-label')), ['In 1 hour', 'In 2 hours', 'In 4 hours', 'Tomorrow at 9:00', 'Monday at 9:00', 'In 1 week at 9:00']);
+    // Two visible lines per button: the hour buttons show their wake time alone, on the 24-hour clock, the day buttons their date.
+    const wakeAt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'short' }), day = date => `${weekday.format(date)} ${date.getDate()}`;
+    assert.deepEqual(choices.map(node => [node.querySelector('.sf-snooze-label').textContent, node.querySelector('.sf-snooze-detail').textContent]), [
+      ...presets.relative.map(preset => [preset.label, wakeAt.format(new Date(preset.wake_at * 1000))]),
+      ['+1 day', day(new Date('2026-11-14T09:00:00'))], ['Monday', day(new Date('2026-11-16T09:00:00'))], ['+1 week', day(new Date('2026-11-20T09:00:00'))]]);
+    assert.ok(choices.every(node => node.querySelector('.sf-snooze-detail').getAttribute('aria-hidden') === null), 'the second line is plain visible text');
+    assert.ok(choices.every(node => /^Wakes /.test(node.getAttribute('aria-description'))));
+    assert.ok(choices.every(node => !node.dataset.sfTip && !node.title && !node.closest('[data-sf-tip]')), 'snooze choices carry no tooltip');
+    assert.ok(choices.every(node => !node.classList.contains('sf-snooze-span')), 'no merged button on a Friday');
+    assert.equal($('[role=dialog] .sf-snooze-head .sf-menu-heading').textContent, row('design').querySelector('.sf-row-title').textContent, 'the title uses the session menu heading');
+    assert.equal(!!$('[role=dialog] .sf-menu-title'), false);
+    await click(button('Monday at 9:00'));
+    assert.equal(mock.control.metadata.sessions.design.wake_at, wake);
+    assert.equal(row('design').closest('section'), shelf('Snoozed'));
+    assert.ok(button('Unsnooze'), 'the menu stays open with the new snooze'); assert.equal($('.sf-undo') === null, true);
+    assert.equal(button('Undo'), undefined); assert.equal(button('Dismiss undo'), undefined);
+    assert.equal(mock.calls.some(call => call[0] === 'open'), false);
+  } finally { Date.now = realNow; }
+});
+
+for (const [when, labels, names, merged] of [
+  ['2026-11-15T14:32:00', ['+1 day = Monday', '+1 week'], ['Tomorrow, Monday at 9:00', 'In 1 week at 9:00'], 0],
+  ['2026-11-16T14:32:00', ['+1 day', 'Monday = +1 week'], ['Tomorrow at 9:00', 'Monday, in 1 week at 9:00'], 1]
+]) test(`snooze day choices merge Monday with the choice it equals on ${when.slice(0, 10)}, into one button over two columns showing the date once`, async () => {
+  const realNow = Date.now, now = new Date(when).getTime(); Date.now = () => now;
+  try {
+    await mount();
+    const presets = flow.snoozePresets(now);
+    await click(row('design').querySelector('[aria-label="Snooze session"]'));
+    const days = [...$('[role=dialog]').querySelectorAll('.sf-snooze-day')];
+    assert.deepEqual(days.map(node => node.querySelector('.sf-snooze-label').textContent), labels);
+    assert.deepEqual(days.map(node => node.getAttribute('aria-label')), names);
+    assert.deepEqual(days.map(node => node.classList.contains('sf-snooze-span')), labels.map((_, index) => index === merged));
+    assert.equal(days[merged].querySelectorAll('.sf-snooze-detail').length, 1, 'the merged button shows its date once');
+    assert.ok(/^Mon /.test(days[merged].querySelector('.sf-snooze-detail').textContent) || !/^en/.test(Intl.DateTimeFormat().resolvedOptions().locale));
+    await click(days[merged]);
+    assert.equal(mock.control.metadata.sessions.design.wake_at, presets.days[merged].wake_at);
+    assert.equal(new Date(presets.days[merged].wake_at * 1000).getDay(), 1);
+  } finally { Date.now = realNow; }
 });
 
 test('only the card that last opened a menu mounts a popover', async () => {
