@@ -758,7 +758,8 @@ export function createController(ctx, client = queryClient, env = { capture: cap
     const home = { id: '__no_project__', name: 'Home', path: null, isNoProject: true };
     const projects = value.projects.filter(p => p.id !== home.id && !p.isNoProject).flatMap(p => {
       const paths = [...new Set([p.path, ...(p.repos || []).map(repo => repo.path)].filter(path => typeof path === 'string' && path))];
-      return paths.map(path => ({ id: `${p.id}:${path}`, projectId: p.id, name: p.label || p.name || p.id, path, icon: p.icon || null, color: p.color || null, isNoProject: false }));
+      return paths.map(path => ({ id: `${p.id}:${path}`, projectId: p.id, name: p.label || p.name || p.id, path, icon: p.icon || null, color: p.color || null, isNoProject: false,
+        sessionCount: Number.isInteger(p.sessionCount) ? p.sessionCount : null }));
     });
     return { projects: [home, ...projects] };
   }
@@ -1377,7 +1378,10 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       check(scope); refresh(scope, { queryKey: [...scopeKey(scope), 'sessions'] });
     },
     async projects(scope) {
-      return projectsFor(scope);
+      // The tree carries no creation time; the catalog has it for created projects. Without the catalog the pickers only lose their New labels.
+      const [tree, catalog] = await Promise.all([projectsFor(scope), activeRequest(scope, 'projects.list', {}).catch(() => null)]);
+      const created = new Map((Array.isArray(catalog?.projects) ? catalog.projects : []).filter(p => Number.isFinite(p?.created_at)).map(p => [p.id, p.created_at]));
+      return { projects: tree.projects.map(choice => created.has(choice.projectId) ? { ...choice, createdAt: created.get(choice.projectId) } : choice) };
     },
 
     async projectHome(scope) {
@@ -1515,6 +1519,8 @@ const CSS = `
 /* The snooze menu's title line keeps the session menu's 24px height, set there by its buttons. */.sf-menu .sf-snooze-head{min-height:24px}
 .sf-project-choice{display:flex;align-items:center;gap:7px;min-width:0}.sf-project-choice[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}.sf-project-picker .sf-project-choice[aria-pressed=true]{background:var(--sf-active-fill);color:var(--ui-text-primary)}
 .sf-project-picker{box-sizing:border-box;width:min(440px,calc(100vw - 18px));min-width:0;max-width:none;max-height:min(720px,calc(100dvh - 24px),calc(var(--radix-popover-content-available-height,100dvh) - 2px));overflow:hidden}.sf-project-picker>strong,.sf-project-picker>input{flex-shrink:0}.sf-project-picker>input{box-sizing:border-box;min-width:0}.sf-menu.sf-project-picker>.sf-project-options{gap:0;overflow-y:auto;overscroll-behavior:contain;min-height:0}.sf-project-picker .sf-project-choice{box-sizing:border-box;flex-shrink:0;width:100%;height:24px;min-height:24px;padding:4px 8px;font-size:12px;line-height:16px;gap:8px;border:0}.sf-project-picker .sf-project-icon{width:14px;height:14px}.sf-project-details{display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left}.sf-project-details>.sf-project-name,.sf-project-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.sf-project-details>.sf-project-name{max-width:55%}.sf-project-path{flex:1;margin-left:auto;text-align:right;font-size:11px;font-weight:400;line-height:16px;color:var(--ui-text-tertiary)}
+/* A project created in the last day with no session yet. The negative margin halves the details gap so the label reads as part of the name. */
+.sf-project-new{flex-shrink:0;margin-left:-6px;padding:0 5px;border-radius:3px;font-size:10px;font-weight:600;line-height:14px;letter-spacing:.02em;color:var(--ui-accent);background:color-mix(in srgb,var(--ui-accent) 18%,transparent)}
 .sf-project-group{display:flex;flex-direction:column;gap:0;flex-shrink:0}.sf-project-picker .sf-project-folder{padding-left:30px}.sf-project-folder .sf-project-path{text-align:left;margin-left:0}.sf-project-heading .sf-project-name{max-width:100%}.sf-project-heading[aria-disabled=true]{opacity:1;cursor:default}
 .sf-menu .sf-menu-action{display:flex;align-items:center;gap:8px}.sf-menu-icon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex-shrink:0}.sf-menu-icon svg{width:14px;height:14px}.sf-menu button.sf-menu-action[data-destructive=true]{color:var(--ui-red)}
 .sf-menu-label{display:flex;align-items:center;flex:1;min-width:0}
@@ -2970,6 +2976,9 @@ function filterProjectGroups(prepared, query) {
 export function projectChoiceGroups(entries, query = '', home) {
   return filterProjectGroups(prepareProjectGroups(entries, home), query);
 }
+const NEW_PROJECT_MS = 24 * 3600 * 1000;
+// Created on the server within the last day and holding no session with messages yet: the native tree counts only those, so clicking the project without sending anything keeps the label. Projects discovered from repositories have no creation time and are never new.
+export const isNewProject = (choice, now = Date.now()) => Number.isFinite(choice?.createdAt) && choice.sessionCount === 0 && now - choice.createdAt * 1000 < NEW_PROJECT_MS;
 export function ProjectPicker({ controller, scope, close, mode = 'new', selected = '*', filterProject }) {
   const [query, setQuery] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const alive = useRef(true), creationKeys = useRef(new Map());
@@ -3013,16 +3022,19 @@ export function ProjectPicker({ controller, scope, close, mode = 'new', selected
 }
 function ProjectChoice({ choice, selected, scope, controller, filterProject, busy, label, displayPath, onSelect, heading = false, pathOnly = false }) {
   const [open, setOpen] = useState(false);
+  const fresh = !pathOnly && isNewProject(choice);
   const openMenu = event => { event.preventDefault(); event.stopPropagation(); if (busy) return; controller.check(scope); setOpen(true); };
   return h(sdk.Popover, { open, onOpenChange: setOpen },
     // Declare ownership before Hermes's window-capture fallback intercepts the gesture.
     h(sdk.ContextMenu, null, h(sdk.ContextMenuTrigger, { asChild: true },
-      h(sdk.PopoverTrigger, { asChild: true }, h(sdk.Button, { type: 'button', variant: 'ghost', className: `sf-project-choice${heading ? ' sf-project-heading' : pathOnly ? ' sf-project-folder' : ''}`, disabled: busy, 'aria-disabled': heading || undefined, 'aria-label': label, 'aria-pressed': heading ? undefined : selected, ...(heading ? null : sharedTip(choice.path)),
+      h(sdk.PopoverTrigger, { asChild: true }, h(sdk.Button, { type: 'button', variant: 'ghost', className: `sf-project-choice${heading ? ' sf-project-heading' : pathOnly ? ' sf-project-folder' : ''}`, disabled: busy, 'aria-disabled': heading || undefined, 'aria-label': label, 'aria-description': fresh ? 'New project' : undefined, 'aria-pressed': heading ? undefined : selected, ...(heading ? null : sharedTip(choice.path)),
       // Prevent the trigger's normal toggle: left click selects; right click edits.
       onClick: event => { event.preventDefault(); if (!heading) onSelect(); }, onContextMenu: openMenu,
       onKeyDown: event => { if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') openMenu(event); } },
       !pathOnly ? h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)) : null,
-      h('span', { className: 'sf-project-details' }, !pathOnly ? h('span', { className: 'sf-project-name' }, choice.name) : null, !heading ? h('span', { className: 'sf-project-path' }, displayPath) : null))))),
+      h('span', { className: 'sf-project-details' }, !pathOnly ? h('span', { className: 'sf-project-name' }, choice.name) : null,
+        fresh ? h('span', { className: 'sf-project-new', 'aria-hidden': true }, 'New') : null,
+        !heading ? h('span', { className: 'sf-project-path' }, displayPath) : null))))),
     h(sdk.PopoverContent, { side: 'right', align: 'start', className: 'sf-popover', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
       onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject })));
 }

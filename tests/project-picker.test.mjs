@@ -4,7 +4,7 @@ import { JSDOM } from 'jsdom';
 import React, { act } from 'react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import * as mock from './sdk.mock.mjs';
-import { createController, captureScope, scopeKey, ProjectPicker, projectDisplayPath, projectChoiceGroups } from '../desktop/plugin.js';
+import { createController, captureScope, scopeKey, ProjectPicker, projectDisplayPath, projectChoiceGroups, isNewProject } from '../desktop/plugin.js';
 
 const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', { url: 'http://localhost' });
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, MouseEvent: dom.window.MouseEvent, KeyboardEvent: dom.window.KeyboardEvent, IS_REACT_ACT_ENVIRONMENT: true });
@@ -158,4 +158,54 @@ test('home lookup is routed, profile-qualified and rejects source/profile drift'
 	mock.switchScope(); const count = mock.calls.length;
 	await assert.rejects(controller.projectHome(scope), /Source\/profile changed/);
 	assert.equal(mock.calls.length, count);
+});
+
+test('a project is new only while created less than a day ago and without a session holding messages', () => {
+	const now = Date.UTC(2026, 10, 14, 12), hour = 3600;
+	const created = hoursAgo => now / 1000 - hoursAgo * hour;
+	assert.equal(isNewProject({ createdAt: created(1), sessionCount: 0 }, now), true);
+	assert.equal(isNewProject({ createdAt: created(23.9), sessionCount: 0 }, now), true);
+	assert.equal(isNewProject({ createdAt: created(24), sessionCount: 0 }, now), false, 'the label lasts 24 hours');
+	assert.equal(isNewProject({ createdAt: created(1), sessionCount: 1 }, now), false, 'a session with messages ends it early');
+	assert.equal(isNewProject({ createdAt: created(1), sessionCount: null }, now), false, 'an unknown count is not proof of an unused project');
+	assert.equal(isNewProject({ sessionCount: 0 }, now), false, 'a discovered repository has no creation time');
+});
+
+const freshFixture = () => {
+	mock.control.home = '/home/fixture';
+	const now = Math.floor(Date.now() / 1000);
+	mock.control.projects = [
+		{ id: 'p_fresh', label: 'Fresh', path: '/home/fixture/fresh', sessionCount: 0 },
+		{ id: 'p_used', label: 'Used', path: '/home/fixture/used', sessionCount: 1 },
+		{ id: 'p_old', label: 'Old', path: '/home/fixture/old', sessionCount: 0 },
+		{ id: 'p_multi', label: 'Multi', path: '/home/fixture/main', repos: [{ path: '/home/fixture/main' }, { path: '/home/fixture/second' }], sessionCount: 0 },
+		{ id: 'auto:/home/fixture/cloned', label: 'cloned', path: '/home/fixture/cloned', isAuto: true, sessionCount: 0 }
+	];
+	mock.control.projectCatalog = [
+		{ id: 'p_fresh', name: 'Fresh', created_at: now - 600, folders: [{ path: '/home/fixture/fresh' }], archived: false },
+		{ id: 'p_used', name: 'Used', created_at: now - 600, folders: [{ path: '/home/fixture/used' }], archived: false },
+		{ id: 'p_old', name: 'Old', created_at: now - 2 * 86400, folders: [{ path: '/home/fixture/old' }], archived: false },
+		{ id: 'p_multi', name: 'Multi', created_at: now - 600, folders: [{ path: '/home/fixture/main' }, { path: '/home/fixture/second' }], archived: false }
+	];
+};
+const labelled = () => [...document.querySelectorAll('.sf-project-new')].map(node => node.closest('button').querySelector('.sf-project-name').textContent);
+
+for (const mode of ['filter', 'new']) {
+	test(`${mode} picker labels new projects in place, once per project`, async () => {
+		freshFixture(); await mount(mode);
+		assert.deepEqual(labelled(), ['Fresh', 'Multi'], 'used, day-old and discovered projects stay unlabelled; a multi-folder project is labelled on its heading only');
+		const verb = mode === 'filter' ? 'Filter by' : 'New session in';
+		assert.equal(button(`${verb} Fresh`).getAttribute('aria-description'), 'New project');
+		assert.equal(button(`${verb} Used`).getAttribute('aria-description'), null);
+		// Alphabetical order is unchanged: the label does not move the project.
+		assert.deepEqual([...document.querySelectorAll('.sf-project-name')].map(node => node.textContent).filter(name => name !== 'All projects'), ['cloned', 'Fresh', 'Multi', 'Old', 'Used']);
+		await input('Fresh'); assert.deepEqual(labelled(), ['Fresh']);
+	});
+}
+
+test('a failed catalog read keeps the picker working without labels', async () => {
+	freshFixture(); mock.control.projectListError = true;
+	await mount('new');
+	assert.ok(button('New session in Fresh'));
+	assert.deepEqual(labelled(), []);
 });

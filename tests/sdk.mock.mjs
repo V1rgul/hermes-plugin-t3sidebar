@@ -111,7 +111,7 @@ export const host = {
     }
     if (method === 'projects.tree') { if (control.projectError) throw new Error('fixture projects unavailable'); return { projects: clone(control.projects) }; }
     if (method === 'projects.list') {
-      if (control.projectError) throw new Error('fixture projects unavailable');
+      if (control.projectError || control.projectListError) throw new Error('fixture projects unavailable');
       return { projects: clone(control.projectCatalog) };
     }
     if (method === 'projects.get') {
