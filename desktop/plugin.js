@@ -1640,6 +1640,8 @@ const BUNDLED_ICONS = {
   TicketLocked: ['M15 5l0 2', 'M11 19h-6a2 2 0 0 1 -2 -2v-3a2 2 0 0 0 0 -4v-3a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v2', 'M14 16h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1', 'M15 16v-2a2.5 2.5 0 0 1 5 0v2'],
   // Tabler v3.44.0 calendar: the snooze menu's day row, beside its preset time.
   Calendar: ['M4 7a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12z', 'M16 3v4', 'M8 3v4', 'M4 11h16'],
+  // Tabler v3.44.0 pinned-off (MIT): the SDK exports Pin but not its crossed-out counterpart.
+  PinOff: ['M3 3l18 18', 'M15 4.5l-3.249 3.249m-2.57 1.433l-2.181 .818l-1.5 1.5l7 7l1.5 -1.5l.82 -2.186m1.43 -2.563l3.25 -3.251', 'M9 15l-4.5 4.5', 'M14.5 4l5.5 5.5'],
   CalendarCog: ['M12 21h-6a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v5', 'M16 3v4', 'M8 3v4', 'M4 11h16', 'M17.001 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M19.001 15.5v1.5', 'M19.001 21v1.5', 'M22.032 17.25l-1.299 .75', 'M17.27 20l-1.3 .75', 'M15.97 17.25l1.3 .75', 'M20.733 20l1.3 .75'],
   FolderCog: ['M12.5 19h-7.5a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v3', 'M17.001 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M19.001 15.5v1.5', 'M19.001 21v1.5', 'M22.032 17.25l-1.299 .75', 'M17.27 20l-1.3 .75', 'M15.97 17.25l1.3 .75', 'M20.733 20l1.3 .75'],
   FolderSymlink: ['M3 21v-4a3 3 0 0 1 3 -3h5', 'M8 17l3 -3l-3 -3', 'M3 11v-5a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8'],
@@ -2395,7 +2397,7 @@ function SessionActions({ row, scope, controller, filterProject, deleteSession, 
     h('div', { className: 'sf-menu-separator', role: 'separator' }),
     // Pin, Delete and Move act on this session; Project, past the divider, opens its project's own menu.
     h('div', { className: 'sf-menu-toolbar', role: 'toolbar', 'aria-label': 'Session actions' },
-      row.archived !== true ? h(MenuIcon, { label: row.meta.pinned ? 'Unpin' : 'Pin', name: 'Pin', glyph: '♧', disabled: disabled || busy, onClick: () => run({ action: row.meta.pinned ? 'unpin' : 'pin' }) }) : null,
+      row.archived !== true ? h(MenuIcon, { label: row.meta.pinned ? 'Unpin' : 'Pin', name: row.meta.pinned ? 'PinOff' : 'Pin', glyph: '♧', disabled: disabled || busy, onClick: () => run({ action: row.meta.pinned ? 'unpin' : 'pin' }) }) : null,
       h(MenuIcon, { label: 'Delete session', name: 'Trash2', glyph: '🗑', destructive: true, disabled: disabled || busy || !idle || typeof sdk.ConfirmDialog !== 'function', reason: !idle ? notIdle : typeof sdk.ConfirmDialog !== 'function' ? 'Deletion is unavailable in this Desktop version.' : null,
         onClick: () => { controller.check(scope); deleteSession(row); close(); } }),
       submenu(moveOpen, setMoveOpen, 'Move to project', 'FolderSymlink', { glyph: '↪', disabled: disabled || busy || !idle, reason: idle ? null : notIdle }, () => h(MoveProjectActions, { row, scope, controller })),

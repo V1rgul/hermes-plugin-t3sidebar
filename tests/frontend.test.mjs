@@ -768,13 +768,16 @@ test('menu triggers and their owning card retain open state until dismissal or s
   assert.equal(trigger().getAttribute('aria-expanded'), 'false'); assert.equal(row('design').dataset.menuOpen, 'false');
   await click(button('Actions for Sidebar layout'));
   assert.equal(row('design').dataset.menuOpen, 'true');
+  assert.equal(button('Pin').querySelector('svg').dataset.icon, 'Pin');
   // Actions keep the menu open, even when the card moves to another shelf, and show their reverse.
   await click(button('Pin'));
   assert.equal(row('design').closest('section'), shelf('Pinned'));
   assert.equal(row('design').dataset.menuOpen, 'true'); assert.ok(button('Unpin'));
+  assert.equal(button('Unpin').querySelector('svg[aria-hidden=true]').dataset.icon, 'PinOff');
   await click(button('Unpin'));
   assert.equal(row('design').closest('section'), shelf('Ready'));
   assert.equal(row('design').dataset.menuOpen, 'true'); assert.ok(button('Pin'));
+  assert.equal(button('Pin').querySelector('svg').dataset.icon, 'Pin');
   await dismiss();
   assert.equal(row('design').dataset.menuOpen, 'false');
 });
