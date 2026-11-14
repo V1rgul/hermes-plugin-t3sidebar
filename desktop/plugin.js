@@ -1425,7 +1425,7 @@ const CSS = `
 @property --sf-floor-cards{syntax:'<integer>';inherits:false;initial-value:0}
 /* Card geometry: --sf-card-content (two text lines), --sf-card-padding and --sf-card-margin (vertical, per side). Defaults are fallbacks rather than declarations, so :root, a theme or any ancestor can set them; the stride used by windowing and shelf minimums derives from them. */
 .sf{--sf-card-stride:calc(var(--sf-card-content,42px) + 2 * var(--sf-card-padding,6px) + 2 * var(--sf-card-margin,1px))}
-.sf{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;min-width:220px;font:12px/1.4 var(--font-sans,inherit);color:var(--ui-text-primary)}
+.sf{position:relative;isolation:isolate;display:flex;flex-direction:column;height:100%;min-height:0;min-width:220px;font:12px/1.4 var(--font-sans,inherit);color:var(--ui-text-primary)}
 .sf *{box-sizing:border-box}.sf button,.sf input,.sf select{font:inherit}.sf button{cursor:pointer}.sf button:disabled{cursor:default;opacity:.4}
 .sf button:focus-visible,.sf input:focus-visible,.sf select:focus-visible{outline:2px solid var(--ui-accent);outline-offset:-2px}
 .sf-header{padding:6px 12px;display:flex;align-items:center;gap:5px;height:40px;flex-shrink:0}.sf-icon{display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;width:27px;height:27px;padding:4px;border:0;border-radius:4px;color:var(--ui-text-tertiary);background:transparent}
@@ -1477,7 +1477,8 @@ const CSS = `
 /* Metadata motion (useMetaMotion): animated items keep their content on their right edge, so a width narrower than the content during a slide spills to the left, never past the card's right edge where a scroll container would grow. A rolling number's own text turns transparent under the overlay drawing the roll; the leaving characters and the time slot's previous content are laid over the slot's right edge. */
 .sf-draft-mark,.sf-time,.sf-row [data-roll]{justify-content:flex-end}.sf-time,.sf-row [data-roll]{position:relative}.sf-row [data-roll]{display:inline-flex}
 .sf-row [data-rolling]{-webkit-text-fill-color:transparent}
-.sf-roll-fx{position:absolute;top:0;right:0;display:flex;white-space:pre;pointer-events:none;-webkit-text-fill-color:currentColor}.sf-roll-keep,.sf-roll-in,.sf-roll-out,.sf-roll-hold{display:inline-block;white-space:pre}
+/* Transform animations (the rolling characters, the Limits disclosure chevron) run on the compositor, which cannot tell where the moving part will be: Chromium lifts everything painted after it that might overlap into a separate transparent layer while it moves, so that content loses its subpixel text and icon rendering. Beside a ticking Working time the cards below flickered once a second. These parts are positioned with a z-index so they paint last and leave nothing to lift; the plugin roots isolate those z-indexes, so they never rise above Desktop's menus and tooltips. */
+.sf-roll-fx{position:absolute;z-index:1;top:0;right:0;display:flex;white-space:pre;pointer-events:none;-webkit-text-fill-color:currentColor}.sf-roll-keep,.sf-roll-in,.sf-roll-out,.sf-roll-hold{display:inline-block;white-space:pre}
 .sf-roll-was{position:absolute;top:0;right:0;display:flex}.sf-roll-hold{visibility:hidden}
 .sf-time>.sf-meta-ghost{position:absolute;top:0;right:0;bottom:0;display:inline-flex;align-items:center}.sf-time>.sf-meta-ghost.sf-age{color:var(--ui-text-secondary)}
 /* Recede only the neutral title so status labels, colored icons and metadata stay readable. */
@@ -5093,7 +5094,7 @@ function SamplerInfo({ sampler, now }) {
 }
 // The page renders in the workspace pane, outside the sidebar stylesheet, so it carries its own theme-variable styles.
 const USAGE_CSS = `
-.su{position:relative;box-sizing:border-box;display:flex;flex-direction:column;height:100%;overflow:hidden;font:12px/1.45 var(--font-sans,inherit);color:var(--ui-text-primary)}
+.su{position:relative;isolation:isolate;box-sizing:border-box;display:flex;flex-direction:column;height:100%;overflow:hidden;font:12px/1.45 var(--font-sans,inherit);color:var(--ui-text-primary)}
 /* The top bar sits outside the scrolling pane. Both reserve the same scrollbar gutter, so the centred bar and sections share their edges whether or not the page overflows. */
 .su-top{flex:none;padding:14px 24px 0;overflow:hidden;scrollbar-gutter:stable}
 .su-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:16px 24px 28px;scrollbar-gutter:stable}
@@ -5165,7 +5166,7 @@ ${SEGMENTED_FALLBACK_CSS}
 .su-accounts-group[data-open=true]>.su-disclosure{border-radius:7px 7px 0 0}
 .su-disclosure-count{font-weight:400;color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums}
 .su-disclosure-names{flex:1 1 0;min-width:0;margin-left:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400;color:var(--ui-text-tertiary);text-align:right}
-.su-disclosure-chevron{display:inline-flex;transition:transform .12s ease}.su-disclosure-chevron svg{width:14px;height:14px}.su-disclosure[aria-expanded=true] .su-disclosure-chevron{transform:rotate(90deg)}
+/* Its rotation paints last, like the sidebar's rolling characters (.sf-roll-fx). */.su-disclosure-chevron{position:relative;z-index:1;display:inline-flex;transition:transform .12s ease}.su-disclosure-chevron svg{width:14px;height:14px}.su-disclosure[aria-expanded=true] .su-disclosure-chevron{transform:rotate(90deg)}
 @media(prefers-reduced-motion:reduce){.su-disclosure-chevron{transition:none}}
 .su-footnotes{display:flex;flex-direction:column;gap:4px}
 .su-headline{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}.su-pool{font-size:24px;font-weight:600;color:var(--su-color);font-variant-numeric:tabular-nums}
