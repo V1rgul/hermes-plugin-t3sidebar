@@ -3,9 +3,11 @@
 from contextlib import closing
 import ast
 import asyncio
+import base64
 import contextvars
 from datetime import UTC, datetime
 import importlib.util
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -485,6 +487,8 @@ class CollectorTests(unittest.TestCase):
 			("agent.account_usage", "_codex_backend_urls"),
 			("agent.account_usage", "_codex_headers"),
 			("agent.account_usage", "fetch_account_usage"),
+			("tools.xai_http", "hermes_xai_user_agent"),
+			("hermes_cli.auth_xai", "_xai_access_token_is_expiring"),
 		})
 		imported = {
 			(node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
@@ -506,12 +510,13 @@ class CollectorTests(unittest.TestCase):
 			"resolve_codex_runtime_credentials", "_persist", "persist_pool_entries",
 			"_save_auth_store", "redeem_codex_reset_credit", "remember_account_usage", "_claim_refresh",
 			"cached_account_usage", "refresh_account_usage_entries_async", "_identity_id_for", "resolve_anthropic_token",
+			"resolve_xai_oauth_runtime_credentials", "_refresh_xai_oauth_tokens", "refresh_xai_oauth_pure", "_save_xai_oauth_tokens",
 		}
 		used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
 		used |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
 		used |= {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
 		self.assertEqual(used & forbidden, set())
-		self.assertEqual(limits.VETTED_PROVIDERS, ("openai-codex", "anthropic"))
+		self.assertEqual(limits.VETTED_PROVIDERS, ("openai-codex", "anthropic", "xai-oauth"))
 
 
 class SamplerTests(unittest.TestCase):
@@ -825,20 +830,26 @@ NO_CLAUDE = lambda clock: None
 
 # The real read, kept before NoNetworkTestCase swaps it out of the module.
 REAL_FETCH_ANTHROPIC_USAGE = limits._fetch_anthropic_usage
+REAL_FETCH_XAI_USAGE = limits._fetch_xai_usage
+REAL_FETCH_XAI_PLAN = limits._fetch_xai_plan
 
 
 class NoNetworkTestCase(unittest.TestCase):
-	"""Anthropic's scoped-limit GET defaults to the real endpoint; record any default call instead of sending it."""
+	"""Anthropic's and xAI's own GETs default to the real endpoints; record any default call instead of sending it."""
 
 	def setUp(self):
 		self.network = []
-		patcher = patch.object(limits, "_fetch_anthropic_usage", side_effect=lambda token: self.network.append(token))
-		patcher.start()
-		self.addCleanup(patcher.stop)
+		for name in ("_fetch_anthropic_usage", "_fetch_xai_usage", "_fetch_xai_plan"):
+			patcher = patch.object(limits, name, side_effect=lambda token, *args: self.network.append(token))
+			patcher.start()
+			self.addCleanup(patcher.stop)
 		# The plan is cached per process; each test starts as a freshly started Hermes.
 		plans = patch.dict(limits._PLAN_READ, clear=True)
 		plans.start()
 		self.addCleanup(plans.stop)
+		inflight = patch.object(limits, "_PLAN_INFLIGHT", set())
+		inflight.start()
+		self.addCleanup(inflight.stop)
 
 
 TOKEN = "sk-ant-oat01-secret"
@@ -1113,6 +1124,178 @@ class ClaudeCodeFallbackTests(NoNetworkTestCase):
 			(Path(temp) / ".credentials.json").write_text(body, encoding="utf-8-sig")
 			with patch.dict(limits.os.environ, {"CLAUDE_CONFIG_DIR": temp}):
 				self.assertEqual(limits._claude_code_login(clock=lambda: 1000.0), {"token": "tok", "expired": False})
+
+
+def xai_jwt(tag):
+	"""An xAI OAuth access token's shape: three base64url segments starting like a JWT header; ``tag`` keeps tokens apart."""
+	payload = base64.urlsafe_b64encode(json.dumps({"sub": tag}).encode()).decode().rstrip("=")
+	return f"eyJhbGciOiJSUzI1NiJ9.{payload}.c2lnbmF0dXJl"
+
+
+XAI_ROUTE = "https://api.x.ai/v1"
+# Shape of a live cli-chat-proxy.grok.com /v1/billing?format=credits body (field names as xAI sends them; values invented).
+XAI_BODY = {"config": {
+	"currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-11-14T07:12:58.017604+00:00", "end": "2026-11-21T07:12:58.017604+00:00"},
+	"creditUsagePercent": 3.0, "onDemandCap": {"val": 0}, "onDemandUsed": {"val": 0},
+	"productUsage": [{"product": "GrokTasks", "usagePercent": 2.0}, {"product": "GrokBuild", "usagePercent": 1.0}],
+	"isUnifiedBillingUser": True, "prepaidBalance": {"val": 0}, "topUpMethod": "TOP_UP_METHOD_SAVED_PAYMENT_METHOD",
+	"billingPeriodStart": "2026-11-14T07:12:58.017604+00:00", "billingPeriodEnd": "2026-11-21T07:12:58.017604+00:00"}}
+
+
+def collect_xai(pool, body=lambda token: XAI_BODY, plan=lambda token: "X Premium", clock=time.time, expired=(), hermes_calls=None, **overrides):
+	"""One collection with xAI's billing read answered by ``body``; each entry's route is its own base_url, as Hermes resolves it."""
+	symbols = CollectorTests.symbols(CollectorTests(), pool, hermes_calls)
+	symbols.update({
+		"_pool_entry_route_base_url": lambda provider, entry: entry.runtime_base_url, "_pool_entry_host": lambda provider, entry: entry.runtime_base_url,
+		"hermes_xai_user_agent": lambda: "Hermes-Agent/9.9.9", "_xai_access_token_is_expiring": lambda token, skew_seconds=0: token in expired, **overrides})
+	with patch.object(limits, "_native_symbols", return_value=symbols):
+		return limits.collect_native(join_timeout=1, clock=clock, claude_login=NO_CLAUDE, xai_fetcher=body, xai_profile=plan)
+
+
+class XaiLimitsTests(NoNetworkTestCase):
+	def test_the_credits_body_is_one_account_wide_pool_window(self):
+		snapshot = limits.xai_snapshot(XAI_BODY, NOW)
+		# A weekly period joins the page's weekly window; the per-product shares of the same pool add no window.
+		self.assertEqual(snapshot, {"fetched_at": NOW, "plan": None, "banked_resets": None, "banked_applicable": None, "windows": [
+			window("weekly", 3.0, dt_epoch("2026-11-21T07:12:58.017604+00:00"), "Weekly pool", 604800)]})
+		# Another period is keyed by its duration, read from the billing period when the current one is missing.
+		monthly = {"config": {"creditUsagePercent": 50, "billingPeriodStart": "2026-11-01T00:00:00+00:00", "billingPeriodEnd": "2026-12-01T00:00:00+00:00"}}
+		self.assertEqual(limits.xai_snapshot(monthly, NOW)["windows"], [window("w2592000", 50.0, dt_epoch("2026-12-01T00:00:00+00:00"), "Usage pool", 2592000)])
+		# No usage value is no window, never a 0 % one; a body that is not a credits body is no snapshot.
+		self.assertEqual(limits.xai_snapshot({"config": {"currentPeriod": XAI_BODY["config"]["currentPeriod"]}}, NOW)["windows"], [])
+		for body in (None, [], {"config": "broken"}, {"monthlyLimit": 0}):
+			self.assertIsNone(limits.xai_snapshot(body, NOW))
+
+	def test_only_an_oauth_token_on_xais_own_route_is_sent_and_only_to_the_billing_read(self):
+		tokens = {name: xai_jwt(name) for name in ("ok", "proxy", "http", "old", "fails", "empty")}
+		pool = {"xai-oauth": [
+			{"id": "x00001", "label": "Grok subscription", "priority": 0, "access_token": tokens["ok"], "base_url": XAI_ROUTE},
+			{"id": "x00002", "priority": 1, "access_token": "xai-apikey0123456789", "base_url": XAI_ROUTE},
+			{"id": "x00003", "priority": 2, "access_token": tokens["proxy"], "base_url": "https://proxy.example.invalid/v1"},
+			{"id": "x00004", "priority": 3, "access_token": tokens["http"], "base_url": "http://api.x.ai/v1"},
+			{"id": "x00005", "priority": 4, "access_token": tokens["old"], "base_url": XAI_ROUTE},
+			{"id": "x00006", "priority": 5, "access_token": tokens["fails"], "base_url": XAI_ROUTE},
+			{"id": "x00007", "priority": 6, "access_token": tokens["empty"], "base_url": XAI_ROUTE},
+		], "openai-codex": [{"id": "7c202b", "priority": 0, "access_token": "tok-b", "base_url": "https://chatgpt.com/backend-api/codex"}]}
+		sent, plans, hermes_calls = [], [], []
+		body = lambda token: sent.append(token) or {tokens["fails"]: None, tokens["empty"]: {"config": {}}}.get(token, XAI_BODY)
+		readings = collect_xai(pool, body, lambda token: plans.append(token) or "X Premium", clock=lambda: NOW, expired={tokens["old"]}, hermes_calls=hermes_calls)
+		by_id = {a["id"]: a for reading in readings for a in reading["accounts"]}
+		# An API key, a token Hermes routes elsewhere and an expired one are never sent; the plan is read only for a successful reading.
+		self.assertEqual(sorted(sent), sorted([tokens["ok"], tokens["fails"], tokens["empty"]]))
+		self.assertEqual(plans, [tokens["ok"]])
+		self.assertEqual({account_id: by_id[account_id]["error"] for account_id in by_id if account_id.startswith("x")},
+			{"x00001": None, "x00002": "no_data", "x00003": "no_data", "x00004": "no_data", "x00005": "token_expired", "x00006": "refresh_failed", "x00007": "no_data"})
+		# Hermes's own fetch still reads Codex only.
+		self.assertEqual([provider for provider, _ in hermes_calls], ["openai-codex"])
+		self.assertEqual(self.network, [])
+		self.assertNotIn("eyJ", repr(readings))
+		self.assertNotIn("xai-apikey", repr(readings))
+		with tempfile.TemporaryDirectory() as temp:
+			path = Path(temp) / "limits.sqlite3"
+			store = limits.LimitsStore(path)
+			store.record(readings, checked_at=NOW)
+			grok = next(p for p in limits.limits_payload(store, hours=1, now=NOW)["providers"] if p["provider"] == "xai-oauth")
+			self.assertNotIn(b"eyJ", path.read_bytes())
+		account = next(a for a in grok["accounts"] if a["id"] == "x00001")
+		self.assertEqual((grok["label"], account["label"], account["plan"]), ("xAI Grok", "Grok subscription", "X Premium"))
+		self.assertEqual([(w["key"], w["remaining_percent"], w["window_seconds"]) for w in account["windows"]], [("weekly", 97.0, 604800)])
+
+	def test_the_plan_is_read_at_the_first_collection_then_hourly(self):
+		token, now, plans = xai_jwt("ok"), [NOW], []
+		pool = {"xai-oauth": [{"id": "x00001", "priority": 0, "access_token": token, "base_url": XAI_ROUTE}]}
+		collect = lambda: collect_xai(pool, plan=lambda token: plans.append(token) or "X Premium", clock=lambda: now[0])
+		collect()
+		now[0] += limits.PLAN_INTERVAL_S - 1
+		(reading,) = collect()
+		self.assertEqual((len(plans), reading["accounts"][0]["snapshot"]["plan"]), (1, "X Premium"))
+		now[0] += 1
+		collect()
+		self.assertEqual(len(plans), 2)
+
+	def test_a_token_that_reaches_its_expiry_margin_mid_collection_is_not_sent(self):
+		# Hermes's expiry rule is asked with the margin right before each request: valid at admission, then expiring before the usage read or before the plan read.
+		pool = {"xai-oauth": [{"id": "x00001", "priority": 0, "access_token": xai_jwt("ok"), "base_url": XAI_ROUTE}]}
+		for valid_checks, error, usage_sent, plan_sent in ((1, "token_expired", 0, 0), (2, None, 1, 0)):
+			with self.subTest(valid_checks=valid_checks):
+				checks, sent, plans = [], [], []
+				expiring = lambda token, skew_seconds=0: checks.append(skew_seconds) or len(checks) > valid_checks
+				(reading,) = collect_xai(pool, lambda token: sent.append(token) or XAI_BODY, lambda token: plans.append(token) or "X Premium", _xai_access_token_is_expiring=expiring)
+				(account,) = reading["accounts"]
+				self.assertEqual((account["error"], len(sent), len(plans)), (error, usage_sent, plan_sent))
+				self.assertTrue(checks and all(skew == limits.XAI_EXPIRY_MARGIN_S for skew in checks))
+				if error is None:
+					self.assertIsNone(account["snapshot"]["plan"])
+
+	def test_a_plan_read_that_hangs_cannot_hold_the_collection_and_is_never_doubled(self):
+		token, now, release, reads = xai_jwt("ok"), [NOW], threading.Event(), []
+		# Registered after the base class's cache restore, so it runs first: the worker is released and joined before the cache it writes is restored.
+		self.addCleanup(lambda: release.set() or [thread.join(5) for thread in threading.enumerate() if thread.name == "t3sidebar-limits-plan"])
+		pool = {"xai-oauth": [{"id": "x00001", "priority": 0, "access_token": token, "base_url": XAI_ROUTE}]}
+		collect_xai(pool, clock=lambda: now[0])
+		now[0] += limits.PLAN_INTERVAL_S
+		hanging = lambda token: reads.append(token) or (release.wait(30) and "SuperGrok")
+		with patch.object(limits, "PLAN_DEADLINE_S", 0.2):
+			began = time.monotonic()
+			(reading,) = collect_xai(pool, plan=hanging, clock=lambda: now[0])
+			self.assertLess(time.monotonic() - began, 5)
+			self.assertEqual((reading["accounts"][0]["error"], reading["accounts"][0]["snapshot"]["plan"]), (None, "X Premium"))
+			# A collection while that read is still pending starts no second one and keeps the last plan.
+			(reading,) = collect_xai(pool, plan=hanging, clock=lambda: now[0])
+			self.assertEqual((len(reads), reading["accounts"][0]["snapshot"]["plan"]), (1, "X Premium"))
+		# Once it finishes, its answer is the plan and the next read waits its hour.
+		release.set()
+		for thread in [thread for thread in threading.enumerate() if thread.name == "t3sidebar-limits-plan"]:
+			thread.join(5)
+		(reading,) = collect_xai(pool, plan=hanging, clock=lambda: now[0])
+		self.assertEqual((len(reads), reading["accounts"][0]["snapshot"]["plan"]), (1, "SuperGrok"))
+
+	def test_the_user_agent_is_hermes_own_at_every_collection(self):
+		# Hermes's xAI identity carries its version: the plugin asks Hermes at each collection, so an updated Hermes and the plugin never send two identities.
+		pool = {"xai-oauth": [{"id": "x00001", "priority": 0, "access_token": xai_jwt("ok"), "base_url": XAI_ROUTE}]}
+		sent = []
+		with patch.object(limits, "_fetch_xai_usage", side_effect=lambda token, user_agent: sent.append(user_agent) or XAI_BODY):
+			for version in ("Hermes-Agent/0.23.1", "Hermes-Agent/0.24.0"):
+				collect_xai(pool, body=None, hermes_xai_user_agent=lambda version=version: version)
+		self.assertEqual(sent, ["Hermes-Agent/0.23.1", "Hermes-Agent/0.24.0"])
+
+	def test_without_hermes_xai_helpers_or_a_sane_identity_nothing_is_sent(self):
+		pool = {"xai-oauth": [{"id": "x00001", "priority": 0, "access_token": xai_jwt("ok"), "base_url": XAI_ROUTE}]}
+		for overrides in ({"hermes_xai_user_agent": None}, {"_xai_access_token_is_expiring": None}, {"hermes_xai_user_agent": lambda: "Hermes\r\nX-Injected: 1"}, {"hermes_xai_user_agent": lambda: ""}):
+			with self.subTest(overrides=sorted(overrides)):
+				sent = []
+				(reading,) = collect_xai(pool, lambda token: sent.append(token) or XAI_BODY, **overrides)
+				self.assertEqual((reading["error"], reading["accounts"], sent), ("unavailable", [], []))
+
+	def test_default_reads_go_only_to_the_grok_billing_surface_named_as_hermes(self):
+		calls, answers = [], []
+
+		class Client:
+			def __init__(self, **kwargs):
+				calls.append(("client", kwargs))
+
+			def __enter__(self):
+				return self
+
+			def __exit__(self, *exc):
+				return False
+
+			def get(self, url, headers):
+				calls.append(("get", url, headers))
+				status, body = answers.pop(0)
+				return SimpleNamespace(status_code=status, json=lambda: body)
+
+		expected = {"Authorization": "Bearer tok", "Accept": "application/json", "x-xai-token-auth": "xai-grok-cli", "User-Agent": "Hermes-Agent/9.9.9"}
+		with patch("httpx.Client", Client):
+			answers[:] = [(200, XAI_BODY), (401, {"error": "expired"}), (200, ["not", "a", "body"])]
+			self.assertEqual([REAL_FETCH_XAI_USAGE("tok", "Hermes-Agent/9.9.9") for _ in range(3)], [XAI_BODY, None, None])
+			gets = [call for call in calls if call[0] == "get"]
+			self.assertEqual({(url, tuple(sorted(headers.items()))) for _, url, headers in gets}, {("https://cli-chat-proxy.grok.com/v1/billing?format=credits", tuple(sorted(expected.items())))})
+			self.assertTrue(all(kwargs["follow_redirects"] is False for kind, kwargs, *_ in calls if kind == "client"))
+			calls.clear()
+			answers[:] = [(200, {"subscription_tier_display": " X Premium "}), (200, {"subscription_tier_display": "me@example.com"}), (200, {"subscription_tier_display": "x" * 65}), (500, {})]
+			self.assertEqual([REAL_FETCH_XAI_PLAN("tok", "Hermes-Agent/9.9.9") for _ in range(4)], ["X Premium", None, None, None])
+			self.assertEqual({url for kind, url, *_ in calls if kind == "get"}, {"https://cli-chat-proxy.grok.com/v1/settings"})
 
 
 def dt_epoch(text):
