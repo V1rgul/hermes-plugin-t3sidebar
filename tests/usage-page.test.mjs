@@ -558,7 +558,7 @@ test('scales, formats and colors are compact and stable per series key', () => {
   assert.deepEqual([...first.entries()].sort(), [...again.entries()].sort());
   assert.equal(new Set(first.values()).size, 3, 'colliding hashes probe to distinct hues');
   const providers = usage.seriesColors(usage.usageSeries(history, 'provider', 'tokens'), 'provider');
-  assert.match(providers.get('anthropic'), /oklch\(0\.72 0\.15 45\)/); assert.match(providers.get('openai-codex'), /oklch\(0\.8 0 0\)/, 'OpenAI draws in light grey, not a hue');
+  assert.match(providers.get('anthropic'), /oklch\(0\.72 0\.15 39\)/, 'Anthropic takes the hue of its Artificial Analysis colour #cc785c'); assert.match(providers.get('openai-codex'), /oklch\(0\.8 0 0\)/, 'OpenAI draws in light grey, not a hue');
 });
 
 test('preferences validate every field and fall back to safe defaults', () => {
