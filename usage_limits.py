@@ -8,7 +8,7 @@ Read-only toward credentials, by construction, except that an expired Claude Cod
 - Only providers in ``VETTED_PROVIDERS`` are refreshed: plugin usage hooks are arbitrary code and OpenRouter issues two GETs.
 - Each Anthropic account (pool entry or Claude Code login) is read with one GET of its own: Anthropic's usage URL with ``cedar_ember=1``, whose body carries the 5-hour and weekly windows Hermes maps, the model-scoped limits of its ``limits`` list (a weekly cap on one model, such as Fable) and the account's limit resets (the ``cedar_ember`` block), none of which Hermes passes on. Reading through Hermes as well sent the same GET twice. The token goes only to ``api.anthropic.com`` and only when it is OAuth-shaped, Hermes's own rule for that endpoint; it is never refreshed or stored, and the body is dropped once read. The reading no longer lands in Hermes's in-memory Anthropic gauge, which Hermes's own reads (model picker, ``/usage``) keep. Anthropic lists resets only to Claude Code, so this read names itself as the Claude Code CLI installed on the host (``claude-cli/<version> (external, cli)``, as T3 Code does); without an installed CLI it goes out as Hermes's own usage fetch does (``claude-code/2.1.0``) and the resets read as none. Every other Anthropic request names itself ``claude-code/2.1.0`` too, never httpx.
 - Anthropic falls back to Claude Code's own login when Hermes's anthropic pool is empty: Claude sessions that run through the Claude Code CLI (claude-subscription-directsdk) consume that login's account, not a Hermes pool entry. Its plan comes from Anthropic's OAuth profile, read at the sampler's first collection and then hourly (every ``PLAN_RETRY_S`` after a failure, keeping the last plan). An expired token is refreshed by calling ``fetch_account_usage("anthropic")`` without a token, which resolves one through Hermes's Claude Code resolver and writes the new pair back to Claude Code's credentials, then read again.
-- Each xAI Grok OAuth account (SuperGrok / X Premium subscription) is read with one GET of its own: the Grok CLI's billing surface (``XAI_BILLING_URL``), whose ``format=credits`` body carries the subscription's weekly pool, shared by every Grok product; Hermes has no xAI usage fetch. The surface is unofficial and the token goes only there, only for an entry Hermes routes to ``api.x.ai`` and only when it is JWT-shaped (an xAI API key never is). An access token that has expired is not sent: Hermes refreshes it at its next Grok turn and the account reads ``token_expired`` until then. The requests carry the Grok CLI's own ``x-xai-token-auth`` header, which the surface requires, and name themselves as Hermes names its xAI requests (``hermes_xai_user_agent``). The plan comes from the same surface's settings, read like Anthropic's.
+- Each xAI Grok OAuth account (SuperGrok / X Premium subscription) is read with one GET of its own: the Grok CLI's billing surface (``XAI_BILLING_URL``), whose ``format=credits`` body carries the subscription's weekly pool, shared by every Grok product; Hermes has no xAI usage fetch. The surface is unofficial and the token goes only there, only for an entry Hermes routes to ``api.x.ai`` and only when it is JWT-shaped (an xAI API key never is). An access token that has expired is not sent: the entry is handed to Hermes's own pool refresh (``load_pool("xai-oauth").try_refresh_matching``, the path a failed Grok request takes), which rotates and persists the pair under Hermes's auth lock, then the pool is read again. A failed refresh is retried no sooner than ``XAI_REFRESH_RETRY_S`` and the account reads ``token_expired`` meanwhile. Only the root home's sampler refreshes, only while no named profile exists, and never an exhausted entry (see ``_xai_refresh_is_serialized`` and ``_refresh_xai_entries``). The requests carry the Grok CLI's own ``x-xai-token-auth`` header, which the surface requires, and name themselves as Hermes names its xAI requests (``hermes_xai_user_agent``). The plan comes from the same surface's settings, read like Anthropic's.
 - Codex banked reset credit expiries (the usage payload only carries their count) are read at most every ``CREDITS_INTERVAL_S``. Every pool account's list is read with its own token through Hermes's private Codex helpers (its URL and headers, so the request is named as Hermes names its Codex reads); a 401 or any failure keeps the previous list and never refreshes the token. Without those helpers no list is read, and the page shows only each account's banked reset count.
 
 Nothing secret is stored or logged: tokens, identities and base URLs stay in local variables of one collection; the store keeps pool entry id + label, plan, window numbers, banked reset count, banked credit status/grant/expiry times, Anthropic limit resets (Anthropic's reset id, kind, count, expiry, usability and the limit names they clear) and a closed set of error classes.
@@ -110,6 +110,8 @@ _XAI_TOKEN_PATTERN = re.compile(r"^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9
 _XAI_PLAN_PATTERN = re.compile(r"^[A-Za-z0-9 +._-]{1,64}$")
 # A token this close to its expiry is not sent: it could expire in flight and draw a 401 the sampler must not repair.
 XAI_EXPIRY_MARGIN_S = 60
+# A refresh that left an xAI entry expiring is not asked again sooner: a failing token endpoint is not hit at every sample.
+XAI_REFRESH_RETRY_S = 900.0
 # The plan read runs after the usage reads; past this it is left to finish in the background and the last known plan is shown, so a slow answer cannot hold the collection.
 PLAN_DEADLINE_S = 10.0
 _ACCOUNT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
@@ -599,6 +601,9 @@ def _native_symbols():
 	take("agent.account_usage", "fetch_account_usage")
 	take("tools.xai_http", "hermes_xai_user_agent")
 	take("hermes_cli.auth_xai", "_xai_access_token_is_expiring")
+	take("agent.credential_pool", "load_pool")
+	take("agent.credential_pool", "STATUS_EXHAUSTED")
+	take("hermes_cli.profiles", "list_profile_names")
 	return symbols
 
 
@@ -674,6 +679,52 @@ def _route(symbols, provider, entry):
 	return symbols["_pool_entry_route_base_url"](provider, entry), symbols["_pool_entry_host"](provider, entry)
 
 
+# Last xAI refresh asked per (home, account) that did not leave a usable token, process-wide like the credit throttle. Monotonic, so a wall clock set back cannot make it due early.
+_XAI_REFRESH_LOCK = threading.Lock()
+_XAI_REFRESH_ASKED = {}
+_monotonic = time.monotonic
+
+
+def _xai_refresh_is_serialized(symbols):
+	"""Whether a refresh from this sampler is serialized with every Grok turn that can spend the same refresh token: the sampler runs in Hermes's root home and no named profile exists; False when unknown.
+
+	A named profile without xAI rows of its own borrows the root's through ``read_credential_pool``'s fallback, but Hermes refreshes them under the profile's lock and takes the root's only to save the result. A profile's sampler and a root Grok turn, or the root's sampler and a profile's Grok turn, could then both spend one single-use refresh token. With profiles, expired tokens are left to Hermes's own Grok turns.
+	"""
+	try:
+		from hermes_constants import get_default_hermes_root
+
+		if _home_key(get_default_hermes_root()) != _home_key(_default_home()):
+			return False
+		return list(symbols["list_profile_names"]()) == ["default"]
+	except Exception:
+		return False
+
+
+def _refresh_xai_entries(symbols, account_ids):
+	"""Hand expired xAI pool entries to Hermes's own pool refresh, the one a failed Grok request triggers; returns nothing, so no token leaves Hermes's pool object.
+
+	An entry is refreshed only while the pool Hermes loads still holds it as an OAuth row with a refresh token and an expiring access token: a Grok turn may have refreshed it since the plugin read the pool, and Hermes's forced refresh would then rotate a fresh pair for nothing. An exhausted entry is left alone, because a successful refresh clears its cooldown, which Hermes's own selection would have honoured. ``try_refresh_matching`` takes Hermes's cross-process auth lock, adopts a pair another process rotated meanwhile instead of spending the refresh token, and persists the new pair; on failure it benches or quarantines the entry exactly as after a failed Grok request. A row without a refresh token is never handed over, because Hermes benches it.
+	"""
+	entries = {}
+	try:
+		for account_id in account_ids:
+			# Loaded again right before each entry, so a status another process saved during an earlier refresh is seen; Hermes offers no conditional refresh that would close the remaining window.
+			pool = symbols["load_pool"]("xai-oauth")
+			entries = {str(entry.id): entry for entry in pool.entries()}
+			entry = entries.get(account_id)
+			if entry is None or getattr(entry, "auth_type", None) != "oauth" or not getattr(entry, "refresh_token", None):
+				continue
+			if getattr(entry, "last_status", None) == symbols["STATUS_EXHAUSTED"]:
+				continue
+			try:
+				if symbols["_xai_access_token_is_expiring"](entry.access_token, XAI_EXPIRY_MARGIN_S):
+					pool.try_refresh_matching(credential_id=account_id)
+			except Exception:
+				continue
+	finally:
+		entries.clear()
+
+
 # Last credit-list read per (home, provider, account), process-wide so every sampler of a home shares it.
 _CREDITS_LOCK = threading.Lock()
 _CREDITS_READ = {}
@@ -728,8 +779,18 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 	def xai_expiring(token):
 		# Checked again right before every xAI request: a token valid when the collection began can expire during the reads before it.
 		return bool(symbols["_xai_access_token_is_expiring"](token, XAI_EXPIRY_MARGIN_S))
+
+	def xai_gate(base_url, token):
+		# None when this xAI token may be sent, else the account's error.
+		try:
+			route = urlsplit(base_url or "")
+			if not (route.scheme == "https" and route.hostname == XAI_INFERENCE_HOST and _is_xai_oauth_token(token)):
+				return "no_data"
+			return "token_expired" if xai_expiring(token) else None
+		except Exception:
+			return "internal_error"
 	started = float(clock())
-	providers, slots, requests, xai_plans = [], [], [], []
+	providers, slots, requests, xai_plans, xai_expired = [], [], [], [], []
 	xai_agent = None
 	# Per-account credit lists while Hermes still has the private helpers they need.
 	pool_credits = pool_credits_available(symbols)
@@ -796,25 +857,64 @@ def collect_native(join_timeout=JOIN_TIMEOUT_S, clock=time.time, credits_fetcher
 			seen.add((host, fingerprint))
 			reading["accounts"].append(account)
 			if provider == "xai-oauth":
-				# The token goes to the Grok billing surface only for an entry Hermes routes to xAI itself and only when it is an OAuth JWT; one that has expired is left for Hermes to refresh at its next Grok turn rather than sent to fail.
-				try:
-					route = urlsplit(base_url or "")
-					sendable = route.scheme == "https" and route.hostname == XAI_INFERENCE_HOST and _is_xai_oauth_token(token)
-					expired = sendable and xai_expiring(token)
-				except Exception:
-					account["error"] = "internal_error"
-					continue
-				if not sendable:
-					account["error"] = "no_data"
-					continue
-				if expired:
-					account["error"] = "token_expired"
+				# The token goes to the Grok billing surface only for an entry Hermes routes to xAI itself and only when it is an OAuth JWT; one that has expired is set aside for Hermes's own refresh below rather than sent to fail.
+				account["error"] = xai_gate(base_url, token)
+				if account["error"] == "token_expired":
+					xai_expired.append((account, reading))
+				if account["error"] is not None:
 					continue
 				xai_plans.append((account, token))
 			# The per-account credit list needs the same route and token, kept only in that mode.
 			credit = (base_url, token) if pool_credits and provider == "openai-codex" else None
 			slots.append((account, reading, host, credit))
 			requests.append((provider, base_url, token, fingerprint))
+	# An expired xAI token is handed to Hermes's own pool refresh, then the pool is read again and a refreshed token is read like any other. While a refresh leaves an account expiring it is not asked again before XAI_REFRESH_RETRY_S, and the account reads token_expired.
+	if xai_expired and symbols.get("load_pool") is not None and symbols.get("STATUS_EXHAUSTED") is not None and symbols.get("list_profile_names") is not None and _xai_refresh_is_serialized(symbols):
+		asked = _monotonic()
+		with _XAI_REFRESH_LOCK:
+			due = [account["id"] for account, _reading in xai_expired if not asked - _XAI_REFRESH_ASKED.get((home, account["id"]), float("-inf")) < XAI_REFRESH_RETRY_S]
+			for account_id in due:
+				_XAI_REFRESH_ASKED[(home, account_id)] = asked
+		rows = None
+		try:
+			if due:
+				try:
+					_refresh_xai_entries(symbols, due)
+				except Exception:
+					pass
+				try:
+					rows = {row.get("id"): row for row in ((read_pool() or {}).get("xai-oauth") or []) if isinstance(row, dict)}
+				except Exception:
+					rows = None
+			for account, reading in xai_expired:
+				if rows is None or account["id"] not in due:
+					continue
+				row = rows.get(account["id"])
+				if row is None:
+					# Hermes drops a device-code login whose refresh it judged terminal: the login is lost, not pending.
+					account["error"] = "credential_dead"
+					continue
+				try:
+					entry = symbols["PooledCredential"].from_dict("xai-oauth", row)
+					dead = symbols["STATUS_DEAD"] is not None and getattr(entry, "last_status", None) == symbols["STATUS_DEAD"]
+					token = str(entry.runtime_api_key or "").strip()
+					base_url, host = _route(symbols, "xai-oauth", entry)
+				except Exception:
+					account["error"] = "internal_error"
+					continue
+				# A refresh Hermes judged terminal leaves the entry dead, as a failed Grok request would.
+				account["error"] = "credential_dead" if dead else xai_gate(base_url, token) if token else "no_credential"
+				if account["error"] is not None:
+					continue
+				with _XAI_REFRESH_LOCK:
+					_XAI_REFRESH_ASKED.pop((home, account["id"]), None)
+				xai_plans.append((account, token))
+				slots.append((account, reading, host, None))
+				requests.append(("xai-oauth", base_url, token, _token_fingerprint(token)))
+		finally:
+			if rows is not None:
+				rows.clear()
+	xai_expired.clear()
 	try:
 		hermes_fetch, own_fetch = symbols["fetch_account_usage"], anthropic_fetcher or _fetch_anthropic_usage
 		own_xai = xai_fetcher or (lambda token: _fetch_xai_usage(token, xai_agent))

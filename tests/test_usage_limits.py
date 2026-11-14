@@ -4,6 +4,7 @@ from contextlib import closing
 import ast
 import asyncio
 import base64
+import collections
 import contextvars
 from datetime import UTC, datetime
 import importlib.util
@@ -489,24 +490,27 @@ class CollectorTests(unittest.TestCase):
 			("agent.account_usage", "fetch_account_usage"),
 			("tools.xai_http", "hermes_xai_user_agent"),
 			("hermes_cli.auth_xai", "_xai_access_token_is_expiring"),
+			("agent.credential_pool", "load_pool"),
+			("agent.credential_pool", "STATUS_EXHAUSTED"),
+			("hermes_cli.profiles", "list_profile_names"),
 		})
 		imported = {
 			(node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
 			for alias in node.names if node.module and node.module.split(".")[0] in ("agent", "hermes_cli", "hermes_constants")
 		}
 		self.assertEqual(imported, {
-			("hermes_constants", "get_hermes_home"), ("hermes_constants", "hermes_home_key"),
+			("hermes_constants", "get_hermes_home"), ("hermes_constants", "hermes_home_key"), ("hermes_constants", "get_default_hermes_root"),
 			("hermes_constants", "reset_hermes_home_override"), ("hermes_constants", "set_hermes_home_override"),
 		})
 		functions = {fn.name: fn for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef)}
 		users = {name for name, fn in functions.items() if any(isinstance(node, ast.Constant) and node.value == "fetch_account_usage" for node in ast.walk(fn))}
 		self.assertEqual(users, {"_native_symbols", "_collect_claude_code", "collect_native"})
-		# Pool accounts are only ever fetched read-only with their own token; the one refreshing path (an expired Claude Code login, fetched without a token) stays inside the fallback.
+		# Pool accounts are only ever fetched read-only with their own token; the refreshing paths (an expired Claude Code login, fetched without a token, and an expired xAI entry, handed to Hermes's pool refresh) stay inside their own functions.
 		(pooled,) = [node for node in ast.walk(functions["_fetch_accounts"]) if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "fetch"]
 		self.assertEqual({keyword.arg for keyword in pooled.keywords}, {"base_url", "api_key", "read_only", "identity_id"})
 		self.assertTrue(any(keyword.arg == "read_only" and getattr(keyword.value, "value", None) is True for keyword in pooled.keywords))
 		forbidden = {
-			"refresh_account_usage_async", "load_pool", "select", "try_refresh_matching",
+			"refresh_account_usage_async", "select",
 			"resolve_codex_runtime_credentials", "_persist", "persist_pool_entries",
 			"_save_auth_store", "redeem_codex_reset_credit", "remember_account_usage", "_claim_refresh",
 			"cached_account_usage", "refresh_account_usage_entries_async", "_identity_id_for", "resolve_anthropic_token",
@@ -516,6 +520,15 @@ class CollectorTests(unittest.TestCase):
 		used |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
 		used |= {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
 		self.assertEqual(used & forbidden, set())
+
+		def names(node):
+			found = [n.id for n in ast.walk(node) if isinstance(n, ast.Name)] + [n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)]
+			return collections.Counter(found + [n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)])
+		# Hermes's xAI pool refresh is reached only from the xAI refresh, which the collection calls for expired entries alone.
+		allowed = {"load_pool": {"_native_symbols", "collect_native", "_refresh_xai_entries"}, "try_refresh_matching": {"_refresh_xai_entries"}}
+		for name, owners in allowed.items():
+			self.assertEqual({fn for fn in functions if names(functions[fn])[name]}, owners)
+			self.assertEqual(names(tree)[name], sum(names(functions[fn])[name] for fn in owners))
 		self.assertEqual(limits.VETTED_PROVIDERS, ("openai-codex", "anthropic", "xai-oauth"))
 
 
@@ -850,6 +863,9 @@ class NoNetworkTestCase(unittest.TestCase):
 		inflight = patch.object(limits, "_PLAN_INFLIGHT", set())
 		inflight.start()
 		self.addCleanup(inflight.stop)
+		refreshes = patch.dict(limits._XAI_REFRESH_ASKED, clear=True)
+		refreshes.start()
+		self.addCleanup(refreshes.stop)
 
 
 TOKEN = "sk-ant-oat01-secret"
@@ -1142,14 +1158,45 @@ XAI_BODY = {"config": {
 	"billingPeriodStart": "2026-11-14T07:12:58.017604+00:00", "billingPeriodEnd": "2026-11-21T07:12:58.017604+00:00"}}
 
 
-def collect_xai(pool, body=lambda token: XAI_BODY, plan=lambda token: "X Premium", clock=time.time, expired=(), hermes_calls=None, **overrides):
-	"""One collection with xAI's billing read answered by ``body``; each entry's route is its own base_url, as Hermes resolves it."""
+def collect_xai(pool, body=lambda token: XAI_BODY, plan=lambda token: "X Premium", clock=time.time, expired=(), hermes_calls=None, root=True, **overrides):
+	"""One collection with xAI's billing read answered by ``body``; each entry's route is its own base_url, as Hermes resolves it; ``root`` says whether the sampler runs in Hermes's root home."""
 	symbols = CollectorTests.symbols(CollectorTests(), pool, hermes_calls)
 	symbols.update({
 		"_pool_entry_route_base_url": lambda provider, entry: entry.runtime_base_url, "_pool_entry_host": lambda provider, entry: entry.runtime_base_url,
-		"hermes_xai_user_agent": lambda: "Hermes-Agent/9.9.9", "_xai_access_token_is_expiring": lambda token, skew_seconds=0: token in expired, **overrides})
-	with patch.object(limits, "_native_symbols", return_value=symbols):
+		"hermes_xai_user_agent": lambda: "Hermes-Agent/9.9.9", "_xai_access_token_is_expiring": lambda token, skew_seconds=0: token in expired,
+		"STATUS_EXHAUSTED": "exhausted", "list_profile_names": lambda: ["default"], **overrides})
+	with patch.object(limits, "_native_symbols", return_value=symbols), patch.object(limits, "_default_home", return_value=Path("/hermes-root" if root else "/hermes-root/profiles/work")), \
+			patch("hermes_constants.get_default_hermes_root", return_value=Path("/hermes-root")):
 		return limits.collect_native(join_timeout=1, clock=clock, claude_login=NO_CLAUDE, xai_fetcher=body, xai_profile=plan)
+
+
+class FakeXaiPool:
+	"""Hermes's ``load_pool("xai-oauth")`` as the refresh uses it: its entries, and ``try_refresh_matching`` applying ``rotations`` (a new token or row fields) to the persisted pool."""
+
+	def __init__(self, pool, rotations, failing=(), on_refresh=None):
+		self.pool, self.rotations, self.failing, self.on_refresh = pool, rotations, set(failing), on_refresh
+		self.loaded, self.refreshed = [], []
+
+	def load(self, provider):
+		self.loaded.append(provider)
+		return self
+
+	def entries(self):
+		return [SimpleNamespace(id=row["id"], auth_type=row.get("auth_type"), refresh_token=row.get("refresh_token"), access_token=row.get("access_token"), last_status=row.get("last_status")) for row in self.pool["xai-oauth"]]
+
+	def try_refresh_matching(self, credential_id=None):
+		self.refreshed.append(credential_id)
+		if self.on_refresh:
+			self.on_refresh(credential_id)
+		if credential_id in self.failing:
+			raise RuntimeError("xai_refresh_failed")
+		rotation = self.rotations.get(credential_id)
+		row = next(row for row in self.pool["xai-oauth"] if row["id"] == credential_id)
+		if rotation == "removed":
+			self.pool["xai-oauth"].remove(row)
+			return None
+		row.update({"access_token": rotation} if isinstance(rotation, str) else rotation or {})
+		return SimpleNamespace(id=credential_id)
 
 
 class XaiLimitsTests(NoNetworkTestCase):
@@ -1226,6 +1273,100 @@ class XaiLimitsTests(NoNetworkTestCase):
 				self.assertTrue(checks and all(skew == limits.XAI_EXPIRY_MARGIN_S for skew in checks))
 				if error is None:
 					self.assertIsNone(account["snapshot"]["plan"])
+
+	def test_an_expired_token_is_refreshed_by_hermes_pool_then_read(self):
+		# Hermes's pool refresh rotates the row it is asked for and persists it, so the plugin's next pool read sees the new token.
+		old, fresh = xai_jwt("old"), xai_jwt("fresh")
+		pool = {"xai-oauth": [{"id": "x00001", "priority": 0, "access_token": old, "refresh_token": "r1", "auth_type": "oauth", "base_url": XAI_ROUTE}]}
+		hermes = FakeXaiPool(pool, {"x00001": fresh})
+		sent, plans = [], []
+		(reading,) = collect_xai(pool, lambda token: sent.append(token) or XAI_BODY, lambda token: plans.append(token) or "X Premium", expired={old}, load_pool=hermes.load)
+		(account,) = reading["accounts"]
+		self.assertEqual((hermes.loaded, hermes.refreshed), (["xai-oauth"], ["x00001"]))
+		self.assertEqual((account["error"], sent, plans, account["snapshot"]["plan"]), (None, [fresh], [fresh], "X Premium"))
+		self.assertNotIn("eyJ", repr(reading))
+		# A success leaves no retry delay: the next expiry is refreshed at once.
+		self.assertEqual(limits._XAI_REFRESH_ASKED, {})
+
+	def test_a_refresh_that_leaves_the_token_expired_is_retried_only_after_the_delay(self):
+		old = xai_jwt("old")
+		pool = {"xai-oauth": [{"id": "x00001", "priority": 0, "access_token": old, "refresh_token": "r1", "auth_type": "oauth", "base_url": XAI_ROUTE}]}
+		hermes, now, sent = FakeXaiPool(pool, {}), [1000.0], []
+		collect = lambda: collect_xai(pool, lambda token: sent.append(token) or XAI_BODY, expired={old}, load_pool=hermes.load)
+		# The delay runs on the monotonic clock, so a wall clock set back (the collection's clock) cannot make it due early.
+		with patch.object(limits, "_monotonic", side_effect=lambda: now[0]):
+			for step, refreshes in ((0, 1), (limits.XAI_REFRESH_RETRY_S - 1, 1), (1, 2)):
+				now[0] += step
+				(reading,) = collect()
+				self.assertEqual((reading["accounts"][0]["error"], len(hermes.refreshed)), ("token_expired", refreshes))
+		self.assertEqual(sent, [])
+
+	def test_a_refresh_hermes_judges_terminal_reads_as_a_dead_credential(self):
+		old = xai_jwt("old")
+		pool = {"xai-oauth": [{"id": "x00001", "priority": 0, "access_token": old, "refresh_token": "r1", "auth_type": "oauth", "base_url": XAI_ROUTE}]}
+		for rotation in ({"last_status": "dead"}, "removed"):
+			with self.subTest(rotation=rotation):
+				rows = {"xai-oauth": [dict(row) for row in pool["xai-oauth"]]}
+				limits._XAI_REFRESH_ASKED.clear()
+				(reading,) = collect_xai(rows, expired={old}, load_pool=FakeXaiPool(rows, {"x00001": rotation}).load)
+				self.assertEqual(reading["accounts"][0]["error"], "credential_dead")
+
+	def test_a_pool_reread_that_fails_keeps_the_token_expired(self):
+		old = xai_jwt("old")
+		pool = {"xai-oauth": [{"id": "x00001", "priority": 0, "access_token": old, "refresh_token": "r1", "auth_type": "oauth", "base_url": XAI_ROUTE}]}
+		hermes, reads = FakeXaiPool(pool, {}), []
+
+		def read_pool():
+			reads.append(True)
+			if len(reads) > 1:
+				raise OSError("auth.json locked")
+			return pool
+		(reading,) = collect_xai(pool, expired={old}, load_pool=hermes.load, read_credential_pool=read_pool)
+		self.assertEqual((hermes.refreshed, reading["accounts"][0]["error"]), (["x00001"], "token_expired"))
+
+	def test_an_exhausted_entry_or_any_named_profile_is_left_to_hermes_own_grok_turns(self):
+		# A refresh would clear an exhausted entry's cooldown; a named profile borrows the root's rows under its own lock, so a profile's sampler or the root's sampler next to a profile's Grok turn could spend one refresh token twice.
+		old = xai_jwt("old")
+		profiles = {"list_profile_names": lambda: ["default", "work"]}
+		failing = {"list_profile_names": lambda: (_ for _ in ()).throw(OSError("profiles unreadable"))}
+		for exhausted, root, overrides in ((True, True, {}), (False, False, {}), (False, True, profiles), (False, True, failing), (False, True, {"list_profile_names": None})):
+			with self.subTest(exhausted=exhausted, root=root, overrides=sorted(overrides)):
+				row = {"id": "x00001", "priority": 0, "access_token": old, "refresh_token": "r1", "auth_type": "oauth", "base_url": XAI_ROUTE}
+				pool = {"xai-oauth": [{**row, "last_status": "exhausted"} if exhausted else row]}
+				hermes = FakeXaiPool(pool, {"x00001": xai_jwt("fresh")})
+				limits._XAI_REFRESH_ASKED.clear()
+				(reading,) = collect_xai(pool, expired={old}, load_pool=hermes.load, root=root, **overrides)
+				self.assertEqual((hermes.refreshed, reading["accounts"][0]["error"]), ([], "token_expired"))
+
+	def test_hermes_refreshes_only_oauth_rows_with_a_refresh_token_that_are_still_expiring(self):
+		# Rows refreshed by a Grok turn since the plugin's read, rows Hermes would bench (no refresh token, an API key) and unknown ids are never handed to the forced refresh; one failure does not stop the others.
+		tokens = {name: xai_jwt(name) for name in ("a", "b", "c", "d", "e")}
+		rows = [
+			{"id": "x00001", "access_token": tokens["a"], "refresh_token": "r", "auth_type": "oauth"},
+			{"id": "x00002", "access_token": tokens["b"], "refresh_token": "r", "auth_type": "oauth"},
+			{"id": "x00003", "access_token": tokens["c"], "refresh_token": "", "auth_type": "oauth"},
+			{"id": "x00004", "access_token": tokens["d"], "refresh_token": "r", "auth_type": "api_key"},
+			{"id": "x00005", "access_token": tokens["e"], "refresh_token": "r", "auth_type": "oauth"},
+		]
+		hermes = FakeXaiPool({"xai-oauth": rows}, {}, failing={"x00001"})
+		margins = []
+		symbols = {"load_pool": hermes.load, "STATUS_EXHAUSTED": "exhausted", "_xai_access_token_is_expiring": lambda token, skew: margins.append(skew) or token != tokens["b"]}
+		limits._refresh_xai_entries(symbols, ["x00001", "x00002", "x00003", "x00004", "x00005", "gone01"])
+		self.assertEqual(hermes.refreshed, ["x00001", "x00005"])
+		self.assertEqual(set(margins), {limits.XAI_EXPIRY_MARGIN_S})
+
+	def test_an_entry_another_process_exhausts_during_an_earlier_refresh_is_not_refreshed(self):
+		rows = [{"id": f"x0000{n}", "access_token": xai_jwt(str(n)), "refresh_token": "r", "auth_type": "oauth"} for n in (1, 2)]
+		hermes = FakeXaiPool({"xai-oauth": rows}, {}, on_refresh=lambda credential_id: rows[1].update(last_status="exhausted"))
+		limits._refresh_xai_entries({"load_pool": hermes.load, "STATUS_EXHAUSTED": "exhausted", "_xai_access_token_is_expiring": lambda token, skew: True}, ["x00001", "x00002"])
+		self.assertEqual((hermes.refreshed, len(hermes.loaded)), (["x00001"], 2))
+
+	def test_without_hermes_pool_refresh_an_expired_token_stays_expired(self):
+		old = xai_jwt("old")
+		pool = {"xai-oauth": [{"id": "x00001", "priority": 0, "access_token": old, "refresh_token": "r1", "auth_type": "oauth", "base_url": XAI_ROUTE}]}
+		(reading,) = collect_xai(pool, expired={old}, load_pool=None)
+		self.assertEqual(reading["accounts"][0]["error"], "token_expired")
+		self.assertEqual(limits._XAI_REFRESH_ASKED, {})
 
 	def test_a_plan_read_that_hangs_cannot_hold_the_collection_and_is_never_doubled(self):
 		token, now, release, reads = xai_jwt("ok"), [NOW], threading.Event(), []
