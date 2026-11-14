@@ -1529,7 +1529,8 @@ const CSS = `
 .sf-menu .sf-stats{display:flex;flex-direction:column;gap:4px;padding:0 2px;font-size:11px;line-height:16px;color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap}
 .sf-menu .sf-stats-line{display:flex;flex-direction:row;align-items:center;gap:14px;min-width:0}.sf-menu .sf-stats-line[data-spread=true]{justify-content:space-between;gap:8px}
 .sf-stat{display:inline-flex;align-items:center;gap:4px;min-width:0}.sf-stat>svg,.sf-stat>.codicon{position:relative;top:-1px;flex:none;width:12px;height:12px}.sf-stat b{font-weight:400;color:var(--ui-text-secondary)}
-.sf-stat-mark{margin-right:-10px}.sf-stat-aside svg{width:11px;height:11px;vertical-align:-2px}
+/* Desktop's reset makes every svg a block, which would break the subagent detail around its arrow. */
+.sf-stat-mark{margin-right:-10px}.sf-stat-aside svg{display:inline-block;width:11px;height:11px;margin-right:3px;vertical-align:-2px}
 .sf-stats-bar{display:flex;flex:1 1 72px;min-width:72px;height:4px;border-radius:2px;overflow:hidden}.sf-stats-bar>span{flex-basis:0;min-width:2px;height:100%}
 .sf-stat-key{flex:none;width:8px;height:8px;border-radius:2px}
 /* Main agent in the theme accent, subagents a lighter shade of it (the popover blended in), Hermes a neutral grey. */

@@ -590,6 +590,15 @@ try {
       && icons.every(icon => icon.width === 14 && icon.height === 14) && tools.every(el => el.textContent === '');
   }));
   const menuDelete = context.getByRole('button', { name: 'Delete session', exact: true });
+  // Desktop's Tailwind reset makes every svg a block; the harness has no such reset, so add it to see what Desktop draws. A block arrow broke the subagent detail onto three lines.
+  await context.locator('.sf-stats:not([aria-busy])').waitFor();
+  const preflight = await page.addStyleTag({ content: 'img,svg,video,canvas{display:block;vertical-align:middle}' });
+  check('session figures keep every item on one line under Desktop\'s svg reset, inside the menu', await context.locator('.sf-session-menu').evaluate(menu => {
+    const stats = menu.querySelector('.sf-stats'), r = menu.getBoundingClientRect(), items = [...stats.querySelectorAll('.sf-stat')];
+    return !!stats.querySelector('.sf-stat-aside') && items.length >= 8 && items.every(item => item.getBoundingClientRect().height <= 16)
+      && [...stats.querySelectorAll('.sf-stats-line')].every(line => line.getBoundingClientRect().height === 16 && line.getBoundingClientRect().right <= r.right - 7);
+  }));
+  await preflight.evaluate(node => node.remove());
   check('Delete icon and text use the red theme color', await deleteIsRed(menuDelete));
   await menuDelete.hover();
   check('Delete icon and text remain red on hover', await deleteIsRed(menuDelete));
