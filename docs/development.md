@@ -10,6 +10,8 @@ npm ci --ignore-scripts --no-audit --no-fund && npm run test:all
 
 Python test dependencies are listed in `requirements-dev.txt`; Hermes already provides the production FastAPI/Pydantic environment. The backend test entry point initializes Hermes's committed dependency environment before discovery and scratch-profile overrides. Set `HERMES_DISABLE_LAZY_INSTALLS=1` for verification without automatic dependency installation. The browser smoke uses an installed Chromium from the Playwright cache or `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`. If neither exists, install the matching development browser with `npx playwright install chromium`; the tests never silently download one.
 
+`npm run test:all` runs the frontend, backend and Chromium correctness suites concurrently, with each output line labeled by suite. It waits for all three to finish and fails if any suite fails. For a serial diagnostic run or a smaller machine, use `npm run test:all -- --max-processes 1`. Performance benchmarks remain separate and serial so competing test load cannot distort their timings.
+
 To inspect the rendered sidebar with synthetic data:
 
 ```sh
