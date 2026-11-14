@@ -406,10 +406,12 @@ export function syntheticUsageHistory(days = 7, tz = 'UTC') {
     const input = tokens.map(value => Math.round(value * 0.2)), output = tokens.map(value => Math.round(value * 0.05)), cache_read = tokens.map((value, index) => value - input[index] - output[index]);
     return { key: model, label: model, provider, model, tokens, input, output, cache_read, cache_write: tokens.map(() => 0), reasoning: output.map(value => Math.round(value / 3)),
       cost_usd: tokens.map(value => Math.round(value * (provider === 'anthropic' ? 2.4 : 1.1)) / 1e6),
-      user_messages: tokens.map(value => Math.round(value / (600_000 * share))) };
+      user_messages: tokens.map(value => Math.round(value / (600_000 * share))),
+      // A mean per bucket, so unlike the amounts it does not scale with the bucket size.
+      agents: buckets.map(t => Math.round(wave(t, seriesIndex) * weight * 150) / 100) };
   });
   const sum = (list, field) => buckets.map((_, index) => list.reduce((total, item) => total + item[field][index], 0));
-  const fields = ['tokens', 'input', 'output', 'cache_read', 'cache_write', 'reasoning', 'cost_usd', 'user_messages'];
+  const fields = ['tokens', 'input', 'output', 'cache_read', 'cache_write', 'reasoning', 'cost_usd', 'user_messages', 'agents'];
   const by_provider = [...new Set(by_model.map(item => item.provider))].map(provider => {
     const members = by_model.filter(item => item.provider === provider);
     return { key: provider, label: provider, provider, model: null, ...Object.fromEntries(fields.map(field => [field, sum(members, field)])) };

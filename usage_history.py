@@ -1,6 +1,6 @@
-"""Token, API-equivalent cost and human-message history for the Usage page (`GET /usage/history`).
+"""Token, API-equivalent cost, human-message and parallel-agent history for the Usage page (`GET /usage/history`).
 
-Hermes only stores exact cumulative usage per session x model x task (`session_model_usage`), without per-call timestamps. To draw a time series without adding storage, each usage row is redistributed over the timestamps of the API calls that produced it: main-loop rows over the session's assistant messages (input side weighted by the context size at that call, output side by the size of the reply), auxiliary rows and rows without matching messages over evenly spaced points. The result is therefore approximate by construction and says so (`approximate: true`).
+Hermes only stores exact cumulative usage per session x model x task (`session_model_usage`), without per-call timestamps. To draw a time series without adding storage, each usage row is redistributed over the timestamps of the API calls that produced it: main-loop rows over the session's assistant messages (input side weighted by the context size at that call, output side by the size of the reply), auxiliary rows and rows without matching messages over evenly spaced points. Parallel agents come from the same messages: every session, delegated subagents included, runs from one message to the next within a turn. The result is therefore approximate by construction and says so (`approximate: true`).
 
 The module is self-contained (stdlib only at import time) because the dashboard loads it directly via importlib. It never writes: Hermes `state.db` is opened with `mode=ro` for one short read transaction per request.
 """
@@ -43,6 +43,10 @@ _SYNTHETIC_USER_PREFIX = re.compile(
 	r"|Coordinator handoff, not an additional answer"
 	r"|\S \[[^\]\n]+\] @\S+ Kanban t_)"
 )
+# Tool results that end a wait rather than work: a person answering, or blocking subagents finishing, which are agents of their own and counted as such.
+_WAIT_TOOLS = frozenset({"clarify", "delegate_task"})
+# A fork or continuation copies earlier messages with their original timestamps into a session started later; a session's own first message can precede its row by a few seconds (4 s at most on the live DB, against 44 s for the closest copy), so older messages are copies whose agent time the original session already counts.
+COPY_SLACK_S = 20.0
 # Enough of the head of a user row to classify it without loading whole prompts into Python.
 _USER_HEAD_CHARS = 160
 _CACHE_LIMIT = 32
@@ -329,11 +333,12 @@ class _Row:
 
 
 class _Series:
-	__slots__ = ("values", "user_messages")
+	__slots__ = ("values", "user_messages", "agent_seconds")
 
 	def __init__(self, width):
 		self.values = {name: [0.0] * width for name in (*TOKEN_CLASSES, "reasoning", "cost_usd")}
 		self.user_messages = [0] * width
+		self.agent_seconds = [0.0] * width
 
 
 def _even_points(row):
@@ -393,6 +398,18 @@ def _compute(conn, tables, days, tz, now, buckets, window_end, price, db_key):
 			if identity not in user_owner or delay < user_owner[identity][0]:
 				user_owner[identity] = (delay, bucket, rows[owner])
 
+	def add_agents(spans, rows):
+		for begin, end, owner in spans:
+			low, high = max(begin, start), min(end, window_end)
+			if high <= low:
+				continue
+			target = series_for(rows[owner]).agent_seconds
+			index = bisect.bisect_right(buckets, low) - 1
+			while low < high:
+				edge = min(high, buckets[index + 1] if index + 1 < width else window_end)
+				target[index] += edge - low
+				low, index = edge, index + 1
+
 	if {"session_model_usage", "messages", "sessions"} <= tables:
 		# Only sessions with a usage row near the window are read, but each is read whole so context weights and call matching stay exact for rows that straddle the window start.
 		session_ids = [session_id for (session_id,) in conn.execute(
@@ -407,6 +424,7 @@ def _compute(conn, tables, days, tz, now, buckets, window_end, price, db_key):
 				for row, (times, in_shares, out_shares) in zip(rows, layout[0]):
 					add_row(row, times, in_shares, out_shares)
 				add_users(layout[1], rows)
+				add_agents(layout[2], rows)
 		for _, bucket, row in user_owner.values():
 			series_for(row).user_messages[bucket] += 1
 
@@ -424,10 +442,11 @@ def _message_query(conn):
 	tool_calls = f"COALESCE({size}(tool_calls), 0)" if "tool_calls" in columns else "0"
 	display_kind = "display_kind" if "display_kind" in columns else "NULL"
 	compressed = "_compressed_summary" if "_compressed_summary" in columns else "0"
+	tool_name = "tool_name" if "tool_name" in columns else "NULL"
 	return (
 		f"SELECT session_id, role, timestamp, COALESCE({size}(content), 0) + {tool_calls} + {reasoning},"
 		f" CASE WHEN role = 'user' THEN {display_kind} END, CASE WHEN role = 'user' THEN {compressed} END,"
-		f" CASE WHEN role = 'user' THEN substr(content, 1, {_USER_HEAD_CHARS}) END"
+		f" CASE WHEN role = 'user' THEN substr(content, 1, {_USER_HEAD_CHARS}) END, CASE WHEN role = 'tool' THEN {tool_name} END"
 		" FROM messages WHERE session_id IN ({}) AND timestamp IS NOT NULL ORDER BY session_id, timestamp, id"
 	)
 
@@ -435,7 +454,7 @@ def _message_query(conn):
 def _sources_query(conn):
 	# Delegated subagent runs can carry the parent's interactive source (desktop, tui), so source alone would count the parent agent's prompts and steers as the user's; the native `_delegate_from` marker identifies them, as in the sidebar listing.
 	delegated = "CASE WHEN json_valid(model_config) THEN json_extract(model_config, '$._delegate_from') IS NOT NULL ELSE 0 END" if "model_config" in _columns(conn, "sessions") else "0"
-	return f"SELECT id, source, {delegated} FROM sessions WHERE id IN ({{}})"
+	return f"SELECT id, source, {delegated}, started_at FROM sessions WHERE id IN ({{}})"
 
 
 def _session_layouts(conn, db_key, batch, non_human, message_query, sources_query):
@@ -444,7 +463,7 @@ def _session_layouts(conn, db_key, batch, non_human, message_query, sources_quer
 	rows_by_session = defaultdict(list)
 	for record in conn.execute(f"SELECT {_ROW_COLUMNS} FROM session_model_usage WHERE session_id IN ({placeholders}) AND first_seen IS NOT NULL AND last_seen IS NOT NULL ORDER BY session_id, task, model, billing_provider, billing_base_url, billing_mode", batch):
 		rows_by_session[record[0]].append(_Row(record))
-	sources = {session_id: (source, bool(flag)) for session_id, source, flag in conn.execute(sources_query.format(placeholders), batch)}
+	sources = {session_id: (source, bool(flag), started) for session_id, source, flag, started in conn.execute(sources_query.format(placeholders), batch)}
 	markers = {session_id: (top, count) for session_id, top, count in conn.execute(f"SELECT session_id, MAX(id), COUNT(*) FROM messages WHERE session_id IN ({placeholders}) GROUP BY session_id", batch)}
 	signatures = {}
 	layouts = {}
@@ -452,7 +471,8 @@ def _session_layouts(conn, db_key, batch, non_human, message_query, sources_quer
 	with _layout_lock:
 		for session_id in batch:
 			human = session_id in sources and sources[session_id][0] not in non_human and not sources[session_id][1]
-			signature = (markers.get(session_id), human, tuple(row.signature for row in rows_by_session[session_id]))
+			started = sources[session_id][2] if session_id in sources else None
+			signature = (markers.get(session_id), human, tuple(row.signature for row in rows_by_session[session_id]), started)
 			signatures[session_id] = signature
 			hit = _layouts.get((db_key, session_id))
 			if hit is not None and hit[0] == signature:
@@ -463,7 +483,7 @@ def _session_layouts(conn, db_key, batch, non_human, message_query, sources_quer
 		messages = defaultdict(list)
 		for record in conn.execute(message_query.format(",".join("?" * len(stale))), stale):
 			messages[record[0]].append(record[1:])
-		fresh = {session_id: _layout(rows_by_session[session_id], messages.get(session_id, ()), signatures[session_id][1]) for session_id in stale}
+		fresh = {session_id: _layout(rows_by_session[session_id], messages.get(session_id, ()), signatures[session_id][1], signatures[session_id][3]) for session_id in stale}
 		layouts.update(fresh)
 		with _layout_lock:
 			if len(_layouts) + len(fresh) > _LAYOUT_LIMIT:
@@ -475,15 +495,17 @@ def _session_layouts(conn, db_key, batch, non_human, message_query, sources_quer
 			yield rows_by_session[session_id], layouts[session_id]
 
 
-def _layout(rows, messages, human):
-	"""Window-independent placement of one session: per row (call times, input shares, output shares) and human user messages as (time, size, owning row index, reply delay)."""
+def _layout(rows, messages, human, started=None):
+	"""Window-independent placement of one session: per row (call times, input shares, output shares), human user messages as (time, size, owning row index, reply delay) and agent spans as (start, end, owning row index)."""
 	# In-place compaction rewrites rows with new ids but the same role, timestamp and text, so identical copies are counted once both as context and as calls.
 	timestamps = []
 	prefix = [0]
 	calls = []
 	users = []
+	spans = []
 	seen = set()
-	for role, timestamp, size, display_kind, compressed, head in messages:
+	own = started - COPY_SLACK_S if isinstance(started, (int, float)) else -math.inf
+	for role, timestamp, size, display_kind, compressed, head, tool in messages:
 		identity = (role, timestamp, size)
 		if identity in seen:
 			continue
@@ -493,6 +515,11 @@ def _layout(rows, messages, human):
 			calls.append((timestamp, size, prefix[bisect.bisect_left(timestamps, timestamp)]))
 		elif role == "user" and human and is_human_user_row(display_kind, compressed, head):
 			users.append((timestamp, size))
+		# The agent runs from each message to the next until its turn ends: the gap before a user row, typed or injected, is idle, except before a steer, which the user types while the agent works; so is a wait that a wait tool's result ends. Copied history belongs to the session it was copied from.
+		if timestamps and (role != "user" or display_kind == "steer") and tool not in _WAIT_TOOLS:
+			begin = max(timestamps[-1], own)
+			if timestamp > begin:
+				spans.append((begin, timestamp))
 		timestamps.append(timestamp)
 		prefix.append(prefix[-1] + size)
 	call_times = [timestamp for timestamp, _, _ in calls]
@@ -515,7 +542,8 @@ def _layout(rows, messages, human):
 			shares = [1.0 / len(times)] * len(times)
 			placements.append((times, shares, shares))
 	owned = []
-	if users and rows:
+	agents = []
+	if rows:
 		candidates = [index for index, row in enumerate(rows) if not row.task] or list(range(len(rows)))
 		dominant = max(candidates, key=lambda index: (rows[index].tokens, rows[index].last_seen))
 		for timestamp, size in users:
@@ -525,7 +553,22 @@ def _layout(rows, messages, human):
 				owned.append((timestamp, size, _owner_at(rows, candidates, call_times[index]), call_times[index] - timestamp))
 			else:
 				owned.append((timestamp, size, dominant, math.inf))
-	return placements, owned
+		owners = {}
+		for begin, end in spans:
+			# A span belongs to the model of the call it leads to, or of the session's last call once no call follows.
+			index = min(bisect.bisect_left(call_times, end), len(call_times) - 1)
+			if index < 0:
+				owner = dominant
+			elif index in owners:
+				owner = owners[index]
+			else:
+				owner = owners[index] = _owner_at(rows, candidates, call_times[index])
+			# Contiguous spans of one model merge, so a turn is usually one span to place.
+			if agents and agents[-1][1] == begin and agents[-1][2] == owner:
+				agents[-1] = (agents[-1][0], end, owner)
+			else:
+				agents.append((begin, end, owner))
+	return placements, owned, agents
 
 
 def _owner_at(rows, candidates, timestamp):
@@ -556,19 +599,22 @@ def _render(days, tz, now, buckets, window_end, series, missing):
 	models = {}
 	providers = {}
 	fields = ("tokens", *TOKEN_CLASSES, "reasoning", "user_messages")
+	# Agents are a mean over each bucket's whole length, so the bucket in progress, like every other chart's, holds only what has happened so far.
+	lengths = [end - begin for begin, end in zip(buckets, [*buckets[1:], window_end])]
 
 	def empty(key, label, provider, model):
-		return {"key": key, "label": label, "provider": provider, "model": model, **{name: [0] * width for name in fields}, "cost_usd": [0.0] * width}
+		return {"key": key, "label": label, "provider": provider, "model": model, **{name: [0] * width for name in fields}, "cost_usd": [0.0] * width, "agents": [0.0] * width}
 
 	for (provider, model), data in series.items():
 		arrays = {name: _round_preserving_sum([max(0.0, value) for value in data.values[name]]) for name in (*TOKEN_CLASSES, "reasoning")}
 		arrays["tokens"] = [sum(arrays[name][index] for name in TOKEN_CLASSES) for index in range(width)]
 		cost = [max(0.0, value) for value in data.values["cost_usd"]]
 		users = list(data.user_messages)
-		if not any(arrays["tokens"]) and not any(users) and not any(round(value, 6) for value in cost):
+		agents = [seconds / length if length > 0 else 0.0 for seconds, length in zip(data.agent_seconds, lengths)]
+		if not any(arrays["tokens"]) and not any(users) and not any(round(value, 6) for value in cost) and not any(agents):
 			continue
 		label = provider or "unknown"
-		entry = {**arrays, "cost_usd": cost, "user_messages": users}
+		entry = {**arrays, "cost_usd": cost, "user_messages": users, "agents": agents}
 		# The model view is split by model alone: one model billed through several providers (or an unrecorded one) is one series, naming its provider only while there is a single one. Both views sum the already-rounded (provider, model) series, so they always agree to the token.
 		if model not in models:
 			models[model] = empty(model, model, label, model)
@@ -580,11 +626,14 @@ def _render(days, tz, now, buckets, window_end, series, missing):
 		for bucket in (model_bucket, providers[label]):
 			for name in fields:
 				bucket[name] = [left + right for left, right in zip(bucket[name], entry[name])]
-			bucket["cost_usd"] = [left + right for left, right in zip(bucket["cost_usd"], cost)]
+			for name in ("cost_usd", "agents"):
+				bucket[name] = [left + right for left, right in zip(bucket[name], entry[name])]
 	by_model = list(models.values())
 	by_provider = list(providers.values())
 	for entry in (*by_model, *by_provider):
 		entry["cost_usd"] = [round(value, 6) for value in entry["cost_usd"]]
+		# Six decimals keep a few seconds in a daily bucket (0.0864 s per step), so short runs survive and both splits agree.
+		entry["agents"] = [round(value, 6) for value in entry["agents"]]
 
 	def order(entry):
 		return (-sum(entry["tokens"]), entry["key"])

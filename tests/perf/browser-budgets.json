@@ -130,58 +130,58 @@
       "maxGap": 60
     },
     "usage/usage:open": {
-      "ms": 33,
+      "ms": 52,
       "cardRenders": 4,
       "mounted": 2,
-      "componentRenders": 78
+      "componentRenders": 90
     },
     "usage/usage:period-right": {
-      "ms": 27,
+      "ms": 34,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 33
+      "componentRenders": 40
     },
     "usage/usage:period-left": {
-      "ms": 30,
+      "ms": 38,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 33
+      "componentRenders": 40
     },
     "usage/usage:mode:independent": {
-      "ms": 20,
+      "ms": 22,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 20
+      "componentRenders": 23
     },
     "usage/usage:mode:stacked": {
-      "ms": 20,
+      "ms": 22,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 20
+      "componentRenders": 23
     },
     "usage/usage:split:model": {
-      "ms": 24,
+      "ms": 36,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 20
+      "componentRenders": 23
     },
     "usage/usage:split:provider": {
-      "ms": 20,
+      "ms": 23,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 20
+      "componentRenders": 23
     },
     "usage/usage:hover": {
-      "ms": 17,
+      "ms": 18,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 10
+      "componentRenders": 12
     },
     "usage/page:close": {
-      "ms": 18,
+      "ms": 21,
       "cardRenders": 4,
       "mounted": 2,
-      "componentRenders": 56
+      "componentRenders": 63
     },
     "limits/limits:open": {
       "ms": 24,

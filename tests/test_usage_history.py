@@ -23,7 +23,7 @@ SCHEMA = """
 CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, parent_session_id TEXT, title TEXT, started_at REAL NOT NULL, model_config TEXT);
 CREATE TABLE messages (
 	id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT, tool_calls TEXT,
-	reasoning TEXT, reasoning_content TEXT, timestamp REAL NOT NULL, token_count INTEGER, active INTEGER NOT NULL DEFAULT 1,
+	reasoning TEXT, reasoning_content TEXT, tool_name TEXT, timestamp REAL NOT NULL, token_count INTEGER, active INTEGER NOT NULL DEFAULT 1,
 	compacted INTEGER NOT NULL DEFAULT 0, display_kind TEXT, _compressed_summary INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
@@ -61,10 +61,10 @@ class Fixture:
 	def session(self, session_id, source="desktop", parent=None, started_at=1.0, model_config=None):
 		self.run("INSERT INTO sessions (id, source, parent_session_id, started_at, model_config) VALUES (?, ?, ?, ?, ?)", session_id, source, parent, started_at, model_config)
 
-	def message(self, session_id, role, timestamp, content="", tool_calls=None, reasoning=None, display_kind=None, compressed=0):
+	def message(self, session_id, role, timestamp, content="", tool_calls=None, reasoning=None, display_kind=None, compressed=0, tool_name=None):
 		self.run(
-			"INSERT INTO messages (session_id, role, content, tool_calls, reasoning, reasoning_content, timestamp, display_kind, _compressed_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			session_id, role, content, tool_calls, reasoning, reasoning, timestamp, display_kind, compressed,
+			"INSERT INTO messages (session_id, role, content, tool_calls, reasoning, reasoning_content, tool_name, timestamp, display_kind, _compressed_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			session_id, role, content, tool_calls, reasoning, reasoning, tool_name, timestamp, display_kind, compressed,
 		)
 
 	def usage(self, session_id, model, provider, first_seen, last_seen, *, task="", calls=1, input=0, output=0, cache_read=0, cache_write=0, reasoning=0):
@@ -244,11 +244,13 @@ class UsageHistoryTests(unittest.TestCase):
 		self.assertEqual(quarter["window_end"], int(local(PARIS, 2026, 10, 28)))
 
 	def test_bucket_edges_assign_to_the_later_bucket_and_drop_outside_points(self):
-		self.db.session("s1")
+		# A cron run, so the user rows below are not human messages: each call is a turn of its own, and without them the days between the calls would read as one agent running throughout.
+		self.db.session("s1", "cron")
 		edge = self.day[3]
-		self.db.message("s1", "assistant", edge, "x")
-		self.db.message("s1", "assistant", self.day[0] - 0.001, "x")
-		self.db.message("s1", "assistant", self.day[7], "x")
+		for call in (edge, self.day[0] - 0.001, self.day[7]):
+			# Same instant as the call: no agent time, so only the calls decide which models appear.
+			self.db.message("s1", "user", call, "go")
+			self.db.message("s1", "assistant", call, "x")
 		self.db.usage("s1", "a", "p", edge, edge, calls=1, input=10)
 		self.db.usage("s1", "b", "p", self.day[0] - 0.001, self.day[0] - 0.001, calls=1, input=10)
 		self.db.usage("s1", "c", "p", self.day[7], self.day[7], calls=1, input=10)
@@ -325,6 +327,104 @@ class UsageHistoryTests(unittest.TestCase):
 		self.assertEqual(payload["totals"]["user_messages"], 2)
 		# Their tokens still count: subagent work costs the same.
 		self.assertEqual(payload["totals"]["tokens"], 30)
+
+	def test_parallel_agents_are_the_mean_running_count_per_bucket(self):
+		hour = self.day[6] + 3600
+		self.db.session("parent")
+		self.db.message("parent", "user", hour, "go")
+		self.db.message("parent", "assistant", hour + 600, "", tool_calls="delegate")
+		# Blocking delegation: the parent waits while its subagent works, so only the subagent counts.
+		self.db.message("parent", "tool", hour + 1800, "result", tool_name="delegate_task")
+		self.db.message("parent", "assistant", hour + 2400, "done")
+		# Idle until the next user row, typed or injected.
+		self.db.message("parent", "user", hour + 3000, "[IMPORTANT: Background process proc_1 completed normally]")
+		self.db.message("parent", "assistant", hour + 3300, "", tool_calls="ask")
+		# Waiting for a person's answer is not agent work either.
+		self.db.message("parent", "tool", hour + 3500, "answer", tool_name="clarify")
+		self.db.message("parent", "assistant", hour + 3540, "", tool_calls="run")
+		# A tool run straddling the bucket edge is split between both buckets.
+		self.db.message("parent", "tool", hour + 4200, "output", tool_name="terminal")
+		self.db.usage("parent", "main", "p", hour + 600, hour + 3540, calls=4, input=10)
+		self.db.session("child", "desktop", parent="parent", model_config='{"_delegate_from": "parent"}')
+		self.db.message("child", "user", hour + 600.5, "task")
+		self.db.message("child", "assistant", hour + 1200, "", tool_calls="run")
+		self.db.message("child", "tool", hour + 1500, "output", tool_name="terminal")
+		self.db.message("child", "assistant", hour + 1799.5, "report")
+		self.db.usage("child", "sub", "p", hour + 1200, hour + 1799.5, calls=2, input=10)
+		payload = self.payload()
+		index = payload["buckets"].index(int(hour))
+		# Parent: 600 + 600 + 300 + 40 + 60 seconds in the first hour, 600 in the next; subagent: 1199 seconds.
+		self.assertEqual(series(payload, "main")["agents"][index:index + 2], [round(1600 / 3600, 6), round(600 / 3600, 6)])
+		self.assertEqual(series(payload, "sub")["agents"][index], round(1199 / 3600, 6))
+		self.assertAlmostEqual(series(payload, "p", "by_provider")["agents"][index], 2799 / 3600, places=6)
+		self.assertEqual(sum(1 for value in series(payload, "p", "by_provider")["agents"] if value), 2)
+
+	def test_parallel_agents_follow_the_model_of_each_call(self):
+		early = self.day[6] + 3600
+		self.db.session("s1")
+		self.db.message("s1", "user", early, "hello")
+		self.db.message("s1", "assistant", early + 1800, "a")
+		self.db.message("s1", "user", early + 3600, "switch")
+		self.db.message("s1", "assistant", early + 3600 + 900, "b")
+		self.db.usage("s1", "alpha", "p", early + 1800, early + 1800, calls=1, input=500)
+		self.db.usage("s1", "beta", "p", early + 4500, early + 4500, calls=1, input=10)
+		payload = self.payload()
+		index = payload["buckets"].index(int(early))
+		self.assertEqual(series(payload, "alpha")["agents"][index:index + 2], [0.5, 0])
+		self.assertEqual(series(payload, "beta")["agents"][index:index + 2], [0, 0.25])
+
+	def test_fork_copies_count_their_agent_time_once(self):
+		hour = self.day[6] + 3600
+		# The fork sorts first, copies only part of a turn that waited on a subagent, and runs another model: the original keeps its own time and model whatever the order.
+		self.db.session("b-original", started_at=hour - 1)
+		self.db.message("b-original", "user", hour, "go")
+		self.db.message("b-original", "assistant", hour + 600, "", tool_calls="delegate")
+		self.db.message("b-original", "tool", hour + 1200, "result", tool_name="delegate_task")
+		self.db.message("b-original", "assistant", hour + 1500, "", tool_calls="run")
+		self.db.message("b-original", "tool", hour + 1560, "output", tool_name="terminal")
+		self.db.message("b-original", "assistant", hour + 1800, "done")
+		self.db.usage("b-original", "orig", "p", hour + 600, hour + 1800, calls=3, input=10)
+		# A fork copies the user and assistant rows with their timestamps, not the tool rows, then goes on by itself.
+		self.db.session("a-fork", parent="b-original", started_at=hour + 1900)
+		self.db.message("a-fork", "user", hour, "go")
+		self.db.message("a-fork", "assistant", hour + 600, "", tool_calls="delegate")
+		self.db.message("a-fork", "assistant", hour + 1500, "", tool_calls="run")
+		self.db.message("a-fork", "user", hour + 2400, "more")
+		self.db.message("a-fork", "assistant", hour + 3000, "again")
+		self.db.usage("a-fork", "forked", "p", hour + 3000, hour + 3000, calls=1, input=10)
+		payload = self.payload()
+		index = payload["buckets"].index(int(hour))
+		# Original: 600 + 300 + 60 + 240 seconds; fork: only its own 600.
+		self.assertEqual(series(payload, "orig")["agents"][index], round(1200 / 3600, 6))
+		self.assertEqual(series(payload, "forked")["agents"][index], round(600 / 3600, 6))
+
+	def test_a_steer_does_not_end_the_agent_run(self):
+		hour = self.day[6] + 3600
+		self.db.session("s1")
+		self.db.message("s1", "user", hour, "go")
+		self.db.message("s1", "assistant", hour + 600, "", tool_calls="run")
+		# Typed while the agent works, so the time before it is still work.
+		self.db.message("s1", "user", hour + 1200, "also check the logs", display_kind="steer")
+		self.db.message("s1", "tool", hour + 1800, "output", tool_name="terminal")
+		self.db.message("s1", "assistant", hour + 2400, "done")
+		self.db.usage("s1", "m", "p", hour + 600, hour + 2400, calls=2, input=10)
+		payload = self.payload()
+		self.assertEqual(series(payload, "m")["agents"][payload["buckets"].index(int(hour))], round(2400 / 3600, 6))
+
+	def test_short_runs_survive_daily_buckets_and_both_splits_agree(self):
+		start = self.day[6] + 3600
+		for offset, model in enumerate(("m1", "m2")):
+			session = f"s{offset}"
+			self.db.session(session)
+			self.db.message(session, "user", start + 100 * offset, "go")
+			self.db.message(session, "assistant", start + 100 * offset + 3, "ok")
+			self.db.usage(session, model, "p", start + 100 * offset + 3, start + 100 * offset + 3, calls=1, input=10)
+		payload = self.payload(days=90)
+		index = payload["buckets"].index(int(self.day[6]))
+		models = [series(payload, model)["agents"][index] for model in ("m1", "m2")]
+		# Three seconds in a day is 0.0000347 agents: still drawn, and the provider is the sum of its models.
+		self.assertTrue(all(value > 0 for value in models))
+		self.assertAlmostEqual(series(payload, "p", "by_provider")["agents"][index], sum(models), delta=2e-6)
 
 	def test_unanswered_user_message_goes_to_the_dominant_main_model(self):
 		call = self.day[6] + 600
