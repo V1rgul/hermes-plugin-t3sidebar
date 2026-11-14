@@ -54,9 +54,9 @@ test('window scrolling keeps layout-effect bookkeeping bounded to mounted rows',
 	const resize = observeViewport(t), fixture = windowFixture();
 	await render(fixture.tree(fixture.entries));
 	const body = document.querySelector('.sf-section-body');
-	await resize(body, 112);
+	await resize(body, 108);
 	fixture.reset();
-	await act(async () => { body.scrollTop = 56 * 30; body.dispatchEvent(new Event('scroll')); });
+	await act(async () => { body.scrollTop = 54 * 30; body.dispatchEvent(new Event('scroll')); });
 	assert.ok(document.querySelector('[data-session-id="window-30"]'));
 	assert.ok(fixture.renders <= 8, `only the viewport and overscan render: ${fixture.renders}`);
 	assert.ok(fixture.keyReads < 100, `scroll must not revisit 500 logical keys: ${fixture.keyReads}`);
@@ -67,10 +67,10 @@ test('small-list resizes and scrolling update caches/fades without rendering unu
 	await render(fixture.tree(entries));
 	const body = document.querySelector('.sf-section-body');
 	Object.defineProperty(body, 'scrollHeight', { configurable: true, value: 500 });
-	await resize(body, 112);
+	await resize(body, 108);
 	fixture.reset();
 	for (const height of [100, 90, 80, 70]) await resize(body, height);
-	await act(async () => { body.scrollTop = 56; body.dispatchEvent(new Event('scroll')); });
+	await act(async () => { body.scrollTop = 54; body.dispatchEvent(new Event('scroll')); });
 	assert.equal(body.dataset.moreBelow, 'true');
 	await act(async () => { body.scrollTop = 500; body.dispatchEvent(new Event('scroll')); });
 	assert.equal(body.dataset.moreBelow, 'false');
@@ -87,20 +87,20 @@ test('small-list keyboard reveal consumes focus immediately without stealing lat
 		h(flow.HermesT3Sidebar, { ctx: mock.ctx, controller }), h('textarea', { 'aria-label': 'Composer probe' }))));
 	await tick(); await tick();
 	const body = document.querySelector('[data-section=active] .sf-section-body');
-	await resize(body, 112);
+	await resize(body, 108);
 	const keyDown = async (card, key) => act(async () => card.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true })));
 	for (const [id, key, scrollTop, inputLabel] of [
 		['focus-5', 'End', 0, 'Search sessions'],
 		['focus-5', 'ArrowDown', 0, 'Composer probe'],
-		['focus-0', 'Home', 224, 'Search sessions'],
-		['focus-0', 'ArrowUp', 224, 'Composer probe'],
+		['focus-0', 'Home', 216, 'Search sessions'],
+		['focus-0', 'ArrowUp', 216, 'Composer probe'],
 		['focus-0', 'Home', 0, 'Search sessions']
 	]) {
 		const card = document.querySelector(`[data-session-id="${id}"] .sf-open`);
 		await act(async () => card.focus());
 		await act(async () => { body.scrollTop = scrollTop; body.dispatchEvent(new Event('scroll')); });
 		await keyDown(card, key);
-		assert.equal(body.scrollTop, id === 'focus-5' ? 224 : 0, `${key} reveals the already-focused boundary card`);
+		assert.equal(body.scrollTop, id === 'focus-5' ? 216 : 0, `${key} reveals the already-focused boundary card`);
 		const input = document.querySelector(`[aria-label="${inputLabel}"]`);
 		await act(async () => input.focus());
 		assert.ok(document.activeElement === input, `${key} must not leave pending focus that steals ${inputLabel}`);
@@ -111,8 +111,8 @@ test('crossing the window threshold synchronizes cached scroll and last-positive
 	const resize = observeViewport(t), fixture = windowFixture(), small = fixture.entries.slice(0, 80), large = fixture.entries.slice(0, 81);
 	await render(fixture.tree(small));
 	const body = document.querySelector('.sf-section-body');
-	await resize(body, 112);
-	await act(async () => { body.scrollTop = 56 * 30; body.dispatchEvent(new Event('scroll')); });
+	await resize(body, 108);
+	await act(async () => { body.scrollTop = 54 * 30; body.dispatchEvent(new Event('scroll')); });
 	await resize(body, 0);
 	await render(fixture.tree(large));
 	assert.equal(document.querySelectorAll('[data-session-id]').length, 8);
@@ -123,7 +123,7 @@ test('crossing the window threshold synchronizes cached scroll and last-positive
 	await render(fixture.tree(small));
 	assert.equal(document.querySelectorAll('[data-session-id]').length, 80);
 	await act(async () => { body.scrollTop = 0; body.dispatchEvent(new Event('scroll')); });
-	await resize(body, 224);
+	await resize(body, 216);
 	await render(fixture.tree(large));
 	assert.equal(document.querySelectorAll('[data-session-id]').length, 7);
 	assert.ok(document.querySelector('[data-session-id="window-0"]'));

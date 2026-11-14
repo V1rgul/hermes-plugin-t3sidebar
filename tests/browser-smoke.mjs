@@ -180,7 +180,7 @@ try {
   check('search still allows explicitly unfolding matching archives', await page.locator('[data-session-id="archived"]').isVisible());
   await page.getByRole('button', { name: 'Clear search', exact: true }).click();
   check('all five shelves rendered', await page.locator('.sf-section').count() === 5);
-  check('Working with one card has no spare vertical space', await page.locator('[data-section="working"]').evaluate(el => el.getBoundingClientRect().height <= 30 + el.querySelectorAll('.sf-row').length * 56 + 1));
+  check('Working with one card has no spare vertical space', await page.locator('[data-section="working"]').evaluate(el => el.getBoundingClientRect().height <= 30 + el.querySelectorAll('.sf-row').length * 54 + 1));
   check('waiting approval remains Ready despite archival and pin metadata', await page.locator('section[aria-label="Ready"] [data-session-id="approval"]').count() === 1);
   const tokenColor = (locator, token) => locator.evaluate((el, token) => {
     const probe = document.createElement('span'); probe.style.color = `var(${token})`; el.append(probe);
@@ -263,9 +263,9 @@ try {
     check(`${id} recedes its title exactly like Working while staying fully opaque`, await titleColor(id) === recededTitle && await card.evaluate(el => getComputedStyle(el).opacity) === '1');
     await card.hover();
     check(`${id} title returns to primary text instantly on hover`, await titleColor(id) === primaryTitle);
-    check(`${id} card backgrounds keep a 2px gap from adjacent cards without changing the 56px stride`, await card.evaluate(el => {
+    check(`${id} card backgrounds keep a 2px gap from adjacent cards without changing the 54px stride`, await card.evaluate(el => {
       const style = getComputedStyle(el), next = el.parentElement.nextElementSibling?.querySelector('.sf-row') || el.nextElementSibling;
-      return el.getBoundingClientRect().height === 56 && style.backgroundClip === 'padding-box' && style.borderTopWidth === '1px' && style.borderBottomWidth === '1px'
+      return el.getBoundingClientRect().height === 54 && style.backgroundClip === 'padding-box' && style.borderTopWidth === '1px' && style.borderBottomWidth === '1px'
         && style.borderTopColor === 'rgba(0, 0, 0, 0)' && (!next || Math.abs(next.getBoundingClientRect().top - el.getBoundingClientRect().bottom) < .5);
     }));
     check(`${id} hover actions sit equally far from the card's top and right edges`, await card.evaluate(el => {
@@ -1182,7 +1182,7 @@ try {
     check(`${height}px: Pinned before headerless Ready, secondary headings fixed${crowded ? '' : ' and visible'}`, layout.sections.map(s => s.name).join(',') === 'pinned,active,working,snoozed,archived' && layout.sections.slice(0, 2).every(s => !s.header) && layout.sections.slice(2).every(s => s.header.height === 30 && s.header.top >= layout.list.top && (crowded || s.header.bottom <= layout.root.bottom) && s.body.top >= s.header.bottom));
     if (crowded) {
       const floors = await page.locator('.sf-shelves').evaluate(el => ({ scrolls: el.scrollHeight > el.clientHeight + 1, overflow: getComputedStyle(el).overflowY, bodies: [...el.children].map(section => section.querySelector('.sf-section-body').getBoundingClientRect().height) }));
-      check(`${height}px: the one-card floors exceed the pane, so the shelves scroll as a whole and every body still shows a whole card`, layout.overflow === 'hidden' && floors.scrolls && floors.overflow === 'auto' && floors.bodies.every(body => body >= 55.5));
+      check(`${height}px: the one-card floors exceed the pane, so the shelves scroll as a whole and every body still shows a whole card`, layout.overflow === 'hidden' && floors.scrolls && floors.overflow === 'auto' && floors.bodies.every(body => body >= 53.5));
     } else {
       check(`${height}px: no whole-list scrolling; all five bodies constrained`, layout.overflow === 'hidden' && layout.listScrollHeight <= layout.listHeight + 1 && layout.sections.every(s => s.body.height > 0 && s.body.bottom <= layout.list.bottom + 1 && s.scrollHeight > s.body.height));
       const shares = await page.locator('.sf-shelves').evaluate(el => ({ height: el.getBoundingClientRect().height, ...Object.fromEntries([...el.children].map(s => [s.dataset.section, s.getBoundingClientRect().height])) }));
@@ -1200,7 +1200,7 @@ try {
     check(`${height}px: dense Snoozed gets the same two-card minimum before Archived`, await page.locator('[data-section="snoozed"]').evaluate(el => {
       const grid = el.parentElement.getBoundingClientRect().height;
       // Chromium quantizes flex tracks to 1/64px; preserve the CSS minimum without a subpixel false failure.
-      return el.getBoundingClientRect().height >= Math.floor(Math.min(30 + 2 * 56, grid * .2 - 1) * 64) / 64;
+      return el.getBoundingClientRect().height >= Math.floor(Math.min(30 + 2 * 54, grid * .2 - 1) * 64) / 64;
     }));
     check(`${height}px: toolbar single line and Search left of Filter and New session`, layout.toolbar.length === 3 && layout.toolbar.every(r => Math.abs((r.top + r.bottom) / 2 - (layout.toolbar[0].top + layout.toolbar[0].bottom) / 2) < 2) && layout.toolbar.every((r, i, arr) => !i || arr[i-1].right <= r.left));
     // Scroll each body in turn: every other category's scrollTop AND geometry stay fixed.
@@ -1227,20 +1227,22 @@ try {
       const section = el.closest('[data-section]').dataset.section;
       return section === 'archived' ? el.scrollTop > 0 : section === 'active' ? el.scrollTop === readyScroll : el.scrollTop === 0;
     }), readyScroll));
-    await page.locator('.sf-section-body').evaluateAll(els => els.forEach(el => { el.scrollTop = 0; }));
+    // The shelves scroll as a whole in the crowded pane too: reset them, or hover() scrolls the card into view and moves the title it compares.
+    await page.locator('.sf-section-body, .sf-shelves').evaluateAll(els => els.forEach(el => { el.scrollTop = 0; }));
     const card = page.locator('[data-session-id="synthetic-active-000"]');
     const metadata = await card.locator('.sf-card-meta').boundingBox(), title = await card.locator('.sf-row-title').boundingBox();
     // Registered lengths compute to px: the 1.5em fade of the 14px title reads 21px. The right fade drawn is --sf-cut × --sf-fade-end.
     const fadeState = el => { const style = getComputedStyle(el); return { cut: style.getPropertyValue('--sf-cut'), start: style.getPropertyValue('--sf-fade-start'), end: style.getPropertyValue('--sf-fade-end'), left: el.scrollLeft, max: el.scrollWidth - el.clientWidth, overflow: style.textOverflow, mask: style.maskImage, transition: style.transitionProperty }; };
     const cardTitle = card.locator('.sf-row-title');
     const rest = await cardTitle.evaluate(fadeState);
-    check(`${height}px: 56px two-line card; cut title fades only at its right edge, below metadata`, (await card.boundingBox()).height === 56 && metadata.y + metadata.height <= title.y && rest.overflow === 'clip' && rest.mask !== 'none' && rest.max > 0 && rest.left === 0 && rest.cut === '1' && rest.start === '0px' && rest.end === '21px');
-    check(`${height}px: card text lines use a centered 3px gap without changing line heights`, await card.locator('.sf-open').evaluate(el => {
+    check(`${height}px: 54px two-line card; cut title fades only at its right edge, below metadata`, (await card.boundingBox()).height === 54 && metadata.y + metadata.height <= title.y && rest.overflow === 'clip' && rest.mask !== 'none' && rest.max > 0 && rest.left === 0 && rest.cut === '1' && rest.start === '0px' && rest.end === '21px');
+    check(`${height}px: card text lines use a centered 1px gap without changing line heights`, await card.locator('.sf-open').evaluate(el => {
       const meta = el.querySelector('.sf-card-meta').getBoundingClientRect(), title = el.querySelector('.sf-row-title').getBoundingClientRect(), bounds = el.getBoundingClientRect();
-      return getComputedStyle(el).rowGap === '3px' && meta.height === 19 && title.height === 19 && title.top - meta.bottom === 3 && Math.abs((meta.top + title.bottom) / 2 - (bounds.top + bounds.bottom) / 2) < 1;
+      return getComputedStyle(el).rowGap === '1px' && meta.height === 19 && title.height === 19 && title.top - meta.bottom === 1 && Math.abs((meta.top + title.bottom) / 2 - (bounds.top + bounds.bottom) / 2) < 1;
     }));
     await card.hover(); const action = await card.locator('.sf-hover').boundingBox(), titleHovered = await card.locator('.sf-row-title').boundingBox();
-    check(`${height}px: hover actions stay at top, title unaffected`, action.y < title.y && action.y + action.height <= title.y + 1 && JSON.stringify(titleHovered) === JSON.stringify(title));
+    // The actions take the metadata line's box, like T3 Code's first-line actions, so they never reach the title line.
+    check(`${height}px: hover actions cover exactly the metadata line, clear of the title, title unaffected`, Math.abs(action.y - metadata.y) < .5 && action.height === metadata.height && action.y + action.height <= titleHovered.y && JSON.stringify(titleHovered) === JSON.stringify(title));
     if (height === 400) {
       await page.waitForTimeout(700);
       check('reduced motion leaves a hovered cut title at its start', await cardTitle.evaluate(el => el.scrollLeft) === 0);
@@ -1280,8 +1282,8 @@ try {
     await page.waitForFunction(count => (document.querySelector('[data-section="pinned"]')?.querySelectorAll('.sf-row').length || 0) === count, count);
     if (count === 1) check('Pinned uses natural flex sizing rather than a calculated grid track', await page.locator('[data-section="pinned"]').evaluate(el => getComputedStyle(el.parentElement).display === 'flex' && getComputedStyle(el).flexGrow === '0' && !el.parentElement.style.gridTemplateRows));
     if (!count) check('empty Pinned reserves no space and Ready starts at the top', await page.locator('[data-section="pinned"]').evaluate(el => el.getBoundingClientRect().height === 0 && !el.querySelector('.sf-row')) && await page.locator('.sf-scroll').evaluate(list => Math.abs(list.getBoundingClientRect().top - list.querySelector('[data-section="active"]').getBoundingClientRect().top) <= 1));
-    // The 6px above the cards hold the group pin straddling the outline; 5px of margin plus the 1px shelf gap separate the group from Ready.
-    else check(`Pinned with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="pinned"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - 6 - count * 56) <= 1 && Math.abs(el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().bottom - 6) <= 1, count));
+    // The 6px above the cards hold the group pin straddling the outline; below, the group touches Ready (its -1px margin cancels the shelf gap), so the outline sits 2px above Ready's first card background, like any two adjacent cards.
+    else check(`Pinned with ${count} cards shrinks to content without blank space and touches Ready`, await page.locator('[data-section="pinned"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - 6 - count * 54) <= 1 && Math.abs(el.nextElementSibling.getBoundingClientRect().top - el.getBoundingClientRect().bottom) <= .5, count));
   }
 
   for (const count of [0, 1, 2]) {
@@ -1297,7 +1299,7 @@ try {
       await fixture.queryClient.invalidateQueries({ queryKey: ['hermes-t3sidebar'] });
     }, count);
     await page.waitForFunction(count => document.querySelector('[data-section="working"]')?.querySelectorAll('.sf-row').length === count, count);
-    check(`Working with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="working"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - (30 + count * 56)) <= 1, count));
+    check(`Working with ${count} cards shrinks to content without blank space`, await page.locator('[data-section="working"]').evaluate((el, count) => Math.abs(el.getBoundingClientRect().height - (30 + count * 54)) <= 1, count));
     check(`Working ${count}: CSS flex sizes it from its content, with no inline size`, await page.locator('[data-section="working"]').evaluate(el => getComputedStyle(el.parentElement).display === 'flex' && !el.style.height && !el.style.maxHeight && !el.parentElement.style.gridTemplateRows));
     if (!count) check('empty Working retains only its 30px header and no scroll-body footprint', await page.locator('[data-section="working"]').evaluate(el => el.querySelector('.sf-section-toggle').getBoundingClientRect().height === 30 && el.querySelector('.sf-section-body').getBoundingClientRect().height === 0));
     if (count === 2) {
@@ -1332,7 +1334,7 @@ try {
         const inside = el => { const r = el.getBoundingClientRect(); return r.top >= bounds.top && r.bottom <= bounds.bottom + 1; };
         const scrolls = shelves.scrollHeight > shelves.clientHeight + 1;
         const headers = [...list.querySelectorAll('.sf-section-toggle')], bodies = [...shelves.querySelectorAll('.sf-section-body')], pinned = list.querySelector('[data-section=pinned] .sf-section-body');
-        const visible = () => headers.every(el => el.getBoundingClientRect().height === 30 && (scrolls || inside(el))) && bodies.every(el => el.getBoundingClientRect().height >= 55.5 && el.scrollHeight > el.clientHeight && (scrolls || inside(el)))
+        const visible = () => headers.every(el => el.getBoundingClientRect().height === 30 && (scrolls || inside(el))) && bodies.every(el => el.getBoundingClientRect().height >= 53.5 && el.scrollHeight > el.clientHeight && (scrolls || inside(el)))
           && (!pinned || pinned.getBoundingClientRect().height > 0 && inside(pinned));
         const top = visible();
         shelves.scrollTop = shelves.scrollHeight;
@@ -1342,14 +1344,14 @@ try {
           fits: list.scrollHeight <= list.clientHeight + 1, scrolls,
           tightCards: [...list.querySelectorAll('.sf-open')].every(el => {
             const meta = el.querySelector('.sf-card-meta').getBoundingClientRect(), title = el.querySelector('.sf-row-title').getBoundingClientRect();
-            return el.closest('.sf-row').getBoundingClientRect().height === 56 && getComputedStyle(el).rowGap === '3px' && meta.height === 19 && title.height === 19 && title.top - meta.bottom === 3;
+            return el.closest('.sf-row').getBoundingClientRect().height === 54 && getComputedStyle(el).rowGap === '1px' && meta.height === 19 && title.height === 19 && title.top - meta.bottom === 1;
           }),
           shelves: top && reachable
         };
       });
       console.log(`SHORT ${base}px ${banner}: ${JSON.stringify(geometry)}`);
       check(`${base}px list pane (+${footerHeight}px footer)${banner === 'error' ? ' with error' : ''}: whole-card shelves fit, or scroll as a whole with every heading and body reachable, without outer clipping`, geometry.fits && geometry.shelves);
-      check(`${base}px list pane ${banner}: tight card text preserves 56px rows and 19px lines`, geometry.tightCards);
+      check(`${base}px list pane ${banner}: tight card text preserves 54px rows and 19px lines`, geometry.tightCards);
       check(`${base}px list pane ${banner}: no Undo or dismiss-Undo controls`, await noUndo());
       if (base === 300 && banner === 'error') await page.locator('.harness-sidebar').screenshot({ path: join(screenshotDir, 'short-300-error.png') });
     }
@@ -1516,14 +1518,14 @@ try {
     await motion.waitForTimeout(400);
     const sample = () => motion.evaluate(() => ({
       ghosts: [...document.querySelectorAll('[data-exiting=true]')].map(ghost => ({ height: ghost.getBoundingClientRect().height, inert: ghost.inert, hidden: ghost.getAttribute('aria-hidden'), ids: ghost.querySelectorAll('[data-session-id]').length })),
-      entering: [...document.querySelectorAll('.sf-slot:not([data-exiting])')].map(slot => slot.getBoundingClientRect().height).filter(height => height > 0 && height < 55),
-      rows: [...document.querySelectorAll('.sf-row')].every(row => Math.abs(row.getBoundingClientRect().height - 56) < .5),
+      entering: [...document.querySelectorAll('.sf-slot:not([data-exiting])')].map(slot => slot.getBoundingClientRect().height).filter(height => height > 0 && height < 53),
+      rows: [...document.querySelectorAll('.sf-row')].every(row => Math.abs(row.getBoundingClientRect().height - 54) < .5),
       working: document.querySelector('[data-section=working]').getBoundingClientRect().height }));
     const rest = await sample();
     await motion.getByRole('searchbox').fill('zzzz-no-match');
     await motion.waitForTimeout(90);
     const leaving = await sample();
-    check('search-removed cards collapse as inert, id-free ghosts while each card keeps its full height', leaving.ghosts.length > 0 && leaving.ghosts.every(ghost => ghost.height > 1 && ghost.height < 55 && ghost.inert && ghost.hidden === 'true' && !ghost.ids) && leaving.rows);
+    check('search-removed cards collapse as inert, id-free ghosts while each card keeps its full height', leaving.ghosts.length > 0 && leaving.ghosts.every(ghost => ghost.height > 1 && ghost.height < 53 && ghost.inert && ghost.hidden === 'true' && !ghost.ids) && leaving.rows);
     check('content-sized Working shrinks with its leaving card instead of jumping', leaving.working > 31 && leaving.working < rest.working - 1);
     await motion.waitForTimeout(400);
     check('exit ghosts are removed once collapsed', (await sample()).ghosts.length === 0);
@@ -1545,7 +1547,7 @@ try {
     const moving = await motion.evaluate(() => ({
       ghost: !!document.querySelector('[data-section=active] [data-exiting=true]'),
       slot: document.querySelector('[data-section=working] [data-session-id="design"]').closest('.sf-slot').getBoundingClientRect().height }));
-    check('a card changing category collapses out of Ready and grows into Working', moving.ghost && moving.slot < 55);
+    check('a card changing category collapses out of Ready and grows into Working', moving.ghost && moving.slot < 53);
     await motion.close();
   }
   {
@@ -1621,7 +1623,7 @@ try {
         const opacities = root => root ? [...root.querySelectorAll('.sf-draft-mark')].map(mark => Number(getComputedStyle(mark).opacity)) : [];
         return { section: card.closest('.sf-section').dataset.section, slot: card.closest('.sf-slot').getBoundingClientRect().height, pencils: opacities(card), ghost: ghost && { pencils: opacities(ghost), overlays: ghost.querySelectorAll('.sf-roll-fx,.sf-meta-ghost,[data-rolling]').length },
           motion: document.getAnimations().filter(animation => !(animation instanceof CSSAnimation || animation instanceof CSSTransition) && card.querySelector('.sf-card-meta').contains(animation.effect?.target)).length }; }`, 900);
-    const before = moved.filter(sample => sample.section === 'active'), growing = moved.filter(sample => sample.section !== 'active' && sample.slot < 55.5), folding = moved.filter(sample => sample.ghost);
+    const before = moved.filter(sample => sample.section === 'active'), growing = moved.filter(sample => sample.section !== 'active' && sample.slot < 53.5), folding = moved.filter(sample => sample.ghost);
     console.log(`META SEND MOVE: ${JSON.stringify({ before: before.length, growing: growing.length, folding: folding.length, ghost: folding[0]?.ghost })}`);
     check('a sent pencil stays whole on its Ready card until the card moves', before.length > 3 && before.every(sample => sample.pencils.length === 1 && sample.pencils[0] === 1 && !sample.motion));
     check('the card folds out of Ready with its pencil whole and no number roll or status overlay', folding.length > 3 && folding.every(sample => sample.ghost.pencils.length === 1 && sample.ghost.pencils[0] === 1 && !sample.ghost.overlays));
@@ -1807,7 +1809,7 @@ try {
       const mark = el.querySelector(':scope > .sf-pinned-mark')?.getBoundingClientRect();
       const part = selector => { const node = row.querySelector(selector), box = node.getBoundingClientRect(); return { visible: getComputedStyle(node).display !== 'none' && box.height > 0, middle: box.top + box.height / 2 }; };
       return {
-        height: rect.height, space: el.nextElementSibling.getBoundingClientRect().top - rect.bottom, row: row.getBoundingClientRect().height, rows: el.querySelectorAll('.sf-row').length,
+        height: rect.height, space: el.nextElementSibling.getBoundingClientRect().top - rect.bottom, readyGap: ready.top + margin - (rect.bottom - parseFloat(outline.bottom)), margin, row: row.getBoundingClientRect().height, rows: el.querySelectorAll('.sf-row').length,
         // The outline spans exactly the cards' box, the same as a Ready card, and sits under them.
         outline: outline.content !== 'none' && outline.borderTopWidth === '1px' && outline.zIndex === '-1' && getComputedStyle(el).isolation === 'isolate' && rect.left === ready.left && rect.width === ready.width,
         // Its top and bottom lines are the first and last cards' outermost background rows, so a hovered or selected card covers them (and the gap behind the pin).
@@ -1822,11 +1824,11 @@ try {
     const group = lines.getByRole('group', { name: 'Pinned sessions', exact: true });
     const mode = () => group.locator('button[aria-pressed=true]').textContent();
     const two = await measure();
-    check('Pinned sessions defaults to 2 lines: ordinary cards, one group pin on an outline as wide as Ready cards', await mode() === '2 lines' && two.lines === '2' && two.row === 56 && two.height === 6 + two.rows * 56 && two.space === 6 && two.outline && two.underBackgrounds && two.markOnBorder && two.ownPins === 0 && two.name && two.provider);
+    check('Pinned sessions defaults to 2 lines: ordinary cards, one group pin on an outline as wide as Ready cards', await mode() === '2 lines' && two.lines === '2' && two.row === 54 && two.height === 6 + two.rows * 54 && two.space === 0 && two.readyGap === 2 * two.margin && two.outline && two.underBackgrounds && two.markOnBorder && two.ownPins === 0 && two.name && two.provider);
     await group.getByRole('button', { name: '1 line', exact: true }).click();
     await lines.waitForFunction(() => document.querySelector('.sf-scroll')?.dataset.pinnedLines === '1');
     const one = await measure();
-    check('1 line: 33px pinned cards without the project name or provider, title and status on one centred line', one.row === 33 && one.height === 6 + one.rows * 33 && one.space === 6 && one.outline && one.underBackgrounds && one.markOnBorder && !one.name && !one.provider && one.stride === 19 &&
+    check('1 line: 33px pinned cards without the project name or provider, title and status on one centred line', one.row === 33 && one.height === 6 + one.rows * 33 && one.space === 0 && one.outline && one.underBackgrounds && one.markOnBorder && !one.name && !one.provider && one.stride === 19 &&
       Math.abs(one.title - one.rowMiddle) <= 1 && Math.abs(one.time - one.rowMiddle) <= 1);
     await lines.locator('[data-session-id="pinned"]').hover();
     check('1 line: hover actions are centred in the row', await lines.locator('[data-session-id="pinned"]').evaluate(row => {
@@ -1834,7 +1836,7 @@ try {
       return getComputedStyle(row.querySelector('.sf-hover')).visibility === 'visible' && Math.abs((strip.top - box.top) - (box.bottom - strip.bottom)) <= 1;
     }));
     await lines.mouse.move(1100, 850);
-    check('Ready cards keep two lines in 1-line mode', await lines.locator('[data-section=active] .sf-row').first().evaluate(el => el.getBoundingClientRect().height === 56));
+    check('Ready cards keep two lines in 1-line mode', await lines.locator('[data-section=active] .sf-row').first().evaluate(el => el.getBoundingClientRect().height === 54));
     await lines.reload();
     await lines.locator('[data-session-id="pinned"]').waitFor();
     check('Pinned sessions line count persists through a real browser reload', (await measure()).row === 33);
@@ -1865,8 +1867,8 @@ try {
     const slots = () => lines.locator('[data-section=pinned] .sf-window').evaluate(el => ({ height: el.style.height, tops: [...el.querySelectorAll('.sf-slot')].slice(0, 3).map(slot => slot.style.top), row: el.querySelector('.sf-row').getBoundingClientRect().height }));
     check('windowed 1-line Pinned list stacks its cards at the 33px stride', JSON.stringify(await slots()) === JSON.stringify({ height: `${110 * 33}px`, tops: ['0px', '33px', '66px'], row: 33 }));
     await group.getByRole('button', { name: '2 lines', exact: true }).click();
-    await lines.waitForFunction(() => document.querySelector('[data-section=pinned] .sf-window')?.style.height === `${110 * 56}px`);
-    check('switching to 2 lines re-reads the stride of the mounted windowed list', JSON.stringify(await slots()) === JSON.stringify({ height: `${110 * 56}px`, tops: ['0px', '56px', '112px'], row: 56 }));
+    await lines.waitForFunction(() => document.querySelector('[data-section=pinned] .sf-window')?.style.height === `${110 * 54}px`);
+    check('switching to 2 lines re-reads the stride of the mounted windowed list', JSON.stringify(await slots()) === JSON.stringify({ height: `${110 * 54}px`, tops: ['0px', '54px', '108px'], row: 54 }));
     for (const height of [300, 400, 650, 1300]) {
       await lines.locator('.harness-sidebar').evaluate((el, height) => { el.style.height = `${height}px`; }, height);
       check(`${height}px with an oversized pinned group: Pinned scrolls past its cap (60% of the list, leaving 450px, at least 18%), Ready keeps a body and the secondary headings fit, or the shelves scroll as a whole when their one-card floors exceed the pane`, await lines.locator('.sf-scroll').evaluate(el => {
@@ -1891,7 +1893,7 @@ try {
         const pinned = el.querySelector('[data-section=pinned]'), body = pinned.querySelector('.sf-section-body'), ready = el.querySelector('[data-section=active] .sf-section-body'), bounds = pinned.getBoundingClientRect();
         return el.scrollHeight <= el.clientHeight + 1 && bounds.bottom <= el.getBoundingClientRect().bottom && body.scrollHeight <= body.clientHeight + 1 && [...pinned.querySelectorAll('.sf-row')].every(row => {
           const card = row.getBoundingClientRect();
-          return card.height === 56 && card.top >= bounds.top && card.bottom <= bounds.bottom + 1;
+          return card.height === 54 && card.top >= bounds.top && card.bottom <= bounds.bottom + 1;
         }) && ready.scrollHeight > ready.clientHeight;
       }));
     }
