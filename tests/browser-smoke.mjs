@@ -2121,7 +2121,7 @@ try {
     });
     let layout = await usageLayout();
     console.log(`USAGE LAYOUT: ${JSON.stringify(layout)}`);
-    check('Usage page draws Tokens, Cost and User messages charts on one shared, aligned time axis', layout.charts.join() === 'tokens,cost_usd,user_messages' && layout.aligned && layout.plotWidth > 800 && layout.drawn);
+    check('Usage page draws Tokens, Cost, User messages and Parallel agents charts on one shared, aligned time axis', layout.charts.join() === 'tokens,cost_usd,user_messages,agents' && layout.aligned && layout.plotWidth > 800 && layout.drawn);
     check('Usage page has no horizontal overflow and keeps labels inside the page', layout.overflowX <= 0 && layout.inside);
     {
       const axis7 = await axisState('.su-chart[data-metric="user_messages"]');
@@ -2131,7 +2131,7 @@ try {
       // Curves never dip below the zero line or rise above the plot: every line's box stays inside the 1000x100 viewBox.
       const inside = await usage.evaluate(() => [...document.querySelectorAll('.su-chart[data-metric] svg .su-line')].every(path => { const box = path.getBBox(); return box.y >= -0.01 && box.y + box.height <= 100.01; }));
       console.log(`USAGE 7D AXIS: ${JSON.stringify({ ...axis7, midnights, points, buckets: buckets.length })}`);
-      check('Usage 7d charts count per hour: the unit under each title is the bucket size', axis7.units.join() === 'tokens / h,$ / h,messages / h');
+      check('Usage 7d charts count per hour: the unit under each title is the bucket size', axis7.units.join() === 'tokens / h,$ / h,messages / h,agents, mean per h');
       check('Usage 7d draws one curve point per hourly bucket and every curve stays between the zero line and the top of the plot', points === buckets.length && points > 6 * 24 && points <= 7 * 24 && inside);
       check('Usage 7d day gridlines match the local midnights and labels name the month only once', axis7.dayLines === midnights && midnights === 7 && axis7.labels.length === 7 && monthsOnChange(axis7.labels) && !axis7.overlap);
     }
@@ -2148,9 +2148,9 @@ try {
       });
       console.log(`USAGE CHART HEADS: ${JSON.stringify(heads)}`);
       check('Usage chart titles and totals are 16px with at least 30px between a chart\'s x axis and the next title', heads.sizes.every(size => size === '16px|16px') && heads.gaps.every(gap => gap >= 30));
-      check('Usage totals name the period shown (/ 7 days)', heads.totals.every(text => text === '/ 7 days'));
+      check('Usage totals name the period shown (/ 7 days), and the agents mean the period it averages', heads.totals.join() === '/ 7 days,/ 7 days,/ 7 days,mean over 7 days');
       check('Usage per-day units sit under each title with the legend right-aligned on the same line', heads.lines.every(line => line.below && line.sameLine && line.left && line.right));
-      check('Usage charts have no 0 tick label, and every chart has the unfold period control beside its x axis instead of a header selector', heads.zeros === 0 && heads.controls === 3 && heads.beside && heads.periodButtons === 0);
+      check('Usage charts have no 0 tick label, and every chart has the unfold period control beside its x axis instead of a header selector', heads.zeros === 0 && heads.controls === 4 && heads.beside && heads.periodButtons === 0);
     }
     const tokensPlot = usage.locator('.su-chart[data-metric="tokens"] .su-plot');
     const plotBox = await tokensPlot.boundingBox();
@@ -2160,13 +2160,13 @@ try {
       const tips = [...document.querySelectorAll('.su-tip')], page = document.querySelector('.su').getBoundingClientRect();
       return { crosses, tips: tips.length, rows: tips.map(tip => tip.querySelectorAll('.su-tip-row').length), inside: tips.every(tip => { const box = tip.getBoundingClientRect(); return box.left >= page.left && box.right <= page.right; }), flipped: tips.every(tip => tip.dataset.side === 'left') };
     });
-    check('hovering one chart moves a synchronized crosshair and tooltip on all three', hover.crosses.length === 3 && new Set(hover.crosses).size === 1 && hover.tips === 3 && hover.rows.join() === '3,3,3' && hover.inside && hover.flipped);
+    check('hovering one chart moves a synchronized crosshair and tooltip on all four', hover.crosses.length === 4 && new Set(hover.crosses).size === 1 && hover.tips === 4 && hover.rows.join() === '3,3,3,3' && hover.inside && hover.flipped);
     await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-stacked.png') });
     await usage.getByRole('button', { name: 'Independent', exact: true }).click();
     await usage.getByRole('button', { name: 'Model', exact: true }).click();
     await usage.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="tokens"] svg g[data-series]').length === 4);
     layout = await usageLayout();
-    check('Model split with Independent mode redraws one line per model without overflow', layout.series.join() === '4,4,4' && layout.drawn && layout.overflowX <= 0 && layout.inside);
+    check('Model split with Independent mode redraws one line per model without overflow', layout.series.join() === '4,4,4,4' && layout.drawn && layout.overflowX <= 0 && layout.inside);
     await usage.mouse.move(plotBox.x + plotBox.width * 0.2, plotBox.y + plotBox.height / 2);
     await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'usage-independent.png') });
     await usage.mouse.move(5, 5);
@@ -2188,7 +2188,7 @@ try {
       await usage.mouse.move(box.x + box.width * 0.6, box.y + box.height / 2);
       const tip = await usage.locator('.su-chart[data-metric="user_messages"] .su-tip-total b').textContent();
       const units = await usage.evaluate(() => [...document.querySelectorAll('.su-yunit')].map(el => el.textContent).join());
-      check('Usage 24h counts per 10 minutes: the unit says so and the tooltip total is a plain bucket amount', units === 'tokens / 10 min,$ / 10 min,messages / 10 min' && /^[\d,]+$/.test(tip));
+      check('Usage 24h counts per 10 minutes: the unit says so and the tooltip total is a plain bucket amount', units === 'tokens / 10 min,$ / 10 min,messages / 10 min,agents, mean per 10 min' && /^[\d,]+$/.test(tip));
       await usage.locator('.harness-page').screenshot({ path: join(usageDir, 'v2-usage-24h.png') });
       await usage.mouse.move(5, 5);
     }
@@ -2636,7 +2636,7 @@ try {
       await glide.close();
     }
     {
-      // Usage period glide, on its own page without reduced motion: all three charts share one window per frame, the x-axis labels stay on the SVG's time mapping, a longer period widens from the old span and a shorter one zooms in on the old drawing before it is redrawn.
+      // Usage period glide, on its own page without reduced motion: all four charts share one window per frame, the x-axis labels stay on the SVG's time mapping, a longer period widens from the old span and a shorter one zooms in on the old drawing before it is redrawn.
       const glide = await browser.newPage({ viewport: { width: 1300, height: 1000 }, deviceScaleFactor: 1, timezoneId: 'Europe/Paris' });
       glide.on('pageerror', error => errors.push(error.message));
       await glide.clock.install({ time: new Date('2026-10-28T15:00:00+01:00') });
@@ -2658,13 +2658,13 @@ try {
       });
       const state = () => glide.evaluate(() => { const charts = [...document.querySelectorAll('.su-chart[data-metric]')];
         return { samples: window.__usageGlide, boxes: charts.map(chart => chart.querySelector('.su-plot > svg').getAttribute('viewBox')).join(), translates: document.querySelectorAll('.su-xaxis > span[style*="translate"]').length, days: charts.at(-1).querySelectorAll('.su-day-grid').length, gliding: charts.some(chart => chart.dataset.gliding) }; });
-      const settled = Array(3).fill('0 0 1000 100').join();
+      const settled = Array(4).fill('0 0 1000 100').join();
       await record();
       await glide.locator('.su-axis-range [data-direction=left]').first().click();
       await glide.waitForFunction(() => document.querySelectorAll('.su-chart[data-metric="user_messages"] .su-day-grid').length === 30 && !document.querySelector('.su-chart[data-gliding]'), null, { timeout: 3000 });
       const grow = await state();
       console.log(`USAGE PERIOD GLIDE 7D→30D: ${JSON.stringify({ frames: grow.samples.length, widths: grow.samples.map(item => Math.round(item.width)), maxOffset: Math.max(...grow.samples.map(item => item.offset)), boxes: grow.boxes, translates: grow.translates })}`);
-      check('Usage 7d → 30d glides all three charts through one window, widening from the old seven days', grow.samples.length >= 5 && grow.samples.every(item => item.shared && item.days === 30 && item.clip === 'clip') && grow.samples[0].width < 300 && grow.samples.every((item, index, all) => index === 0 || item.width >= all[index - 1].width - 1e-6));
+      check('Usage 7d → 30d glides all four charts through one window, widening from the old seven days', grow.samples.length >= 5 && grow.samples.every(item => item.shared && item.days === 30 && item.clip === 'clip') && grow.samples[0].width < 300 && grow.samples.every((item, index, all) => index === 0 || item.width >= all[index - 1].width - 1e-6));
       check('During the usage glide the x-axis labels stay on the SVG\'s time mapping within 1.5px', grow.samples.every(item => item.offset <= 1.5));
       check('After the usage glide every viewBox and translate is back to the instant-change state', grow.boxes === settled && grow.translates === 0 && !grow.gliding);
       await record();

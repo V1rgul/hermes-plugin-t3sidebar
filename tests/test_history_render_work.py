@@ -21,19 +21,21 @@ def reference_render(days, tz, now, buckets, window_end, series, missing):
 	models = {}
 	providers = {}
 	fields = ("tokens", *history.TOKEN_CLASSES, "reasoning", "user_messages")
+	lengths = [end - begin for begin, end in zip(buckets, [*buckets[1:], window_end])]
 
 	def empty(key, label, provider, model):
-		return {"key": key, "label": label, "provider": provider, "model": model, **{name: [0] * width for name in fields}, "cost_usd": [0.0] * width}
+		return {"key": key, "label": label, "provider": provider, "model": model, **{name: [0] * width for name in fields}, "cost_usd": [0.0] * width, "agents": [0.0] * width}
 
 	for (provider, model), data in series.items():
 		arrays = {name: history._round_preserving_sum([max(0.0, value) for value in data.values[name]]) for name in (*history.TOKEN_CLASSES, "reasoning")}
 		arrays["tokens"] = [sum(arrays[name][index] for name in history.TOKEN_CLASSES) for index in range(width)]
 		cost = [max(0.0, value) for value in data.values["cost_usd"]]
 		users = list(data.user_messages)
-		if not any(arrays["tokens"]) and not any(users) and not any(round(value, 6) for value in cost):
+		agents = [seconds / length for seconds, length in zip(data.agent_seconds, lengths)]
+		if not any(arrays["tokens"]) and not any(users) and not any(round(value, 6) for value in cost) and not any(agents):
 			continue
 		label = provider or "unknown"
-		entry = {**arrays, "cost_usd": cost, "user_messages": users}
+		entry = {**arrays, "cost_usd": cost, "user_messages": users, "agents": agents}
 		model_bucket = models.setdefault(model, empty(model, model, label, model))
 		if model_bucket["provider"] != label:
 			model_bucket["provider"] = None
@@ -41,10 +43,12 @@ def reference_render(days, tz, now, buckets, window_end, series, missing):
 			for name in fields:
 				bucket[name] = [left + right for left, right in zip(bucket[name], entry[name])]
 			bucket["cost_usd"] = [left + right for left, right in zip(bucket["cost_usd"], cost)]
+			bucket["agents"] = [left + right for left, right in zip(bucket["agents"], agents)]
 	by_model = list(models.values())
 	by_provider = list(providers.values())
 	for entry in (*by_model, *by_provider):
 		entry["cost_usd"] = [round(value, 6) for value in entry["cost_usd"]]
+		entry["agents"] = [round(value, 6) for value in entry["agents"]]
 
 	def order(entry):
 		return (-sum(entry["tokens"]), entry["key"])
@@ -79,6 +83,7 @@ def generated_series(rng, width):
 			for name in data.values:
 				data.values[name] = [rng.choice((0.0, 0.0, 0.4, 1.5, 7.25, 1000.5, -2.0)) for _ in range(width)]
 			data.user_messages = [rng.choice((0, 0, 1, 3)) for _ in range(width)]
+			data.agent_seconds = [rng.choice((0.0, 0.0, 0.1, 900.0, 3600.0, 7200.5)) for _ in range(width)]
 		result[(rng.choice(("openai", "anthropic", "", None)), rng.choice(("m1", "m2", "m3", "m4")))] = data
 	return result
 

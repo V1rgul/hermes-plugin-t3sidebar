@@ -3445,10 +3445,14 @@ const finiteOrNull = value => Number.isFinite(value) ? value : null;
 const compactNumber = Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 const integerNumber = Intl.NumberFormat('en', { maximumFractionDigits: 0 });
 const usdNumber = Intl.NumberFormat('en', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Significant rather than fraction digits: a period mean of a few short turns is a small fraction that two decimals would round to 0.
+const agentNumber = Intl.NumberFormat('en', { maximumSignificantDigits: 2 });
+// A mean metric plots each bucket's average rather than its amount, so its headline and legend give the mean over the period instead of a sum.
 export const USAGE_METRICS = [
   { key: 'tokens', title: 'Tokens', unit: 'tokens', format: value => compactNumber.format(value), integer: true },
   { key: 'cost_usd', title: 'Cost', subtitle: 'API-equivalent', unit: '$', format: value => usdNumber.format(value), integer: false },
-  { key: 'user_messages', title: 'User messages', unit: 'messages', format: value => integerNumber.format(value), integer: true }
+  { key: 'user_messages', title: 'User messages', unit: 'messages', format: value => integerNumber.format(value), integer: true },
+  { key: 'agents', title: 'Parallel agents', subtitle: 'subagents included', unit: 'agents', format: value => agentNumber.format(value), integer: false, mean: true }
 ];
 export function validUsageHistory(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.buckets) || !value.buckets.every(Number.isFinite)) throw new Error('Unsupported usage history response.');
@@ -3606,8 +3610,11 @@ export function buildUsageCharts(history, split, mode) {
   // Hour labels only fit a window of about a day; longer windows are labelled by local day whatever their bucket size.
   const span = history.buckets.length ? history.buckets.at(-1) + lengths.at(-1) - history.buckets[0] : 0;
   const axis = bucketMinutes < 1440 && span <= 1.5 * DAY_S ? 'hour' : 'day';
+  // A bucket's mean covers its whole length, so the bucket in progress holds only what has happened so far; the period mean divides by the time elapsed up to the payload instead, or a fresh bucket would dilute it.
+  const generated = Number(history.generated_at), elapsed = Number.isFinite(generated) && generated > history.buckets[0] ? Math.min(span, generated - history.buckets[0]) : span;
+  const periodMean = values => elapsed > 0 ? values.reduce((sum, value, index) => sum + value * lengths[index], 0) / elapsed : 0;
   // Largest total first, per chart: the legend and tooltip read biggest first, and the stack is drawn the other way round so the largest band sits on top and gives the stack's upper edge its colour (a negligible series stacked last would otherwise outline the whole chart).
-  const all = USAGE_METRICS.map(metric => ({ metric, series: usageSeries(history, split, metric.key).sort((a, b) => b.total - a.total || a.key.localeCompare(b.key)) }));
+  const all = USAGE_METRICS.map(metric => ({ metric, series: usageSeries(history, split, metric.key).map(item => metric.mean ? { ...item, total: periodMean(item.values) } : item).sort((a, b) => b.total - a.total || a.key.localeCompare(b.key)) }));
   // One color map across the three charts, so a series keeps its color even where it is absent from one metric.
   const colors = seriesColors(all.flatMap(chart => chart.series), split);
   // Each point is the real amount in its bucket; the bucket size, chosen per period, is the chart's unit.
@@ -4329,7 +4336,7 @@ function UsageHistoryView({ query, prefs, setDays }) {
     query.isError ? h(QueryProblem, { query, what: 'Latest usage' }) : null,
     empty ? h(Fragment, null, h(UsageState, null, 'No usage recorded in this period.'), h('div', { className: 'su-axis-row' }, h(AxisRangeControl, { side: 'past', stops: USAGE_RANGE_STOPS, ...range })))
       : h('div', { className: 'su-charts', ref: charts }, model.charts.map(chart => h(UsageChart, { key: chart.metric.key, chart, model, mode: prefs.mode, hover, setHover, range }))),
-    h('p', { className: 'su-footnote' }, 'Per-call timing is reconstructed from message timestamps, so placement within a bucket is approximate. Cost is the API-equivalent price of the same usage, not what a subscription bills.',
+    h('p', { className: 'su-footnote' }, 'Per-call timing is reconstructed from message timestamps, so placement within a bucket is approximate. Cost is the API-equivalent price of the same usage, not what a subscription bills. Parallel agents count subagents, not a parent waiting for them or for your answer.',
       view.pricing_missing.length ? ` No price available for: ${view.pricing_missing.join(', ')} (counted as $0).` : ''));
 }
 const VIEW_W = 1000, VIEW_H = 100;
@@ -4348,6 +4355,7 @@ function plotKeys(event, count, hover, setHover) {
 }
 // The total names the period it covers ("/ 7 days"); a payload without a known period falls back to "total".
 export const periodTotalLabel = days => days === 1 ? '/ day' : Number.isInteger(days) && days > 1 ? `/ ${days} days` : 'total';
+export const periodMeanLabel = days => days === 1 ? 'mean over 24 h' : Number.isInteger(days) && days > 1 ? `mean over ${days} days` : 'mean';
 function UsageChart({ chart, model, mode, hover, setHover, range }) {
   const { metric, series, layers, scale } = chart, count = model.buckets.length;
   const y = value => VIEW_H - value / scale.max * VIEW_H;
@@ -4361,10 +4369,10 @@ function UsageChart({ chart, model, mode, hover, setHover, range }) {
   return h('section', { className: 'su-chart', 'data-metric': metric.key, 'aria-label': `${metric.title} chart` },
     h('div', { className: 'su-chart-head' }, h('h3', null, metric.title), metric.subtitle ? h('span', { className: 'su-sub' }, metric.subtitle) : null,
       // The space before the period is in the total's own font: inside the smaller label it read narrower than the space after the slash.
-      h('span', { className: 'su-total' }, `${metric.format(chart.total)} `, h('span', { className: 'su-total-label' }, periodTotalLabel(model.days)))),
+      h('span', { className: 'su-total' }, `${metric.format(chart.total)} `, h('span', { className: 'su-total-label' }, metric.mean ? periodMeanLabel(model.days) : periodTotalLabel(model.days)))),
     // The unit (amount per bucket) opens the line under the title and the legend fills it from the right.
-    h('div', { className: 'su-chart-sub' }, h('span', { className: 'su-yunit' }, `${metric.unit} / ${model.unit}`),
-      h('div', { className: 'su-legend' }, series.length ? series.map(item => pageTipped(`${item.label}: ${metric.format(item.total)} total in this period`, h('span', { key: item.key, className: 'su-legend-item', 'data-series': item.key },
+    h('div', { className: 'su-chart-sub' }, h('span', { className: 'su-yunit' }, metric.mean ? `${metric.unit}, mean per ${model.unit}` : `${metric.unit} / ${model.unit}`),
+      h('div', { className: 'su-legend' }, series.length ? series.map(item => pageTipped(`${item.label}: ${metric.format(item.total)} ${metric.mean ? 'on average' : 'total'} in this period`, h('span', { key: item.key, className: 'su-legend-item', 'data-series': item.key },
         h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', { className: 'su-legend-label' }, item.label), h('b', null, metric.format(item.total)))))
         : h('span', { className: 'su-muted' }, 'Nothing in this period'))),
     h('div', { className: 'su-plot-row' },
