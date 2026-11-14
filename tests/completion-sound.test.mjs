@@ -91,34 +91,34 @@ const sections = rows => ({ active: rows });
 
 test('a Done returning with the same completion stays silent; a new completion plays even for a card new to the list', () => {
 	const state = {}, done = { completion: { done_token: 't1' } };
-	assert.equal(flow.attentionCue(state, sections([card('a', done)]), { a: { done_token: 't1' } }), false, 'baseline');
+	assert.equal(flow.attentionCue(state, sections([card('a', done)]), { a: { done_token: 't1' } }), 0, 'baseline');
 	// A new turn (a /loop wake-up) makes it Working and ends without a completion of its own.
-	assert.equal(flow.attentionCue(state, sections([card('a', { ...done, status: 'working' })]), { a: { done_token: 't1' } }), false);
-	assert.equal(flow.attentionCue(state, sections([card('a', done)]), { a: { done_token: 't1' } }), false);
-	assert.equal(flow.attentionCue(state, sections([card('a', { completion: { done_token: 't2' } })]), { a: { done_token: 't2' } }), true);
+	assert.equal(flow.attentionCue(state, sections([card('a', { ...done, status: 'working' })]), { a: { done_token: 't1' } }), 0);
+	assert.equal(flow.attentionCue(state, sections([card('a', done)]), { a: { done_token: 't1' } }), 0);
+	assert.equal(flow.attentionCue(state, sections([card('a', { completion: { done_token: 't2' } })]), { a: { done_token: 't2' } }), 1);
 	// A session created since the baseline finishes its first turn.
-	assert.equal(flow.attentionCue(state, sections([card('a', { completion: { done_token: 't2' } }), card('b', { completion: { done_token: 'b1' } })]), { a: { done_token: 't2' }, b: { done_token: 'b1' } }), true);
+	assert.equal(flow.attentionCue(state, sections([card('a', { completion: { done_token: 't2' } }), card('b', { completion: { done_token: 'b1' } })]), { a: { done_token: 't2' }, b: { done_token: 'b1' } }), 1);
 });
 
 test('a completion that reaches the open session while it still reads Working plays once Working ends, although its acknowledgment hid the badge', () => {
 	const state = {}, scope = sections;
 	flow.attentionCue(state, scope([card('a', { status: 'working' })]), {});
-	assert.equal(flow.attentionCue(state, scope([card('a', { status: 'working', completion: { done_token: 't1' } })]), { a: { done_token: 't1' } }), false);
+	assert.equal(flow.attentionCue(state, scope([card('a', { status: 'working', completion: { done_token: 't1' } })]), { a: { done_token: 't1' } }), 0);
 	// Acknowledged by the open session before the runtime caught up.
-	assert.equal(flow.attentionCue(state, scope([card('a', { status: 'working' })]), {}), false);
-	assert.equal(flow.attentionCue(state, scope([card('a')]), {}), true);
-	assert.equal(flow.attentionCue(state, scope([card('a')]), {}), false);
+	assert.equal(flow.attentionCue(state, scope([card('a', { status: 'working' })]), {}), 0);
+	assert.equal(flow.attentionCue(state, scope([card('a')]), {}), 1);
+	assert.equal(flow.attentionCue(state, scope([card('a')]), {}), 0);
 	// Ending on a question plays once, for the question.
 	flow.attentionCue(state, scope([card('a', { status: 'working', completion: { done_token: 't2' } })]), { a: { done_token: 't2' } });
-	assert.equal(flow.attentionCue(state, scope([card('a', { status: 'waiting' })]), {}), true);
-	assert.equal(flow.attentionCue(state, scope([card('a')]), {}), false);
+	assert.equal(flow.attentionCue(state, scope([card('a', { status: 'waiting' })]), {}), 1);
+	assert.equal(flow.attentionCue(state, scope([card('a')]), {}), 0);
 });
 
 test('older history loaded later brings its badges without a sound', () => {
 	const state = {};
 	flow.attentionCue(state, sections([card('a')]), { old: { done_token: 'o1' } });
-	assert.equal(flow.attentionCue(state, sections([card('a'), card('old', { completion: { done_token: 'o1' } }), card('older', { unread: true }), card('asking', { status: 'waiting' })]), { old: { done_token: 'o1' } }), false);
-	assert.equal(flow.attentionCue(state, sections([card('a', { status: 'waiting' })]), {}), true, 'a card already listed asks a question');
+	assert.equal(flow.attentionCue(state, sections([card('a'), card('old', { completion: { done_token: 'o1' } }), card('older', { unread: true }), card('asking', { status: 'waiting' })]), { old: { done_token: 'o1' } }), 0);
+	assert.equal(flow.attentionCue(state, sections([card('a', { status: 'waiting' })]), {}), 1, 'a card already listed asks a question');
 });
 
 async function mountSettings(sound) {
@@ -167,4 +167,64 @@ test("the automatic sound plays the chosen Desktop preset and respects Desktop's
 	mock.control.metadata.completions = { pinned: marker('turn-2') };
 	await poll();
 	assert.ok(audio.tones > 0); assert.equal(audio.starts, 0);
+});
+
+test('the player reports a sound as playing until its last voice stops, and refuses another meanwhile', async () => {
+	// Timers held by the test, so the playing span is read from what the player schedules, and a clock that moves only when told.
+	const timers = [];
+	let clock;
+	const Still = class extends dom.window.AudioContext { constructor() { super(); clock = this; } get currentTime() { return this.clock; } };
+	const win = { AudioContext: Still, atob: dom.window.atob, setTimeout: (run, ms) => timers.push({ run, ms }) - 1, clearTimeout: id => { if (timers[id]) timers[id].cleared = true; } };
+	const player = flow.createSoundPlayer(win), seen = [];
+	player.subscribe(() => seen.push(player.playing()));
+	const bowl = `hermes-${flow.HERMES_SOUNDS.findIndex(sound => sound?.name === 'Singing bowl')}`;
+	assert.equal(await player.play(bowl), true);
+	assert.deepEqual(seen, [true]);
+	// Its first voice swells and fades over 0.58 + 0.16 + 1.35 s, well past a fixed guess.
+	assert.ok(timers[0].ms > 2090 && timers[0].ms < 2150, `${timers[0].ms} ms`);
+	assert.equal(await player.play('t3'), false, 'a cue started while one plays is dropped');
+	clock.clock += 2.2; timers[0].run();
+	assert.deepEqual(seen, [true, false]);
+	assert.equal(await player.play('t3'), true);
+	assert.equal(timers[1].ms, 400, "T3's recording lasts its decoded duration");
+	player.dispose();
+	assert.deepEqual(seen, [true, false, true, false], 'disposing ends the playing state');
+});
+
+test('the Preview button is disabled while a sound plays', async () => {
+	await mountSettings('hermes-8');
+	const preview = [...document.querySelectorAll('button')].find(node => node.textContent.includes('Preview'));
+	assert.equal(preview.disabled, false);
+	await act(async () => preview.click());
+	await tick();
+	assert.equal(preview.disabled, true);
+	// IBM terminal ends 0.26 s after it starts.
+	await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)); });
+	assert.equal(preview.disabled, false);
+});
+
+test('two sessions finishing in the same poll give one sound each', async () => {
+	await mountSidebar('t3');
+	mock.control.metadata.completions = { pinned: marker('turn-1'), snoozed: marker('turn-2') };
+	await poll();
+	assert.equal(audio.starts, 2);
+});
+
+test('a notification arriving while one plays waits for it instead of being dropped; disposing drops the rest', async () => {
+	const timers = [];
+	let clock;
+	const Still = class extends dom.window.AudioContext { constructor() { super(); clock = this; } get currentTime() { return this.clock; } };
+	const win = { AudioContext: Still, atob: dom.window.atob, setTimeout: (run, ms) => timers.push({ run, ms }) - 1, clearTimeout() {} };
+	const player = flow.createSoundPlayer(win);
+	await player.queue('t3');
+	const second = player.queue('t3'), third = player.queue('t3');
+	await tick();
+	assert.equal(audio.starts, 1, 'the second waits while the first plays');
+	const waiting = timers.at(-1);
+	assert.equal(waiting.ms, 400, 'until the first ends');
+	clock.clock += 0.4; waiting.run(); await second;
+	assert.equal(audio.starts, 2);
+	player.dispose();
+	clock.clock += 0.4; timers.at(-1).run(); await third;
+	assert.equal(audio.starts, 2, 'a disposed player plays nothing more');
 });

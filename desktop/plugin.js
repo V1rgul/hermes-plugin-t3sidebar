@@ -1,6 +1,6 @@
 // hermes-t3sidebar — independent T3-inspired session browser; plain disk-plugin ESM.
 import * as sdk from '@hermes/plugin-sdk';
-import { cloneElement, createContext, createElement as h, Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useContext, useMemo, useRef, useState } from 'react';
+import { cloneElement, createContext, createElement as h, Fragment, memo, useCallback, useEffect, useId, useLayoutEffect, useContext, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 const { host, useValue, useQuery, useMutation, useQueryClient, queryClient, gatewayActivationEpoch } = sdk;
 export const SECTIONS = ['pinned', 'active', 'working', 'snoozed', 'archived'];
@@ -156,7 +156,10 @@ export const COMPLETION_SOUNDS = [{ id: 'none', label: 'None' }, { id: 't3', lab
   ...HERMES_SOUNDS.flatMap((sound, id) => sound ? [{ id: `hermes-${id}`, label: sound.name }] : [])];
 // One lazily created AudioContext, only once a sound is wanted. Browsers keep it suspended until a gesture, so a gesture also resumes it and decodes T3's sound ahead of the first cue.
 export function createSoundPlayer(win = globalThis.window, data = T3_COMPLETION_MP3) {
-  let context = null, buffer = null, playingUntil = 0, reverb = null;
+  let context = null, buffer = null, playingUntil = 0, reverb = null, playing = false, ended = null, queued = Promise.resolve(), generation = 0;
+  // The settings page disables its play buttons while a sound plays, since a preview started meanwhile is dropped (see play).
+  const listeners = new Set();
+  const setPlaying = value => { if (playing !== value) { playing = value; listeners.forEach(listener => listener()); } };
   const audio = () => {
     const Context = win?.AudioContext || win?.webkitAudioContext;
     if (!Context) return null;
@@ -166,7 +169,7 @@ export function createSoundPlayer(win = globalThis.window, data = T3_COMPLETION_
   };
   const decoded = ac => buffer ??= Promise.resolve().then(() => ac.decodeAudioData(Uint8Array.from(win.atob(data), char => char.charCodeAt(0)).buffer))
     .catch(error => { buffer = null; throw error; });
-  // Desktop's chain: voices → master → low-pass → dry + a short generated room reverb → out. Returns how long the preset lasts.
+  // Desktop's chain: voices → master → low-pass → dry + a short generated room reverb → out. Returns how long the preset lasts: until its last voice stops, which the voices schedule themselves, reverb tail excluded.
   function synth(ac, sound) {
     if (!reverb) {
       const length = Math.floor(ac.sampleRate * 1.6);
@@ -177,31 +180,49 @@ export function createSoundPlayer(win = globalThis.window, data = T3_COMPLETION_
     tone.type = 'lowpass'; tone.frequency.setValueAtTime(3800, now); tone.Q.setValueAtTime(0.32, now);
     master.gain.setValueAtTime(0.48, now); dry.gain.setValueAtTime(0.88, now); wet.gain.setValueAtTime(0.34, now); room.buffer = reverb;
     master.connect(tone); tone.connect(dry); dry.connect(ac.destination); tone.connect(room); room.connect(wet); wet.connect(ac.destination);
-    sound.play(ac, master, now + 0.01);
-    return 0.6;
+    let end = now;
+    const timed = source => { const stop = source.stop.bind(source); source.stop = when => { end = Math.max(end, when); stop(when); }; return source; };
+    const voices = { sampleRate: ac.sampleRate, createGain: () => ac.createGain(), createBiquadFilter: () => ac.createBiquadFilter(), createBuffer: (...args) => ac.createBuffer(...args),
+      createOscillator: () => timed(ac.createOscillator()), createBufferSource: () => timed(ac.createBufferSource()) };
+    sound.play(voices, master, now + 0.01);
+    return end - now;
   }
+  // Starts the sound unless one still plays: two sounds at once would blur into one.
+  async function play(choice) {
+    const hermes = /^hermes-(\d+)$/.exec(choice)?.[1], preset = hermes && HERMES_SOUNDS[Number(hermes)];
+    if (choice !== 't3' && !preset) return false;
+    const ac = audio();
+    if (!ac) return false;
+    try {
+      const sound = preset ? null : await decoded(ac);
+      if (context !== ac || ac.currentTime < playingUntil) return false;
+      let length;
+      if (preset) length = synth(ac, preset);
+      else { const source = ac.createBufferSource(); source.buffer = sound; source.connect(ac.destination); source.start(); length = sound.duration; }
+      playingUntil = ac.currentTime + length;
+      win.clearTimeout(ended); setPlaying(true);
+      ended = win.setTimeout(() => { ended = null; setPlaying(false); }, length * 1000);
+      return true;
+    } catch (_) { return false; }
+  }
+  const busy = () => !!context && context.currentTime < playingUntil;
+  const wait = () => new Promise(resolve => win.setTimeout(resolve, Math.max(0, (playingUntil - (context?.currentTime ?? 0)) * 1000)));
   return {
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    playing: () => playing,
     unlock() { const ac = audio(); if (ac) void decoded(ac).catch(() => {}); },
-    async play(choice) {
-      const hermes = /^hermes-(\d+)$/.exec(choice)?.[1], preset = hermes && HERMES_SOUNDS[Number(hermes)];
-      if (choice !== 't3' && !preset) return false;
-      const ac = audio();
-      if (!ac) return false;
-      try {
-        const sound = preset ? null : await decoded(ac);
-        // Sessions settling together give one cue, not a clipped burst.
-        if (context !== ac || ac.currentTime < playingUntil) return false;
-        let length;
-        if (preset) length = synth(ac, preset);
-        else { const source = ac.createBufferSource(); source.buffer = sound; source.connect(ac.destination); source.start(); length = sound.duration; }
-        playingUntil = ac.currentTime + length;
-        return true;
-      } catch (_) { return false; }
+    play,
+    // Notifications are never dropped: each waits for the sound before it, so sessions settling together give one sound each, in turn. A preview starting in the gap pushes the next one back again; the timer can also fire just before the audio clock, hence the retries.
+    queue(choice) {
+      const owner = generation;
+      const next = async () => { for (let tries = 0; tries < 8 && owner === generation; tries++) { if (busy()) await wait(); if (owner !== generation || await play(choice) || !busy()) return; } };
+      queued = queued.then(next, next);
+      return queued;
     },
-    dispose() { const ac = context; context = null; buffer = null; reverb = null; playingUntil = 0; void ac?.close?.().catch(() => {}); }
+    dispose() { generation++; const ac = context; context = null; buffer = null; reverb = null; playingUntil = 0; win?.clearTimeout(ended); ended = null; setPlaying(false); listeners.clear(); void ac?.close?.().catch(() => {}); }
   };
 }
-// The sound follows the cards' own Done and Input badges (cardStatus): it plays when a card newly shows Input, or when a new completion marker reaches a card that no Working status outranks. Done comes from the backend's completion markers, recorded only for a turn that leaves nothing to report back, so a turn ending while subagents or a notifying background command still run gives none. A marker that arrives while the card still reads Working waits for it to stop, even if the open session acknowledges it meanwhile, which hides its badge. The first snapshot and cards that only appear later (older history) set the baseline without a sound.
+// The sound follows the cards' own Done and Input badges (cardStatus): it plays when a card newly shows Input, or when a new completion marker reaches a card that no Working status outranks, once for each such card. Done comes from the backend's completion markers, recorded only for a turn that leaves nothing to report back, so a turn ending while subagents or a notifying background command still run gives none. A marker that arrives while the card still reads Working waits for it to stop, even if the open session acknowledges it meanwhile, which hides its badge. The first snapshot and cards that only appear later (older history) set the baseline without a sound.
 const HELD_MARKER_LIMIT = 200;
 export function attentionCue(state, sections, completions) {
   const rows = new Map(SECTIONS.flatMap(section => sections[section] || EMPTY_ROWS).map(row => [row.key, row]));
@@ -210,22 +231,23 @@ export function attentionCue(state, sections, completions) {
   const markers = new Map(Object.entries(completions || {}).filter(([, marker]) => marker?.done_token).map(([key, marker]) => [`${key}\n${marker.done_token}`, key]));
   // Native unread has no marker identity: it counts only for cards already listed.
   const unread = new Set([...rows.values()].filter(row => status.get(row.key) === 'done' && !row.completion?.done_token).map(row => `${row.key}\nunread`));
-  if (!state.seen) { Object.assign(state, { seen: new Set([...markers.keys(), ...unread]), held: new Map(), input, keys: new Set(rows.keys()) }); return false; }
-  let fire = [...input].some(key => state.keys.has(key) && !state.input.has(key))
-    || [...unread].some(id => !state.seen.has(id) && state.keys.has(id.slice(0, id.lastIndexOf('\n'))));
+  if (!state.seen) { Object.assign(state, { seen: new Set([...markers.keys(), ...unread]), held: new Map(), input, keys: new Set(rows.keys()) }); return 0; }
+  // One cue per card: a card that ends on a question and releases its completion in the same poll counts once.
+  const cues = new Set([...input].filter(key => state.keys.has(key) && !state.input.has(key)));
+  for (const id of unread) { const key = id.slice(0, id.lastIndexOf('\n')); if (!state.seen.has(id) && state.keys.has(key)) cues.add(key); }
   for (const [id, key] of markers) if (!state.seen.has(id)) { state.held.delete(key); state.held.set(key, id); }
   for (const [key] of state.held) {
     const value = status.get(key);
     // Not listed yet (a session newer than the list), or still Working: keep waiting.
     if (value === undefined || value === 'working') continue;
     state.held.delete(key);
-    fire = true;
+    cues.add(key);
   }
   while (state.held.size > HELD_MARKER_LIMIT) state.held.delete(state.held.keys().next().value);
   // A completion stays known while its marker exists, so a card that leaves Done (a new turn) and returns to it with the same marker stays silent.
   state.seen = new Set([...markers.keys(), ...unread]);
   state.input = input; state.keys = new Set(rows.keys());
-  return fire;
+  return cues.size;
 }
 const activationEpoch = sdk.atom(gatewayActivationEpoch());
 // Plugin pages currently mounted, newest last. Desktop mounts a route page in the workspace only while the router is on its path and exposes no route state to plugins, so each page publishes its own presence; the sidebar then drops the session highlight and lights the page's footer button, as the native sidebar does on its own pages.
@@ -1879,6 +1901,7 @@ function Settings({ ctx, sound = null }) {
   const saveTokens = on => savePreference('show-tokens', SHOW_TOKENS_KEY, on, 'The token count setting was not saved.', setTokensError);
   // Like Desktop's picker, choosing a sound plays it.
   const saveSound = id => { if (!validCompletionSound(id)) return; savePreference('completion-sound', COMPLETION_SOUND_KEY, id, 'The completion sound setting was not saved.', setSoundError); void sound?.play(id); };
+  const playing = useSyncExternalStore(sound?.subscribe ?? noSubscription, sound?.playing ?? notPlaying);
   // The host already supplies the page title and gutters; behavior notes live in docs/behavior.md.
   return h('div', null, h('style', null, SETTINGS_CSS), h(sdk.ListRow ?? SettingsRow, {
     title: 'Snooze preset time',
@@ -1903,25 +1926,37 @@ function Settings({ ctx, sound = null }) {
   }), h(sdk.ListRow ?? SettingsRow, {
     title: 'Done/Input sound',
     description: 'Desktop’s Completion Sound plays at every turn end, including when the agent hands work to subagents or waits for a background command while the session is still Working. This one waits for Done or Input.',
-    action: h('div', { className: 'sf-sound' },
-      h(SoundPicker, { value: completionSound, onChange: saveSound }),
-      h(sdk.Button, { type: 'button', variant: 'outline', size: 'sm', className: 'gap-1.5', disabled: completionSound === 'none' || !sound, onClick: () => void sound?.play(completionSound) }, icon('Play', '▶'), 'Preview')),
+    action: h(SoundPicker, { value: completionSound, onChange: saveSound, onPlay: sound ? id => void sound.play(id) : null, playing }),
     below: soundError ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, soundError) : null
   }), h(NativeSoundStatus, { off: completionSound === 'none' }));
 }
-// Desktop's preset Select with T3 Code's sound added and starred; a plain select on clients without the SDK Select.
-function SoundPicker({ value, onChange }) {
+const noSubscription = () => () => {}, notPlaying = () => false;
+// Inside the open list a press must play without choosing the row or closing the list: the Select item chooses on pointer up (mouse) or click (touch), so the button's wrapper keeps those from reaching it, also when the disabled button lets them pass through. Keeping focus on the row leaves Enter choosing it, as in any other row.
+const stopRowEvent = event => event.stopPropagation();
+const ROW_PLAY_GUARD = { onPointerDown: stopRowEvent, onPointerUp: stopRowEvent, onClick: stopRowEvent, onMouseDown: event => { event.preventDefault(); event.stopPropagation(); } };
+function PlayButton({ option, onPlay, playing, ...props }) {
+  return h('button', { type: 'button', className: 'sf-sound-play', 'aria-label': `Play ${option.label}`, disabled: playing || !onPlay, onClick: () => onPlay?.(option.id), ...props }, icon('Play', '▶'));
+}
+// Desktop's preset Select with T3 Code's sound added and starred, each sound with its own play button, the chosen one's beside the value; a plain select and a Preview button on clients without the SDK Select.
+function SoundPicker({ value, onChange, onPlay, playing }) {
   // A fixed icon column: a ban sign before None, a star before the sound the plugin adds, and an empty one before Desktop's presets, so every name starts at the same place. The Select's own styling marks the active choice.
   const mark = option => option.id === 'none' ? icon('Ban', '⊘') : option.plugin ? '★' : null;
-  const label = option => h('span', { className: 'sf-sound-option' }, h('span', { className: 'sf-sound-mark', 'aria-hidden': true }, mark(option)), option.label);
+  // The Select copies the chosen row's content into its trigger, where CSS hides that copy's button: the trigger's own sits over it instead, since a button cannot nest in another.
+  const label = option => h('span', { className: 'sf-sound-option' }, h('span', { className: 'sf-sound-mark', 'aria-hidden': true }, mark(option)), h('span', { className: 'sf-sound-name' }, option.label),
+    option.id !== 'none' && h('span', { className: 'sf-sound-play-slot', ...ROW_PLAY_GUARD }, h(PlayButton, { option, onPlay, playing, tabIndex: -1 })));
+  const chosen = COMPLETION_SOUNDS.find(option => option.id === value);
   if ([sdk.Select, sdk.SelectTrigger, sdk.SelectValue, sdk.SelectContent, sdk.SelectItem].every(part => typeof part === 'function' || typeof part === 'object' && part)) {
-    return h(sdk.Select, { value, onValueChange: onChange },
-      h(sdk.SelectTrigger, { className: 'min-w-56 text-xs', 'aria-label': 'Done/Input sound' }, h(sdk.SelectValue)),
-      h(sdk.SelectContent, null, COMPLETION_SOUNDS.map(option => h(sdk.SelectItem, { key: option.id, value: option.id }, label(option)))));
+    return h('div', { className: 'sf-sound' },
+      h(sdk.Select, { value, onValueChange: onChange },
+        h(sdk.SelectTrigger, { className: 'sf-sound-trigger min-w-56 text-xs', 'aria-label': 'Done/Input sound' }, h(sdk.SelectValue)),
+        h(sdk.SelectContent, { className: 'sf-sound-list' }, COMPLETION_SOUNDS.map(option => h(sdk.SelectItem, { key: option.id, value: option.id, textValue: option.label }, label(option))))),
+      chosen && chosen.id !== 'none' && h(PlayButton, { option: chosen, onPlay, playing, className: 'sf-sound-play sf-sound-play-chosen' }));
   }
   // A native select draws text only.
-  return h('select', { className: 'sf-sound-select', 'aria-label': 'Done/Input sound', value, onChange: event => onChange(event.target.value) },
-    COMPLETION_SOUNDS.map(option => h('option', { key: option.id, value: option.id }, option.plugin ? `★ ${option.label}` : option.label)));
+  return h('div', { className: 'sf-sound' },
+    h('select', { className: 'sf-sound-select', 'aria-label': 'Done/Input sound', value, onChange: event => onChange(event.target.value) },
+      COMPLETION_SOUNDS.map(option => h('option', { key: option.id, value: option.id }, option.plugin ? `★ ${option.label}` : option.label))),
+    h(sdk.Button, { type: 'button', variant: 'outline', size: 'sm', className: 'gap-1.5', disabled: value === 'none' || playing || !onPlay, onClick: () => onPlay?.(value) }, icon('Play', '▶'), 'Preview'));
 }
 // Desktop's own sound, read again when another window changes it or this one comes back into view. Settings remounts this page on every return from Desktop's own row.
 function useNativeSound() {
@@ -1956,8 +1991,19 @@ const SEGMENTED_FALLBACK_CSS = `.su-seg{display:inline-flex;gap:2px;padding:2px;
 .su-seg button[aria-pressed=true]{background:var(--ui-bg-elevated,var(--ui-bg-tertiary));color:var(--ui-text-primary)}`;
 const SETTINGS_CSS = `${SEGMENTED_FALLBACK_CSS}
 .sf-snooze-time::-webkit-calendar-picker-indicator{background:currentColor;-webkit-mask:${ALARM_MASK} content-box center/contain no-repeat;mask:${ALARM_MASK} content-box center/contain no-repeat;cursor:pointer}
-.sf-sound{display:flex;align-items:center;gap:8px}
-.sf-sound-option{display:inline-flex;align-items:center;gap:6px}
+.sf-sound{position:relative;display:flex;align-items:center;gap:8px}
+.sf-sound-option{display:flex;align-items:center;gap:6px;min-width:0}
+/* In the list the row's text grows to the check column, so each play button lines up at the right. */
+.sf-sound-list [data-slot=select-item]>span:last-child{flex:1;min-width:0}
+.sf-sound-play-slot{display:inline-flex;margin-left:auto;padding-left:8px}
+.sf-sound-play{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ui-text-tertiary);cursor:pointer}
+.sf-sound-play svg{width:12px;height:12px}
+.sf-sound-play:hover:not(:disabled){background:var(--chrome-action-hover,var(--ui-bg-quaternary));color:var(--ui-text-primary)}
+.sf-sound-play:disabled{opacity:.4;cursor:default}
+/* The trigger shows a copy of the chosen row: its button gives way to the trigger's own, laid over the trigger left of the chevron. */
+.sf-sound-trigger .sf-sound-play-slot{display:none}
+.sf-sound-trigger>[data-slot=select-value]{margin-right:22px;overflow:hidden}
+.sf-sound-play-chosen{position:absolute;right:30px;top:50%;transform:translateY(-50%)}
 .sf-sound-mark{display:inline-flex;align-items:center;justify-content:center;width:14px;flex:none}
 .sf-sound-mark svg{width:13px;height:13px}
 .sf-sound-select{min-width:14rem;padding:4px 8px;border:1px solid var(--ui-stroke-secondary);border-radius:6px;background:transparent;color:inherit;font-size:12px}
@@ -2949,7 +2995,7 @@ function ScopedSidebar({ ctx, controller, scope, onAttention }) {
   const classified = useMemo(() => buildSections(rows, metadata.data || EMPTY_STATE, liveCounts, { runtimeKnown, runtimeStale, now: classificationNow, draftIds }), [rows, metadata.data, liveCounts, runtimeKnown, runtimeStale, classificationNow, draftIds]);
   // Badges are only read once both feeds answered, and not from a failed poll's leftover snapshot, whose statuses are unknown.
   const attention = useRef({ seen: null, input: null, keys: null }), attentionReady = !!metadata.data && runtimeKnown && !runtimeStale;
-  useEffect(() => { if (attentionReady && attentionCue(attention.current, classified, metadata.data.completions)) onAttention?.(); }, [classified, attentionReady]);
+  useEffect(() => { if (!attentionReady) return; const cues = attentionCue(attention.current, classified, metadata.data.completions); if (cues) onAttention?.(cues); }, [classified, attentionReady]);
   const emptyCandidates = useMemo(() => SECTIONS.flatMap(section => classified[section]).filter(row => row.newSession && !row._draftOnly), [classified]);
   // Search keystrokes and toolbar state do not touch these observers, which cover hidden empty sessions too.
   const draftObservers = useMemo(() => emptyCandidates.map(row => h(EmptySessionDraft, { key: draftIdentity(row), row, scope, controller, onPresence: onDraftPresence, refreshAt: runtime.dataUpdatedAt,
@@ -5108,7 +5154,7 @@ export default {
     const sound = createSoundPlayer();
     const controller = createController(ctx);
     // Desktop's Mute interface sounds silences automatic cues; this is one.
-    const attention = () => { const choice = readCompletionSound(ctx); if (choice !== 'none' && !readNativeSound()?.muted) void sound.play(choice); };
+    const attention = cues => { const choice = readCompletionSound(ctx); if (choice !== 'none' && !readNativeSound()?.muted) for (let cue = 0; cue < cues; cue++) void sound.queue(choice); };
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller, onAttention: attention }) });
     ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx, sound }) });
