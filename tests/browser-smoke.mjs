@@ -1587,6 +1587,53 @@ try {
     const swapped = swap.filter(sample => sample.age);
     check('a Pinned card changing status fades the old badge out, slides its slot, then fades the new one in', swapped.some(sample => sample.ghost > 0.1 && sample.ghost < 0.9 && sample.fresh === 0 && Math.abs(sample.width - swap[0].width) < 0.1)
       && swapped.some(sample => sample.ghost === null && sample.fresh === 0 && sample.width < swap[0].width - 1 && sample.width > swap.at(-1).width + 1) && swap.at(-1).fresh === 1 && swap.at(-1).ghost === null);
+    // A send empties the composer before the server answers: the pencil stays until the card shows its new status. Desktop raises awaitingResponse after emptying the composer.
+    const draftShown = async () => {
+      await meta.evaluate(id => { window.hermesT3SidebarHarness.control.mountedDrafts[id] = 'a prompt'; window.hermesT3SidebarHarness.host.state.awaitingResponse.set(false); }, open);
+      // Attached rather than visible: the pointer still rests on the card, whose hover actions hide its metadata's right side.
+      await meta.waitForSelector(`[data-session-id="${open}"] .sf-draft-mark[aria-label]`, { state: 'attached', timeout: 4000 });
+      await meta.waitForTimeout(500);
+    };
+    const send = `() => { const fixture = window.hermesT3SidebarHarness; fixture.control.mountedDrafts['${open}'] = ''; fixture.host.state.awaitingResponse.set(true); }`;
+    await draftShown();
+    // Without a new status (a turn queued behind another), the pencil leaves once the periodic composer read would have dropped it.
+    const unanswered = await frames(send, pencil, 2900);
+    const sentAt = unanswered.findIndex(sample => !sample.labelled), heldFor = unanswered.slice(sentAt).filter(sample => sample.marks && sample.opacity === 1).length;
+    check('a sent pencil without a new status stays whole for most of two seconds, then leaves', sentAt >= 0 && heldFor > 60 && unanswered.slice(sentAt).some(sample => sample.marks && sample.opacity > 0.1 && sample.opacity < 0.9) && !unanswered.at(-1).marks);
+    const restore = await meta.evaluate(id => { const live = window.hermesT3SidebarHarness.control.live.find(item => item.session_key === id); return live && { status: live.status, turn_started_at: live.turn_started_at }; }, open);
+    await draftShown();
+    // A new status shortly after the send moves the card (this pinned fixture from Ready to Pinned; an unpinned one goes to Working): it folds out of Ready with its pencil and grows into its new category with its new status, neither playing metadata motion.
+    const moved = await frames(`() => { (${send})(); setTimeout(() => { const fixture = window.hermesT3SidebarHarness, live = fixture.control.live.find(item => item.session_key === '${open}');
+        if (live) Object.assign(live, { status: 'working', turn_started_at: Date.now() / 1000 }); else fixture.control.live.push({ id: 'runtime-${open}', session_key: '${open}', status: 'working', turn_started_at: Date.now() / 1000 });
+        fixture.host.state.awaitingResponse.set(false);
+        // Typing again while the card grows: a fresh send-time read brings the pencil back mid-growth.
+        fixture.queryClient.invalidateQueries().then(() => setTimeout(() => { fixture.control.mountedDrafts['${open}'] = 'more'; fixture.host.state.awaitingResponse.set(true); }, 40)); }, 150); }`,
+      `() => { const card = document.querySelector('[data-session-id="${open}"]'), ghost = document.querySelector('[data-section=active] [data-exiting=true]');
+        const opacities = root => root ? [...root.querySelectorAll('.sf-draft-mark')].map(mark => Number(getComputedStyle(mark).opacity)) : [];
+        return { section: card.closest('.sf-section').dataset.section, slot: card.closest('.sf-slot').getBoundingClientRect().height, pencils: opacities(card), ghost: ghost && { pencils: opacities(ghost), overlays: ghost.querySelectorAll('.sf-roll-fx,.sf-meta-ghost,[data-rolling]').length },
+          motion: document.getAnimations().filter(animation => !(animation instanceof CSSAnimation || animation instanceof CSSTransition) && card.querySelector('.sf-card-meta').contains(animation.effect?.target)).length }; }`, 900);
+    const before = moved.filter(sample => sample.section === 'active'), growing = moved.filter(sample => sample.section !== 'active' && sample.slot < 55.5), folding = moved.filter(sample => sample.ghost);
+    console.log(`META SEND MOVE: ${JSON.stringify({ before: before.length, growing: growing.length, folding: folding.length, ghost: folding[0]?.ghost })}`);
+    check('a sent pencil stays whole on its Ready card until the card moves', before.length > 3 && before.every(sample => sample.pencils.length === 1 && sample.pencils[0] === 1 && !sample.motion));
+    check('the card folds out of Ready with its pencil whole and no number roll or status overlay', folding.length > 3 && folding.every(sample => sample.ghost.pencils.length === 1 && sample.ghost.pencils[0] === 1 && !sample.ghost.overlays));
+    check('the card grows into its new category without metadata motion, even when its pencil returns meanwhile', growing.length > 3 && growing.some(sample => !sample.pencils.length) && growing.some(sample => sample.pencils.length) && growing.every(sample => !sample.motion));
+    await meta.evaluate(([id, restore]) => { const fixture = window.hermesT3SidebarHarness, index = fixture.control.live.findIndex(item => item.session_key === id);
+      if (restore) Object.assign(fixture.control.live[index], restore); else fixture.control.live.splice(index, 1);
+      fixture.host.state.awaitingResponse.set(false); return fixture.queryClient.invalidateQueries(); }, [open, restore]);
+    await meta.waitForSelector(`[data-section=active] [data-session-id="${open}"]`);
+    // A card leaving while its Working timer rolls folds out showing the new value, not the roll's frozen overlay.
+    const caught = await meta.evaluate(async () => {
+      const label = () => document.querySelector('[data-session-id="root"] .sf-working-duration');
+      while (!label()?.querySelector('.sf-roll-fx')) await new Promise(resolve => requestAnimationFrame(resolve));
+      const text = label().firstChild.nodeValue, search = document.querySelector('input[aria-label="Search sessions"]');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(search, 'zzzz-no-match');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const ghost = [...document.querySelectorAll('[data-exiting=true]')].find(node => node.querySelector('.sf-working-duration'));
+      return ghost && { text, shown: ghost.querySelector('.sf-working-duration').textContent, overlays: ghost.querySelectorAll('.sf-roll-fx,[data-rolling]').length };
+    });
+    check('a card leaving mid-roll folds out with its new value and no roll overlay', caught && caught.shown === caught.text && !caught.overlays);
+    await meta.getByRole('searchbox').fill('');
     // Reduced motion changes everything at once; a roll already in flight finishes first.
     await meta.emulateMedia({ reducedMotion: 'reduce' });
     await meta.waitForTimeout(400);
