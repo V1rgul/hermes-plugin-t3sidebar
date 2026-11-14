@@ -214,13 +214,13 @@ test('plan units follow the capacity table: Codex is linear in price in every wi
   const codexRows = [['plus', 20], ['team', 20], ['business', 20], ['self_serve_business_usage_based', 20], ['self_serve_business_prolite', 100], ['prolite', 100], ['pro', 200], ['promax', 500]];
   for (const [plan, units] of codexRows) for (const key of ['weekly', 'five_hour', 'weekly:gpt-5', 'w7200']) {
     assert.equal(usage.planWeight('openai-codex', plan, key), units, `Codex ${plan} in ${key}`);
-    assert.equal(usage.planAssumed('openai-codex', plan), false, `Codex ${plan} is known`);
+    assert.equal(usage.planUnknown('openai-codex', plan), false, `Codex ${plan} is known`);
   }
   // Older samples hold Hermes's title-cased plan; case and separators fold back to the enum.
   assert.deepEqual(['Team', 'Prolite', 'Self Serve Business Usage Based', ' PROMAX ', 'Self Serve Business Prolite'].map(plan => usage.planWeight('openai-codex', plan)), [20, 100, 20, 500, 100]);
   const anthropicRows = [['pro', 20, 20], ['max_5x', 100, 100], ['max_20x', 200, 400], ['team_standard', 20, 20], ['team_premium', 100, 100]];
   for (const [plan, weekly, fiveHour] of anthropicRows) {
-    assert.deepEqual([usage.planWeight('anthropic', plan, 'weekly'), usage.planWeight('anthropic', plan, 'five_hour'), usage.planAssumed('anthropic', plan)], [weekly, fiveHour, false], `Anthropic ${plan}`);
+    assert.deepEqual([usage.planWeight('anthropic', plan, 'weekly'), usage.planWeight('anthropic', plan, 'five_hour'), usage.planUnknown('anthropic', plan)], [weekly, fiveHour, false], `Anthropic ${plan}`);
   }
   assert.deepEqual([usage.planWeight('anthropic', 'max_20x', 'weekly'), usage.planWeight('anthropic', 'max_20x', 'five_hour')], [200, 400], 'Max 20x is 2x Max 5x weekly but 4x in five hours');
   assert.deepEqual([usage.planWeight('anthropic', 'max_20x', 'weekly:opus'), usage.planWeight('anthropic', 'max_20x', 'five_hour:opus'), usage.planWeight('anthropic', 'max_20x', 'w7200'), usage.planWeight('anthropic', 'max_20x', undefined)], [200, 400, 200, 200], 'unknown windows use the weekly weight');
@@ -228,11 +228,26 @@ test('plan units follow the capacity table: Codex is linear in price in every wi
   const tolerant = { 'Claude Pro': 20, 'default_claude_max_5x': 100, 'Max 5x': 100, 'default_claude_max_20x': 200, 'MAX 20X': 200, 'Team Standard': 20, 'standard seat': 20, 'Team Premium': 100, premium: 100, 'Enterprise Premium Seat': 100 };
   for (const [plan, units] of Object.entries(tolerant)) assert.equal(usage.planWeight('anthropic', plan), units, `Anthropic "${plan}"`);
   assert.deepEqual([usage.planLabel('anthropic', 'default_claude_max_20x'), usage.planLabel('anthropic', 'team_standard'), usage.planLabel('anthropic', 'premium')], ['Max 20x', 'Standard seat', 'Premium seat']);
-  // Unknown capacity counts as one base plan and is flagged; "premium" alone never matches a Codex row, and a bare "max" stays unknown.
+  // Unknown capacity adds nothing to the pool and is flagged; "premium" alone never matches a Codex row, and a bare "max" stays unknown.
   for (const [provider, plan] of [['openai-codex', 'premium'], ['openai-codex', 'enterprise'], ['openai-codex', null], ['anthropic', 'max'], ['anthropic', 'team'], ['nous', 'pro']]) {
-    assert.deepEqual([usage.planWeight(provider, plan), usage.planAssumed(provider, plan)], [20, true], `${provider} ${plan} is assumed`);
+    assert.deepEqual([usage.planWeight(provider, plan), usage.planUnknown(provider, plan)], [0, true], `${provider} ${plan} is unknown`);
   }
   assert.equal(usage.BASE_PLAN_UNITS, 20);
+});
+
+test('xAI plans follow the published multiples of Plus with Ultra at 200, and older plans take the plan that replaces them', () => {
+  const rows = { Free: 0, 'X Basic': 0, Plus: 4, 'X Premium': 4, 'SuperGrok Lite': 4, Premium: 16, 'X Premium+': 16, SuperGrok: 16, Super: 60, 'SuperGrok Plus': 60, Ultra: 200, 'SuperGrok Heavy': 200 };
+  for (const [plan, units] of Object.entries(rows)) {
+    assert.deepEqual([usage.planWeight('xai-oauth', plan, 'weekly'), usage.planUnknown('xai-oauth', plan), usage.planLabel('xai-oauth', plan)], [units, false, plan], `xAI ${plan}`);
+  }
+  // The plus sign keeps X Premium+ apart from X Premium; unknown names are flagged and left out, and the table belongs to xAI alone.
+  for (const plan of ['mystery', null]) assert.deepEqual([usage.planWeight('xai-oauth', plan), usage.planUnknown('xai-oauth', plan)], [0, true], `xAI ${plan} is unknown`);
+  assert.deepEqual([usage.planUnknown('openai-codex', 'super'), usage.planUnknown('openai-codex', 'X Premium'), usage.planUnknown('nous', 'Ultra')], [true, true, true], 'xAI rows never apply to another provider');
+  // Accounts without a paid pool add no capacity: the pool of a Free and an X Basic account has no verdict, rather than a division by zero.
+  const now = 1_000_000, free = usage.limitsVerdict(verdictProvider(now, { provider: 'xai-oauth', label: 'xAI Grok', plans: ['Free', 'X Basic'] }), usage.USAGE_DEFAULTS, now);
+  assert.deepEqual([free.status, free.capacity, free.remaining_pct], ['unknown', null, null]);
+  const mixed = usage.limitsVerdict(verdictProvider(now, { provider: 'xai-oauth', label: 'xAI Grok', plans: ['X Basic', 'X Premium'] }), usage.USAGE_DEFAULTS, now);
+  assert.equal(mixed.capacity, 4);
 });
 
 test('plan labels use T3 Code\'s names', () => {
@@ -265,7 +280,7 @@ test('the pool weighs accounts by plan units: a raw point on Pro 100 moves it fi
   const withWindows = accounts.map((account, index) => ({ ...account, label: account.id, fetched_at: now, windows: [{ key: 'weekly', window_seconds: 7 * D, remaining_percent: 50, resets_at: now + (index + 1) * D }] }));
   const projection = usage.projectPool(withWindows, [], 'weekly', now, 3 * D, { rate: 0, provider: 'openai-codex' });
   assert.deepEqual([projection.capacity, projection.current], [120, 60]);
-  assert.deepEqual(projection.members.map(item => [item.id, item.plan_label, item.weight, item.assumed]), [['biz', 'Business', 20, false], ['pro', 'Pro 100', 100, false]]);
+  assert.deepEqual(projection.members.map(item => [item.id, item.plan_label, item.weight, item.unknown]), [['biz', 'Business', 20, false], ['pro', 'Pro 100', 100, false]]);
   // Each reset restores the account's own weight: Business gains 10 units, Pro 100 gains 50; what was left expires as `lost`.
   assert.deepEqual(projection.resets.map(item => [item.account, item.t - now, item.gain, item.lost, item.before]), [['biz', D, 10, 10, 60], ['pro', 2 * D, 50, 50, 70]]);
   assert.deepEqual(usage.projectPool(withWindows, [], 'five_hour', now, D, { rate: 0, provider: 'openai-codex' }).capacity, 0, 'no readings in that window, no capacity');
@@ -1136,12 +1151,13 @@ test('the single Limits button shows each provider\'s pooled units with a verdic
     { provider: 'xai', label: 'xAI', auth: 'logged_out', accounts: [], history: [] },
     served(verdictProvider(now, { left: 20, perHour: 2 })),
     served(verdictProvider(now, { provider: 'anthropic', label: 'Anthropic', plans: ['pro', 'max_5x'] })),
+    served(verdictProvider(now, { provider: 'xai-oauth', label: 'xAI Grok', plans: ['Premium', 'Premium'], left: 13 })),
     served(verdictProvider(now, { provider: 'nous', label: 'Nous', plans: [null, null], left: 13 }))] };
   plugin.register(mock.ctx); await render(mock.control.contributions[0]);
   assert.equal(restPaths().filter(path => path.startsWith('/usage/limits?')).length, 1, 'one limits request, keyed like the Limits page');
   assert.equal(restPaths().find(path => path.startsWith('/usage/limits?')), '/usage/limits?hours=168');
   assert.deepEqual(footerItems().map(item => [item.provider, item.status, item.value, item.icon, item.mark]), [
-    ['openai-codex', 'short', '20', 'short', 'openai-codex'], ['anthropic', 'waste', '60', 'waste', 'anthropic'], ['nous', 'ok', '2.6', null, 'nous']], 'the logged-out provider is left out');
+    ['openai-codex', 'short', '20', 'short', 'openai-codex'], ['anthropic', 'waste', '60', 'waste', 'anthropic'], ['xai-oauth', 'ok', '2.1', null, 'xai-oauth']], 'the logged-out provider and the one whose plans have no known capacity are left out');
   // Codex is blocked for 98 hours (red), Anthropic loses 48 of 120 units (40%: orange); an ok pool has no glyph and no severity.
   assert.deepEqual($$('.sf-footer .sf-limit').map(node => [node.dataset.severity ?? null, node.querySelector('[data-verdict-icon]')?.dataset.severity ?? null, node.querySelector('[data-verdict-icon] svg')?.getAttribute('data-icon') ?? null]),
     [['high', 'high', 'ArrowBarToDownTouching'], ['medium', 'medium', 'ClockX'], [null, null, null]]);
@@ -1149,7 +1165,7 @@ test('the single Limits button shows each provider\'s pooled units with a verdic
   assert.deepEqual([$$('.sf-footer button').length, limits.querySelectorAll('button').length, limits.dataset.empty, limits.getAttribute('title')], [2, 0, 'false', null], 'one button holds every item; its tooltip is the SDK Tip, not a title');
   // The accessible name repeats the tooltip: one factual line per provider, no advice.
   const name = limits.getAttribute('aria-label');
-  assert.match(name, /^Limits\. OpenAI Codex: 20 \/ 120 units · Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), (14h 0m|13h 59m) before the next reset · missing ~196 units\. Anthropic: 60 \/ 120 units · 48 units will expire unused by [A-Z][a-z]{2}\. Nous: 2\.6 \/ 40 units · On track for the next 7 days: nothing runs out and little expires unused\.$/);
+  assert.match(name, /^Limits\. OpenAI Codex: 20 \/ 120 units · Runs out [A-Z][a-z]{2} \d{1,2}:\d{2} (AM|PM), (14h 0m|13h 59m) before the next reset · missing ~196 units\. Anthropic: 60 \/ 120 units · 48 units will expire unused by [A-Z][a-z]{2}\. xAI Grok: 2\.1 \/ 32 units · On track for the next 7 days: nothing runs out and little expires unused\.$/);
   assert.equal(ADVICE.test(name), false);
   const codex = usage.validUsageLimits(mock.control.usageLimits).providers[1];
   assert.equal(usage.limitsFooterLine(codex, usage.limitsVerdict(codex, usage.USAGE_DEFAULTS, now), now).startsWith('OpenAI Codex: 20 / 120 units · Runs out '), true);
@@ -1160,7 +1176,7 @@ test('the single Limits button shows each provider\'s pooled units with a verdic
 
 test('a provider whose verdict cannot be computed shows a muted warning glyph in the footer and on the Limits page', async () => {
   const now = Date.now() / 1000;
-  const flat = verdictProvider(now, { provider: 'anthropic', label: 'Anthropic' }); flat.history = [];
+  const flat = verdictProvider(now, { provider: 'anthropic', label: 'Anthropic', plans: ['pro', 'max_5x'] }); flat.history = [];
   mock.control.usageLimits = { generated_at: now, sampler: null, providers: [served(verdictProvider(now, { stale: true })), served(flat)] };
   plugin.register(mock.ctx); await render(mock.control.contributions[0]);
   // Stale readings and no drain data both leave the verdict unknown: a warning instead of no glyph, so no glyph always means on track.
@@ -1382,10 +1398,10 @@ test('stale, failing and unread accounts keep the normal view', async () => {
   plugin.register(mock.ctx); await render(limitsPage());
   assert.equal($('.su-disclosure').getAttribute('aria-label'), 'Accounts (2)');
   await click($('.su-disclosure'));
-  assert.equal($('.su-capacity').textContent, '/ 20 units', 'the account without a reading is left out of the pool');
-  // "max" alone does not say 5x or 20x: counted as one base plan, flagged on the row and in a footnote.
-  assert.deepEqual([$('.su-account[data-account="acct-b1"] .su-badge[data-badge=plan]').textContent, $('.su-account[data-account="acct-b1"] .su-assumed').textContent], ['max20 units', 'capacity unknown, counted as 20*']);
-  assert.match($('.su-assumption').textContent, /^\* Capacity unknown for claude-max \(max\), claude-team \(no plan reported\): counted as 20 units, one \$20 plan\.$/);
+  // "max" alone does not say 5x or 20x: the account read is left out of the pool, flagged on the row and in a footnote, and the pool's size reads unknown rather than empty.
+  assert.deepEqual([$('.su-pool').textContent, $('.su-capacity').textContent], ['—', 'capacity unknown']);
+  assert.deepEqual([$('.su-account[data-account="acct-b1"] .su-badge[data-badge=plan]').textContent, $('.su-account[data-account="acct-b1"] .su-assumed').textContent], ['maxunknown', 'capacity unknown, not counted*']);
+  assert.match($('.su-assumption').textContent, /^\* Capacity unknown for claude-max \(max\), claude-team \(no plan reported\): not counted in the pool\.$/);
   assert.equal($('.su-verdict').dataset.status, 'unknown', 'a stale pool without drain data gets no verdict');
   assert.match($('.su-chart-notes').textContent, /1 account without a reading left out of the pool/);
   // Compare text, never a DOM node: a failing assertion on a jsdom element tries to diff the whole DOM.

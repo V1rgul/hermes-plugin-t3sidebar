@@ -3716,15 +3716,23 @@ const PLAN_UNITS = {
     max_20x: { label: 'Max 20x', weekly: 200, five_hour: 400 },
     standard_seat: { label: 'Standard seat', weekly: 20, five_hour: 20 },
     premium_seat: { label: 'Premium seat', weekly: 100, five_hour: 100 }
+  },
+  // xAI publishes its pools only as multiples of Plus (Plus 1x, Premium 4x, Super 15x, Ultra 50x, x.ai/pricing); the $200 Ultra is pinned at 200 like the other $200 plans, so Plus is 4. Older plans, which have no published multiple, take the new plan that replaces them: SuperGrok Lite and X Premium = Plus, SuperGrok and X Premium+ = Premium, SuperGrok Plus = Super, SuperGrok Heavy = Ultra. Free and X Basic include no paid pool, so they add nothing.
+  'xai-oauth': {
+    free: { label: 'Free', weekly: 0 }, x_basic: { label: 'X Basic', weekly: 0 },
+    plus: { label: 'Plus', weekly: 4 }, x_premium: { label: 'X Premium', weekly: 4 }, supergrok_lite: { label: 'SuperGrok Lite', weekly: 4 },
+    premium: { label: 'Premium', weekly: 16 }, x_premium_plus: { label: 'X Premium+', weekly: 16 }, supergrok: { label: 'SuperGrok', weekly: 16 },
+    super: { label: 'Super', weekly: 60 }, supergrok_plus: { label: 'SuperGrok Plus', weekly: 60 },
+    ultra: { label: 'Ultra', weekly: 200 }, supergrok_heavy: { label: 'SuperGrok Heavy', weekly: 200 }
   }
 };
-// Codex plans with no known capacity: T3 Code's codexPlanLabel names them, and they count as one base plan (flagged).
+// Codex plans with no known capacity: T3 Code's codexPlanLabel names them, and the pool leaves them out (flagged).
 const CODEX_PLAN_LABELS = { free: 'Free', go: 'Go', ent26: 'Enterprise', enterprise: 'Enterprise', enterprise_cbp_automation: 'Enterprise', enterprise_cbp_usage_based: 'Enterprise', edu: 'Edu', edu_plus: 'Edu', edu_pro: 'Edu' };
 // Older samples hold Hermes's title-cased plan ("Prolite", "Self Serve Business Usage Based"); folding case and separators recovers the enum.
 const planSlug = plan => typeof plan === 'string' ? plan.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') : '';
 const planFamily = provider => {
   const id = typeof provider === 'string' ? provider.toLowerCase() : '';
-  return id === 'openai-codex' || id === 'codex' ? 'openai-codex' : id.startsWith('anthropic') || id.startsWith('claude') ? 'anthropic' : null;
+  return id === 'openai-codex' || id === 'codex' ? 'openai-codex' : id.startsWith('anthropic') || id.startsWith('claude') ? 'anthropic' : id === 'xai-oauth' ? 'xai-oauth' : null;
 };
 // Anthropic plan strings vary by source (subscriptionType "max", rateLimitTier "default_claude_max_20x", seat tiers), so they are matched by pattern. A bare "max" says nothing about 5x or 20x and stays unknown.
 function anthropicPlanKey(slug) {
@@ -3736,20 +3744,22 @@ function anthropicPlanKey(slug) {
   return null;
 }
 function planEntry(provider, plan) {
-  const family = planFamily(provider), slug = planSlug(plan);
+  // xAI names its plans for display ("X Premium+", "SuperGrok Heavy"); the plus sign is spelled out, or X Premium+ would fold onto X Premium.
+  const family = planFamily(provider), slug = planSlug(family === 'xai-oauth' && typeof plan === 'string' ? plan.replace(/\+/g, ' plus') : plan);
   if (!slug || !family) return null;
-  // Codex plans are exact enums: "premium" alone must never pick up a Codex row.
+  // Codex and xAI plans are exact names: "premium" alone must never pick up a Codex row, and "X Premium" never the $30 Premium.
   const key = family === 'anthropic' ? anthropicPlanKey(slug) : slug;
   return key && Object.hasOwn(PLAN_UNITS[family], key) ? PLAN_UNITS[family][key] : null;
 }
+// A plan whose capacity is not in the table adds nothing to the pool: guessing a size would make the pool's units and verdict wrong without saying so, so it is left out and named in the footnotes.
 export function planWeight(provider, plan, windowKey = 'weekly') {
   const entry = planEntry(provider, plan);
-  if (!entry) return BASE_PLAN_UNITS;
+  if (!entry) return 0;
   const base = String(windowKey ?? '').split(':')[0];
   return Number.isFinite(entry[base]) ? entry[base] : entry.weekly;
 }
-// True when the plan's capacity is not in the table and the pool counts it as one base plan.
-export const planAssumed = (provider, plan) => planEntry(provider, plan) === null;
+// True when the plan's capacity is not in the table, so the pool leaves the account out.
+export const planUnknown = (provider, plan) => planEntry(provider, plan) === null;
 export function planLabel(provider, plan) {
   const entry = planEntry(provider, plan);
   if (entry) return entry.label;
@@ -3891,11 +3901,11 @@ export function projectPool(accounts, history, windowKey, now, horizonS, options
       resetAt = period ? resetAt + (Math.floor((now - resetAt) / period) + 1) * period : null;
     }
     const weight = planWeight(provider, account.plan, windowKey);
-    state.push({ id: account.id, label: account.label || account.id, plan: account.plan ?? null, planLabel: planLabel(provider, account.plan), assumed: planAssumed(provider, account.plan),
+    state.push({ id: account.id, label: account.label || account.id, plan: account.plan ?? null, planLabel: planLabel(provider, account.plan), unknown: planUnknown(provider, account.plan),
       priority: Number.isFinite(account.priority) ? account.priority : Infinity, weight, units: weight * remaining / 100, resetAt, period });
   }
   state.sort((a, b) => a.priority - b.priority || String(a.id).localeCompare(String(b.id)));
-  const members = state.map(item => ({ id: item.id, label: item.label, plan: item.plan, plan_label: item.planLabel, weight: item.weight, assumed: item.assumed }));
+  const members = state.map(item => ({ id: item.id, label: item.label, plan: item.plan, plan_label: item.planLabel, weight: item.weight, unknown: item.unknown }));
   const stats = Object.hasOwn(options, 'rate') ? { rate: options.rate, coveredS: null, partial: false } : drainStats(samples, now, options.lookbackS), measured = stats.rate;
   const rate = Number.isFinite(measured) && measured >= 0 ? measured : null, drain = rate ?? 0;
   const pool = () => state.reduce((sum, item) => sum + item.units, 0);
@@ -4453,9 +4463,9 @@ function AccountsDisclosure({ provider, windowKey, now, open, onToggle, redeem, 
 }
 // Shared notes once under every section: how the samples and projections work, what a unit is, and which capacities are guessed.
 function LimitsFootnotes({ providers, sampler, now }) {
-  const assumed = providers.flatMap(provider => provider.accounts.filter(account => planAssumed(provider.provider, account.plan)).map(account => `${account.label || account.id} (${planLabel(provider.provider, account.plan) || 'no plan reported'})`));
+  const unknown = providers.flatMap(provider => provider.accounts.filter(account => planUnknown(provider.provider, account.plan)).map(account => `${account.label || account.id} (${planLabel(provider.provider, account.plan) || 'no plan reported'})`));
   return h('div', { className: 'su-footnotes' }, h(SamplerInfo, { sampler, now }),
-    assumed.length ? h('p', { className: 'su-footnote su-assumption' }, `* Capacity unknown for ${assumed.join(', ')}: counted as ${BASE_PLAN_UNITS} units, one $20 plan.`) : null);
+    unknown.length ? h('p', { className: 'su-footnote su-assumption' }, `* Capacity unknown for ${unknown.join(', ')}: not counted in the pool.`) : null);
 }
 // Longest lookback on the left: moving left reaches further into the past. The native value is the visual position (0 = 30d), so arrow keys follow the visual direction (Right = shorter); the preference itself stores hours, never the position.
 export const lookbackPosition = hours => { const index = LOOKBACK_STOPS.indexOf(hours); return LOOKBACK_STOPS.length - 1 - (index < 0 ? LOOKBACK_STOPS.indexOf(USAGE_DEFAULTS.lookback) : index); };
@@ -4844,9 +4854,9 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
     projection.unknownAccounts.length ? h('span', { key: 'unknown' }, `${projection.unknownAccounts.length} account${projection.unknownAccounts.length === 1 ? '' : 's'} without a reading left out of the pool`) : null].filter(Boolean);
   return h('div', { className: 'su-chart su-pooled', 'data-window': windowKey, 'data-past': range.past, 'data-future': range.future, 'data-capacity': projection.capacity, role: 'group', 'aria-label': `${provider.label || providerId} pooled remaining quota` },
     h('div', { className: 'su-headline' },
-      // Without any account reading the pool is unknown, not empty.
+      // Without any account reading, or with only accounts whose plan capacity is unknown, the pool is unknown, not empty.
       h('span', { className: 'su-pool' }, projection.capacity ? unitsText(projection.current) : '—'),
-      pageTipped(PLAN_UNITS_NOTE, h('span', { className: 'su-capacity' }, projection.capacity ? `/ ${unitsText(projection.capacity)} units` : 'no account readings yet'))),
+      pageTipped(PLAN_UNITS_NOTE, h('span', { className: 'su-capacity' }, projection.capacity ? `/ ${unitsText(projection.capacity)} units` : projection.members.length ? 'capacity unknown' : 'no account readings yet'))),
     verdict ? h(VerdictLine, { verdict, now, windowKey }) : null,
     h('div', { className: 'su-limits-grid', ref: grid },
       // No unit caption (the headline already says units) and no 0 label, which would sit on the past range control under it; the 0 gridline stays.
@@ -4884,13 +4894,13 @@ function LimitAccount({ provider, account, selected, now, redeem, unsettled }) {
   const setPreviewing = useCallback(on => setPreview(on ? () => codexResetGain : null), []);
   const windows = [...account.windows].sort((a, b) => windowRank(a.key) - windowRank(b.key) || a.key.localeCompare(b.key));
   // The plan label and the capacity this account adds to the pool in the selected window; T3 Code's names, not the raw enum.
-  const label = planLabel(provider, account.plan), units = planWeight(provider, account.plan, selected || 'weekly'), assumed = planAssumed(provider, account.plan);
+  const label = planLabel(provider, account.plan), units = planWeight(provider, account.plan, selected || 'weekly'), unknown = planUnknown(provider, account.plan);
   return h('div', { className: 'su-account', 'data-account': account.id },
     h('div', { className: 'su-account-head' },
       h('strong', null, account.label || account.id),
       Number.isFinite(account.priority) ? h(SplitBadge, { kind: 'priority', title: 'Pool priority: the lowest number is used first.', tone: 'primary', subject: 'priority', detail: String(account.priority) }) : null,
-      h(SplitBadge, { kind: 'plan', title: PLAN_UNITS_NOTE, tone: 'primary', subject: label || 'Unknown plan', detail: `${unitsText(units)} units` }),
-      assumed ? h('span', { className: 'su-muted su-assumed' }, `capacity unknown, counted as ${BASE_PLAN_UNITS}*`) : null,
+      h(SplitBadge, { kind: 'plan', title: PLAN_UNITS_NOTE, tone: 'primary', subject: label || 'Unknown plan', detail: unknown ? 'unknown' : `${unitsText(units)} units` }),
+      unknown ? h('span', { className: 'su-muted su-assumed' }, 'capacity unknown, not counted*') : null,
       account.stale ? h(Badge, { tone: 'warn', title: 'The latest reading is older than the cache freshness limit.' }, 'Stale') : null,
       account.error ? h(Badge, { tone: 'error', title: String(account.error) }, 'Error') : null,
       h('span', { className: 'su-spacer' }),

@@ -2051,7 +2051,9 @@ try {
       // With more providers than a 260px row can hold, items that do not fit wrap onto the clipped second line and vanish whole instead of overflowing the row.
       await closeUp.evaluate(() => {
         const mock = window.hermesT3SidebarHarness, data = mock.syntheticUsageLimits(168, 'mixed'), [codex, claude] = data.providers;
-        mock.control.usageLimits = { ...data, providers: [...data.providers, { ...codex, provider: 'gemini', label: 'Gemini' }, { ...claude, provider: 'xai', label: 'xAI' }, { ...codex, provider: 'nous', label: 'Nous' }] };
+        // Copies under provider ids whose plan tables apply, so each one has a known capacity and a footer item.
+        mock.control.usageLimits = { ...data, providers: [...data.providers, { ...codex, provider: 'codex', label: 'Codex' }, { ...claude, provider: 'claude-subscription-directsdk-experimental', label: 'Claude Code' },
+          { ...codex, provider: 'xai-oauth', label: 'xAI Grok', accounts: codex.accounts.map(account => ({ ...account, plan: 'Premium' })) }] };
         return mock.queryClient.invalidateQueries();
       });
       await closeUp.waitForFunction(() => document.querySelectorAll('.sf-footer .sf-limit').length === 5);
