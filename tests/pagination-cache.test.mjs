@@ -10,7 +10,7 @@ const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></h
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, IS_REACT_ACT_ENVIRONMENT: true });
 const { createRoot } = await import('react-dom/client');
 let client, controller, root;
-const tick = async () => act(async () => new Promise(resolve => setTimeout(resolve, 20)));
+const tick = async () => act(async () => new Promise(resolve => setTimeout(resolve, 0)));
 const requests = () => mock.calls.filter(call => call[0] === 'rest' && call[1].startsWith('/archives?')).map(call => call[1]);
 function fixture(count = 1101) {
 	mock.control.rows = [{ id: 'ordinary', title: 'Ordinary history', message_count: 2 }];

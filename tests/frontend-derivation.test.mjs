@@ -11,7 +11,7 @@ const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></h
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, IS_REACT_ACT_ENVIRONMENT: true });
 const { createRoot } = await import('react-dom/client');
 let root, controller;
-const tick = async () => act(async () => new Promise(resolve => setTimeout(resolve, 15)));
+const tick = async () => act(async () => new Promise(resolve => setTimeout(resolve, 0)));
 const button = name => [...document.querySelectorAll('button')].find(node => node.getAttribute('aria-label') === name || node.textContent === name);
 const input = async value => {
 	const node = document.querySelector('[aria-label="Search sessions"]');

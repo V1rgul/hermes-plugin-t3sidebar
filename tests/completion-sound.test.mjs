@@ -10,7 +10,7 @@ const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></h
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, IS_REACT_ACT_ENVIRONMENT: true });
 const { createRoot } = await import('react-dom/client');
 const storage = mock.ctx.storage;
-const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
+const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 let root;
 
 // A Web Audio stand-in that records what the plugin decodes and plays: T3's decoded buffer, and Desktop presets' synthesized voices. Its clock moves on every read, so separate cues never coalesce.

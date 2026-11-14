@@ -10,7 +10,7 @@ const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></h
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, MouseEvent: dom.window.MouseEvent, KeyboardEvent: dom.window.KeyboardEvent, IS_REACT_ACT_ENVIRONMENT: true });
 const { createRoot } = await import('react-dom/client');
 let root, controller;
-const tick = async () => act(async () => new Promise(resolve => setTimeout(resolve, 15)));
+const tick = async () => act(async () => new Promise(resolve => setTimeout(resolve, 0)));
 const button = label => [...document.querySelectorAll('button')].find(node => node.getAttribute('aria-label') === label) || null;
 const click = async node => { assert.ok(node); await act(async () => node.click()); await tick(); };
 const input = async value => {

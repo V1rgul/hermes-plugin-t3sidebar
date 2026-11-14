@@ -11,7 +11,7 @@ Object.assign(globalThis, { window: dom.window, document: dom.window.document, H
 const { createRoot } = await import('react-dom/client');
 const originalRest = mock.ctx.rest, originalNow = Date.now;
 let root, clock;
-const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
+const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 const $ = selector => document.querySelector(selector);
 // The clock only moves when the test says so, so the order of outcome, read start and confirmation is explicit.
 const advance = () => { clock += 100; };

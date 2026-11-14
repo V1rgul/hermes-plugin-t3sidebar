@@ -11,7 +11,7 @@ const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></h
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, MouseEvent: dom.window.MouseEvent, IS_REACT_ACT_ENVIRONMENT: true });
 const { createRoot } = await import('react-dom/client');
 let root, controller;
-const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
+const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 const dialog = label => document.querySelector(`[role=dialog][aria-label="${label}"]`);
 const button = (parent, label) => [...parent.querySelectorAll('button')].find(node => node.getAttribute('aria-label') === label || node.textContent === label);
 async function click(node) { assert.ok(node); await act(async () => node.click()); await tick(); }

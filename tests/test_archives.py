@@ -13,6 +13,7 @@ from hermes_state_sessions import INTERNAL_LISTING_SOURCES
 from hermes_cli import projects_db
 
 from test_backend import backend
+from native_fixture import native_fixture
 
 
 class NativeArchives(unittest.TestCase):
@@ -38,7 +39,7 @@ class NativeArchives(unittest.TestCase):
 	def test_compressed_archive_rich_metadata_and_restore_readback_are_readonly(self):
 		with closing(projects_db.connect(self.home / "projects.db")) as conn:
 			project = projects_db.create_project(conn, name="Real project", folders=["/repo"], icon="tree", color="#123456")
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			db.create_session("root", "cli", cwd="/repo/src", system_prompt="private-prompt", model_config={"provider": "old"})
 			db.update_session_cwd("root", "/repo/src", git_branch="retained")
 			db.update_token_counts("root", input_tokens=100, output_tokens=20, absolute=True)
@@ -88,7 +89,7 @@ class NativeArchives(unittest.TestCase):
 		self.assertEqual(self.db_path.read_bytes(), before_restore_reads)
 
 	def test_archived_elsewhere_hidden_recovery_cron_internal_filtered_before_paging(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for sid, source in [("older", "cli"), ("hidden", "cli"), ("newer", "cli"), ("job", "cron"), *((f"internal-{source}", source) for source in INTERNAL_LISTING_SOURCES)]:
 				db.create_session(sid, source)
 				db.set_session_archived(sid, True, notify=False)
@@ -114,7 +115,7 @@ class NativeArchives(unittest.TestCase):
 			self.assertEqual(self.client().get("/archives").status_code, 200)
 
 	def test_exact_id_missing_alias_and_storage_failure(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			db.create_session("prefix-target-suffix", "cli")
 			db.set_session_archived("prefix-target-suffix", True, notify=False)
 		with patch.object(backend, "open_session_db", side_effect=self.open_db):
@@ -174,7 +175,7 @@ class NativeArchives(unittest.TestCase):
 		homes = {name: self.home / "profiles" / name for name in ("alpha", "beta")}
 		for name, home in homes.items():
 			home.mkdir(parents=True)
-			with closing(SessionDB(home / "state.db")) as db:
+			with closing(native_fixture(home / "state.db")) as db:
 				db.create_session("collision", "cli", cwd=f"/{name}")
 				db.set_session_archived("collision", name == "alpha", notify=False)
 		before = {name: (home / "state.db").read_bytes() for name, home in homes.items()}

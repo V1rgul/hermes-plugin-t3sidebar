@@ -12,7 +12,7 @@ Object.assign(globalThis, { window: dom.window, document: dom.window.document, H
 const { createRoot } = await import('react-dom/client');
 const rest = mock.ctx.rest;
 let root, controller;
-const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
+const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 const microtasks = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 const notes = () => [...document.querySelectorAll('.sf-strip li[data-error=true]')].map(node => node.textContent);
 afterEach(async () => {

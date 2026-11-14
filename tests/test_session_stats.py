@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from hermes_state import SessionDB
 
 from test_backend import backend
+from native_fixture import native_fixture
 
 
 class SessionStats(unittest.TestCase):
@@ -32,7 +33,7 @@ class SessionStats(unittest.TestCase):
 
 	def test_figures_cover_compressed_segments_subagent_runs_and_hermes_overhead(self):
 		delegate = lambda parent: {"_delegate_from": parent}
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for sid, source, parent, config, tokens in [
 				("root", "desktop", None, None, (100, 20)), ("tip", "desktop", "root", None, (300, 40)),
 				# A reset fork of the root is another conversation, not this one's history.
@@ -81,7 +82,7 @@ class SessionStats(unittest.TestCase):
 		self.assertEqual(self.stats("tip"), {**value, "id": "tip"})
 
 	def test_unknown_tokens_stay_null_and_segment_boundaries_count_as_compressions(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for sid, parent in [("one", None), ("two", "one"), ("three", "two")]:
 				db.create_session(sid, "cli", parent_session_id=parent)
 				db.update_token_counts(sid, input_tokens=5, output_tokens=5, model="fixture", absolute=True)
@@ -95,7 +96,7 @@ class SessionStats(unittest.TestCase):
 		self.assertEqual((value["compressions"], value["subagents"], value["messages"], value["working_seconds"]), (2, {"count": 0, "simultaneous": 0}, 0, 0))
 
 	def test_route_is_profile_qualified_exact_and_reports_missing_sessions(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			db.create_session("present", "desktop")
 		app = FastAPI()
 		app.include_router(backend.create_router(Path(self.temp.name) / "state.sqlite3"), prefix="/api")

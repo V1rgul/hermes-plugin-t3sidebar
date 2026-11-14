@@ -223,12 +223,11 @@ class CompletionHookTests(unittest.TestCase):
 
 	def test_two_profile_observers_with_colliding_ids_stay_separate(self):
 		from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-		from hermes_state import SessionDB
 		other_home = self.home / "other-profile"
 		other_home.mkdir()
 		token = set_hermes_home_override(other_home)
 		try:
-			with closing(SessionDB(db_path=other_home / "state.db")) as db:
+			with closing(native_fixture(other_home / "state.db")) as db:
 				db.create_session("human", "cli")
 			other = hooks.CompletionObserver(other_home)
 			self.addCleanup(other.close)
@@ -674,13 +673,12 @@ class CompletionHookTests(unittest.TestCase):
 
 	def test_restore_is_profile_home_exact_with_colliding_ids(self):
 		from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-		from hermes_state import SessionDB
 		self.archive()
 		other_home = self.home / "another-profile"
 		other_home.mkdir()
 		token = set_hermes_home_override(other_home)
 		try:
-			with closing(SessionDB(db_path=other_home / "state.db")) as db:
+			with closing(native_fixture(other_home / "state.db")) as db:
 				db.create_session("human", "cli")
 				db.set_session_archived("human", True, notify=False)
 			other = hooks.CompletionObserver(other_home)

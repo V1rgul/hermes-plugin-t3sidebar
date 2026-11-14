@@ -11,7 +11,7 @@ const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></h
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, IS_REACT_ACT_ENVIRONMENT: true });
 const { createRoot } = await import('react-dom/client');
 let root, controller;
-const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
+const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 const acks = action => mock.calls.filter(call => call[0] === 'rest' && call[2]?.method === 'POST' && call[2].body?.action === action).map(call => [call[1], call[2].body]);
 async function refreshMetadata() { await act(async () => mock.queryClient.invalidateQueries({ queryKey: [...scopeKey(captureScope()), 'metadata'] })); await tick(); await tick(); }
 afterEach(async () => {

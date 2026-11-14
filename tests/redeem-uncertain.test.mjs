@@ -11,7 +11,7 @@ Object.assign(globalThis, { window: dom.window, document: dom.window.document, H
 const { createRoot } = await import('react-dom/client');
 let root;
 const H = 3600, D = 86400;
-const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
+const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 const $ = selector => document.querySelector(selector);
 async function click(node) { assert.ok(node, 'element to click exists'); await act(async () => node.click()); await tick(); }
 afterEach(async () => {

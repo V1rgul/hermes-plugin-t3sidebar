@@ -11,7 +11,7 @@ Object.assign(globalThis, { window: dom.window, document: dom.window.document, H
 const { createRoot } = await import('react-dom/client');
 let root, restore = null;
 const H = 3600;
-const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
+const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 afterEach(async () => {
   if (root) { await act(async () => root.unmount()); root = null; }
   restore?.(); restore = null;

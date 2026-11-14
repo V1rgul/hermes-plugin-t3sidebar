@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from test_backend import backend
+from native_fixture import native_fixture
 
 
 class MetadataReadPerformance(unittest.TestCase):
@@ -92,7 +93,7 @@ class NativeAliasPerformance(unittest.TestCase):
 		with tempfile.TemporaryDirectory(prefix="flow-alias-performance-") as temp:
 			path = Path(temp) / "native.sqlite3"
 			# Seed only synthetic compact session columns, avoiding lifecycle hooks.
-			with closing(SessionDB(path)) as db:
+			with closing(native_fixture(path)) as db:
 				assert db._conn is not None
 				with db._conn:
 					for i in range(20):
@@ -152,7 +153,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 
 		with tempfile.TemporaryDirectory(prefix="flow-short-organized-") as temp:
 			path = Path(temp) / "native.sqlite3"
-			with closing(SessionDB(path)) as db:
+			with closing(native_fixture(path)) as db:
 				assert db._conn is not None
 				with db._conn:
 					for sid, source, started, parent, reason, archived, hidden in [
@@ -205,7 +206,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 
 		with tempfile.TemporaryDirectory(prefix="flow-short-snapshot-") as temp:
 			path = Path(temp) / "native.sqlite3"
-			with closing(SessionDB(path)) as db:
+			with closing(native_fixture(path)) as db:
 				assert db._conn is not None
 				with db._conn:
 					db._conn.execute("INSERT INTO sessions(id, source, started_at, end_reason, input_tokens, output_tokens) VALUES ('root', 'cli', 1, 'compression', 2, 3)")
@@ -245,7 +246,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 
 		with tempfile.TemporaryDirectory(prefix="flow-empty-organized-") as temp:
 			path = Path(temp) / "native.sqlite3"
-			with closing(SessionDB(path)) as db:
+			with closing(native_fixture(path)) as db:
 				assert db._conn is not None
 				with db._conn:
 					db._conn.executemany("INSERT INTO sessions(id, source, started_at, archived) VALUES (?, 'cli', 1, 1)",
@@ -267,7 +268,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 		from hermes_state import SessionDB
 		with tempfile.TemporaryDirectory(prefix="flow-organized-performance-") as temp:
 			path = Path(temp) / "native.sqlite3"
-			with closing(SessionDB(path)) as db:
+			with closing(native_fixture(path)) as db:
 				assert db._conn is not None
 				with db._conn:
 					for i in range(500):
@@ -294,7 +295,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 		from hermes_state import SessionDB
 		with tempfile.TemporaryDirectory(prefix="flow-organized-lineage-") as temp:
 			path = Path(temp) / "native.sqlite3"
-			with closing(SessionDB(path)) as db:
+			with closing(native_fixture(path)) as db:
 				assert db._conn is not None
 				with db._conn:
 					for i in range(32):

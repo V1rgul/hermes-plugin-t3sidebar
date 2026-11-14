@@ -12,7 +12,7 @@ Object.assign(globalThis, { window: dom.window, document: dom.window.document, H
 const { createRoot } = await import('react-dom/client');
 const rest = mock.ctx.rest;
 let root, controller;
-const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
+const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 const browse = () => [...document.querySelectorAll('button')].find(node => node.textContent === 'Browse older sessions');
 const row = id => document.querySelector(`[data-session-id="${id}"]`);
 afterEach(async () => {

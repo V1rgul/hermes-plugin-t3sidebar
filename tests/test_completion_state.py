@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from test_backend import ROOT, backend
+from native_fixture import native_fixture
 
 
 SPEC = importlib.util.spec_from_file_location("completion_ledger_test", ROOT / "completion_state.py")
@@ -302,7 +303,7 @@ class CompletionTests(unittest.TestCase):
         from hermes_state import SessionDB
 
         native_path = Path(self.temp.name) / "native.sqlite3"
-        with closing(SessionDB(native_path)) as db:
+        with closing(native_fixture(native_path)) as db:
             assert db._conn is not None
             with db._conn:
                 db._conn.execute("INSERT INTO sessions(id, source, started_at, end_reason) VALUES ('old-root', 'cli', 1, 'compression')")

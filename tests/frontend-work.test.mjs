@@ -12,7 +12,7 @@ Object.assign(globalThis, { window: dom.window, document: dom.window.document, H
 const { createRoot } = await import('react-dom/client');
 const h = React.createElement;
 let root, controller;
-const tick = async () => act(async () => new Promise(resolve => setTimeout(resolve, 15)));
+const tick = async () => act(async () => new Promise(resolve => setTimeout(resolve, 0)));
 async function render(tree) {
 	root ||= createRoot(document.getElementById('app'));
 	await act(async () => root.render(tree));

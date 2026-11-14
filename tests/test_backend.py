@@ -18,6 +18,8 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from native_fixture import native_fixture
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("hermes_dashboard_plugin_hermes_t3sidebar_test", ROOT / "dashboard/plugin_api.py")
@@ -384,11 +386,10 @@ class BackendTests(unittest.TestCase):
 			self.assertEqual(backend.default_state_path(), self.path)
 
 	def test_session_store_opens_read_only_through_public_session_db(self):
-		from hermes_state import SessionDB
 		from fastapi import HTTPException
 
 		path = Path(self.temp.name) / "state.db"
-		with closing(SessionDB(db_path=path)) as db:
+		with closing(native_fixture(path)) as db:
 			db._conn.execute("INSERT INTO sessions(id, source, started_at) VALUES ('s1', 'cli', 1)")
 			db._conn.commit()
 		before = path.read_bytes()
