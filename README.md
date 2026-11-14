@@ -16,7 +16,7 @@
 - Cards: project, provider icon, token count including subagents.
 - Pins, snoozes and completion markers shared between Desktop clients through the backend companion.
 
-![Session sidebar: yellow draft background on Installation guide review, Input and Done badges, pinned sessions, Working, Snoozed and folded Archived shelves, Limits and Usage footer](docs/images/draft.png)
+![Session sidebar in Hermes Desktop: yellow draft background on Ask gift card refund destination, Input and Done badges, a pinned session, Working, Snoozed and folded Archived shelves, Limits and Usage footer](docs/images/draft.png)
 
 ### AutoTitler: rename now
 
@@ -56,7 +56,7 @@
 - Anthropic limit resets (such as a Fable reset): one line each under the account's bars, with its own **Use one** button; hovering it hatches what that reset would give back. It confirms with the share of the window it refills that is lost, then uses that reset as Claude Code's `/limit-reset` does.
 - Backend sampler every 5 minutes, 35 days of history, read-only: never refreshes pool tokens, clears cooldowns or redeems resets. An expired Claude Code login is the one exception: Hermes's own Claude Code resolver refreshes it.
 
-![Limits page: OpenAI Codex pool running out Sunday with reset markers and lost units, its two accounts unfolded with 5-hour and weekly bars and banked resets, Anthropic pool with units expiring unused, averaging and time-to-empty measurements](docs/images/limits.png)
+![Limits page: Anthropic pool with units expiring unused by Friday and lost units, OpenAI Codex pool running out Sunday with reset markers, its two accounts unfolded with session and weekly bars and banked resets, averaging and time-to-empty measurements](docs/images/limits.png)
 
 ### Projects
 
@@ -87,7 +87,7 @@
 - Show token counts
 - Done/Input sound: T3 Code's or one of Desktop's presets, played when a session shows Done or Input
 
-![Plugin settings page: Snooze preset time field with alarm-clock picker, Working indicator Normal or Detailed, Pinned sessions 1 or 2 lines, Show token counts switch](docs/images/settings.png)
+![Plugin settings page in Desktop's Settings, under Plugins: Snooze preset time field with alarm-clock picker, Working indicator Normal or Detailed, Pinned sessions 1 or 2 lines, Show token counts switch, Done/Input sound picker](docs/images/settings.png)
 
 ## Install
 
