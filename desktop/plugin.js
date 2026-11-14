@@ -5299,7 +5299,7 @@ export default {
     const attention = cues => { const choice = readCompletionSound(ctx); if (choice !== 'none' && !readNativeSound()?.muted) for (let cue = 0; cue < cues; cue++) void sound.queue(choice); };
     ctx.register({ id: 'sidebar', area: 'panes', title: 't3sidebar', order: 0,
       data: { placement: 'left', width: '290px' }, render: () => h(HermesT3Sidebar, { ctx, controller, onAttention: attention }) });
-    ctx.registerSettingsPage({ id: 'settings', title: 'hermes-t3sidebar', icon: 'list-tree', render: () => h(Settings, { ctx, sound }) });
+    ctx.registerSettingsPage({ id: 'settings', title: 'T3 sidebar', icon: 'layout-sidebar-left', render: () => h(Settings, { ctx, sound }) });
     ctx.register({ id: 'usage', area: sdk.ROUTES_AREA ?? 'routes', title: 'Usage', data: { path: USAGE_ROUTE }, render: () => h(UsagePage, { ctx, view: 'usage' }) });
     ctx.register({ id: 'limits', area: sdk.ROUTES_AREA ?? 'routes', title: 'Limits', data: { path: LIMITS_ROUTE }, render: () => h(UsagePage, { ctx, view: 'limits' }) });
     // Browsers start audio suspended until a gesture; Desktop clients without tracked listeners just rely on Electron's autoplay.

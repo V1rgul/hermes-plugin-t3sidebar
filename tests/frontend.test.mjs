@@ -49,7 +49,8 @@ test('only supported import specifiers; opt-in left-pane registration and dispos
   assert.match(source, /const secondTicker = [^]*?setInterval\(/);
   plugin.register(mock.ctx);
   assert.equal(mock.control.contributions[0].data.placement, 'left');
-  assert.equal(mock.control.contributions[0].title, 't3sidebar'); assert.equal(mock.control.settings.title, plugin.name);
+  assert.equal(mock.control.contributions[0].title, 't3sidebar'); assert.equal(mock.control.settings.title, 'T3 sidebar');
+  assert.equal(mock.control.settings.icon, 'layout-sidebar-left');
   assert.equal(mock.control.contributions[0].id, 'sidebar'); assert.equal(typeof mock.control.settings.render, 'function');
   mock.control.disposers.forEach(fn => fn()); assert.equal(mock.control.listener, null);
 });
