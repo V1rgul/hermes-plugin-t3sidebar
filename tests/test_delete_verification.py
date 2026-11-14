@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from hermes_state import SessionDB
 
 from test_backend import backend
+from native_fixture import native_fixture
 
 
 BODY = SimpleNamespace(request_id="confirmed-delete", expected_revision=0, expected_generation=0)
@@ -23,7 +24,7 @@ class DeleteVerificationTests(unittest.TestCase):
 		self.temp = tempfile.TemporaryDirectory(prefix="hermes-t3sidebar-delete-verify-")
 		self.addCleanup(self.temp.cleanup)
 		self.db_path = Path(self.temp.name) / "state.db"
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			db.create_session("unrelated", "cli")
 		self.opened = 0
 		def open_db(profile, *, read_only=True):

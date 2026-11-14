@@ -11,7 +11,8 @@ Object.assign(globalThis, { window: dom.window, document: dom.window.document, H
 const { createRoot } = await import('react-dom/client');
 let root;
 const H = 3600, D = 86400;
-const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
+// Yield for queued query notifications; JSDOM has no animation that needs a fixed wall-clock sleep.
+const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const button = label => $$('button').find(node => node.textContent === label || node.getAttribute('aria-label') === label);
@@ -835,7 +836,8 @@ test('the countdown of an open page moves on its own at each whole second', asyn
     assert.equal($('.su-refresh').getAttribute('aria-label'), 'Refresh available in 21 s');
     // The next timer is due when the count changes, 20 ms from now.
     clock.advance(1000);
-    await tick(); await tick();
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 25)); });
+    await tick();
     assert.equal($('.su-refresh').getAttribute('aria-label'), 'Refresh available in 20 s');
   } finally { clock.restore(); }
 });

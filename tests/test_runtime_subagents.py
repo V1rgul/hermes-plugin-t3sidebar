@@ -17,6 +17,7 @@ import gateway.session_ancillary as ancillary
 import tools.delegate_tool_registry as registry
 
 from test_backend import backend
+from native_fixture import native_fixture
 
 
 class AuthoritySubagents(unittest.TestCase):
@@ -26,7 +27,7 @@ class AuthoritySubagents(unittest.TestCase):
 		self.home = Path(self.temp.name)
 		token = set_hermes_home_override(str(self.home))
 		self.addCleanup(reset_hermes_home_override, token)
-		with closing(SessionDB(self.home / "native.sqlite3")) as db:
+		with closing(native_fixture(self.home / "native.sqlite3")) as db:
 			db.create_session("durable", "cli")
 		self.db = SessionDB(self.home / "native.sqlite3", read_only=True)
 		self.addCleanup(self.db.close)

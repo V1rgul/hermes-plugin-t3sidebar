@@ -14,6 +14,7 @@ from hermes_cli import projects_db
 from gateway.session_contract import SessionActor
 
 from test_backend import backend
+from native_fixture import native_fixture
 
 
 class CardMetadata(unittest.TestCase):
@@ -34,7 +35,7 @@ class CardMetadata(unittest.TestCase):
 			archived = projects_db.create_project(conn, name="Archived", folders=["/repo/nested/old"])
 			conn.execute("UPDATE projects SET archived = 1 WHERE id = ?", (archived,))
 			conn.commit()
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for sid, cwd in [("outer", "/repo/src"), ("inner", "/repo/nested/src"), ("second", "/second/sub"), ("archived", "/repo/nested/old/src"), ("boundary", "/repo2"), ("home", None)]:
 				db.create_session(sid, "cli", cwd=cwd)
 		before = {path: path.read_bytes() for path in [self.db_path, self.root / "projects.db"]}
@@ -52,7 +53,7 @@ class CardMetadata(unittest.TestCase):
 			self.assertEqual(path.read_bytes(), content)
 
 	def test_compression_tip_provider_and_unique_conversation_tokens_no_secrets(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for sid, parent, provider, inp, out in [("root", None, "old-provider", 100, 20), ("middle", "root", "middle-provider", 200, 30), ("tip", "middle", "actual-tip-provider", 300, 40)]:
 				db.create_session(sid, "cli", parent_session_id=parent, model_config={"provider": provider, "gateway_runtime": {"provider": "wrong-fallback", "secret": "private-credential"}, "secret": "private-config"}, system_prompt="private-prompt")
 				db.update_token_counts(sid, input_tokens=inp, output_tokens=out, cache_read_tokens=10000, cache_write_tokens=10000, reasoning_tokens=10000, model=f"{sid}-model", absolute=True)
@@ -74,7 +75,7 @@ class CardMetadata(unittest.TestCase):
 		self.assertEqual(self.db_path.read_bytes(), before)
 
 	def test_missing_catalog_and_invalid_config_are_honest_without_model_guess(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for sid, config in [("missing", None), ("fallback", {"gateway_runtime": {"provider": "native-slug"}}), ("invalid", None), ("array", None)]:
 				db.create_session(sid, "cli", cwd="/honest-basename", model_config=config)
 				db.update_token_counts(sid, input_tokens=5, output_tokens=7, model="anthropic/not-provider-evidence", absolute=True)
@@ -90,7 +91,7 @@ class CardMetadata(unittest.TestCase):
 		self.assertFalse((self.root / "projects.db").exists())
 
 	def test_subagent_tokens_join_their_conversation_once_across_nesting_and_compression(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for sid, source, parent, config, inp, out in [
 				("root", "cli", None, None, 100, 10),
 				("tip", "cli", "root", None, 200, 20),
@@ -143,7 +144,7 @@ class CardMetadata(unittest.TestCase):
 		self.assertEqual(rows[0]["total_tokens"], 3)
 
 	def test_card_message_count_preserves_empty_evidence_without_inventing_unknown_history(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			db.create_session("empty", "desktop")
 		before = self.db_path.read_bytes()
 		rows = self.sessions()
@@ -189,7 +190,7 @@ class CardMetadata(unittest.TestCase):
 		self.assertIsNone(rows[1]["total_tokens"])
 
 	def test_missing_provider_recovers_only_unambiguous_main_loop_billing(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for sid in ("recorded", "mixed", "empty", "automatic", "explicit"):
 				db.create_session(sid, "cli", model_config={"provider": "anthropic"} if sid == "explicit" else None)
 			for sid in ("recorded", "mixed", "explicit"):
@@ -206,7 +207,7 @@ class CardMetadata(unittest.TestCase):
 		self.assertEqual(self.db_path.read_bytes(), before)
 
 	def test_billing_fallback_rejects_conflicting_lineage_configuration(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for prefix, provider in (("consistent", "openai-codex"), ("conflict", "anthropic")):
 				db.create_session(prefix + "-root", "cli", model_config={"provider": provider})
 				db.end_session(prefix + "-root", "compression")
@@ -217,7 +218,7 @@ class CardMetadata(unittest.TestCase):
 		self.assertIsNone(rows["conflict-tip"]["provider"])
 
 	def test_billing_fallback_is_one_read_batch_and_degrades_on_missing_usage_table(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for sid in ("one", "two", "three"):
 				db.create_session(sid, "cli")
 				db.update_token_counts(sid, input_tokens=3, model="fixture", billing_provider="openai-codex")
@@ -233,7 +234,7 @@ class CardMetadata(unittest.TestCase):
 			self.assertIsNone(rows[0]["provider"])
 
 	def test_explicit_tip_providers_skip_billing_reads_including_compressed_cards(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for sid, parent, config in [
 				("plain", None, {"provider": "explicit"}),
 				("root", None, {"provider": "conflicting-root"}),
@@ -259,7 +260,7 @@ class CardMetadata(unittest.TestCase):
 		self.assertEqual(rows["tip"]["total_tokens"], 10)
 
 	def test_mixed_billing_batch_covers_only_complete_unresolved_tip_lineages(self):
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			for prefix, root_provider, tip_provider in [
 				("explicit", "root-conflict", "tip-wins"),
 				("fallback", "route", None),
@@ -309,7 +310,7 @@ class CardMetadata(unittest.TestCase):
 	def test_catalog_loaded_once_and_read_only_even_with_custom_names(self):
 		with closing(projects_db.connect(self.root / "projects.db")) as conn:
 			projects_db.create_project(conn, name="Not a basename", folders=["/workspace"])
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			db.create_session("one", "cli", cwd="/workspace/one")
 			db.create_session("two", "cli", cwd="/workspace/two")
 		native_list = projects_db.list_projects
@@ -325,7 +326,7 @@ class CardMetadata(unittest.TestCase):
 	def test_unreadable_catalog_falls_back_without_modification(self):
 		catalog = self.root / "projects.db"
 		catalog.write_bytes(b"not a sqlite database")
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			db.create_session("one", "cli", cwd="/fallback")
 		self.assertEqual(self.sessions()[0]["project"]["name"], "fallback")
 		self.assertEqual(catalog.read_bytes(), b"not a sqlite database")
@@ -343,7 +344,7 @@ class CardMetadata(unittest.TestCase):
 	def test_authority_runtime_cron_cannot_reappear(self):
 		from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			db.create_session("human", "cli")
 		token = set_hermes_home_override(str(self.root))
 		self.addCleanup(reset_hermes_home_override, token)

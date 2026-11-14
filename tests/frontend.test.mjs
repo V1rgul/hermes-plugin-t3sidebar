@@ -10,7 +10,8 @@ const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></h
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event, MouseEvent: dom.window.MouseEvent, KeyboardEvent: dom.window.KeyboardEvent, IS_REACT_ACT_ENVIRONMENT: true });
 const { createRoot } = await import('react-dom/client');
 let root, controller;
-const tick = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 12)); }); };
+// Yield for queued query notifications; JSDOM has no animation that needs a fixed wall-clock sleep.
+const tick = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); }); };
 const $ = selector => document.querySelector(selector);
 const all = selector => [...document.querySelectorAll(selector)];
 const row = id => { const element = $(`[data-session-id="${id}"]`); return element?.closest('[data-closed=true]') ? null : element; };

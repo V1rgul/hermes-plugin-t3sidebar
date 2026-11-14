@@ -17,6 +17,7 @@ from gateway.session_live_listing import LiveEntry
 import gateway.session_live_listing as listing_module
 
 from test_backend import backend
+from native_fixture import native_fixture
 
 
 class NativeContracts(unittest.TestCase):
@@ -73,7 +74,7 @@ class NativeContracts(unittest.TestCase):
 		token = set_hermes_home_override(str(self.path))
 		self.addCleanup(reset_hermes_home_override, token)
 		db_path = self.path / "native.sqlite3"
-		with closing(SessionDB(db_path)) as db:
+		with closing(native_fixture(db_path)) as db:
 			db.create_session("collision", "cli")
 		authority = SimpleNamespace(profile_id=str(self.path), db=SimpleNamespace(db_path=db_path))
 		actor = SessionActor("authenticated-subject", str(self.path), frozenset({"session:read", "session:control"}), "http")
@@ -102,7 +103,7 @@ class NativeContracts(unittest.TestCase):
 
 	def test_sessions_native_rich_pagination_and_organized_compression_backfill(self):
 		db_path = self.path / "native.sqlite3"
-		with closing(SessionDB(db_path)) as db:
+		with closing(native_fixture(db_path)) as db:
 			db.create_session("old-root", "cli", cwd="/old-project", system_prompt="must-not-leak", model_config={"secret": "must-not-leak"})
 			db.update_session_cwd("old-root", "/old-project", git_branch="retained")
 			db.end_session("old-root", "compression")
@@ -196,7 +197,7 @@ class NativeContracts(unittest.TestCase):
 		from hermes_state_sessions import INTERNAL_LISTING_SOURCES
 
 		db_path = self.path / "native-picker.sqlite3"
-		with closing(SessionDB(db_path)) as db:
+		with closing(native_fixture(db_path)) as db:
 			db.create_session("older-human", "cli")
 			for source in INTERNAL_LISTING_SOURCES:
 				db.create_session(f"internal-{source}", source)
@@ -215,7 +216,7 @@ class NativeContracts(unittest.TestCase):
 
 	def test_cron_runs_are_excluded_from_pages_and_organized_backfill(self):
 		db_path = self.path / "cron-filter.sqlite3"
-		with closing(SessionDB(db_path)) as db:
+		with closing(native_fixture(db_path)) as db:
 			db.create_session("human", "cli")
 			db.create_session("job-run", "cron")
 		fake = ModuleType("hermes_cli.web_server_sessions")

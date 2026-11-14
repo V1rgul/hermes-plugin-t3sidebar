@@ -11,6 +11,7 @@ from hermes_state import SessionDB
 import hermes_state_runtime as runtime
 
 from test_backend import backend
+from native_fixture import native_fixture
 
 
 class DeleteSnapshots(unittest.TestCase):
@@ -19,7 +20,7 @@ class DeleteSnapshots(unittest.TestCase):
 		self.addCleanup(self.temp.cleanup)
 		self.path = Path(self.temp.name)
 		self.db_path = self.path / "native.sqlite3"
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(native_fixture(self.db_path)) as db:
 			db.create_session("empty", "desktop", system_prompt="PRIVATE TEST PROMPT")
 			db.create_session("empty-longer", "desktop")
 		self.reader = patch.object(backend, "open_session_db", side_effect=self.open_native)
