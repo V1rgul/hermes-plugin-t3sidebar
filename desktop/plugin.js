@@ -1882,7 +1882,7 @@ function Settings({ ctx, sound = null }) {
   // The host already supplies the page title and gutters; behavior notes live in docs/behavior.md.
   return h('div', null, h('style', null, SETTINGS_CSS), h(sdk.ListRow ?? SettingsRow, {
     title: 'Snooze preset time',
-    description: 'Tomorrow, Monday and Next week wake at this local time. Existing snoozes keep their time.',
+    description: '+1 day, Monday and +1 week wake at this local time. Existing snoozes keep their time.',
     action: h(sdk.Input, { type: 'time', step: 60, value: presetTime, className: 'sf-snooze-time', 'aria-label': 'Snooze preset time', 'aria-invalid': error ? true : undefined, onChange: event => save(event.target.value) }),
     below: error ? h('div', { role: 'alert', className: 'mt-1.5 text-xs text-destructive' }, error) : null
   }), h(sdk.ListRow ?? SettingsRow, {
