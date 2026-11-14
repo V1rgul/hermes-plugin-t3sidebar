@@ -269,6 +269,14 @@ export const ctx = {
       if (control.deleteLostReply) { control.deleteLostReply = false; throw new Error('fixture reply lost after commit'); }
       return clone(control.deleteResult || receipt.result);
     }
+    // The session menu's figures: control.stats is one payload, or a function of the id that may throw like a failed read; control.statsGate holds the read in flight.
+    if (path.endsWith('/stats')) {
+      const id = decodeURIComponent(path.slice('/sessions/'.length, -'/stats'.length));
+      if (control.statsGate) await control.statsGate;
+      const value = typeof control.stats === 'function' ? await control.stats(id) : control.stats ?? { tokens: { main: 182000, subagents: 64000, hermes: 9000 },
+        subagents: { count: 3, simultaneous: 2 }, working_seconds: 2580, messages: 12, model_calls: 148, tool_calls: 211, compressions: 1 };
+      return clone({ profile: host.state.profile.get(), id, ...value });
+    }
     if (path.endsWith('/workspace')) {
       const id = decodeURIComponent(path.slice('/sessions/'.length, -'/workspace'.length));
       const row = [...control.rows, ...(control.extra || [])].find(row => row.id === id || row._lineage_root_id === id || row._lineage_ids?.includes(id));

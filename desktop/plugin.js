@@ -371,7 +371,9 @@ export function workingDetail(row) {
 export function compactTokens(row) {
   const valid = value => Number.isFinite(value) && value >= 0;
   const total = valid(row.total_tokens) ? row.total_tokens : valid(row.input_tokens) && valid(row.output_tokens) ? row.input_tokens + row.output_tokens : null;
-  if (total === null) return '—';
+  return total === null ? '—' : tokenCount(total);
+}
+export function tokenCount(total) {
   if (total === 0) return '0';
   const thousands = Math.round(total / 1000);
   return thousands < 1000 ? `${tokenFormatter.format(thousands)}K` : `${millionTokenFormatter.format(total / 1000000)}M`;
@@ -1134,6 +1136,17 @@ export function createController(ctx, client = queryClient, env = { capture: cap
       refreshCardDrafts(scope);
       this.flushDrafts(scope);
     },
+    // The session menu's figures, read only while the menu is open; the response carries the displayed figures and nothing else.
+    async stats(scope, row) {
+      check(scope);
+      const route = await routeFor(scope), id = durableId(row);
+      const value = await fenced(scope, () => ctx.rest(`/sessions/${encodeURIComponent(id)}/stats`));
+      if (value?.profile !== (route?.targetProfile || scope.profile) || value?.id !== id) throw new Error('The server did not confirm this session\'s statistics.');
+      const count = item => Number.isInteger(item) && item >= 0 ? item : null;
+      return { tokens: { main: count(value.tokens?.main), subagents: count(value.tokens?.subagents), hermes: count(value.tokens?.hermes) },
+        subagents: { count: count(value.subagents?.count), simultaneous: count(value.subagents?.simultaneous) },
+        workingSeconds: count(value.working_seconds), messages: count(value.messages), modelCalls: count(value.model_calls), toolCalls: count(value.tool_calls), compressions: count(value.compressions) };
+    },
     // The backend's command catalog lists commands actually registered by loaded plugins, not merely installed files.
     async autotitlerAvailable(scope) {
       const route = await routeFor(scope);
@@ -1484,7 +1497,7 @@ const CSS = `
 /* The strip reports a list-wide unknown runtime once; the cards' "?" would only repeat it. */
 .sf-scroll[data-runtime-unknown=true] .sf-wait{display:none}
 /* Skeleton cards share the card stride and text lines, so the first real cards take their place without a shift. */
-.sf-skeleton{flex-shrink:0}.sf-skeleton-card{display:flex;flex-direction:column;justify-content:center;gap:3px;height:var(--sf-card-stride);padding:var(--sf-card-padding,6px) 10px;border-block:var(--sf-card-margin,1px) solid transparent}.sf-skeleton-meta,.sf-skeleton-title{display:block;border-radius:3px;background:linear-gradient(90deg,color-mix(in srgb,var(--ui-text-primary) 7%,transparent) 40%,color-mix(in srgb,var(--ui-text-primary) 13%,transparent) 50%,color-mix(in srgb,var(--ui-text-primary) 7%,transparent) 60%) 0 0/300% 100%;animation:sf-shimmer 1.4s ease-in-out infinite}.sf-skeleton-meta{width:45%;height:10px;margin:4.5px 0}.sf-skeleton-title{width:75%;height:12px;margin:3.5px 0}.sf-skeleton-card:nth-child(3) .sf-skeleton-title{width:60%}.sf-skeleton-card:nth-child(4) .sf-skeleton-title{width:68%}
+.sf-skeleton{flex-shrink:0}.sf-skeleton-card{display:flex;flex-direction:column;justify-content:center;gap:3px;height:var(--sf-card-stride);padding:var(--sf-card-padding,6px) 10px;border-block:var(--sf-card-margin,1px) solid transparent}.sf-skeleton-meta,.sf-skeleton-title,.sf-stats-bone{display:block;border-radius:3px;background:linear-gradient(90deg,color-mix(in srgb,var(--ui-text-primary) 7%,transparent) 40%,color-mix(in srgb,var(--ui-text-primary) 13%,transparent) 50%,color-mix(in srgb,var(--ui-text-primary) 7%,transparent) 60%) 0 0/300% 100%;animation:sf-shimmer 1.4s ease-in-out infinite}.sf-skeleton-meta{width:45%;height:10px;margin:4.5px 0}.sf-skeleton-title{width:75%;height:12px;margin:3.5px 0}.sf-skeleton-card:nth-child(3) .sf-skeleton-title{width:60%}.sf-skeleton-card:nth-child(4) .sf-skeleton-title{width:68%}
 @keyframes sf-shimmer{from{background-position:100% 0}to{background-position:0 0}}
 /* No-match state at the top of the list, under the search field. */
 .sf-empty.sf-no-match{display:flex;flex-direction:column;gap:2px;flex-shrink:0;padding:6px 10px 8px;font-size:12px;color:var(--ui-text-tertiary)}.sf-no-match-hint{font-size:11px;color:var(--ui-text-quaternary)}.sf-no-match-actions{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 0 -6px}
@@ -1509,7 +1522,19 @@ const CSS = `
 .sf-menu.sf-session-menu,.sf-menu.sf-project-submenu{box-sizing:border-box;width:520px;max-width:calc(100vw - 18px)}.sf-menu .sf-menu-line{display:flex;flex-direction:row;align-items:center;gap:2px;min-width:0}.sf-menu-heading{flex:1;min-width:0;padding-left:2px;font-size:13px;font-weight:500;color:var(--ui-text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sf-menu-id,.sf-menu-path{flex:1;min-width:0;padding-left:2px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:16px;color:var(--ui-text-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sf-menu .sf-menu-edit{display:flex;flex-direction:row;align-items:center;gap:4px;flex:1;min-width:0}.sf-menu-edit input{flex:1;min-width:0}
 .sf-menu-tool-wrap{display:inline-flex;flex-direction:row;flex:none}.sf-menu .sf-menu-tool{justify-content:center;flex-shrink:0;width:24px;height:24px;padding:0;color:var(--ui-text-primary)}.sf-menu .sf-menu-tool svg{flex-shrink:0;width:14px;height:14px}.sf-menu .sf-menu-tool[data-destructive=true]{color:var(--ui-red)}.sf-menu .sf-menu-tool.sf-copied{color:var(--ui-green,#1f8a65)}.sf-menu .sf-menu-tool[aria-expanded=true]{background:var(--chrome-action-hover,var(--ui-bg-quaternary))}
 .sf-menu .sf-menu-draft{display:flex;flex-direction:row;align-items:center;gap:6px;min-width:0;padding-left:2px}.sf-menu-draft-mark{display:inline-flex;color:var(--ui-yellow,#c08532)}.sf-menu-draft-mark svg{width:13px;height:13px}.sf-menu-draft-text{flex:1;min-width:0;font-size:11px;color:var(--ui-text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sf-menu .sf-menu-separator{height:1px;margin:2px -8px;background:var(--ui-stroke-secondary)}.sf-menu .sf-menu-toolbar{flex-direction:row;align-items:center;gap:0}.sf-menu-toolbar>.sf-menu-tool-wrap{flex:1}.sf-menu .sf-menu-toolbar .sf-menu-tool{width:100%}.sf-menu-toolbar-divider{flex:none;width:1px;height:16px;margin:0 2px;background:var(--ui-stroke-secondary)}
+.sf-menu .sf-menu-separator{height:1px;margin:2px -8px;background:var(--ui-stroke-secondary)}
+/* The ID's hash is a grey label, 4px from the ID like the stats icons from their figures; line icons sit 1px up to centre on the digits' ink. */
+.sf-menu .sf-menu-id-mark{display:inline-flex;flex:none;margin-left:2px;color:var(--ui-text-tertiary)}.sf-menu-id-mark svg{position:relative;top:-1px;width:12px;height:12px}
+/* Session figures: a token line whose bar stretches to fill what its figures leave, then an activity line spread edge to edge. Two 16px lines, which the loading bones match. */
+.sf-menu .sf-stats{display:flex;flex-direction:column;gap:4px;padding:0 2px;font-size:11px;line-height:16px;color:var(--ui-text-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap}
+.sf-menu .sf-stats-line{display:flex;flex-direction:row;align-items:center;gap:14px;min-width:0}.sf-menu .sf-stats-line[data-spread=true]{justify-content:space-between;gap:8px}
+.sf-stat{display:inline-flex;align-items:center;gap:4px;min-width:0}.sf-stat>svg,.sf-stat>.codicon{position:relative;top:-1px;flex:none;width:12px;height:12px}.sf-stat b{font-weight:400;color:var(--ui-text-secondary)}
+.sf-stat-mark{margin-right:-10px}.sf-stat-aside svg{width:11px;height:11px;vertical-align:-2px}
+.sf-stats-bar{display:flex;flex:1 1 72px;min-width:72px;height:4px;border-radius:2px;overflow:hidden}.sf-stats-bar>span{flex-basis:0;min-width:2px;height:100%}
+.sf-stat-key{flex:none;width:8px;height:8px;border-radius:2px}
+/* Main agent in the theme accent, subagents a lighter shade of it (the popover blended in), Hermes a neutral grey. */
+.sf-stats [data-part=main]{background:var(--ui-accent)}.sf-stats [data-part=subagents]{background:color-mix(in oklab,var(--ui-accent) 45%,var(--ui-bg-elevated,var(--ui-bg-quaternary)))}.sf-stats [data-part=hermes]{background:color-mix(in srgb,var(--ui-text-primary) 30%,transparent)}
+.sf-stats-bone{height:10px;margin:3px 0}.sf-stats-bone:first-child{width:78%}.sf-stats-bone+.sf-stats-bone{width:94%}.sf-menu .sf-menu-toolbar{flex-direction:row;align-items:center;gap:0}.sf-menu-toolbar>.sf-menu-tool-wrap{flex:1}.sf-menu .sf-menu-toolbar .sf-menu-tool{width:100%}.sf-menu-toolbar-divider{flex:none;width:1px;height:16px;margin:0 2px;background:var(--ui-stroke-secondary)}
 .sf-project-submenu{max-height:min(calc(100vh - 32px),var(--radix-popover-content-available-height,100vh));overflow:auto}.sf-project-submenu fieldset{border:0;padding:0;margin:4px 0;min-width:0}.sf-project-submenu legend{font-size:11px;color:var(--ui-text-tertiary);margin-bottom:7px}.sf-project-submenu fieldset:disabled{opacity:.5}
 /* The glyph column holds the project mark on the name line, then each folder's Filter. Under it, a tall reset button left of the palette and of the icon grid. */.sf-menu .sf-project-head{display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:1px 4px}.sf-project-head-mark{display:flex;justify-content:center}.sf-project-head .sf-menu-heading,.sf-project-head .sf-menu-path{padding-left:0}.sf-menu .sf-project-head .sf-menu-edit{grid-column:2 / 4}
 .sf-project-submenu .sf-project-choices{display:flex;align-items:stretch;gap:6px}.sf-project-choices>.sf-project-colors,.sf-project-choices>.sf-project-icon-categories{flex:1;min-width:0}.sf-project-submenu .sf-project-reset{flex:none;display:flex;align-items:center;justify-content:center;width:30px;padding:0;border:1px dashed color-mix(in srgb,var(--ui-text-tertiary) 55%,transparent);border-radius:6px;background:transparent;color:var(--ui-text-secondary);cursor:pointer}.sf-project-submenu .sf-project-reset:hover{background:var(--ui-control-hover-background);color:var(--ui-text-primary);border-style:solid}.sf-project-submenu .sf-project-reset[aria-pressed=true]{border-style:solid;border-color:color-mix(in srgb,var(--ui-text-primary) 45%,transparent);color:var(--ui-text-primary)}
@@ -1541,7 +1566,7 @@ const CSS = `
 .sf-limit .su-verdict-icon[data-severity=caution]{color:var(--ui-yellow,#c08532)}.sf-limit .su-verdict-icon[data-severity=medium]{color:var(--ui-orange,#db704b)}.sf-limit .su-verdict-icon[data-severity=high]{color:var(--dt-destructive,#cf2d56)}
 /* Saturated hues read stronger than the neutral icons beside them at equal lightness contrast; 0.75 opacity brings the coloured glyphs to the same visual weight in light and dark themes. */.sf-limit .su-verdict-icon:is([data-severity=caution],[data-severity=medium],[data-severity=high]){opacity:.75;transition:opacity .1s}
 /* Hover, focus and the open page lift the neutral items to the primary text colour; the coloured glyphs rise with them to full opacity, over the Button's own 100ms colour transition. */.sf .sf-footer .sf-limits:is(:hover,:focus-visible,[aria-current=page]) .su-verdict-icon{opacity:1}
-@media(prefers-reduced-motion:reduce){.sf-empty,.sf-skeleton-meta,.sf-skeleton-title{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
+@media(prefers-reduced-motion:reduce){.sf-empty,.sf-skeleton-meta,.sf-skeleton-title,.sf-stats-bone{animation:none}.sf-shelves,.sf-shelves>.sf-section,.sf-section-body,.sf-section-chevron,.sf-row{transition:none!important}}
 
 /* Last, so it overrides the ellipsis each rule above keeps for older clients. */
 ${shortFade(':is(.sf-row-title,.sf-project-name,.sf-project-details>.sf-project-name,.sf-strip-summary,.sf-menu-title,.sf-project-path,.sf-limit-name,.sf-menu-heading,.sf-menu-id,.sf-menu-path,.sf-menu-draft-text)')}
@@ -1640,6 +1665,14 @@ const BUNDLED_ICONS = {
   TicketLocked: ['M15 5l0 2', 'M11 19h-6a2 2 0 0 1 -2 -2v-3a2 2 0 0 0 0 -4v-3a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v2', 'M14 16h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1', 'M15 16v-2a2.5 2.5 0 0 1 5 0v2'],
   // Tabler v3.44.0 calendar: the snooze menu's day row, beside its preset time.
   Calendar: ['M4 7a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12z', 'M16 3v4', 'M8 3v4', 'M4 11h16'],
+  // Tabler v3.49.0 (MIT), the session menu's figures: hash before the session ID, coins before the token split, then working time, messages, model and tool calls; arrows-right marks subagents running side by side.
+  Hash: ['M5 9l14 0', 'M5 15l14 0', 'M11 4l-4 16', 'M17 4l-4 16'],
+  Coins: ['M9 14c0 1.657 2.686 3 6 3s6 -1.343 6 -3s-2.686 -3 -6 -3s-6 1.343 -6 3', 'M9 14v4c0 1.656 2.686 3 6 3s6 -1.344 6 -3v-4', 'M3 6c0 1.072 1.144 2.062 3 2.598s4.144 .536 6 0c1.856 -.536 3 -1.526 3 -2.598c0 -1.072 -1.144 -2.062 -3 -2.598s-4.144 -.536 -6 0c-1.856 .536 -3 1.526 -3 2.598', 'M3 6v10c0 .888 .772 1.45 2 2', 'M3 11c0 .888 .772 1.45 2 2'],
+  Stopwatch: ['M5 13a7 7 0 1 0 14 0a7 7 0 0 0 -14 0', 'M14.5 10.5l-2.5 2.5', 'M17 8l1 -1', 'M14 3h-4'],
+  Message: ['M8 9h8', 'M8 13h6', 'M18 4a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-5l-5 3v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3h12'],
+  Sparkles: ['M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6'],
+  Tool: ['M7 10h3v-3l-3.5 -3.5a6 6 0 0 1 8 8l6 6a2 2 0 0 1 -3 3l-6 -6a6 6 0 0 1 -8 -8l3.5 3.5'],
+  ArrowsRight: ['M21 17l-18 0', 'M18 4l3 3l-3 3', 'M18 20l3 -3l-3 -3', 'M21 7l-18 0'],
   // Tabler v3.44.0 pinned-off (MIT): the SDK exports Pin but not its crossed-out counterpart.
   PinOff: ['M3 3l18 18', 'M15 4.5l-3.249 3.249m-2.57 1.433l-2.181 .818l-1.5 1.5l7 7l1.5 -1.5l.82 -2.186m1.43 -2.563l3.25 -3.251', 'M9 15l-4.5 4.5', 'M14.5 4l5.5 5.5'],
   CalendarCog: ['M12 21h-6a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v5', 'M16 3v4', 'M8 3v4', 'M4 11h16', 'M17.001 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M19.001 15.5v1.5', 'M19.001 21v1.5', 'M22.032 17.25l-1.299 .75', 'M17.27 20l-1.3 .75', 'M15.97 17.25l1.3 .75', 'M20.733 20l1.3 .75'],
@@ -2340,6 +2373,53 @@ function SnoozeActions({ row, mutate, disabled, presetTime, snoozeDetail, title 
         h(IconButton, { type: 'submit', label: 'Apply custom snooze', name: 'Check', glyph: '✓', disabled: off || !value, 'data-valid': customValid }))),
     error ? h('div', { role: 'alert', className: 'sf-error' }, error) : null);
 }
+// Explanations only: the figures themselves are the menu's, never more of them in a tooltip.
+const STATS_TIPS = {
+  tokens: 'Tokens used by the main agent, its subagents and Hermes. The card\'s total counts the main agent and subagents.',
+  subagents: 'Tokens used by subagents, how many ran, and the most running at the same time',
+  hermes: 'Tokens Hermes used for this session: titles, compression, memory and skill review',
+  working: 'Total time the agent spent working on your messages',
+  messages: 'Messages you sent',
+  modelCalls: 'Requests sent to the model; one turn makes several',
+  toolCalls: 'Actions the model ran: commands, file reads, searches…',
+  compressions: 'Times the context was compressed to fit the model'
+};
+const countFormatter = Intl.NumberFormat('en');
+const plural = (count, word) => `${word}${count === 1 ? '' : 's'}`;
+// The session menu's figures, read while the menu is open (Query refetches them on the history events that change them). Unknown figures drop out; a failed read leaves the menu without them.
+function SessionStats({ row, scope, controller }) {
+  const stats = useQuery({ queryKey: [...scopeKey(scope), 'stats', durableId(row)], queryFn: () => controller.stats(scope, row), retry: false, staleTime: 0, refetchOnWindowFocus: false });
+  if (stats.isPending) return h('div', { className: 'sf-stats', role: 'status', 'aria-busy': true, 'aria-label': 'Loading session statistics' },
+    h('span', { className: 'sf-stats-bone', 'aria-hidden': true }), h('span', { className: 'sf-stats-bone', 'aria-hidden': true }));
+  const value = stats.data;
+  if (!value) return null;
+  const { tokens, subagents } = value, ran = subagents.count > 0;
+  const stat = (key, name, tip, ...content) => h('span', { key, className: 'sf-stat', ...sharedTip(tip, 'top') }, name ? icon(name) : null, ...content);
+  const figure = number => h('b', null, number);
+  const parts = [['main', tokens.main], ['subagents', ran ? tokens.subagents : 0], ['hermes', tokens.hermes]];
+  const split = parts.every(([, amount]) => amount !== null) && parts.some(([, amount]) => amount > 0);
+  const key = part => h('span', { className: 'sf-stat-key', 'data-part': part, 'aria-hidden': true });
+  const tokenLine = [
+    tokens.main === null ? null : stat('main', null, STATS_TIPS.tokens, key('main'), 'main ', figure(tokenCount(tokens.main))),
+    ran ? stat('subagents', null, STATS_TIPS.subagents, key('subagents'), 'subagents ', figure(tokens.subagents === null ? '—' : tokenCount(tokens.subagents)),
+      h('span', { className: 'sf-stat-aside' }, `(×${subagents.count}, `, icon('ArrowsRight'), h('span', { className: 'sf-sr' }, 'at most '), `${subagents.simultaneous}`, h('span', { className: 'sf-sr' }, ' at once'), ')')) : null,
+    tokens.hermes === null ? null : stat('hermes', null, STATS_TIPS.hermes, key('hermes'), 'Hermes ', figure(tokenCount(tokens.hermes)))].filter(Boolean);
+  const activity = [
+    value.workingSeconds === null ? null : stat('working', 'Stopwatch', STATS_TIPS.working, figure(formatWorkingDuration(value.workingSeconds * 1000))),
+    value.messages === null ? null : stat('messages', 'Message', STATS_TIPS.messages, figure(countFormatter.format(value.messages)), ` ${plural(value.messages, 'message')}`),
+    value.modelCalls === null ? null : stat('model', 'Sparkles', STATS_TIPS.modelCalls, figure(countFormatter.format(value.modelCalls)), ` ${plural(value.modelCalls, 'model call')}`),
+    value.toolCalls === null ? null : stat('tools', 'Tool', STATS_TIPS.toolCalls, figure(countFormatter.format(value.toolCalls)), ` ${plural(value.toolCalls, 'tool call')}`),
+    value.compressions > 0 ? stat('compressions', null, STATS_TIPS.compressions, sdk.Codicon ? h(sdk.Codicon, { name: 'layers', size: 12, 'aria-hidden': true }) : null,
+      figure(countFormatter.format(value.compressions)), ` ${plural(value.compressions, 'compression')}`) : null].filter(Boolean);
+  if (!tokenLine.length && !activity.length) return null;
+  return h('div', { className: 'sf-stats' },
+    tokenLine.length ? h('div', { className: 'sf-stats-line' },
+      h('span', { className: 'sf-stat sf-stat-mark', ...sharedTip(STATS_TIPS.tokens, 'top') }, icon('Coins')),
+      // Proportions only: flex-grow takes the raw counts, so the bar needs no arithmetic of its own.
+      split ? h('span', { className: 'sf-stats-bar', 'aria-hidden': true }, parts.filter(([, amount]) => amount > 0).map(([part, amount]) => h('span', { key: part, 'data-part': part, style: { flexGrow: amount } }))) : null,
+      ...tokenLine) : null,
+    activity.length ? h('div', { className: 'sf-stats-line', 'data-spread': true }, ...activity) : null);
+}
 function RowActions({ row, scope, controller, filterProject, deleteSession, mutate, disabled, close, snoozeOnly = false, presetTime, snoozeDetail, hasDraft = false }) {
   if (snoozeOnly) {
     // The same title line as the session menu's, on its 24px line though no button sits beside it.
@@ -2389,11 +2469,15 @@ function SessionActions({ row, scope, controller, filterProject, deleteSession, 
       renaming ? null : h(MenuIcon, { label: 'Rename with AutoTitler', name: 'PencilAi', glyph: '✎', disabled: busy || row._liveOnly || autotitler.data !== true,
         reason: row._liveOnly ? 'This unsaved session has no stored history to title yet.' : autotitlerReason, onClick: () => void perform(() => controller.autotitlerRename(scope, row)) })),
     h('div', { className: 'sf-menu-line' },
+      // Grey like the ID itself: a label, not a button.
+      h('span', { className: 'sf-menu-id-mark', 'aria-hidden': true }, icon('Hash')),
       h('span', { className: 'sf-menu-id' }, durableId(row)),
       h(MenuIcon, { label: copied === 'id' ? 'Copied' : 'Copy session ID', name: copied === 'id' ? 'Check' : 'Copy', glyph: copied === 'id' ? '✓' : '⧉', className: copied === 'id' ? 'sf-copied' : '', disabled: busy, onClick: copyId })),
     hasDraft || row.drafted ? h(DraftLine, { row, scope, controller, disabled: busy, onDiscard: () => void perform(() => controller.discardDraft(scope, row)) }) : null,
     row._draftOnly ? h('p', null, 'Opening this draft starts a new session in its folder.')
       : row._liveOnly ? h('p', null, 'Unsaved sessions must be closed through the native session controls.') : null,
+    // Only stored history has figures to read.
+    row._draftOnly || row._liveOnly ? null : h(SessionStats, { row, scope, controller }),
     h('div', { className: 'sf-menu-separator', role: 'separator' }),
     // Pin, Delete and Move act on this session; Project, past the divider, opens its project's own menu.
     h('div', { className: 'sf-menu-toolbar', role: 'toolbar', 'aria-label': 'Session actions' },
@@ -5227,7 +5311,7 @@ export default {
         if (disposed || pending !== work) return;
         pending = null;
         if (!sameScope(scope, captureScope())) return;
-        const resources = work.history ? ['sessions', 'expanded', 'page', 'archives', 'archive-page', 'metadata', 'runtime'] : ['runtime'];
+        const resources = work.history ? ['sessions', 'expanded', 'page', 'archives', 'archive-page', 'metadata', 'runtime', 'stats'] : ['runtime'];
         return queryClient.invalidateQueries({ queryKey: scopeKey(scope), predicate: query => resources.includes(query.queryKey[4]), refetchType: 'active' }, { cancelRefetch: false });
       }).catch(() => { /* Query retains errors for the pane's normal recovery UI. */ });
     });

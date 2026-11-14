@@ -398,6 +398,60 @@ test('session menu: title line with Rename and AutoTitler, ID line with Copy, th
   assert.equal(mock.calls.some(call => call[2] === 'session.mutate'), false, 'menu Delete still only opens confirmation');
 });
 
+test('session menu figures: a skeleton while they load, then the token split and the activity line, with explanatory tooltips only', async () => {
+  let release; mock.control.statsGate = new Promise(resolve => { release = resolve; });
+  await mount(); await click(button('Actions for Sidebar layout'));
+  const menu = $('.sf-session-menu');
+  // A grey hash labels the ID; it is not a button.
+  const id = menu.querySelector('.sf-menu-id-mark');
+  assert.equal(id.querySelector('svg').dataset.icon, 'Hash'); assert.equal(id.getAttribute('aria-hidden'), 'true'); assert.equal(id.closest('button'), null);
+  const loading = menu.querySelector('.sf-stats');
+  assert.equal(loading.getAttribute('aria-busy'), 'true'); assert.equal(loading.querySelectorAll('.sf-stats-bone').length, 2);
+  assert.ok(mock.calls.some(call => call[0] === 'rest' && call[1] === '/sessions/design/stats'));
+  await act(async () => release()); await tick();
+  const stats = menu.querySelector('.sf-stats');
+  assert.equal(stats.hasAttribute('aria-busy'), false);
+  // Just before the toolbar's divider, after the ID line.
+  assert.equal(stats.nextElementSibling.classList.contains('sf-menu-separator'), true);
+  const [tokens, activity] = stats.querySelectorAll('.sf-stats-line');
+  assert.equal(tokens.firstElementChild.querySelector('svg').dataset.icon, 'Coins');
+  assert.deepEqual([...tokens.querySelector('.sf-stats-bar').children].map(part => [part.dataset.part, part.style.flexGrow]), [['main', '182000'], ['subagents', '64000'], ['hermes', '9000']]);
+  assert.deepEqual([...tokens.querySelectorAll('.sf-stat:not(.sf-stat-mark)')].map(node => node.textContent), ['main 182K', 'subagents 64K(×3, at most 2 at once)', 'Hermes 9K']);
+  assert.equal(tokens.querySelector('.sf-stat-aside svg').dataset.icon, 'ArrowsRight');
+  assert.equal(activity.dataset.spread, 'true');
+  assert.deepEqual([...activity.children].map(node => [node.querySelector('svg').dataset.icon ?? node.querySelector('svg').dataset.codicon, node.textContent]),
+    [['Stopwatch', '43m'], ['Message', '12 messages'], ['Sparkles', '148 model calls'], ['Tool', '211 tool calls'], ['layers', '1 compression']]);
+  // Tooltips explain what a figure is; they never carry figures of their own.
+  const tips = [...stats.querySelectorAll('.sf-stat')].map(node => node.dataset.sfTip ?? node.title);
+  assert.equal(tips.length, 9); assert.ok(tips.every(tip => tip && !/\d/.test(tip)), tips.join(' | '));
+  // Reopening shows the figures at once and reads them again in the background.
+  const reads = () => mock.calls.filter(call => call[1] === '/sessions/design/stats').length, before = reads();
+  await dismiss(); await click(button('Actions for Sidebar layout'));
+  assert.equal($('.sf-session-menu .sf-stats').hasAttribute('aria-busy'), false); assert.equal(reads(), before + 1);
+});
+
+test('session menu figures drop what does not apply, use the durable id, and leave the menu intact when the read fails', async () => {
+  mock.control.stats = id => {
+    if (id === 'design') throw new Error('fixture stats unavailable');
+    return id === 'root' ? { tokens: { main: 1500000, subagents: 0, hermes: null }, subagents: { count: 0, simultaneous: 0 }, working_seconds: 3720, messages: 1, model_calls: 1, tool_calls: 0, compressions: 0 }
+      : { tokens: { main: null, subagents: 0, hermes: 0 }, subagents: { count: 0, simultaneous: 0 }, working_seconds: 5, messages: 0, model_calls: 0, tool_calls: 0, compressions: 0 };
+  };
+  await mount(); await click(button('Actions for Runtime classification'));
+  // A compressed conversation is read by its durable root, like Copy session ID.
+  assert.ok(mock.calls.some(call => call[1] === '/sessions/root/stats'));
+  let stats = $('.sf-session-menu .sf-stats');
+  // No subagents and an unknown Hermes count: no subagent item, no Hermes item, and no bar without every part known.
+  assert.deepEqual([...stats.querySelectorAll('.sf-stats-line')[0].querySelectorAll('.sf-stat:not(.sf-stat-mark)')].map(node => node.textContent), ['main 1.5M']);
+  assert.equal(stats.querySelector('.sf-stats-bar'), null);
+  assert.deepEqual([...stats.querySelectorAll('.sf-stats-line')[1].children].map(node => node.textContent), ['1h 2m', '1 message', '1 model call', '0 tool calls']);
+  await dismiss(); await click(button('Actions for Release notes'));
+  stats = $('.sf-session-menu .sf-stats');
+  assert.deepEqual([...stats.querySelectorAll('.sf-stats-line')[0].querySelectorAll('.sf-stat:not(.sf-stat-mark)')].map(node => node.textContent), ['Hermes 0']);
+  await dismiss(); await click(button('Actions for Sidebar layout'));
+  assert.equal($('.sf-session-menu .sf-stats'), null);
+  assert.ok(button('Copy session ID')); assert.equal($('.sf-session-menu [role=alert]'), null);
+});
+
 test('session menu shows the start of a draft on its own line, read when it opens, and discards it from there', async () => {
   mock.control.drafts.design = 'Check that a Friday snooze\n  lands on Monday,   not Saturday';
   await mount();

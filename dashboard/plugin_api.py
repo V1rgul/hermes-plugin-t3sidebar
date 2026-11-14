@@ -1095,6 +1095,99 @@ def native_workspace(profile, session_id):
 		db.close()
 
 
+# A compaction handoff summary. Older stores wrote it without the `_compressed_summary` flag, so the native headers (agent/context_compressor.py SUMMARY_PREFIX and _MERGED_PRIOR_CONTEXT_HEADER) identify it too.
+COMPACTION_SUMMARY_SQL = "(_compressed_summary = 1 OR substr(content, 1, 19) = '[CONTEXT COMPACTION' OR substr(content, 1, 15) = '[PRIOR CONTEXT ')"
+# Ends recorded when Hermes reaped a run left behind by a restart: the time is the cleanup's, not the subagent's.
+REAPED_END_REASONS = ("startup_orphan_reap", "ws_orphan_reap")
+
+
+def tokens_sum(rows):
+	"""Sum of input and output tokens, or None when any counter is unknown."""
+	values = [value for row in rows for value in (row["input_tokens"], row["output_tokens"])]
+	return sum(values) if all(type(value) is int and value >= 0 for value in values) else None
+
+
+def session_stats(db, session_id):
+	"""The session menu's figures for a conversation's stored segments and its delegated subagents, and nothing else."""
+	connection = getattr(db, "_conn", None)
+	if not isinstance(connection, sqlite3.Connection):
+		raise HTTPException(503, "native_session_stats_unavailable")
+	if db.get_session(session_id) is None:
+		raise HTTPException(404, "session_not_found")
+	chain = list(dict.fromkeys(db.get_compression_lineage(session_id) or [session_id]))
+	# A private cursor, so the native connection keeps its own row factory.
+	cursor = connection.cursor()
+	cursor.row_factory = sqlite3.Row
+	read = lambda sql, *params: cursor.execute(sql, params).fetchall()
+	marks = json.dumps(chain)
+	main = read("SELECT input_tokens, output_tokens FROM sessions WHERE id IN (SELECT value FROM json_each(?))", marks)
+	# Same walk as card_subagent_usage, which the card's token total uses.
+	subagents = read("""
+		WITH RECURSIVE tree(id) AS (
+			SELECT value FROM json_each(?)
+			UNION
+			SELECT child.id FROM tree
+			JOIN sessions child ON child.parent_session_id = tree.id
+			WHERE CASE WHEN json_valid(child.model_config) THEN json_extract(child.model_config, '$._delegate_from') END IS NOT NULL
+		)
+		SELECT s.id, s.parent_session_id, s.started_at, s.ended_at, s.end_reason, s.input_tokens, s.output_tokens,
+			coalesce(parent.end_reason = 'compression' AND json_extract(s.model_config, '$._delegate_from') IS NOT s.parent_session_id, 0) AS continuation,
+			(SELECT max(timestamp) FROM messages WHERE session_id = s.id) AS last_message
+		FROM tree JOIN sessions s ON s.id = tree.id LEFT JOIN sessions parent ON parent.id = s.parent_session_id
+		WHERE tree.id NOT IN (SELECT value FROM json_each(?))
+	""", marks, marks)
+	# A subagent's compression continuation inherits the marker, still naming the original spawner rather than its compressed parent (the native fork rule, hermes_state_messages._is_explicit_fork_child_row). It is the same run: it extends that run instead of counting as another.
+	rows = {row["id"]: row for row in subagents}
+	spans = {}
+	for row in subagents:
+		run = row
+		while run["continuation"] and run["parent_session_id"] in rows:
+			run = rows[run["parent_session_id"]]
+		# A run reaped after a restart, or never ended, stops at its last message: the reaping time is the cleanup's.
+		end = row["ended_at"] if row["ended_at"] is not None and row["end_reason"] not in REAPED_END_REASONS else row["last_message"]
+		start, stop = spans.get(run["id"], (run["started_at"], run["started_at"]))
+		spans[run["id"]] = (start, max(stop, end or start))
+	# Most subagents running at once: ends sort before starts at equal times.
+	running = simultaneous = 0
+	for _, step in sorted([(start, 1) for start, _ in spans.values()] + [(stop, -1) for _, stop in spans.values()]):
+		running += step
+		simultaneous = max(simultaneous, running)
+	tree = json.dumps(chain + list(rows))
+	hermes = read("SELECT sum(input_tokens + output_tokens) AS total FROM session_model_usage WHERE task != '' AND session_id IN (SELECT value FROM json_each(?))", tree)[0]["total"]
+	# Messages a person typed: plain ones, mid-turn steers and skill invocations. Hidden prompts, subagent and background-process results, notifications, model switches and auto-continues are written by Hermes.
+	human = f"role = 'user' AND (display_kind IS NULL OR display_kind IN ('steer', 'skill_invocation')) AND NOT {COMPACTION_SUMMARY_SQL}"
+	counts = read(f"""
+		SELECT sum({human}) AS messages, sum(role = 'assistant') AS model_calls, sum(role = 'tool') AS tool_calls,
+			count(DISTINCT CASE WHEN {COMPACTION_SUMMARY_SQL} THEN session_id || ':' || CAST(timestamp AS INTEGER) END) AS summaries
+		FROM messages WHERE session_id IN (SELECT value FROM json_each(?))
+	""", marks)[0]
+	# Working time: from each human message to the last message before the next one, in time order (row ids are not chronological across compaction).
+	working = 0.0
+	start = last = None
+	for timestamp, is_human in read(f"SELECT timestamp, {human} FROM messages WHERE session_id IN (SELECT value FROM json_each(?)) ORDER BY timestamp, id", marks):
+		if is_human:
+			if start is not None:
+				working += last - start
+			start = timestamp
+		last = timestamp
+	if start is not None:
+		working += last - start
+	return {"tokens": {"main": tokens_sum(main), "subagents": tokens_sum(subagents), "hermes": hermes or 0},
+		"subagents": {"count": len(spans), "simultaneous": simultaneous},
+		"working_seconds": round(working), "messages": counts["messages"] or 0, "model_calls": counts["model_calls"] or 0, "tool_calls": counts["tool_calls"] or 0,
+		# Older stores compacted into new segments; each boundary is a compression even where no summary row survives.
+		"compressions": max(counts["summaries"], len(chain) - 1)}
+
+
+def native_session_stats(profile, session_id):
+	"""Exact stored session id, read-only; no resume/title/alias resolution."""
+	db = open_session_db(profile, read_only=True)
+	try:
+		return {"id": session_id, **session_stats(db, session_id)}
+	finally:
+		db.close()
+
+
 def native_control_guard(request, profile, unavailable):
 	"""Require a real native actor with session control over exactly this served home.
 
@@ -1356,6 +1449,17 @@ def create_router(path: Path | None = None, clock: Callable[[], float] = time.ti
 			raise
 		except Exception as exc:
 			raise HTTPException(503, "native_workspace_state_unavailable") from exc
+
+	@api.get("/sessions/{session_id}/stats")
+	def get_stats(session_id: SessionId, request: Request, response: Response):
+		response.headers["Cache-Control"] = "no-store"
+		try:
+			profile = listing_profile(request)
+			return {**native_session_stats(profile, session_id), "profile": profile}
+		except HTTPException:
+			raise
+		except Exception as exc:
+			raise HTTPException(503, "native_session_stats_unavailable") from exc
 
 	@api.post("/sessions/{session_id}/delete")
 	async def delete_session(session_id: SessionId, body: SessionDelete, request: Request, response: Response):
