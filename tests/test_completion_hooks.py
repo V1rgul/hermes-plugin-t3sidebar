@@ -16,6 +16,8 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+from native_fixture import native_fixture
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("t3sidebar_hook_test", ROOT / "__init__.py", submodule_search_locations=[str(ROOT)])
@@ -41,7 +43,7 @@ class CompletionHookTests(unittest.TestCase):
 		self.token = set_hermes_home_override(self.home)
 		self.addCleanup(reset_hermes_home_override, self.token)
 		# No default plugin discovery, production state, credentials or API calls.
-		self.db = SessionDB(db_path=self.home / "state.db")
+		self.db = native_fixture(self.home / "state.db")
 		self.addCleanup(self.db.close)
 		self.db.create_session("human", "cli")
 		self.manager = PluginManager(scope_key=str(self.home))

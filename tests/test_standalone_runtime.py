@@ -23,6 +23,7 @@ import tools.delegate_tool_registry as subagent_registry
 from tools.process_registry import ProcessSession, process_registry
 
 from test_backend import backend
+from native_fixture import native_fixture
 
 NATIVE_PROFILE_HOME = native_server._profile_home
 
@@ -35,7 +36,7 @@ class StandaloneRuntime(unittest.TestCase):
 		self.homes = {name: self.root / name for name in ("exact-profile", "other-profile")}
 		for home in self.homes.values():
 			home.mkdir()
-			with closing(SessionDB(home / "native.sqlite3")) as db:
+			with closing(native_fixture(home / "native.sqlite3")) as db:
 				db.create_session("collision", "cli", system_prompt="private-system-prompt", model_config={"secret": "private-model-config"})
 				for source in INTERNAL_LISTING_SOURCES:
 					db.create_session(f"internal-{source}", source)

@@ -21,6 +21,7 @@ import hermes_cli.web_server_sessions as native_sessions
 from gateway.session_contract import SessionActor
 from hermes_cli.web_server_dashboard import _plugin_route_secret_scope
 from test_backend import backend
+from native_fixture import native_fixture
 
 PREFIX = "/api/plugins/hermes-t3sidebar"
 BODY = {"request_id": "confirmed-delete", "expected_revision": 0, "expected_generation": 0}
@@ -34,7 +35,7 @@ class DeleteEndpoint(unittest.TestCase):
         self.homes = {name: self.root / name for name in ("exact-profile", "other-profile")}
         for home in self.homes.values():
             home.mkdir()
-            with closing(SessionDB(home / "state.db")) as db:
+            with closing(native_fixture(home / "state.db")) as db:
                 db.create_session("target", "desktop", system_prompt="PRIVATE FIXTURE")
                 db.create_session("target-longer", "desktop")
         self.home = self.homes["exact-profile"]

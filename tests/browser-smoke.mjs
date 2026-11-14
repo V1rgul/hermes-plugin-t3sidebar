@@ -1631,9 +1631,19 @@ try {
       fixture.host.state.awaitingResponse.set(false); return fixture.queryClient.invalidateQueries(); }, [open, restore]);
     await meta.waitForSelector(`[data-section=active] [data-session-id="${open}"]`);
     // A card leaving while its Working timer rolls folds out showing the new value, not the roll's frozen overlay.
+    // The earlier 59s -> 1m case now ticks only once a minute. Start a fresh seconds-range fixture and let its reset settle before catching a real interval tick.
+    await meta.evaluate(() => { const fixture = window.hermesT3SidebarHarness; fixture.control.live.find(item => item.id === 'runtime-worker').turn_started_at = Date.now() / 1000 - 5; return fixture.queryClient.invalidateQueries(); });
+    await meta.waitForFunction(() => {
+      const label = document.querySelector('[data-session-id="root"] .sf-working-duration');
+      return /^\d+s$/.test(label?.firstChild.nodeValue) && !label.querySelector('.sf-roll-fx');
+    });
     const caught = await meta.evaluate(async () => {
       const label = () => document.querySelector('[data-session-id="root"] .sf-working-duration');
-      while (!label()?.querySelector('.sf-roll-fx')) await new Promise(resolve => requestAnimationFrame(resolve));
+      const deadline = performance.now() + 3000;
+      while (!label()?.querySelector('.sf-roll-fx')) {
+        if (performance.now() >= deadline) throw new Error('Working timer did not roll within 3 seconds');
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
       const text = label().firstChild.nodeValue, search = document.querySelector('input[aria-label="Search sessions"]');
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(search, 'zzzz-no-match');
       search.dispatchEvent(new Event('input', { bubbles: true }));
