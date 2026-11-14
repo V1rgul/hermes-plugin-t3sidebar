@@ -1653,19 +1653,27 @@ const META_SLIDE_MS = 200, META_FADE_IN_MS = 160, META_FADE_OUT_MS = 120, META_R
 const META_EASE_IN_OUT = 'cubic-bezier(.42,0,.58,1)', META_EASE_OUT = 'cubic-bezier(0,0,.58,1)', META_EASE_IN = 'cubic-bezier(.42,0,1,1)';
 // Below this width change a slide is too short to wait for: the new status fades in while the slot adjusts.
 const META_SLIDE_WAIT_PX = 6;
-const metaMotion = node => !!node && typeof node.animate === 'function' && !node.ownerDocument?.hidden && !reducedMotion();
+// A card growing into its shelf or folding out of it changes its line at once: the change is part of the move. Moving slots are tracked here rather than asked for their animations, which would flush style on every Working tick.
+const movingSlots = new WeakSet();
+const cardMoving = node => movingSlots.has(node.closest?.('.sf-slot'));
+const metaMotion = node => !!node && typeof node.animate === 'function' && !node.ownerDocument?.hidden && !reducedMotion() && !cardMoving(node);
+// A send empties the composer before the server answers, so the pencil would leave in place just before the card moves to Working and fold out with it. Its pencil stays put until the card shows its new status, or at most until the periodic composer read would have dropped it anyway.
+const SEND_HOLD_MS = DRAFT_FOCUS_MS;
 const metaGap = node => { try { return parseFloat(node.ownerDocument.defaultView.getComputedStyle(node.parentNode).columnGap) || 0; } catch (_) { return 0; } };
 const metaWidth = node => node.getBoundingClientRect().width;
 // Motion is decoration: a failure inside it is reported outside React's commit, where it would otherwise unmount the whole list.
 const metaSafely = run => { try { run(); } catch (error) { queueMicrotask(() => { throw error; }); } };
-// A leaving item's clone, cleaned of a number roll caught mid-flight (its overlay and hidden text).
+// A clone does not copy Web Animations, so metadata motion caught mid-flight is settled in it: number rolls (their overlay and hidden text), the old status of a swap and leaving items. A pencil held after a send stays.
+function settleMeta(clone) {
+  for (const done of clone.querySelectorAll('.sf-roll-fx,.sf-meta-ghost,.sf-meta-leaving:not([data-held])')) done.remove();
+  for (const rolling of [clone, ...clone.querySelectorAll('[data-rolling]')]) rolling.removeAttribute('data-rolling');
+}
+// A leaving item's clone.
 function metaGhost(node) {
   const ghost = exitGhost(node);
   // data-exiting names leaving cards; this is a part of a card that stays.
   delete ghost.dataset.exiting;
   ghost.removeAttribute('role'); ghost.removeAttribute('aria-label');
-  for (const fx of ghost.querySelectorAll('.sf-roll-fx')) fx.remove();
-  for (const rolling of [ghost, ...ghost.querySelectorAll('[data-rolling]')]) rolling.removeAttribute('data-rolling');
   return ghost;
 }
 // Opens an item's room from `from` pixels (0, or a leaving copy's current width), then fades the item in.
@@ -1675,15 +1683,25 @@ function metaEnter(node, from = 0) {
   node.animate([{ width: `${from}px`, marginLeft: `${(Math.min(from, width) / (width || 1) - 1) * gap}px` }, { width: `${width}px`, marginLeft: '0px' }], { duration: META_SLIDE_MS, easing: META_EASE_IN_OUT, fill: 'backwards' });
   node.animate([{ opacity: 0 }, { opacity: 1 }], { duration: META_FADE_IN_MS, delay: META_SLIDE_MS, easing: META_EASE_OUT, fill: 'backwards' });
 }
-// Puts a removed item's copy back where it stood, fades it out, then closes its room; returns the copy, removed once closed.
-function metaExit(node, parent, before) {
+// Puts a removed item's copy back where it stood, fades it out, then closes its room; returns the copy, removed once closed. A held copy stays as it is until its `release`.
+function metaExit(node, parent, before, hold = false) {
   if (!node || !parent?.isConnected || !metaMotion(parent)) return null;
   const ghost = metaGhost(node);
+  ghost.classList.add('sf-meta-leaving');
   parent.insertBefore(ghost, before?.parentNode === parent ? before : null);
-  const width = metaWidth(ghost), gap = metaGap(ghost);
-  ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: META_FADE_OUT_MS, easing: META_EASE_IN, fill: 'forwards' });
-  const close = ghost.animate([{ width: `${width}px`, marginLeft: '0px' }, { width: '0px', marginLeft: `${-gap}px` }], { duration: META_SLIDE_MS, delay: META_FADE_OUT_MS, easing: META_EASE_IN_OUT, fill: 'forwards' });
-  close.finished.then(() => ghost.remove(), () => ghost.remove());
+  const leave = () => {
+    const width = metaWidth(ghost), gap = metaGap(ghost);
+    ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: META_FADE_OUT_MS, easing: META_EASE_IN, fill: 'forwards' });
+    const close = ghost.animate([{ width: `${width}px`, marginLeft: '0px' }, { width: '0px', marginLeft: `${-gap}px` }], { duration: META_SLIDE_MS, delay: META_FADE_OUT_MS, easing: META_EASE_IN_OUT, fill: 'forwards' });
+    close.finished.then(() => ghost.remove(), () => ghost.remove());
+  };
+  if (!hold) { leave(); return ghost; }
+  ghost.dataset.held = '';
+  ghost.release = () => {
+    if (!('held' in ghost.dataset)) return;
+    delete ghost.dataset.held;
+    if (ghost.isConnected && metaMotion(ghost)) leave(); else ghost.remove();
+  };
   return ghost;
 }
 // Replaces the time slot's content (age, Working, Input, Done, Woke): the old content's copy, laid over the slot's right edge, fades out, the slot slides to the new width, then the new content fades in.
@@ -1731,34 +1749,46 @@ function metaRoll(node, prev, next) {
   metaRolls.set(node, stop);
   Promise.all([leave.finished, fall.finished].map(promise => promise.catch(() => {}))).then(done);
 }
-// Wires one card's metadata line: callback refs record the animated nodes (and the node React removes), and one layout effect compares each commit with the previous one.
-function useMetaMotion({ time, draft, running, tokens, age, hidden }) {
+// Wires one card's metadata line: callback refs record the animated nodes (and the node React removes), and one layout effect compares each commit with the previous one. `sentAt` reads when this card's composer last sent, on the performance.now() clock (0 for never).
+function useMetaMotion({ time, draft, running, tokens, age, hidden, sentAt }) {
   const [refs] = useState(() => {
     const nodes = {}, removed = {}, exits = {};
     const track = name => node => { if (node) nodes[name] = node; else { if (nodes[name]) removed[name] = nodes[name]; nodes[name] = null; } };
     const timeChild = track('timeChild'), ageNode = track('age');
     return { nodes, removed, exits, line: track('line'), time: track('time'), timeChild, age: ageNode, ageTime: node => { timeChild(node); ageNode(node); }, token: track('token'), draft: track('draft'), running: track('running') };
   });
-  const last = useRef(null), armed = useRef(false);
+  // statusSince: when the card last showed a new status, mounting included. holdTimer releases a held pencil whose card showed no new status in time; one still held when the card unmounts folds out with its card's copy.
+  const last = useRef(null), armed = useRef(false), statusSince = useRef(0), holdTimer = useRef(0);
   // Changes before the card's first paint are part of its mounting, not motion.
-  useEffect(() => { armed.current = true; }, []);
+  useEffect(() => { armed.current = true; return () => clearTimeout(holdTimer.current); }, []);
   useLayoutEffect(() => {
-    const { nodes, removed, exits } = refs, prev = last.current, gone = { ...removed };
+    const { nodes, removed, exits } = refs, prev = last.current, gone = { ...removed }, now = performance.now();
     for (const name in removed) delete removed[name];
     last.current = { time, draft, running, tokens, age, token: nodes.token, ageNode: nodes.age };
+    const newStatus = !prev || prev.time !== time || prev.running !== running;
+    if (newStatus) statusSince.current = now;
     if (!prev || hidden || !armed.current) return;
     metaSafely(() => {
+      // A pencil held since the send leaves with the status the send brought.
+      if (newStatus) { clearTimeout(holdTimer.current); exits.draft?.release?.(); }
       if (prev.time !== time) metaSwap(nodes.time, gone.timeChild, nodes.timeChild);
       else if (prev.age !== age && prev.ageNode === nodes.age) metaRoll(nodes.age, prev.age, age);
       if (prev.tokens !== tokens && prev.token === nodes.token) metaRoll(nodes.token, prev.tokens, tokens);
       const presence = (name, shown, before) => {
         const leaving = exits[name];
         if (shown) {
+          exits[name] = null;
+          // A held pencil never left: the new one takes its place as it is.
+          if (leaving && 'held' in leaving.dataset) { clearTimeout(holdTimer.current); leaving.remove(); return; }
           // Typing again while the pencil leaves reopens its room from where the leaving copy is.
           const from = leaving?.isConnected ? metaWidth(leaving) : 0;
-          leaving?.remove(); exits[name] = null;
+          leaving?.remove();
           metaEnter(nodes[name], from);
-        } else exits[name] = metaExit(gone[name], nodes.line, before);
+          return;
+        }
+        const sent = name === 'draft' ? sentAt() : 0, hold = sent > statusSince.current && now - sent < SEND_HOLD_MS;
+        exits[name] = metaExit(gone[name], nodes.line, before, hold);
+        if (hold && exits[name]) { const held = exits[name]; holdTimer.current = setTimeout(() => held.release(), SEND_HOLD_MS - (now - sent)); }
       };
       if (prev.draft !== draft) presence('draft', draft, null);
       if (prev.running !== running) presence('running', running, nodes.time);
@@ -2350,7 +2380,7 @@ function useSessionDraft({ row, active, hidden, controller, scope }) {
   return draft;
 }
 // Tells the draft sync which composer is focused, and reconciles a session's composer when entering and leaving it (see controller.enterDraft).
-function useDraftFocus({ controller, scope, rows, focusedId, focus }) {
+function useDraftFocus({ controller, scope, rows, focusedId, focus, lastSend }) {
   const latest = useRef(rows);
   latest.current = rows;
   const targetFor = useCallback(id => {
@@ -2384,6 +2414,7 @@ function useDraftFocus({ controller, scope, rows, focusedId, focus }) {
     wasAwaiting.current = awaiting;
     const target = rose && focusedId ? targetFor(focusedId) : null;
     if (!target) return;
+    lastSend.current = { key: target.key, at: performance.now() };
     void client.refetchQueries({ queryKey: [...draftSyncKey(scope), 'focus', focusedId], type: 'active' }).catch(() => {});
     void client.refetchQueries({ queryKey: ['hermes-t3sidebar-drafts', scope.connectionId, scope.profile, scope.epoch, target.key], type: 'active' }).catch(() => {});
   }, [awaiting, focusedId, client, scope, targetFor]);
@@ -2461,7 +2492,7 @@ function useTitleReveal() {
   return { title, enter, leave };
 }
 // The sidebar has one menu, { key, kind: 'actions' | 'snooze', open }, held by the card that last opened it. Only that card mounts a popover around its trigger; every other card renders bare buttons, which keeps mounting a card cheap.
-function SessionRow({ row, active, hidden, draftPresent, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, menu, setMenu, holdMenu, presetTime, snoozeDetail, workingDetails, showTokens }) {
+function SessionRow({ row, active, hidden, draftPresent, lastSend, controller, scope, mutate, filterProject, deleteSession, disabled, onFocus, onNavigate, rowRef, age, menu, setMenu, holdMenu, presetTime, snoozeDetail, workingDetails, showTokens }) {
   const menuOpen = menu?.kind === 'actions' && menu.open, snoozeOpen = menu?.kind === 'snooze' && menu.open;
   const reveal = useTitleReveal();
   const openMenu = kind => setMenu({ key: row.key, kind, open: true });
@@ -2489,7 +2520,7 @@ function SessionRow({ row, active, hidden, draftPresent, controller, scope, muta
   const tokens = showTokens ? compactTokens(row) : null, provider = providerMark(row.provider);
   // The time slot's content is keyed by kind, so a status change replaces its node and the motion can fade the old one out.
   const timeKind = badge || 'age', snoozeRunning = snoozed && isWorking(row);
-  const motion = useMetaMotion({ time: timeKind, draft: hasDraft, running: snoozeRunning, tokens, age, hidden });
+  const motion = useMetaMotion({ time: timeKind, draft: hasDraft, running: snoozeRunning, tokens, age, hidden, sentAt: () => lastSend?.current?.key === row.key ? lastSend.current.at : 0 });
   const open = () => Promise.resolve().then(() => controller.open(scope, row)).catch(error => host.notify({ kind: 'error', message: error.message }));
   const keyDown = event => {
     if (event.target !== event.currentTarget) return;
@@ -2589,14 +2620,18 @@ const reducedMotion = () => { try { return !!globalThis.matchMedia?.('(prefers-r
 function animateSlot(slot, from, to) {
   slot.style.overflow = 'clip';
   const animation = slot.animate([{ height: `${from}px` }, { height: `${to}px` }], CARD_MOTION);
+  movingSlots.add(slot);
+  const settled = () => movingSlots.delete(slot);
+  animation.finished.then(settled, settled);
   return animation;
 }
 // A leaving card is replaced by an inert, attribute-stripped clone of its last DOM, so it cannot be focused, found by
-// session ID or receive events while it collapses; React never owns it.
+// session ID or receive events while it collapses; React never owns it. Its metadata line shows how its motion would end, without playing it.
 function exitGhost(element) {
   const ghost = element.cloneNode(true);
   ghost.setAttribute('aria-hidden', 'true'); ghost.inert = true; ghost.dataset.exiting = 'true';
   for (const node of [ghost, ...ghost.querySelectorAll('[data-session-id],[id]')]) { node.removeAttribute('data-session-id'); node.removeAttribute('id'); }
+  settleMeta(ghost);
   ghost.style.pointerEvents = 'none';
   return ghost;
 }
@@ -2905,6 +2940,8 @@ function ScopedSidebar({ ctx, controller, scope, onAttention }) {
   const loaded = [sessions, runtime, metadata, archives].every(query => query.data !== undefined || query.isError);
   const [settled, setSettled] = useState(false);
   const draftFocus = useRef(null);
+  // The last send from a focused composer, { key, at }: read by that card's metadata motion, so it renders no card.
+  const lastSend = useRef(null);
   // Its own root, so list refreshes never trigger a sync; the data is the drafts to show, without text. It starts once the lists have loaded,
   // so the focused session's folder is known.
   const drafts = useQuery({ queryKey: draftSyncKey(scope), queryFn: () => controller.syncDrafts(scope, () => draftFocus.current?.()), placeholderData: () => controller.localDrafts(scope),
@@ -2961,7 +2998,7 @@ function ScopedSidebar({ ctx, controller, scope, onAttention }) {
     return [...previous].every(id => ids.has(id)) ? previous : new Set([...previous].filter(id => ids.has(id)));
   }), [emptyCandidates]);
   const ownsActive = activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile;
-  useDraftFocus({ controller, scope, rows, focusedId: ownsActive ? activeId : null, focus: draftFocus });
+  useDraftFocus({ controller, scope, rows, focusedId: ownsActive ? activeId : null, focus: draftFocus, lastSend });
   const tokens = useMemo(() => searchTokens(query), [query]);
   // Populate text only for rows actually searched; replacing the classified snapshot also replaces its search index.
   const searchIndex = useMemo(() => new WeakMap(), [classified]);
@@ -3069,7 +3106,7 @@ function ScopedSidebar({ ctx, controller, scope, onAttention }) {
   const rowRef = useCallback((id, element) => { if (element) rowRefs.current.set(id, element); else rowRefs.current.delete(id); }, []);
   const disabled = latest.current.disabled;
   const renderRow = row => h(MemoSessionRow, { key: row.key, row, menu: menu?.key === row.key ? menu : null, setMenu, holdMenu, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
-    draftPresent: row.newSession && emptyDrafts.has(draftIdentity(row)),
+    draftPresent: row.newSession && emptyDrafts.has(draftIdentity(row)), lastSend,
     presetTime, workingDetails, showTokens, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
     active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
   const renderSection = section => {
