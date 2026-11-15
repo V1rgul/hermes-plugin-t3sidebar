@@ -728,7 +728,10 @@ test('snooze rows lead with their icon outside the buttons, the preset time unde
   assert.deepEqual(leads.map(node => node.querySelector('svg')?.dataset.icon), ['Clock', 'Calendar', 'CalendarCog']);
   assert.equal(leads[1].querySelector('small').textContent, '9:00');
   for (const node of leads) assert.equal(node.closest('button'), null, 'row icons sit outside the buttons');
-  assert.deepEqual([...dialog.querySelectorAll('.sf-snooze-choice')].map(node => node.querySelector('svg')), [null, null, null, null, null, null], 'choices carry no icon of their own');
+  // Five or six choices depending on the weekday (Sunday and Monday merge two day choices); none carries an icon.
+  const choices = [...dialog.querySelectorAll('.sf-snooze-choice')];
+  assert.ok(choices.length >= 5, `the hour and day choices are shown (${choices.length})`);
+  assert.equal(choices.filter(node => node.querySelector('svg') !== null).length, 0, 'choices carry no icon of their own');
   const info = dialog.querySelector('.sf-snooze-info');
   assert.equal(info.querySelector('.sf-snooze-info-mark svg')?.dataset.icon, 'AlarmSnooze');
   assert.equal(info.querySelector('.sf-unsnooze svg')?.dataset.icon, 'AlarmOff');

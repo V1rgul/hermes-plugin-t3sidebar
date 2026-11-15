@@ -594,7 +594,8 @@ def runtime_session_facts(session):
 	return facts
 
 
-def runtime_display_metadata(server, facts, projects):
+def runtime_display_metadata(server, facts, projects, owners=None):
+	"""``owners``, when given, is project_owners(projects) prepared once for the request's runtime rows."""
 	item: dict = {"cwd": None, "project": None, "provider": None}
 	if "cwd" in facts:
 		cwd = facts["cwd"]
@@ -604,7 +605,7 @@ def runtime_display_metadata(server, facts, projects):
 			cwd = None
 		if cwd is None or isinstance(cwd, str):
 			item["cwd"] = cwd if isinstance(cwd, str) and cwd.strip() else None
-			item["project"] = card_project(item["cwd"], projects)
+			item["project"] = card_project(item["cwd"], projects, owners)
 			item["project"].setdefault("is_home", False)
 	try:
 		# Never pass the real agent or call _session_info: that broad projection
@@ -710,6 +711,7 @@ def standalone_runtime(request, profile, actor):
 			raise HTTPException(403, "profile_mismatch")
 		stored = stored_rows(db, {row["session_key"] for row in rows})
 		projects = card_projects(db)
+		owners = project_owners(projects)
 		visible = []
 		for row in rows:
 			if runtime_retired(db, row):
@@ -726,7 +728,7 @@ def standalone_runtime(request, profile, actor):
 			item["message_count"] = runtime_message_count(
 				row.get("message_count") if captured["history_known"] else None,
 				record.get("message_count") if record else None)
-			metadata = runtime_display_metadata(server, captured, projects)
+			metadata = runtime_display_metadata(server, captured, projects, owners)
 			# Native legacy previews may contain pending prompts. Runtime needs
 			# liveness/identity only; do not return that text or any extra fields.
 			# Compaction is transparent: a turn's own compaction keeps its native start, and a manual one counts from when it was first seen. Called even under a native turn, so a compaction that ends meanwhile is forgotten.
@@ -762,6 +764,7 @@ def authority_runtime_rows(db_path, rows):
 		stored = stored_rows(with_db, {row.get("session_key") or row["id"] for row in rows})
 		rows = [row for row in rows if not subagent_run(stored.get(row.get("session_key") or row["id"]))]
 		projects = card_projects(with_db) if rows else []
+		owners = project_owners(projects)
 		result = []
 		for row in rows:
 			record = stored.get(row.get("session_key") or row["id"], {})
@@ -769,7 +772,7 @@ def authority_runtime_rows(db_path, rows):
 			item.update(cwd=None, project=None, provider=card_provider(record.get("model_config")), preview="")
 			if "cwd" in record:
 				item["cwd"] = record["cwd"]
-				item["project"] = card_project(record["cwd"], projects)
+				item["project"] = card_project(record["cwd"], projects, owners)
 				item["project"].setdefault("is_home", False)
 			item["message_count"] = runtime_message_count(row.get("message_count"), record.get("message_count"))
 			result.append(item)

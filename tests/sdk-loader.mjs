@@ -7,7 +7,7 @@ export async function resolve(specifier, context, nextResolve) {
 export async function load(url, context, nextLoad) {
   const result = await nextLoad(url, context);
   if (url === new URL('../desktop/plugin.js?performance-test', import.meta.url).href) {
-    return { ...result, source: `${result.source}\nexport { SessionWindow, WorkingDuration };` };
+    return { ...result, source: `${result.source}\nexport { SessionWindow, WorkingDuration, stepValueAt, linearValueAt, placeMarkLabels };` };
   }
   return result;
 }

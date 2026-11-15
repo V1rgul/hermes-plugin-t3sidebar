@@ -3001,10 +3001,18 @@ export function ProjectPicker({ controller, scope, close, mode = 'new', selected
   const entries = projects.data?.projects || EMPTY_ROWS;
   const prepared = useMemo(() => prepareProjectGroups(entries, home.data), [entries, home.data]);
   const groups = useMemo(() => filterProjectGroups(prepared, query), [prepared, query]);
-  const choiceProps = { scope, controller, filterProject, busy };
-  const renderChoice = (choice, pathOnly = false) => h(ProjectChoice, { ...choiceProps, key: choice.id, choice, pathOnly,
+  // The picker has one project editor, { key, open }, held by the choice that last opened it, as the sidebar holds one card menu: only that choice wraps its trigger in a popover, so a long catalog mounts no closed popovers. A choice that leaves the list (a search no longer matching it) drops it.
+  const [editor, setEditor] = useState(null);
+  const release = useCallback(key => setEditor(current => current?.key === key ? null : current), []);
+  // Stable, so typing re-renders only the choices whose own props change; it calls the current select.
+  const latestSelect = useRef(select);
+  latestSelect.current = select;
+  const choose = useCallback(choice => void latestSelect.current(choice), []);
+  const choiceProps = { scope, controller, filterProject, busy, setEditor, release, onSelect: choose };
+  const owned = key => editor?.key === key ? editor : null;
+  const renderChoice = (choice, pathOnly = false) => h(ProjectChoice, { ...choiceProps, key: choice.id, owner: `choice:${choice.id}`, choice, pathOnly, editor: owned(`choice:${choice.id}`),
     selected: filtering && selected === choice.path, label: `${filtering ? 'Filter by' : 'New session in'} ${choice.name}${pathOnly ? `: ${prepared.paths.get(choice)}` : ''}`,
-    displayPath: prepared.paths.get(choice), onSelect: () => void select(choice) });
+    displayPath: prepared.paths.get(choice) });
   return h('div', { className: 'sf-menu sf-project-picker', 'aria-label': filtering ? 'Choose project filter' : 'Choose project for new session' },
     h('strong', null, filtering ? 'Filter by project' : 'New session in…'),
     h('input', { type: 'search', 'aria-label': 'Search projects', placeholder: 'Search projects', value: query, onChange: event => setQuery(event.target.value) }),
@@ -3012,7 +3020,8 @@ export function ProjectPicker({ controller, scope, close, mode = 'new', selected
       filtering ? h(sdk.Button, { type: 'button', variant: 'ghost', className: 'sf-project-choice', 'aria-label': 'All projects', 'aria-pressed': selected === '*', disabled: busy,
         onClick: () => { controller.check(scope); filterProject('*'); close(); } }, h('span', { className: 'sf-project-icon', 'aria-hidden': true }, icon('ListFilter', '≡')), h('span', { className: 'sf-project-details' }, h('span', { className: 'sf-project-name' }, 'All projects'))) : null,
       ...groups.map(group => group.multiple ? h('div', { key: group.id, className: 'sf-project-group', role: 'group', 'aria-label': group.name },
-        h(ProjectChoice, { ...choiceProps, choice: group.choices[0], heading: true, label: `Project ${group.name}` }),
+        // A heading owns its editor as the native project, not as its first matching folder, which a search changes while the heading stays.
+        h(ProjectChoice, { ...choiceProps, owner: `heading:${group.id}`, choice: group.choices[0], heading: true, label: `Project ${group.name}`, editor: owned(`heading:${group.id}`) }),
         ...group.choices.map(choice => renderChoice(choice, true))) : renderChoice(group.choices[0]))),
     projects.isLoading ? h('div', { role: 'status' }, 'Loading projects…') : null,
     projects.isError ? h('div', { role: 'alert' }, projects.error.message, h(sdk.Button, { onClick: () => projects.refetch() }, 'Retry projects')) : null,
@@ -3020,24 +3029,29 @@ export function ProjectPicker({ controller, scope, close, mode = 'new', selected
     busy ? h('div', { role: 'status' }, 'Creating session…') : null,
     error ? h('div', { role: 'alert' }, error) : null);
 }
-function ProjectChoice({ choice, selected, scope, controller, filterProject, busy, label, displayPath, onSelect, heading = false, pathOnly = false }) {
-  const [open, setOpen] = useState(false);
+// Memoized: a search that keeps a choice re-renders it only when its own label, path or selection changes.
+const ProjectChoice = memo(function ProjectChoice({ owner: key, choice, selected, scope, controller, filterProject, busy, label, displayPath, onSelect, editor, setEditor, release, heading = false, pathOnly = false }) {
+  // A heading and its project's first folder are separate choices with separate editors.
+  useEffect(() => () => release(key), [release, key]);
+  const setOpen = useCallback(open => setEditor(current => current?.key === key ? { ...current, open } : current), [setEditor, key]);
   const fresh = !pathOnly && isNewProject(choice);
-  const openMenu = event => { event.preventDefault(); event.stopPropagation(); if (busy) return; controller.check(scope); setOpen(true); };
-  return h(sdk.Popover, { open, onOpenChange: setOpen },
-    // Declare ownership before Hermes's window-capture fallback intercepts the gesture.
-    h(sdk.ContextMenu, null, h(sdk.ContextMenuTrigger, { asChild: true },
-      h(sdk.PopoverTrigger, { asChild: true }, h(sdk.Button, { type: 'button', variant: 'ghost', className: `sf-project-choice${heading ? ' sf-project-heading' : pathOnly ? ' sf-project-folder' : ''}`, disabled: busy, 'aria-disabled': heading || undefined, 'aria-label': label, 'aria-description': fresh ? 'New project' : undefined, 'aria-pressed': heading ? undefined : selected, ...(heading ? null : sharedTip(choice.path)),
-      // Prevent the trigger's normal toggle: left click selects; right click edits.
-      onClick: event => { event.preventDefault(); if (!heading) onSelect(); }, onContextMenu: openMenu,
-      onKeyDown: event => { if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') openMenu(event); } },
-      !pathOnly ? h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)) : null,
-      h('span', { className: 'sf-project-details' }, !pathOnly ? h('span', { className: 'sf-project-name' }, choice.name) : null,
-        fresh ? h('span', { className: 'sf-project-new', 'aria-hidden': true }, 'New') : null,
-        !heading ? h('span', { className: 'sf-project-path' }, displayPath) : null))))),
+  const openMenu = event => { event.preventDefault(); event.stopPropagation(); if (busy) return; controller.check(scope); setEditor({ key, open: true }); };
+  const button = h(sdk.Button, { type: 'button', variant: 'ghost', className: `sf-project-choice${heading ? ' sf-project-heading' : pathOnly ? ' sf-project-folder' : ''}`, disabled: busy, 'aria-disabled': heading || undefined, 'aria-label': label, 'aria-description': fresh ? 'New project' : undefined, 'aria-pressed': heading ? undefined : selected, ...(heading ? null : sharedTip(choice.path)),
+    // Prevent the held trigger's normal toggle: left click selects; right click edits.
+    onClick: event => { event.preventDefault(); if (!heading) onSelect(choice); }, onContextMenu: openMenu,
+    onKeyDown: event => { if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') openMenu(event); } },
+    !pathOnly ? h('span', { className: 'sf-project-icon', 'aria-hidden': true, style: { color: choice.color || undefined } }, projectMark(choice)) : null,
+    h('span', { className: 'sf-project-details' }, !pathOnly ? h('span', { className: 'sf-project-name' }, choice.name) : null,
+      fresh ? h('span', { className: 'sf-project-new', 'aria-hidden': true }, 'New') : null,
+      !heading ? h('span', { className: 'sf-project-path' }, displayPath) : null));
+  // Declare ownership before Hermes's window-capture fallback intercepts the gesture: every choice keeps the public context-menu trigger, the held one also its popover trigger.
+  const owned = trigger => h(sdk.ContextMenu, null, h(sdk.ContextMenuTrigger, { asChild: true }, trigger));
+  if (!editor) return owned(button);
+  return h(sdk.Popover, { open: editor.open, onOpenChange: setOpen },
+    owned(h(sdk.PopoverTrigger, { asChild: true }, button)),
     h(sdk.PopoverContent, { side: 'right', align: 'start', className: 'sf-popover', style: PROJECT_MENU_STYLE, 'aria-label': 'Project actions',
       onKeyDown: event => projectMenuKeyDown(event, () => setOpen(false)) }, h(ProjectActions, { row: { project: { ...choice, id: choice.projectId, cwd: choice.path }, cwd: choice.path, _multiplePaths: heading }, scope, controller, filterProject })));
-}
+});
 function ScopedSidebar({ ctx, controller, scope, onAttention }) {
   const presetTime = useSnoozeTime(ctx), workingDetails = useWorkingDetails(ctx), pinnedLines = usePinnedLines(ctx), showTokens = useShowTokens(ctx);
   // No session counts as viewed while a plugin page is shown, so the previous chat neither stays highlighted nor gets its Done/Woke markers acknowledged.
@@ -3251,10 +3265,16 @@ function ScopedSidebar({ ctx, controller, scope, onAttention }) {
   const focusRow = useCallback(id => { focused.current = id; }, []);
   const rowRef = useCallback((id, element) => { if (element) rowRefs.current.set(id, element); else rowRefs.current.delete(id); }, []);
   const disabled = latest.current.disabled;
-  const renderRow = row => h(MemoSessionRow, { key: row.key, row, menu: menu?.key === row.key ? menu : null, setMenu, holdMenu, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
-    draftPresent: row.newSession && emptyDrafts.has(draftIdentity(row)), lastSend,
-    presetTime, workingDetails, showTokens, snoozeDetail: row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null,
-    active: activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId), onFocus: focusRow, onNavigate: navigate, rowRef, age: row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : relative(row.activity, now) });
+  const renderRow = row => {
+    const active = activeOwner?.connectionId === (scope.connectionId ?? 'local') && activeOwner?.profile === scope.profile && hasAlias(row, activeId);
+    const owned = menu?.key === row.key ? menu : null;
+    // Clock-driven props reach only the cards that show them, so a poll that merely moves the clock re-renders no other card. The age is shown where no status badge takes its place (a Snoozed card always shows its countdown); the precise countdown only in the Snooze menu its card holds, open or fading out. Both are computed from the current poll when the badge leaves or the menu opens.
+    const age = row.section === 'snoozed' ? snoozeRemaining(row.meta.wake_at, now) : cardStatus(row, active) ? null : relative(row.activity, now);
+    const snoozeDetail = owned?.kind === 'snooze' && row.meta.state === 'snoozed' ? snoozePreciseRemaining(row.meta.wake_at, now) : null;
+    return h(MemoSessionRow, { key: row.key, row, menu: owned, setMenu, holdMenu, scope, controller, mutate, hidden: isClosed(row.section), filterProject: selectProject, deleteSession: setDeleteTarget, disabled: disabled || row._liveOnly,
+      draftPresent: row.newSession && emptyDrafts.has(draftIdentity(row)), lastSend,
+      presetTime, workingDetails, showTokens, snoozeDetail, active, onFocus: focusRow, onNavigate: navigate, rowRef, age });
+  };
   const renderSection = section => {
     const entries = sections[section], closed = isClosed(section);
     const items = h(SessionWindow, { entries, section, renderRow, navigators, rowRefs, animate: settled, menuKey: menu?.open ? menu.key : null, strideKey: section === 'pinned' ? pinnedLines : null });
@@ -4099,10 +4119,10 @@ export function limitsProviderOrder(providers) {
   const rank = item => item?.auth === 'logged_out' ? 2 : item?.accounts?.length ? 0 : 1;
   return (providers || []).map((item, index) => ({ item, index })).sort((a, b) => rank(a.item) - rank(b.item) || a.index - b.index).map(entry => entry.item);
 }
-// The one window selector of the overview offers every window any logged-in provider reports.
-export function sharedWindowCatalog(providers) {
+// The one window selector of the overview offers every window any logged-in provider reports. `catalogs`, when given, holds each provider's windowCatalog already prepared for this snapshot.
+export function sharedWindowCatalog(providers, catalogs = null) {
   const found = new Map();
-  for (const provider of providers || []) if (provider?.auth !== 'logged_out') for (const item of windowCatalog(provider)) if (!found.has(item.key)) found.set(item.key, item);
+  for (const provider of providers || []) if (provider?.auth !== 'logged_out') for (const item of catalogs?.get(provider) ?? windowCatalog(provider)) if (!found.has(item.key)) found.set(item.key, item);
   return [...found.values()].sort((a, b) => windowRank(a.key) - windowRank(b.key) || (a.seconds ?? 0) - (b.seconds ?? 0) || a.key.localeCompare(b.key));
 }
 // The Window selector's buttons: model-scoped windows (keys `<period>:<model>`) are numbered in catalog order rather than named, so the bar stays short; the account bars still name each model.
@@ -4237,6 +4257,7 @@ function ScopedUsagePage({ ctx, scope, view }) {
     const saved = updateUsagePreferences(ctx, client, patch);
     if (saved) setPrefs(saved);
   }, [ctx, client]);
+  const setDays = useCallback(days => update({ days }), [update]);
   const tz = useMemo(() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (_) { return 'UTC'; } }, []);
   const key = usageScopeKey(scope);
   const history = useQuery({ queryKey: [...key, 'history', prefs.days, tz], enabled: view === 'usage', staleTime: 60_000, refetchInterval: 300_000, retry: false,
@@ -4299,7 +4320,7 @@ function ScopedUsagePage({ ctx, scope, view }) {
         h(Segmented, { label: 'Split', options: [{ id: 'provider', label: 'Provider' }, { id: 'model', label: 'Model' }], value: prefs.split, onChange: split => update({ split }) }),
         h(Segmented, { label: 'Mode', options: [{ id: 'stacked', label: 'Stacked' }, { id: 'independent', label: 'Independent' }], value: prefs.mode, onChange: mode => update({ mode }) }),
         toolbar)),
-      h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs, setDays: days => update({ days }) }))))
+      h('div', { className: 'su-scroll' }, h('div', { className: 'su-body' }, h(UsageHistoryView, { query: history, prefs, setDays }))))
       // The shared projection controls head the Limits page, so its refresh control sits at the end of that row.
       : h(LimitsView, { query: limits, prefs, update, toolbar, redeem, unsettled }));
 }
@@ -4342,9 +4363,10 @@ function UsageHistoryView({ query, prefs, setDays }) {
     if (!record.run && held) setDrawn(data);
   }, [targetKey, shownKey]);
   useEffect(() => () => glide.current.run?.cancel(), []);
+  // Stable while the period is, so an inspection or a fetch-state change leaves the memoized charts alone.
+  const range = useMemo(() => ({ hours: prefs.days * 24, onChange: hours => setDays(hours / 24) }), [prefs.days, setDays]);
   if (!view) return query.isError ? h(QueryProblem, { query, what: 'Usage history' }) : h(UsageState, null, 'Loading usage…');
   const empty = !model.charts.some(chart => chart.series.length);
-  const range = { hours: prefs.days * 24, onChange: hours => setDays(hours / 24) };
   return h(Fragment, null,
     query.isError ? h(QueryProblem, { query, what: 'Latest usage' }) : null,
     empty ? h(Fragment, null, h(UsageState, null, 'No usage recorded in this period.'), h('div', { className: 'su-axis-row' }, h(AxisRangeControl, { side: 'past', stops: USAGE_RANGE_STOPS, ...range })))
@@ -4360,18 +4382,19 @@ function bucketLabel(model, index) {
   if (model.bucketMinutes >= 1440) return formatAt(start, { weekday: 'short', month: 'short', day: 'numeric' }, model.tz);
   return `${formatAt(start, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }, model.tz)} – ${formatAt(start + model.lengths[index], { hour: 'numeric', minute: '2-digit' }, model.tz)}`;
 }
-function plotKeys(event, count, hover, setHover) {
+// The keys move from the bucket under inspection when it is one of this chart's, so the update reads the current one rather than the one this render saw.
+function plotKeys(event, count, setHover) {
   const moves = { ArrowLeft: -1, ArrowRight: 1 };
-  if (event.key in moves) { event.preventDefault(); setHover(clamp((hover ?? (moves[event.key] > 0 ? -1 : count)) + moves[event.key], 0, count - 1)); }
+  if (event.key in moves) { event.preventDefault(); setHover(hover => clamp(((hover !== null && hover < count ? hover : null) ?? (moves[event.key] > 0 ? -1 : count)) + moves[event.key], 0, count - 1)); }
   if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); setHover(event.key === 'Home' ? 0 : count - 1); }
   if (event.key === 'Escape') setHover(null);
 }
 // The total names the period it covers ("/ 7 days"); a payload without a known period falls back to "total".
 export const periodTotalLabel = days => days === 1 ? '/ day' : Number.isInteger(days) && days > 1 ? `/ ${days} days` : 'total';
 export const periodMeanLabel = days => days === 1 ? 'mean over 24 h' : Number.isInteger(days) && days > 1 ? `mean over ${days} days` : 'mean';
-function UsageChart({ chart, model, mode, hover, setHover, range }) {
+// Memoized, so a page render for anything else (a fetch in flight) skips the charts.
+const UsageChart = memo(function UsageChart({ chart, model, mode, hover, setHover, range }) {
   const { metric, series, layers, scale } = chart, count = model.buckets.length;
-  const y = value => VIEW_H - value / scale.max * VIEW_H;
   const hovered = hover !== null && hover < count ? hover : null;
   const pct = hovered === null ? null : bucketX(hovered, count) / VIEW_W * 100;
   const move = event => {
@@ -4379,21 +4402,21 @@ function UsageChart({ chart, model, mode, hover, setHover, range }) {
     if (!(box.width > 0) || !count) return;
     setHover(clamp(Math.round((event.clientX - box.left) / box.width * (count - 1)), 0, count - 1));
   };
-  return h('section', { className: 'su-chart', 'data-metric': metric.key, 'aria-label': `${metric.title} chart` },
-    h('div', { className: 'su-chart-head' }, h('h3', null, metric.title), metric.subtitle ? h('span', { className: 'su-sub' }, metric.subtitle) : null,
+  // Everything but the inspection overlay depends only on the chart's data, the drawing mode and the period control, so it is built once per change of those. Inspecting a bucket then hands React the same elements, and it skips the legend, totals, axes, gridlines and paths entirely; only the crosshair, dots and tooltip follow the bucket.
+  const parts = useMemo(() => {
+    const y = value => VIEW_H - value / scale.max * VIEW_H;
+    return {
+      head: h('div', { className: 'su-chart-head' }, h('h3', null, metric.title), metric.subtitle ? h('span', { className: 'su-sub' }, metric.subtitle) : null,
       // The space before the period is in the total's own font: inside the smaller label it read narrower than the space after the slash.
       h('span', { className: 'su-total' }, `${metric.format(chart.total)} `, h('span', { className: 'su-total-label' }, metric.mean ? periodMeanLabel(model.days) : periodTotalLabel(model.days)))),
-    // The unit (amount per bucket) opens the line under the title and the legend fills it from the right.
-    h('div', { className: 'su-chart-sub' }, h('span', { className: 'su-yunit' }, metric.mean ? `${metric.unit}, mean per ${model.unit}` : `${metric.unit} / ${model.unit}`),
+      // The unit (amount per bucket) opens the line under the title and the legend fills it from the right.
+      sub: h('div', { className: 'su-chart-sub' }, h('span', { className: 'su-yunit' }, metric.mean ? `${metric.unit}, mean per ${model.unit}` : `${metric.unit} / ${model.unit}`),
       h('div', { className: 'su-legend' }, series.length ? series.map(item => pageTipped(`${item.label}: ${metric.format(item.total)} ${metric.mean ? 'on average' : 'total'} in this period`, h('span', { key: item.key, className: 'su-legend-item', 'data-series': item.key },
         h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', { className: 'su-legend-label' }, item.label), h('b', null, metric.format(item.total)))))
         : h('span', { className: 'su-muted' }, 'Nothing in this period'))),
-    h('div', { className: 'su-plot-row' },
       // No 0 label, as on the Limits charts: the range control sits under it, and the 0 gridline stays.
-      h('div', { className: 'su-yaxis', 'aria-hidden': true }, scale.ticks.filter(tick => tick > 0).map(tick => h('span', { key: tick, style: { bottom: `${tick / scale.max * 100}%` } }, metric.format(tick)))),
-      h('div', { className: 'su-plot', tabIndex: 0, 'aria-label': `${metric.title} per ${model.unit}; use arrow keys to inspect buckets`,
-        onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null), onKeyDown: event => plotKeys(event, count, hovered, setHover) },
-        h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
+      yaxis: h('div', { className: 'su-yaxis', 'aria-hidden': true }, scale.ticks.filter(tick => tick > 0).map(tick => h('span', { key: tick, style: { bottom: `${tick / scale.max * 100}%` } }, metric.format(tick)))),
+      svg: h('svg', { viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, preserveAspectRatio: 'none', 'aria-hidden': true },
           model.dayLines.map(index => h('line', { key: `d${index}`, className: 'su-day-grid', x1: bucketX(index, count), x2: bucketX(index, count), y1: 0, y2: VIEW_H })),
           scale.ticks.map(tick => h('line', { key: tick, className: 'su-grid', x1: 0, x2: VIEW_W, y1: y(tick), y2: y(tick) })),
           layers.map(layer => {
@@ -4402,6 +4425,18 @@ function UsageChart({ chart, model, mode, hover, setHover, range }) {
               h('path', { className: 'su-area', d: layer.area, style: { fill: color, fillOpacity: mode === 'stacked' ? 0.3 : 0.06 } }),
               h('path', { className: 'su-line', d: layer.line, style: { stroke: color } }));
           })),
+      // Every chart has its own x axis and period control, as on the Limits page; the period is one page-wide preference.
+      axis: h('div', { className: 'su-axis-row' }, h(AxisRangeControl, { side: 'past', stops: USAGE_RANGE_STOPS, ...range }),
+      h('div', { className: 'su-xaxis', 'aria-hidden': true }, model.labelIndexes.map((index, position) => h('span', { key: index, 'data-edge': index === 0 ? 'start' : index === count - 1 ? 'end' : undefined,
+        style: { left: `${bucketX(index, count) / VIEW_W * 100}%` } }, model.labels[position]))))
+    };
+  }, [chart, model, mode, range]);
+  return h('section', { className: 'su-chart', 'data-metric': metric.key, 'aria-label': `${metric.title} chart` },
+    parts.head, parts.sub,
+    h('div', { className: 'su-plot-row' }, parts.yaxis,
+      h('div', { className: 'su-plot', tabIndex: 0, 'aria-label': `${metric.title} per ${model.unit}; use arrow keys to inspect buckets`,
+        onPointerMove: move, onPointerLeave: () => setHover(null), onBlur: () => setHover(null), onKeyDown: event => plotKeys(event, count, setHover) },
+        parts.svg,
         hovered === null ? null : h(Fragment, null,
           h('div', { className: 'su-cross', style: { left: `${pct}%` } }),
           layers.map(layer => h('span', { key: layer.key, className: 'su-dot', style: { left: `${pct}%`, bottom: `${layer.upper[hovered] / scale.max * 100}%`, background: model.colors.get(layer.key) } })),
@@ -4409,11 +4444,8 @@ function UsageChart({ chart, model, mode, hover, setHover, range }) {
             h('div', { className: 'su-tip-head' }, bucketLabel(model, hovered)),
             series.map(item => h('div', { key: item.key, className: 'su-tip-row' }, h('span', { className: 'su-swatch', style: { background: model.colors.get(item.key) } }), h('span', null, item.label), h('b', null, metric.format(item.values[hovered])))),
             h('div', { className: 'su-tip-row su-tip-total' }, h('span'), h('span', null, 'Total'), h('b', null, metric.format(series.reduce((sum, item) => sum + item.values[hovered], 0)))))))),
-    // Every chart has its own x axis and period control, as on the Limits page; the period is one page-wide preference.
-    h('div', { className: 'su-axis-row' }, h(AxisRangeControl, { side: 'past', stops: USAGE_RANGE_STOPS, ...range }),
-      h('div', { className: 'su-xaxis', 'aria-hidden': true }, model.labelIndexes.map((index, position) => h('span', { key: index, 'data-edge': index === 0 ? 'start' : index === count - 1 ? 'end' : undefined,
-        style: { left: `${bucketX(index, count) / VIEW_W * 100}%` } }, model.labels[position])))));
-}
+    parts.axis);
+});
 const rateNumber = rate => rate < 10 ? rate.toFixed(1) : String(Math.round(rate));
 function resetTime(seconds, now) {
   return formatAt(seconds, seconds - now < 6 * DAY_S ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -4425,7 +4457,9 @@ function LimitsView({ query, prefs, update, toolbar, redeem, unsettled }) {
   const now = useMemo(() => Date.now() / 1000, [query.dataUpdatedAt]);
   const providers = useMemo(() => limitsProviderOrder(data?.providers || []), [data]);
   const active = useMemo(() => providers.filter(item => item.auth !== 'logged_out'), [providers]);
-  const windows = useMemo(() => sharedWindowCatalog(active), [active]);
+  // Each provider's windows are gathered from its accounts and whole history once per data snapshot, then serve both the shared selector and the provider's own fallback on every render.
+  const catalogs = useMemo(() => new Map(active.map(provider => [provider, windowCatalog(provider)])), [active]);
+  const windows = useMemo(() => sharedWindowCatalog(active, catalogs), [active, catalogs]);
   const selected = chartWindow(windows, prefs.window);
   // Stable per provider id, so a section's toggle callback survives polls.
   const setExpanded = useCallback((id, open) => update(previous => ({ accounts: { ...previous.accounts, [id]: open } })), [update]);
@@ -4445,7 +4479,7 @@ function LimitsView({ query, prefs, update, toolbar, redeem, unsettled }) {
       providers.map(provider => {
         if (provider.auth === 'logged_out') return h(LoggedOutProvider, { key: provider.provider, provider });
         // Each section gets only the preference values it draws, so unfolding one provider's accounts does not re-render every other provider's chart.
-        const windowKey = chartWindow(windowCatalog(provider), selected?.key)?.key ?? null, range = windowKey ? prefs.range[rangeGroup(windowKey)] : null;
+        const windowKey = chartWindow(catalogs.get(provider), selected?.key)?.key ?? null, range = windowKey ? prefs.range[rangeGroup(windowKey)] : null;
         return h(ProviderLimits, { key: provider.provider, provider, windowKey, lookback: prefs.lookback, verdictWindow: prefs.window, past: range?.past, future: range?.future, now, expanded: prefs.accounts[provider.provider] === true, setExpanded, setRange, setLookback, redeem, unsettled });
       }),
       h(LimitsFootnotes, { providers: active, sampler: data.sampler, now }))));
@@ -4623,17 +4657,21 @@ function placeMarkLabels(layer) {
   setTight([...layer.querySelectorAll('.su-waste')], box => box.height);
   const obstacles = [...layer.querySelectorAll('.su-reset-dot, .su-flag')].map(node => node.getBoundingClientRect()), placed = [];
   // Waste labels are placed first: what expires matters more than what a reset restores, so it keeps the better spot.
-  for (const label of [...layer.querySelectorAll('.su-waste-text'), ...layer.querySelectorAll('.su-reset-text')]) {
-    label.dataset.hidden = 'false';
-    let fit = null;
-    for (const side of ['right', 'left']) {
-      label.dataset.side = side;
-      const box = label.getBoundingClientRect();
+  const labels = [...layer.querySelectorAll('.su-waste-text'), ...layer.querySelectorAll('.su-reset-text')];
+  // Labels are positioned absolutely, so one label's side never moves another: every label is measured on its right, then every label on its left, two layouts in all rather than two per label.
+  for (const label of labels) { label.dataset.hidden = 'false'; label.dataset.side = 'right'; }
+  const rights = labels.map(label => label.getBoundingClientRect());
+  for (const label of labels) label.dataset.side = 'left';
+  const lefts = labels.map(label => label.getBoundingClientRect());
+  // The same greedy choice as one label at a time: right first, then left, against the labels placed before it.
+  const sides = labels.map((label, index) => {
+    for (const [side, box] of [['right', rights[index]], ['left', lefts[index]]]) {
       const inside = box.left >= bounds.left - 0.5 && box.right <= bounds.right + 0.5;
-      if (inside && placed.every(other => !boxesOverlap(box, other, MARK_LABEL_GAP_PX)) && obstacles.every(other => !boxesOverlap(box, other, 0))) { fit = box; break; }
+      if (inside && placed.every(other => !boxesOverlap(box, other, MARK_LABEL_GAP_PX)) && obstacles.every(other => !boxesOverlap(box, other, 0))) { placed.push(box); return side; }
     }
-    if (fit) placed.push(fit); else { label.dataset.side = 'right'; label.dataset.hidden = 'true'; }
-  }
+    return null;
+  });
+  labels.forEach((label, index) => { label.dataset.side = sides[index] ?? 'right'; label.dataset.hidden = String(sides[index] === null); });
 }
 // Mark the level each account restores with a disc; only the curve connects resets. Past step-ups are quieter: a hollow dot, no label. The label reads ⟳weight +gain: the account's full plan units it returns to, then what that adds to the pool.
 export const resetMarkText = item => `⟳${unitsText(item.weight)} +${unitsText(item.gain)}`;
@@ -4766,6 +4804,21 @@ function glideRange(grid, from, to, drawn, onEnd) {
   handle = frame(step);
   return { shown: () => shown, cancel: () => { if (handle) cancelFrame?.(handle); settle(); } };
 }
+// Hover lookups binary-search the chart's points, which are already in time order, instead of scanning them on every pointer move.
+// A step series' value at t: the last point at or before t, null before the first.
+function stepValueAt(points, t) {
+  let low = 0, high = points.length;
+  while (low < high) { const mid = (low + high) >> 1; if (points[mid].t > t) high = mid; else low = mid + 1; }
+  return low ? points[low - 1].value : null;
+}
+// A piecewise-linear series' value at t, null outside it. The segment is the first one ending at or after t, as a forward scan finds it: at a reset's repeated time that is the segment arriving at the reset, before its step up.
+function linearValueAt(points, t) {
+  let low = 1, high = points.length;
+  while (low < high) { const mid = (low + high) >> 1; if (points[mid].t < t) low = mid + 1; else high = mid; }
+  if (low >= points.length || !(t >= points[low - 1].t)) return null;
+  const a = points[low - 1], b = points[low];
+  return b.t === a.t ? b.value : a.value + (b.value - a.value) * (t - a.t) / (b.t - a.t);
+}
 // The pooled chart's plot holds the inspection state, so a pointer move or arrow key redraws only the crosshair and its tooltip; the chart drawn inside it comes in as children that keep their identity until the chart itself changes.
 function LimitPlot({ start, end, now, nowPct, cap, pastAt, projectedAt, children }) {
   const [hover, setHover] = useState(null);
@@ -4829,15 +4882,8 @@ function PooledLimitChart({ provider, windowKey, now, verdict, range, lookback, 
   const ticks = unitTicks(cap);
   const axis = useMemo(() => { const midnights = localMidnights(start, end), times = timeAxisTicks(start, end, undefined, 10, midnights); return { ...times, labels: axisLabels(times.times, undefined, times.resolution), midnights }; }, [start, end]);
   const x = t => (t - start) / (end - start) * VIEW_W, y = value => VIEW_H - value / cap * VIEW_H;
-  const pastAt = t => { let value = null; for (const point of past) { if (point.t > t) break; value = point.value; } return value; };
-  const projectedAt = t => {
-    const points = projection.points;
-    for (let index = 1; index < points.length; index++) {
-      const a = points[index - 1], b = points[index];
-      if (t >= a.t && t <= b.t) return b.t === a.t ? b.value : a.value + (b.value - a.value) * (t - a.t) / (b.t - a.t);
-    }
-    return null;
-  };
+  const pastAt = t => stepValueAt(past, t);
+  const projectedAt = t => linearValueAt(projection.points, t);
   // The past is a step series (each reading holds until the next) from the axis start, or the first reading after it, to Now.
   const initial = pastAt(start), inside = past.filter(point => point.t > start && point.t <= now);
   const sequence = initial !== null ? [{ t: start, value: initial }, ...inside] : inside;

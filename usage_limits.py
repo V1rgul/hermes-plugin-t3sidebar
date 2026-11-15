@@ -1224,7 +1224,7 @@ class LimitsStore:
 		return {"interval_s": row[0], "started_at": row[1], "last_run_at": row[2], "last_error": row[3]}
 
 	def read_rows(self, since=None):
-		"""Rows from ``since`` on, extended back to each account's newest window sample (or newest row without any) so the latest windows, label, priority and error stay exact for accounts that stopped sampling; ``None`` reads everything."""
+		"""Rows from ``since`` on, extended back per account to its newest window sample (or newest row without any) so the latest windows, label, priority and error stay exact for accounts that stopped sampling; ``None`` reads everything."""
 		with self._reader() as connection:
 			if connection is None:
 				return [], {}
@@ -1234,10 +1234,15 @@ class LimitsStore:
 			if since is None:
 				rows = connection.execute(columns + order).fetchall()
 			else:
-				# Uncorrelated, so the per-account newest times are computed once rather than per row.
+				# Each account's own floor, so one account that stopped long ago does not pull every other account's older rows in; both lookups and the range read walk the (provider, account_id, t) index.
 				rows = connection.execute(
-					columns + " WHERE t >= MIN(?, (SELECT MIN(latest) FROM (SELECT COALESCE(MAX(CASE WHEN window_key IS NOT NULL THEN t END), MAX(t)) AS latest "
-					"FROM limit_samples GROUP BY provider, account_id)))" + order, (since,)).fetchall()
+					"SELECT s.t, s.provider, s.account_id, s.account_label, s.priority, s.plan, s.banked_resets, s.window_key, s.window_label, "
+					"s.window_seconds, s.scope, s.model, s.used_percent, s.resets_at, s.error "
+					"FROM (SELECT DISTINCT provider, account_id FROM limit_samples) a JOIN limit_samples s "
+					"ON s.provider = a.provider AND s.account_id = a.account_id AND s.t >= MIN(?, COALESCE("
+					"(SELECT w.t FROM limit_samples w WHERE w.provider = a.provider AND w.account_id = a.account_id AND w.window_key IS NOT NULL ORDER BY w.t DESC LIMIT 1), "
+					"(SELECT MAX(m.t) FROM limit_samples m WHERE m.provider = a.provider AND m.account_id = a.account_id))) "
+					"ORDER BY s.provider, s.account_id, s.t, s.rowid", (since,)).fetchall()
 			statuses = {provider: error for provider, error in connection.execute("SELECT provider, error FROM limit_provider_status")}
 		return rows, statuses
 

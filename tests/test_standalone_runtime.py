@@ -501,6 +501,25 @@ class StandaloneRuntime(unittest.TestCase):
 			draft["agent"], draft["model_override"], draft["pending_model_switch"] = None, {}, {}
 			self.assertIsNone(self.runtime_row()["provider"])
 
+	def test_runtime_poll_flattens_the_project_catalog_once_whatever_its_number_of_rows(self):
+		from test_listing_work import CountedProject
+
+		catalog = [CountedProject("outer", "/repo", "/second"), CountedProject("inner", "/repo/nested")]
+		folders = ["/repo/nested/src", "/second/x", "/repository", None]
+		self.registry.clear()
+		for index in range(24):
+			self.registry[f"draft-{index}"] = {**self.session(f"unsaved-{index}", None), "source": "desktop", "history": [], "agent": None,
+				"running": False, "cwd": folders[index % len(folders)], "explicit_cwd": True, "model_override": {"model": "m", "provider": "auto"}}
+		CountedProject.reads = 0
+		with patch.object(backend, "card_projects", return_value=catalog):
+			response = self.client.get("/runtime?profile=exact-profile")
+		self.assertEqual(response.status_code, 200, response.text)
+		self.assertEqual(CountedProject.reads, len(catalog))
+		projects = {row["session_key"]: row["project"] for row in response.json()["sessions"]}
+		self.assertEqual(len(projects), 24)
+		self.assertEqual([(projects[f"unsaved-{index}"]["id"], projects[f"unsaved-{index}"]["cwd"], projects[f"unsaved-{index}"]["is_home"]) for index in range(4)],
+			[("inner", "/repo/nested", False), ("outer", "/second", False), ("/repository", "/repository", False), ("__no_project__", None, True)])
+
 	def test_detached_home_and_missing_workspace_remain_distinct_without_global_cwd(self):
 		self.registry.clear()
 		draft = {**self.session("draft", None), "source": "desktop", "history": [], "agent": None, "running": False,

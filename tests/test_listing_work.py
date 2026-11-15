@@ -96,6 +96,20 @@ class ProjectOwners(unittest.TestCase):
 		self.assertEqual(CountedProject.reads, len(self.catalog))
 		self.assertEqual({draft["project"]["id"] for draft in value}, {"outer"})
 
+	def test_an_authority_runtime_poll_flattens_the_catalog_once_whatever_its_number_of_rows(self):
+		rows = [{"id": f"r{index}", "session_key": f"r{index}", "status": "idle", "source": "cli"} for index in range(40)]
+		# Nested, secondary, boundary-only prefix, unregistered and Home folders.
+		folders = ["/work/repo/nested/a", "/second/x", "/work/repository", "/unregistered", ""]
+		records = {row["id"]: {"cwd": folders[index % len(folders)], "source": "cli"} for index, row in enumerate(rows)}
+		db = SimpleNamespace(close=lambda: None)
+		with patch("hermes_state.SessionDB", return_value=db), patch.object(backend, "runtime_retired", return_value=False), \
+				patch.object(backend, "stored_rows", return_value=records), patch.object(backend, "card_projects", return_value=self.catalog):
+			value = backend.authority_runtime_rows("/synthetic/state.db", rows)
+		self.assertEqual(CountedProject.reads, len(self.catalog))
+		self.assertEqual([row["project"]["id"] for row in value[:5]], ["inner", "outer", "/work/repository", "/unregistered", "__no_project__"])
+		self.assertEqual([row["project"]["is_home"] for row in value[:5]], [False, False, False, False, True])
+		self.assertEqual(value[1]["project"]["cwd"], "/second")
+
 	def test_generated_catalogs_give_the_projects_the_reference_gives(self):
 		segments = ["work", "repo", "nested", "re", "x"]
 		for seed in range(60):

@@ -69,7 +69,7 @@
       "ms": 17,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 88
+      "componentRenders": 55
     },
     "sidebar/filter:close": {
       "ms": 16,
@@ -175,7 +175,7 @@
       "ms": 18,
       "cardRenders": 2,
       "mounted": 2,
-      "componentRenders": 12
+      "componentRenders": 8
     },
     "usage/page:close": {
       "ms": 21,

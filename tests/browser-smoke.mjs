@@ -1359,13 +1359,15 @@ try {
   await page.reload();
   await page.getByRole('button', { name: 'Plugin settings', exact: true }).click();
   const presetSetting = page.locator('[aria-label="Snooze preset time"]');
+  // The +1 day and +1 week choices exist on every weekday, merged with Monday on a Sunday (+1 day) or a Monday (+1 week), so their names are matched whatever today is.
+  const TOMORROW_AT_1435 = /^Tomorrow(, Monday)? at 14:35$/, WEEK_AT_1435 = /^(In 1 week|Monday, in 1 week) at 14:35$/;
   check('plugin settings default the shared day preset time to 09:00', await presetSetting.inputValue() === '09:00');
   await presetSetting.fill('14:35');
   const settingsDesign = page.locator('[data-session-id="design"]');
   await settingsDesign.hover(); await settingsDesign.getByRole('button', { name: 'Snooze session', exact: true }).click();
-  check('settings change updates both calendar snooze choices without a reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'In 1 week at 14:35', exact: true }).count() === 1);
+  check('settings change updates both calendar snooze choices without a reload', await snoozeDialog.getByRole('button', { name: TOMORROW_AT_1435 }).count() === 1 && await snoozeDialog.getByRole('button', { name: WEEK_AT_1435 }).count() === 1);
   const configuredTomorrow = await page.evaluate(() => { const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(14, 35, 0, 0); return tomorrow.getTime() / 1000; });
-  await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).click();
+  await snoozeDialog.getByRole('button', { name: TOMORROW_AT_1435 }).click();
   await page.waitForFunction(expected => window.hermesT3SidebarHarness.control.metadata.sessions.design?.wake_at === expected, configuredTomorrow);
   check('configured Tomorrow action saves its exact local wake deadline', await page.evaluate(expected => window.hermesT3SidebarHarness.control.metadata.sessions.design.wake_at === expected, configuredTomorrow));
   await page.reload();
@@ -1373,7 +1375,7 @@ try {
   check('configured preset time persists across actual browser reload', await presetSetting.inputValue() === '14:35');
   await page.locator('[data-session-id="design"]').hover();
   await page.locator('[data-session-id="design"]').getByRole('button', { name: 'Snooze session', exact: true }).click();
-  check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: 'Tomorrow at 14:35', exact: true }).count() === 1 && await snoozeDialog.getByRole('button', { name: 'In 1 week at 14:35', exact: true }).count() === 1);
+  check('persisted setting is used by both presets after reload', await snoozeDialog.getByRole('button', { name: TOMORROW_AT_1435 }).count() === 1 && await snoozeDialog.getByRole('button', { name: WEEK_AT_1435 }).count() === 1);
   await page.keyboard.press('Escape');
   await presetSetting.fill('09:00');
   const detailsGroup = page.getByRole('group', { name: 'Working indicator', exact: true });
@@ -2224,6 +2226,27 @@ try {
     const CODEX = '.su-provider-limits[data-provider="openai-codex"]', ANTHROPIC = '.su-provider-limits[data-provider="anthropic"]';
     // Let both charts' layout effects and ResizeObservers place their labels.
     const settle = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    // Mark labels are placed by measuring every label's right side, then every left side, in two layouts. Placing them again one label at a time, the way it was done before, must leave every label exactly where it is, in real layout.
+    const markPlacementMatchesOneAtATime = (page, selector) => page.evaluate(selector => {
+      const layer = document.querySelector(`${selector} .su-marks`);
+      if (!layer) return { labels: 0, same: true };
+      const labels = [...layer.querySelectorAll('.su-waste-text'), ...layer.querySelectorAll('.su-reset-text')];
+      const state = () => labels.map(label => `${label.dataset.side}:${label.dataset.hidden}`).join();
+      const before = state(), bounds = layer.getBoundingClientRect(), placed = [];
+      const overlap = (box, other, gap) => !(box.right + gap <= other.left || box.left >= other.right + gap || box.bottom <= other.top || box.top >= other.bottom);
+      const obstacles = [...layer.querySelectorAll('.su-reset-dot, .su-flag')].map(node => node.getBoundingClientRect());
+      for (const label of labels) {
+        label.dataset.hidden = 'false';
+        let fit = null;
+        for (const side of ['right', 'left']) {
+          label.dataset.side = side;
+          const box = label.getBoundingClientRect();
+          if (box.left >= bounds.left - 0.5 && box.right <= bounds.right + 0.5 && placed.every(other => !overlap(box, other, 4)) && obstacles.every(other => !overlap(box, other, 0))) { fit = box; break; }
+        }
+        if (fit) placed.push(fit); else { label.dataset.side = 'right'; label.dataset.hidden = 'true'; }
+      }
+      return { labels: labels.length, hidden: labels.filter(label => label.dataset.hidden === 'true').length, before, same: state() === before };
+    }, selector);
     await settle(usage);
     {
       const state = await usage.evaluate(count => ({ paths: window.hermesT3SidebarHarness.calls.filter(call => call[0] === 'rest').slice(count).map(call => call[1].split('?')[0]).filter(path => path.startsWith('/usage/')),
@@ -2608,6 +2631,9 @@ try {
       const thirty = await usage.evaluate(selector => { const chart = document.querySelector(selector); return { flags: [...chart.querySelectorAll('.su-flag')].map(node => node.querySelector('.su-flag-count')?.textContent ?? '1').join(), past: [...chart.querySelectorAll('.su-reset[data-kind=past]')].map(node => node.querySelectorAll('.su-reset-mark').length).join(), pastLabels: chart.querySelectorAll('.su-reset[data-kind=past] .su-reset-text').length }; }, CODEX);
       console.log(`USAGE AXIS RANGES MARKS: ${JSON.stringify(thirty)}`);
       check('The 30-day Codex projection flags each banked expiry time (×2 only where two credits expire at the same instant) and the past marks last week\'s stacked resets quietly, without labels', thirty.flags === '1,1,×2' && thirty.past.split(',').includes('2') && thirty.pastLabels === 0);
+      const densePlacement = [await markPlacementMatchesOneAtATime(usage, CODEX), await markPlacementMatchesOneAtATime(usage, ANTHROPIC)];
+      console.log(`USAGE LIMITS 30D MARK PLACEMENT: ${JSON.stringify(densePlacement)}`);
+      check('30-day mark labels sit where one-label-at-a-time placement puts them', densePlacement.every(item => item.same) && densePlacement.some(item => item.labels > 0));
       await step('past', 'right').click(); await step('future', 'left').click();
       await usage.waitForFunction(() => [...document.querySelectorAll('.su-pooled')].every(chart => chart.dataset.past === '168' && chart.dataset.future === '168'));
       await usage.mouse.move(5, 5);
@@ -2839,6 +2865,9 @@ try {
       await checkFades('narrow Limits', usage, ['.su-measure-text']);
       // Too narrow for a whole averaging label left of Now: it is cut with a fade (full text in its title) rather than crossing Now.
       check('Limits page fits a narrow workspace: no overflow and every chart keeps its measurement labels on their side of Now', overflow <= 0 && averageOk(geometry) && labelsOk(geometry, { full: false }) && averageOk(other) && labelsOk(other, { full: false }));
+      const narrowPlacement = [await markPlacementMatchesOneAtATime(usage, CODEX), await markPlacementMatchesOneAtATime(usage, ANTHROPIC)];
+      console.log(`USAGE LIMITS NARROW MARK PLACEMENT: ${JSON.stringify(narrowPlacement)}`);
+      check('Narrow-workspace mark labels sit where one-label-at-a-time placement puts them', narrowPlacement.every(item => item.same) && narrowPlacement.some(item => item.labels > 0));
     }
     await usageButton.click();
     await usage.waitForSelector('.su-chart[data-metric="tokens"]');

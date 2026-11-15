@@ -177,8 +177,50 @@ class StoreTests(unittest.TestCase):
 				self.assertEqual(windowed, limits.limits_payload(self.store, hours=hours, now=NOW), hours)
 		gone = next(a for a in windowed["providers"][0]["accounts"] if a["id"] == "gone01")
 		self.assertEqual((gone["label"], gone["error"], gone["windows"][0]["used_percent"]), ("Old seat", "refresh_failed", 30.0))
-		# The oldest newest-sample (dead01, 60 hours ago) bounds a one-hour read, so live01's earlier hours are skipped.
-		self.assertLess(len(full(NOW - 3600)[0]), len(full(None)[0]))
+		# Each account extends back only to its own newest sample, so dead01 (60 hours ago) and gone01 (50 hours ago) do not pull live01's earlier hours into a one-hour read.
+		live = [row for row in full(NOW - 3600)[0] if row[2] == "live01"]
+		self.assertEqual(sorted({row[0] for row in live}), [NOW - 3600])
+
+	def test_one_long_stopped_account_does_not_widen_the_read_of_active_accounts(self):
+		# Dense quarter-hour history for two active accounts over twelve days, next to one account that stopped eleven days ago and one that only ever failed.
+		for step in range(12 * 96, 0, -1):
+			at = NOW - step * 900
+			self.store.record(codex(
+				account("live01", at, [window("weekly", step % 100, NOW + 1000), window("five_hour", step % 7, at + 3600)], label=f"Seat {step % 3}"),
+				account("live02", at, [window("weekly", 50.0, NOW + 2000)], priority=1)), checked_at=at)
+		self.store.record(codex(account("gone01", NOW - 11 * 86400, [window("weekly", 30.0, NOW - 3600), window("five_hour", 3.0, NOW - 9 * 86400)], label="Old seat")), checked_at=NOW - 11 * 86400)
+		self.store.record(codex(account("gone01", NOW - 11 * 86400, [window("weekly", 30.0, NOW - 3600)], label="Renamed seat", error="refresh_failed")), checked_at=NOW - 10 * 86400)
+		self.store.record(codex(account("dead01", None, [], error="refresh_failed")), checked_at=NOW - 11.5 * 86400)
+		self.store.record(codex(account("live01", NOW - 30, [window("weekly", 99.0, NOW + 1000)]), account("live02", NOW - 30, [window("weekly", 51.0, NOW + 2000)], error="refresh_failed")), checked_at=NOW - 30)
+		full = self.store.read_rows
+		for hours in (1, 6, 168):
+			windowed = limits.limits_payload(self.store, hours=hours, now=NOW)
+			with patch.object(self.store, "read_rows", lambda since=None: full(None)):
+				self.assertEqual(windowed, limits.limits_payload(self.store, hours=hours, now=NOW), hours)
+		accounts = {a["id"]: a for a in windowed["providers"][0]["accounts"]}
+		self.assertEqual((accounts["gone01"]["label"], accounts["gone01"]["error"], [w["key"] for w in accounts["gone01"]["windows"]]), ("Renamed seat", "refresh_failed", ["weekly", "five_hour"]))
+		self.assertEqual((accounts["dead01"]["error"], accounts["dead01"]["windows"]), ("refresh_failed", []))
+		self.assertEqual(accounts["live02"]["error"], "refresh_failed")
+		since = NOW - 3600
+		rows = full(since)[0]
+		# The rows still arrive in (provider, account_id, t, rowid) order, which the payload's last-row-wins assembly relies on.
+		self.assertEqual([row[1:3] + (row[0],) for row in rows], sorted(row[1:3] + (row[0],) for row in rows))
+		# Active accounts read only the window; gone01 adds its newest sample's two windows and its later error row; dead01 adds its one row.
+		self.assertEqual(len(rows), sum(1 for row in full(None)[0] if row[0] >= since) + 3 + 1)
+
+		def steps(since):
+			counted = [0]
+			connect = sqlite3.connect
+
+			def counting(*args, **kwargs):
+				connection = connect(*args, **kwargs)
+				connection.set_progress_handler(lambda: counted.__setitem__(0, counted[0] + 1), 100)
+				return connection
+			with patch.object(limits.sqlite3, "connect", counting):
+				self.store.read_rows(since)
+			return counted[0]
+		# SQLite's own work, not only the rows returned: listing the accounts walks the index once, but the one-hour read does well under half of what reading everything does.
+		self.assertLess(steps(since) * 2, steps(None))
 
 	def test_missing_store_reads_empty_without_creating(self):
 		payload = limits.limits_payload(self.store, hours=24, now=NOW)

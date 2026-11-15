@@ -14,6 +14,9 @@ let root;
 const tick = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 const $ = selector => document.querySelector(selector);
 const button = label => [...document.querySelectorAll('button')].find(node => node.textContent === label || node.getAttribute('aria-label') === label);
+// The +1 day and +1 week choices exist on every weekday, merged with Monday on a Sunday (+1 day) or a Monday (+1 week), so they are found by name whatever today is.
+const dayChoice = pattern => [...document.querySelectorAll('button')].find(node => pattern.test(node.getAttribute('aria-label') || ''));
+const tomorrowAt = time => dayChoice(new RegExp(`^Tomorrow(, Monday)? at ${time}$`)), weekAt = time => dayChoice(new RegExp(`^(In 1 week|Monday, in 1 week) at ${time}$`));
 // Button-group settings: the pressed option's label, and an option by label.
 const pressed = group => $(`[role=group][aria-label="${group}"] button[aria-pressed=true]`)?.textContent ?? null;
 const option = (group, label) => [...document.querySelectorAll(`[role=group][aria-label="${group}"] button`)].find(node => node.textContent === label);
@@ -39,19 +42,19 @@ test('preset time defaults to 09:00 and a verified settings save updates both op
 	assert.equal($('[aria-label="Snooze preset time"]').value, '09:00');
 	const originalDeadline = mock.control.metadata.sessions.snoozed.wake_at;
 	await click($('[data-session-id="design"] [aria-label="Snooze session"]'));
-	assert.ok(button('Tomorrow at 9:00')); assert.ok(button('In 1 week at 9:00'));
+	assert.ok(tomorrowAt('9:00')); assert.ok(weekAt('9:00'));
 	assert.equal(document.querySelectorAll('.sf-snooze-info').length, 0, 'unsnoozed sessions have no existing-wake information');
 	await input($('[aria-label="Snooze preset time"]'), '14:35');
 	assert.equal(storage.get('snooze-time'), '14:35');
-	assert.ok(button('Tomorrow at 14:35')); assert.ok(button('In 1 week at 14:35'));
-	assert.equal(button('Tomorrow at 9:00'), undefined);
+	assert.ok(tomorrowAt('14:35')); assert.ok(weekAt('14:35'));
+	assert.equal(tomorrowAt('9:00') === undefined, true);
 	assert.equal(mock.control.metadata.sessions.snoozed.wake_at, originalDeadline, 'a preference change cannot reschedule existing snoozes');
 	const expected = snoozePresets(Date.now(), '14:35').days[0].wake_at;
-	await click(button('Tomorrow at 14:35'));
+	await click(tomorrowAt('14:35'));
 	assert.equal(mock.control.metadata.sessions.design.wake_at, expected);
 	// The menu stays open on the snoozed card, so another preset reschedules it at once.
 	const week = snoozePresets(Date.now(), '14:35').days.at(-1).wake_at;
-	await click(button('In 1 week at 14:35'));
+	await click(weekAt('14:35'));
 	assert.equal(mock.control.metadata.sessions.design.wake_at, week);
 });
 
@@ -63,14 +66,14 @@ test('preset time persists through a fresh query cache/remount and is a Desktop 
 	assert.equal($('[aria-label="Snooze preset time"]').value, '07:15');
 	await act(async () => mock.switchScope('source-b', 'other')); await tick(); await tick();
 	await click($('[data-session-id="design"] [aria-label="Snooze session"]'));
-	assert.ok(button('Tomorrow at 7:15')); assert.ok(button('In 1 week at 7:15'));
+	assert.ok(tomorrowAt('7:15')); assert.ok(weekAt('7:15'));
 });
 
 for (const saved of ['24:00', '9:00', null, {}]) test(`invalid stored preset time ${JSON.stringify(saved)} safely uses the default`, async () => {
 	storage.set('snooze-time', saved); plugin.register(mock.ctx); await render();
 	assert.equal($('[aria-label="Snooze preset time"]').value, '09:00');
 	await click($('[data-session-id="design"] [aria-label="Snooze session"]'));
-	assert.ok(button('Tomorrow at 9:00')); assert.ok(button('In 1 week at 9:00'));
+	assert.ok(tomorrowAt('9:00')); assert.ok(weekAt('9:00'));
 });
 
 test('settings rejects empty input and failed storage writes without publishing a false saved value', async () => {
@@ -87,7 +90,7 @@ test('settings rejects empty input and failed storage writes without publishing 
 	assert.match($('[role=alert]').textContent, /not saved/);
 	assert.equal($('[aria-label="Snooze preset time"]').value, '09:00');
 	await click($('[data-session-id="design"] [aria-label="Snooze session"]'));
-	assert.ok(button('Tomorrow at 9:00')); assert.ok(button('In 1 week at 9:00'));
+	assert.ok(tomorrowAt('9:00')); assert.ok(weekAt('9:00'));
 });
 
 test('Pinned sessions defaults to two lines, switches the mounted sidebar immediately and persists across remounts and sources', async () => {
@@ -140,7 +143,7 @@ test('unavailable storage reads leave settings and default presets usable', asyn
 	assert.equal($('[role=switch][aria-label="Show token counts"]').getAttribute('aria-checked'), 'true');
 	assert.ok($('[data-session-id="design"] .sf-token'));
 	await click($('[data-session-id="design"] [aria-label="Snooze session"]'));
-	assert.ok(button('Tomorrow at 9:00')); assert.ok(button('In 1 week at 9:00'));
+	assert.ok(tomorrowAt('9:00')); assert.ok(weekAt('9:00'));
 });
 
 test('Show token counts defaults on, updates all shelves immediately and persists across remounts and sources', async () => {
