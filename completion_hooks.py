@@ -24,6 +24,12 @@ log = logging.getLogger(__name__)
 # Native excludes these from human listings; also reject explicit worker hooks.
 NON_HUMAN = frozenset({"cron", "subagent", "delegate", "internal", "unknown", "kanban", "tool", "oneshot"})
 TERMINAL_DELEGATIONS = frozenset({"completed", "success", "error", "failed", "interrupted", "cancelled", "canceled"})
+# A child whose stop promised an automatic resume (delegation.auto_resume) finishes its async unit silently, already delivered, while Hermes still owes that unit's parent exactly one report: the resumed run's result or one give-up failure. Mirrors native delegate_tool_auto_resume.OWED_SQL, which a cancel clears (auto_promised false) and a give-up settles (auto_gave_up), over the states that can still hold the debt: waiting, expired before the scheduler reported it, or claimed by the scheduler and not yet running. Only these two record fields and the unit id are read, never the rest of the record.
+OWED_RESUME_SQL = (
+	"SELECT 1 FROM resumable_subagents WHERE state IN ('resumable', 'expired', 'claimed') "
+	"AND json_extract(record_json, '$.auto_promised') AND json_extract(record_json, '$.auto_gave_up') IS NULL "
+	"AND json_extract(record_json, '$.unit_id') IN (SELECT delegation_id FROM async_delegations WHERE "
+	"parent_session_id IN ({ids}) OR origin_session_id IN ({ids}) OR origin_ui_session_id IN ({ids})) LIMIT 1")
 
 
 def _identifier(value):
@@ -42,12 +48,15 @@ class NativeSnapshot:
 	live: bool
 	archived: bool
 	undelivered: frozenset[str] = frozenset()
+	awaiting_resume: bool = False
 
 
-def native_snapshot(home, session_id, *, dispatched_before=None):
+def native_snapshot(home, session_id, *, dispatched_before=None, resume_debt=False):
 	"""Resolve an exact native rich-list alias and read only its owned IDs/states.
 
 	Parentage alone is not compression: native projection distinguishes real compression continuations from /branch, reset, and delegate forks. Never initialize/migrate state.db or attach to a global session/process registry.
+
+	resume_debt also reads whether a child of one of the lineage's async units still owes its promised automatic-resume report. The owing unit is the report's route (native gives up and resumes through it), so ownership is the same exact lineage match as the units themselves. A store without the table predates automatic resume and owes nothing; any other read failure raises, so it never proves completion.
 	"""
 	from hermes_state import SessionDB
 	from .usage_history import internal_listing_sources
@@ -96,6 +105,8 @@ def native_snapshot(home, session_id, *, dispatched_before=None):
 	ids = sorted(aliases)
 	placeholders = ",".join("?" for _ in ids)
 	with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as connection:
+		# One read snapshot: a resumed run records its new unit before it clears the promise, and a give-up records its failure in the same write that settles the debt, so a consistent read sees the debt or its report.
+		connection.execute("BEGIN")
 		flags = connection.execute(
 			f"SELECT id, source, archived FROM sessions WHERE id IN ({placeholders})", ids,
 		).fetchall()
@@ -106,6 +117,9 @@ def native_snapshot(home, session_id, *, dispatched_before=None):
 			f"parent_session_id IN ({placeholders}) OR origin_session_id IN ({placeholders}) "
 			f"OR origin_ui_session_id IN ({placeholders})", ids * 3,
 		).fetchall()
+		awaiting_resume = resume_debt and connection.execute(
+			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'resumable_subagents'").fetchone() is not None and (
+			connection.execute(OWED_RESUME_SQL.format(ids=placeholders), ids * 3).fetchone() is not None)
 	# A timed-out begin worker may finish after tools have already dispatched.
 	# Its baseline must not absorb children created since this hook began.
 	baseline = [row for row in rows if dispatched_before is None or row[2] < dispatched_before]
@@ -113,7 +127,7 @@ def native_snapshot(home, session_id, *, dispatched_before=None):
 	# Finished children whose result still has to wake the parent (native _persist_completion sets delivery_state='pending').
 	undelivered = frozenset(_identifier(row[0]) for row in baseline if row[1] in TERMINAL_DELEGATIONS and row[3] == "pending")
 	return NativeSnapshot(root, aliases, delegations,
-		any(row[1] not in TERMINAL_DELEGATIONS for row in rows), any(row[2] for row in flags), undelivered)
+		any(row[1] not in TERMINAL_DELEGATIONS for row in rows), any(row[2] for row in flags), undelivered, awaiting_resume)
 
 
 def heartbeat_fired_at(home, aliases):
@@ -268,16 +282,16 @@ class CompletionObserver:
 				# Also fence begins whose timeout worker has not returned yet.
 				self._receipts[key] = (now, None, False)
 				self._prune(now)
-			# Background work still running wakes this conversation again, so its next turn continues the user's work time: live children, children that finished during this turn with their result still undelivered (those already undelivered at its start are what this turn consumes, or stale), and notifying processes of any lineage id, since compression rotates the owning key. A Stop suppresses those wake-ups until the user's next prompt (native _notif_claim_turn). Without a begin snapshot this turn recorded no start to continue.
+			# Background work still running wakes this conversation again, so its next turn continues the user's work time: live children, children that finished during this turn with their result still undelivered (those already undelivered at its start are what this turn consumes, or stale), a stopped child still owed its promised automatic-resume report whenever it stopped (no turn consumes that debt: its result or give-up arrives as a later turn), and notifying processes of any lineage id, since compression rotates the owning key. A Stop suppresses those wake-ups until the user's next prompt (native _notif_claim_turn, and the cancel of automatic resumes). Without a begin snapshot this turn recorded no start to continue.
 			before = receipt[1] if receipt is not None else None
 			after = None
 			if before is not None and interrupted is not True:
 				try:
-					after = native_snapshot(self.home, sid)
+					after = native_snapshot(self.home, sid, resume_debt=True)
 				except Exception as exc:
 					log.debug("Turn end snapshot unavailable (%s)", type(exc).__name__)
 			pending = before is not None and interrupted is not True and (
-				bool(after and (after.live or after.undelivered - before.undelivered))
+				bool(after and (after.live or after.awaiting_resume or after.undelivered - before.undelivered))
 				or awaits_processes({sid, key[0], *before.aliases}))
 			# Every outcome ends this exact turn; its start stays for subagent-only Working parents.
 			with self._lock:

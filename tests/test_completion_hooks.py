@@ -6,6 +6,7 @@ import importlib
 import importlib.util
 import json
 from pathlib import Path
+import queue
 import sqlite3
 import sys
 import tempfile
@@ -85,9 +86,18 @@ class CompletionHookTests(unittest.TestCase):
 			except sqlite3.OperationalError:
 				return {}
 
-	def delegate(self, name="deleg_1", session="human", state="running", owner="parent_session_id"):
-		with closing(sqlite3.connect(self.home / "state.db")) as connection:
-			connection.execute(f"INSERT INTO async_delegations (delegation_id, origin_session, {owner}, state, dispatched_at, updated_at) VALUES (?, '', ?, ?, ?, ?)", (name, session, state, time.time(), time.time()))
+	def delegate(self, name="deleg_1", session="human", state="running", owner="parent_session_id", delivery="pending", home=None):
+		with closing(sqlite3.connect((home or self.home) / "state.db")) as connection:
+			connection.execute(f"INSERT INTO async_delegations (delegation_id, origin_session, {owner}, state, dispatched_at, updated_at, delivery_state) VALUES (?, '', ?, ?, ?, ?, ?)", (name, session, state, time.time(), time.time(), delivery))
+			connection.commit()
+
+	def owe(self, name="waiting", unit="waiting-unit", state="resumable", home=None, **fields):
+		# The native record of a child whose stop promised an automatic resume: its unit reported silently (delivered), and the scheduler owes the unit's parent one report, the resumed run's result or a give-up failure.
+		from tools.delegate_tool_resumable import AUTO_AT, _upsert
+		record = dict(owners=["human"], auto_promised=True, resume_mode=AUTO_AT, next_attempt_at=time.time() + 3600, unit_id=unit)
+		record.update(fields)
+		with closing(sqlite3.connect((home or self.home) / "state.db")) as connection:
+			_upsert(connection, name, record, state=state, pinned=False, expires_at=time.time() + 3600)
 			connection.commit()
 
 	def test_registered_hooks_are_native_observers_only(self):
@@ -454,6 +464,131 @@ class CompletionHookTests(unittest.TestCase):
 			connection.commit()
 		self.end(turn="meanwhile")
 		self.assertEqual(self.markers()["human"]["done_token"], "process-notice")
+
+	def test_a_promised_automatic_resume_keeps_the_work_open_until_its_report(self):
+		# The child stopped on a provider limit before this turn: its unit finished silently and the scheduler owes its report.
+		self.delegate("waiting-unit", state="completed", delivery="delivered")
+		self.owe()
+		self.begin(turn="user")
+		start = self.runs()["human"]["started_at"]
+		self.end(turn="user")
+		self.assertEqual(self.markers(), {})
+		self.assertTrue(self.runs()["human"]["pending"])
+		# The scheduler resumed it: the run record clears the promise (native record_start) and a new unit reports its result.
+		self.owe(state="running", auto_promised=False)
+		self.delegate("resumed-unit", state="completed")
+		self.begin(turn="report")
+		self.assertEqual(self.runs()["human"]["started_at"], start)
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			connection.execute("UPDATE async_delegations SET delivery_state = 'delivered' WHERE delegation_id = 'resumed-unit'")
+			connection.commit()
+		self.end(turn="report")
+		self.assertEqual(self.markers()["human"]["done_token"], "report")
+		self.assertFalse(self.runs()["human"]["pending"])
+
+	def test_a_child_that_stops_with_a_promise_during_the_turn_is_still_owed_across_compression(self):
+		self.db.end_session("human", "compression")
+		self.db.create_session("tip", "cli", parent_session_id="human")
+		self.delegate("waiting-unit")
+		self.begin("tip", "user")
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			connection.execute("UPDATE async_delegations SET state = 'completed', delivery_state = 'delivered'")
+			connection.commit()
+		self.owe()
+		self.end("tip", "user")
+		self.assertEqual(self.markers(), {})
+		self.assertTrue(self.runs()["human"]["pending"])
+
+	def test_a_resume_that_starts_between_the_end_reads_is_still_seen(self):
+		self.delegate("waiting-unit", state="completed", delivery="delivered")
+		self.owe()
+		self.begin()
+		connect, started = sqlite3.connect, []
+		test = self
+		class Interleaved:
+			def __init__(self, *args, **kwargs):
+				self.connection = connect(*args, **kwargs)
+			def execute(self, sql, *args):
+				rows = self.connection.execute(sql, *args).fetchall()
+				if sql.startswith("SELECT delegation_id, state, dispatched_at") and not started:
+					# The scheduler starts the resumed run right after the end hook read the units: native dispatch records its new unit, then its run record clears the promise.
+					started.append(True)
+					test.delegate("resumed-unit")
+					test.owe(state="running", auto_promised=False)
+				return SimpleNamespace(fetchall=lambda: rows, fetchone=lambda: rows[0] if rows else None)
+			def close(self):
+				self.connection.close()
+		with patch.object(hooks, "sqlite3", SimpleNamespace(connect=Interleaved)):
+			self.end()
+		self.assertEqual(started, [True])
+		self.assertEqual(self.markers(), {})
+		self.assertTrue(self.runs()["human"]["pending"])
+
+	def test_every_owed_resume_state_blocks_done(self):
+		from tools import delegate_tool_auto_resume as auto
+		self.delegate("waiting-unit", state="completed", delivery="delivered")
+		for index, state in enumerate(("resumable", "expired", "claimed")):
+			with self.subTest(state=state):
+				self.owe(state="expired" if state == "expired" else "resumable")
+				if state == "claimed":
+					# The scheduler's own claim keeps the promise until the resumed run records itself.
+					claimed, superseded = auto._claim(auto._candidates(time.time())[0], "human")
+					self.assertIsNotNone(claimed, superseded)
+				turn = f"owed-{index}"
+				self.begin(turn=turn)
+				self.end(turn=turn)
+				self.assertEqual(self.markers(), {})
+
+	def test_settled_foreign_or_other_profile_resume_debts_allow_done(self):
+		from tools import delegate_tool_auto_resume as auto
+		from tools.process_registry import process_registry
+		self.db.create_session("other", "cli")
+		self.delegate("waiting-unit", state="completed", delivery="delivered")
+		self.delegate("other-unit", session="other", state="completed", delivery="delivered")
+		def cancelled():
+			self.owe()
+			# The person stopped the parent: the native cancel clears the debt in the same write.
+			self.assertEqual(auto.supersede_for_session(parent_session_id="human", reason="user_stop"), 1)
+		def gave_up():
+			self.owe()
+			# The scheduler gave up: its one failure is a pending ledger row that the next turn consumes.
+			with patch.object(process_registry, "completion_queue", queue.Queue()):
+				self.assertTrue(auto._give_up(auto._candidates(time.time(), owed_only=True)[0], auto.TURNED_OFF))
+		def other_profile():
+			other = self.home / "other-profile"
+			other.mkdir()
+			with closing(native_fixture(other / "state.db")) as db:
+				db.create_session("human", "cli")
+			self.delegate("waiting-unit", state="completed", delivery="delivered", home=other)
+			self.owe(home=other)
+		cases = dict(cancelled=cancelled, gave_up=gave_up, never_promised=lambda: self.owe(auto_promised=False),
+			foreign=lambda: self.owe(unit="other-unit", owners=["other"]), other_profile=other_profile)
+		for name, settle in cases.items():
+			with self.subTest(name):
+				with closing(sqlite3.connect(self.home / "state.db")) as connection:
+					connection.execute("DELETE FROM resumable_subagents")
+					connection.commit()
+				settle()
+				self.begin(turn=name)
+				self.end(turn=name)
+				self.assertEqual(self.markers()["human"]["done_token"], name)
+
+	def test_stores_without_resume_records_complete_and_unreadable_ones_do_not(self):
+		self.delegate("waiting-unit", state="completed", delivery="delivered")
+		self.owe()
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			connection.execute("UPDATE resumable_subagents SET record_json = '{'")
+			connection.commit()
+		self.begin(turn="unreadable")
+		self.end(turn="unreadable")
+		self.assertEqual(self.markers(), {})
+		# Hermes releases before automatic resume have no such records: nothing can be owed there.
+		with closing(sqlite3.connect(self.home / "state.db")) as connection:
+			connection.execute("DROP TABLE resumable_subagents")
+			connection.commit()
+		self.begin(turn="older")
+		self.end(turn="older")
+		self.assertEqual(self.markers()["human"]["done_token"], "older")
 
 	def test_processes_spawned_before_compression_still_count(self):
 		self.db.end_session("human", "compression")
