@@ -85,7 +85,7 @@ class Fixtures:
 
 	def _native(self):
 		"""500 regular + 500 archived conversations, 50 compression chains on each side, 1000 delegated children, messages and usage rows: the shape that made organized backfill and usage history expensive."""
-		from hermes_state import SessionDB
+		from native_fixture import native_fixture
 
 		rng = random.Random(20261104)
 		sessions, messages, usage, chains = [], [], [], []
@@ -148,10 +148,9 @@ class Fixtures:
 		self.counts = {"sessions": len(sessions), "messages": len(messages), "usage_rows": len(usage)}
 
 		# Seed compact columns directly, avoiding lifecycle hooks and plugin notifications; only the archive flip uses the native writer, with notify=False so the real profile's plugins are never loaded.
-		with closing(SessionDB(self.native)) as db:
+		with closing(native_fixture(self.native)) as db:
 			conn = db._conn
-			assert conn is not None
-			# The native connection is in autocommit mode, where `with conn:` opens no transaction and every inserted row would pay its own fsync; one explicit transaction keeps the build to seconds.
+			# The fixture's raw connection is in autocommit mode, where `with conn:` opens no transaction and every inserted row would pay its own fsync; one explicit transaction keeps the build to seconds.
 			conn.execute("BEGIN IMMEDIATE")
 			try:
 				conn.executemany("""INSERT INTO sessions(id, source, started_at, archived, parent_session_id, end_reason, model_config, cwd,
@@ -652,7 +651,8 @@ def main(argv=None):
 			extract_ref(args.baseline, baseline_root)
 			baseline_label = "baseline"
 			impls.insert(0, Impl(baseline_label, baseline_root))
-		from hermes_state import SessionDB
+		# The candidate's own read-only reader over the storage interface. A baseline written for the retired SessionDB cannot read this Hermes's store and is reported as skipped.
+		NativeStore = impls[-1].api.native_store.NativeStore
 
 		sys.stderr.write("building fixtures...\n")
 		build_s = fx.build(impls[-1].api)
@@ -662,10 +662,10 @@ def main(argv=None):
 			# The plugin only ever asks for read-only listings; refuse anything else so a regression cannot write to the fixture or reach a real profile.
 			if profile != PROFILE or read_only is not True:
 				raise AssertionError(f"unexpected native open: {profile!r} read_only={read_only!r}")
-			return SessionDB(fx.native, read_only=True)
+			return NativeStore(fx.native)
 
 		stack.enter_context(patch("hermes_cli.web_server_sessions._open_session_db_for_profile", open_db))
-		# Current builds open the store through their own public-SessionDB helper; older baselines through Hermes's.
+		# Current builds open the store through their own reader helper; older baselines through Hermes's.
 		for impl in impls:
 			if hasattr(impl.api, "open_session_db"):
 				stack.enter_context(patch.object(impl.api, "open_session_db", open_db))

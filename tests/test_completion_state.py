@@ -300,9 +300,9 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(calls, [(0, ("both", "old-completed", "organized")), (500, ())])
 
     def test_completed_only_alias_backfills_old_native_row_readonly(self):
-        from hermes_state import SessionDB
+        NativeStore = backend.native_store.NativeStore
 
-        native_path = Path(self.temp.name) / "native.sqlite3"
+        native_path = Path(self.temp.name) / "state.db"
         with closing(native_fixture(native_path)) as db:
             assert db._conn is not None
             with db._conn:
@@ -313,7 +313,7 @@ class CompletionTests(unittest.TestCase):
         def open_db(profile, *, read_only):
             self.assertEqual(profile, "exact")
             self.assertTrue(read_only)
-            return SessionDB(native_path, read_only=True)
+            return NativeStore(native_path)
         client = self.client(profile_reader=lambda: "exact")
         with patch.object(backend, "open_session_db", open_db):
             self.assertEqual([row["id"] for row in client.get("/sessions?limit=1").json()["sessions"]], ["recent"])

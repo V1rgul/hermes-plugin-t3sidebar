@@ -15,22 +15,22 @@
 			"measured_median_ms": 2.754
 		},
 		"native_archives": {
-			"statements": 199,
+			"statements": 201,
 			"median_ms": 225.0,
 			"measured_median_ms": 50.561
 		},
 		"native_sessions_archived_ids": {
-			"statements": 209,
+			"statements": 213,
 			"median_ms": 250.0,
 			"measured_median_ms": 59.441
 		},
 		"native_sessions_loaded_ids": {
-			"statements": 209,
+			"statements": 213,
 			"median_ms": 250.0,
 			"measured_median_ms": 61.079
 		},
 		"native_sessions_plain": {
-			"statements": 203,
+			"statements": 205,
 			"median_ms": 225.0,
 			"measured_median_ms": 51.013
 		},

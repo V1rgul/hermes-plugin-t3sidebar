@@ -1,7 +1,8 @@
 """Installed native read contracts against scratch DBs/doubles, never live history."""
 import asyncio
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 from types import SimpleNamespace, ModuleType
@@ -10,7 +11,6 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from hermes_state import SessionDB
 from gateway.session_contract import SessionActor, SessionHandle, SessionRef
 from gateway.session_live_listing import LiveEntry
 
@@ -18,6 +18,14 @@ import gateway.session_live_listing as listing_module
 
 from test_backend import backend
 from native_fixture import native_fixture
+
+NativeStore = backend.native_store.NativeStore
+
+
+@contextmanager
+def changed_snapshot():
+	"""A listing double's ``read_snapshot``: its id hits lie outside its own short page, which one generation of a real store never answers, so it reports that a write landed during the reads and the listing falls back to exact-ID recovery, the path these doubles exercise."""
+	yield lambda: False
 
 
 class NativeContracts(unittest.TestCase):
@@ -73,10 +81,12 @@ class NativeContracts(unittest.TestCase):
 		from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 		token = set_hermes_home_override(str(self.path))
 		self.addCleanup(reset_hermes_home_override, token)
-		db_path = self.path / "native.sqlite3"
+		db_path = self.path / "state.db"
 		with closing(native_fixture(db_path)) as db:
 			db.create_session("collision", "cli")
-		authority = SimpleNamespace(profile_id=str(self.path), db=SimpleNamespace(db_path=db_path))
+		from persistence_assembly import profile_scope
+
+		authority = SimpleNamespace(profile_id=str(self.path), persistence=SimpleNamespace(scope=profile_scope(home=self.path)))
 		actor = SessionActor("authenticated-subject", str(self.path), frozenset({"session:read", "session:control"}), "http")
 		setattr(fake, "_session_mutation_context", lambda request, profile: (authority, actor))
 		controls = SimpleNamespace(snapshot=lambda sid, generation: [{"kind": "approval"}])
@@ -102,7 +112,7 @@ class NativeContracts(unittest.TestCase):
 			self.assertEqual(self.client().get("/runtime").status_code, 503)
 
 	def test_sessions_native_rich_pagination_and_organized_compression_backfill(self):
-		db_path = self.path / "native.sqlite3"
+		db_path = self.path / "state.db"
 		with closing(native_fixture(db_path)) as db:
 			db.create_session("old-root", "cli", cwd="/old-project", system_prompt="must-not-leak", model_config={"secret": "must-not-leak"})
 			db.update_session_cwd("old-root", "/old-project", git_branch="retained")
@@ -116,7 +126,7 @@ class NativeContracts(unittest.TestCase):
 			self.assertEqual(profile, "exact-profile")
 			self.assertTrue(read_only)
 			opened.append(profile)
-			return SessionDB(db_path, read_only=read_only)
+			return NativeStore(db_path)
 		self.enterContext(patch.object(backend, "open_session_db", open_db))
 		before = db_path.read_bytes()
 		with patch.dict(sys.modules, {fake.__name__: fake}):
@@ -145,6 +155,9 @@ class NativeContracts(unittest.TestCase):
 		fake = ModuleType("hermes_cli.web_server_sessions")
 		calls = []
 		class DB:
+			def __init__(self):
+				# An empty database: the card enrichment's own reads find no tables and keep usage unknown, as for a store without them.
+				self.connection = sqlite3.connect(":memory:")
 			def list_sessions_rich(self, **options):
 				calls.append(options)
 				if not options.get("id_query"):
@@ -152,15 +165,18 @@ class NativeContracts(unittest.TestCase):
 				if options["offset"] == 0:
 					return [{"id": f"prefix-old-{i}"} for i in range(500)]
 				return [{"id": "old", "cwd": "/retained"}]
+			def read_snapshot(self):
+				return changed_snapshot()
 			def close(self):
-				pass
+				self.connection.close()
 		self.enterContext(patch.object(backend, "open_session_db", lambda *args, **kwargs: DB()))
 		with patch.dict(sys.modules, {fake.__name__: fake}):
 			value = backend.native_sessions("exact-profile", 0, 500, ("old",))
 		self.assertEqual(value["sessions"], [{"id": "old", "cwd": "/retained", "archived": False,
 			"project": {"id": "/retained", "name": "retained", "icon": None, "color": None, "cwd": "/retained"},
 			"provider": None, "model": None, "source": None, "input_tokens": None, "output_tokens": None, "total_tokens": None}])
-		self.assertEqual([c["offset"] for c in calls], [0, 0, 500])
+		# The short page is read again without trusting its exhaustion, then the exact id is paged past its 500 substring collisions.
+		self.assertEqual([(c.get("id_query"), c["offset"]) for c in calls], [(None, 0), (None, 0), ("old", 0), ("old", 500)])
 
 	def test_loaded_root_tip_and_segment_aliases_do_not_repeat_rich_listing(self):
 		fake = ModuleType("hermes_cli.web_server_sessions")
@@ -170,6 +186,8 @@ class NativeContracts(unittest.TestCase):
 			def list_sessions_rich(self, **options):
 				calls.append(options)
 				return [row]
+			def read_snapshot(self):
+				return changed_snapshot()
 			def close(self):
 				pass
 		self.enterContext(patch.object(backend, "open_session_db", lambda *args, **kwargs: DB()))
@@ -185,25 +203,28 @@ class NativeContracts(unittest.TestCase):
 			def list_sessions_rich(self, **options):
 				calls.append(options)
 				return [{"id": "tip", "_lineage_root_id": "root", "_lineage_ids": ["root", "tip"]}] if options.get("id_query") else []
+			def read_snapshot(self):
+				return changed_snapshot()
 			def close(self):
 				pass
 		self.enterContext(patch.object(backend, "open_session_db", lambda *args, **kwargs: DB()))
 		with patch.dict(sys.modules, {fake.__name__: fake}), patch.object(backend, "card_rows", side_effect=lambda db, rows: list(rows)):
 			value = backend.native_sessions("exact-profile", 0, 500, ("tip", "root", "tip"))
 		self.assertEqual(len(value["sessions"]), 1)
-		self.assertEqual(len(calls), 2)
+		# Two page reads (the second without trusting exhaustion) and one exact-ID search: the backfilled tip's aliases cover the later ids.
+		self.assertEqual([c.get("id_query") for c in calls], [None, None, "tip"])
 
 	def test_native_internal_sources_excluded_from_pages_and_organized_backfill(self):
-		from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+		from persistence.conversation.sessions import INTERNAL_LISTING_SOURCES
 
-		db_path = self.path / "native-picker.sqlite3"
+		db_path = self.path / "native-picker" / "state.db"
 		with closing(native_fixture(db_path)) as db:
 			db.create_session("older-human", "cli")
 			for source in INTERNAL_LISTING_SOURCES:
 				db.create_session(f"internal-{source}", source)
 			db.create_session("recent-human", "cli")
 		fake = ModuleType("hermes_cli.web_server_sessions")
-		self.enterContext(patch.object(backend, "open_session_db", lambda profile, *, read_only: SessionDB(db_path, read_only=read_only)))
+		self.enterContext(patch.object(backend, "open_session_db", lambda profile, *, read_only: NativeStore(db_path)))
 		before = db_path.read_bytes()
 		with patch.dict(sys.modules, {fake.__name__: fake}):
 			first = backend.native_sessions("exact-profile", 0, 1, ())
@@ -215,12 +236,12 @@ class NativeContracts(unittest.TestCase):
 		self.assertEqual(db_path.read_bytes(), before)
 
 	def test_cron_runs_are_excluded_from_pages_and_organized_backfill(self):
-		db_path = self.path / "cron-filter.sqlite3"
+		db_path = self.path / "cron-filter" / "state.db"
 		with closing(native_fixture(db_path)) as db:
 			db.create_session("human", "cli")
 			db.create_session("job-run", "cron")
 		fake = ModuleType("hermes_cli.web_server_sessions")
-		self.enterContext(patch.object(backend, "open_session_db", lambda profile, *, read_only: SessionDB(db_path, read_only=read_only)))
+		self.enterContext(patch.object(backend, "open_session_db", lambda profile, *, read_only: NativeStore(db_path)))
 		with patch.dict(sys.modules, {fake.__name__: fake}):
 			for offset, expected in [(0, ["human"]), (1, [])]:
 				rows = backend.native_sessions("exact-profile", offset, 1, ("job-run",))["sessions"]

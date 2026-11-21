@@ -102,7 +102,7 @@ class ProjectOwners(unittest.TestCase):
 		folders = ["/work/repo/nested/a", "/second/x", "/work/repository", "/unregistered", ""]
 		records = {row["id"]: {"cwd": folders[index % len(folders)], "source": "cli"} for index, row in enumerate(rows)}
 		db = SimpleNamespace(close=lambda: None)
-		with patch("hermes_state.SessionDB", return_value=db), patch.object(backend, "runtime_retired", return_value=False), \
+		with patch.object(backend.native_store, "NativeStore", return_value=db), patch.object(backend, "runtime_retired", return_value=False), \
 				patch.object(backend, "stored_rows", return_value=records), patch.object(backend, "card_projects", return_value=self.catalog):
 			value = backend.authority_runtime_rows("/synthetic/state.db", rows)
 		self.assertEqual(CountedProject.reads, len(self.catalog))

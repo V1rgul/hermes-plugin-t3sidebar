@@ -1,4 +1,4 @@
-"""Synthetic session history for the Usage page of the test Webapp container (tools/test-webapp), written through Hermes's own SessionDB.
+"""Synthetic session history for the Usage page of the test Webapp container (tools/test-webapp), written through Hermes's storage interface.
 
 Runs inside that container only; every title, message and token count is invented. Sessions are spread over the past nine days on the same working rhythm as seed_limits.py, priced on models Hermes's price table knows, and archived so they fill the Archived shelf instead of the live list. Re-running replaces the sessions it recorded as written, and only those: a session made by hand in the container survives, whatever its model. A container seeded before that record existed keeps its earlier seed sessions, since nothing proves they are the seed's; they hold the seed's titles, so the seed lists them and changes nothing until they are deleted by hand.
 """
@@ -16,11 +16,11 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, "/opt/hermes")
-from hermes_state import SessionDB  # noqa: E402
+from persistence_assembly import open_persistence, profile_scope  # noqa: E402
 
 TZ = ZoneInfo("Europe/Paris")
 W = "/opt/data/workspace"
-# One explicit store for finding the previous sessions and for writing the new ones, rather than whatever home SessionDB would resolve.
+# One explicit store for finding the previous sessions and for writing the new ones, rather than whatever home Hermes would resolve.
 DB_PATH = Path("/opt/data/state.db")
 # The ids the last run wrote, the only sessions a re-run deletes.
 OWNED = Path("/opt/data/demo/seed_usage_ids.json")
@@ -58,6 +58,49 @@ def taken_titles(conn, old):
 	return [(sid, title) for sid, title in conn.execute("SELECT id, title FROM sessions WHERE title IS NOT NULL") if title in titles and sid not in owned]
 
 
+class SeedStore:
+	"""The writes the seed makes, on the store of *path*'s profile folder, each followed by what Hermes's own callers run after it: the plugin hooks of a delete or an archive, retired media and transcript files."""
+
+	def __init__(self, path):
+		self.store = open_persistence(profile_scope(home=Path(path).parent), eager=True)
+
+	def close(self):
+		self.store.close()
+
+	def create_session(self, sid, source, **fields):
+		from persistence.conversation.sessions import NewSession
+
+		self.store.sessions.create(NewSession(session_id=sid, source=source, **fields))
+
+	def append_message(self, sid, role, content, timestamp):
+		from persistence.conversation.messages import NewMessage
+
+		self.store.messages.append(sid, NewMessage.from_live({"role": role, "content": content, "timestamp": timestamp}))
+
+	def update_token_counts(self, sid, *, model, billing_provider, api_call_count, source, **tokens):
+		"""Account the session's usage as one delta, waiting until it is written: the seed then backdates the rows it made."""
+		from persistence.conversation.usage import BillingRoute, TokenCounts, UsageDelta
+
+		route = BillingRoute(model=model, billing_provider=billing_provider)
+		self.store.usage.queue_usage(sid, UsageDelta(tokens=TokenCounts(**tokens), api_call_count=api_call_count, route=route, source=source))
+		if not self.store.usage.flush_usage():
+			raise TimeoutError(f"usage of {sid} was not written")
+
+	def set_session_archived(self, sid, archived):
+		from session_retention import emit_session_deleted
+
+		change = self.store.sessions.set_archived(sid, archived)
+		if change.archived_ids:
+			emit_session_deleted(self.store.scope.profile_dir, change.archived_ids, reason="archive", primary=sid)
+
+	def delete_session(self, sid):
+		from gateway.session_ingress_media import native_inputs_root
+		from session_retention import after_sessions_removed
+
+		removed = self.store.sessions.delete(sid, media_root=str(native_inputs_root()))
+		after_sessions_removed(self.store, self.store.scope.profile_dir, removed, reason="delete", primary=sid)
+
+
 def record_owned(ids):
 	partial = OWNED.with_name(OWNED.name + ".tmp")
 	partial.write_text(json.dumps({"ids": ids}) + "\n", encoding="utf-8")
@@ -65,7 +108,11 @@ def record_owned(ids):
 
 
 def main():
-	db = SessionDB(DB_PATH)
+	with closing(SeedStore(DB_PATH)) as db:
+		seed(db)
+
+
+def seed(db):
 	rng = random.Random(20261108)
 	now = time.time()
 	# Each task runs three times (first pass, follow-up and review on other days), which fills the working hours like a real week.

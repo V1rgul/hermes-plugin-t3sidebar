@@ -8,16 +8,18 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from gateway.config import Platform
 from gateway.session_contract import SessionActor, SessionRef
-from hermes_state import SessionDB
 from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-from hermes_state_runtime import RuntimeStoreError
+from persistence import AuthorityRefusal
+from persistence_assembly import open_persistence, profile_scope
 import gateway.session_ancillary as ancillary
 import tools.delegate_tool_registry as registry
 
 from test_backend import backend
-from native_fixture import native_fixture
+from native_fixture import NativeWriter, native_fixture
 
 
 class AuthoritySubagents(unittest.TestCase):
@@ -27,9 +29,10 @@ class AuthoritySubagents(unittest.TestCase):
 		self.home = Path(self.temp.name)
 		token = set_hermes_home_override(str(self.home))
 		self.addCleanup(reset_hermes_home_override, token)
-		with closing(native_fixture(self.home / "native.sqlite3")) as db:
+		with closing(native_fixture(self.home / "state.db")) as db:
 			db.create_session("durable", "cli")
-		self.db = SessionDB(self.home / "native.sqlite3", read_only=True)
+		# The authority and its agents hold the profile's store as a storage interface handle, as Hermes builds them.
+		self.db = open_persistence(profile_scope(home=self.home), eager=True)
 		self.addCleanup(self.db.close)
 		self.parent = SimpleNamespace(session_id="durable", _session_db=self.db)
 		self.actor = SessionActor("owner", str(self.home), frozenset({"session:read", "session:control"}), "http")
@@ -38,7 +41,7 @@ class AuthoritySubagents(unittest.TestCase):
 		self.entry = SimpleNamespace(session_id="durable")
 		store = SimpleNamespace(_lock=RLock(), _entries={"runtime-route": self.entry})
 		self.authority = SimpleNamespace(profile_id=str(self.home), sessions={"durable": self.live},
-			db=self.db, runner=SimpleNamespace(session_store=store), agent=lambda ref: self.parent,
+			persistence=self.db, runner=SimpleNamespace(session_store=store), agent=lambda ref: self.parent,
 			authorize=self.authorize)
 		self.authorizations = []
 		self.rows: list[dict] = [{"id": "durable", "session_key": "durable", "status": "idle", "source": "cli"}]
@@ -88,7 +91,7 @@ class AuthoritySubagents(unittest.TestCase):
 		self.child("nested", parent=self.children["one"]["agent"])
 		self.child("completed", status="completed")
 		self.child("cancelled", status="cancelled")
-		before = (self.home / "native.sqlite3").read_bytes()
+		before = (self.home / "state.db").read_bytes()
 		with patch.object(ancillary, "read", wraps=ancillary.read) as read:
 			self.assertEqual(self.count(), 2)
 			self.assertEqual(read.call_args.kwargs, {"kind": "subagents"})
@@ -100,11 +103,11 @@ class AuthoritySubagents(unittest.TestCase):
 			self.children.clear()
 			self.assertEqual(self.count(), 0)
 		self.assertEqual(len(self.authorizations), 4)
-		self.assertEqual((self.home / "native.sqlite3").read_bytes(), before)
+		self.assertEqual((self.home / "state.db").read_bytes(), before)
 
 	def test_durable_fallback_does_not_include_same_id_in_foreign_database(self):
 		self.child("owned")
-		self.child("foreign", db=SimpleNamespace(db_path=self.home / "foreign.sqlite3"))
+		self.child("foreign", db=SimpleNamespace(db_path=self.home / "foreign" / "state.db"))
 		self.child("runtime-only", durable=None)
 		self.assertEqual(self.count(), 1)
 
@@ -112,7 +115,7 @@ class AuthoritySubagents(unittest.TestCase):
 		self.child("one", parent=self.parent)
 		self.assertEqual(self.count(), 1)
 		for reason in ("unsupported_projection", "permission_denied", "not_found", "stale_generation", "storage_unavailable"):
-			with self.subTest(reason=reason), patch.object(ancillary, "read", AsyncMock(side_effect=RuntimeStoreError(reason))):
+			with self.subTest(reason=reason), patch.object(ancillary, "read", AsyncMock(side_effect=AuthorityRefusal(reason))):
 				self.assertIsNone(self.count())
 		for response in ({}, {"subagents": None}, {"subagents": [{"status": None}]}, {"subagents": [object()]}):
 			with self.subTest(response=response), patch.object(ancillary, "read", AsyncMock(return_value=response)):
@@ -134,17 +137,14 @@ class AuthoritySubagents(unittest.TestCase):
 				self.runtime()
 
 	def test_retired_ghost_is_excluded_before_ancillary_read_but_absent_draft_is_not_deleted(self):
-		import hermes_state_mutation_retirement as retirement
-
-		with closing(SessionDB(self.home / "native.sqlite3")) as db:
-			assert db._conn is not None
-			with db._conn:
-				retirement.retire_routes(db._conn, ["retired"])
+		with closing(NativeWriter(self.home / "state.db")) as db:
+			db.create_session("retired", "desktop")
+			self.assertTrue(db.delete_session("retired"))
 		self.rows.extend([
 			{"id": "stale-route", "session_key": "retired", "source": "desktop", "message_count": 0},
 			{"id": "draft", "session_key": "never-persisted", "source": "desktop", "message_count": 0},
 		])
-		before = (self.home / "native.sqlite3").read_bytes()
+		before = (self.home / "state.db").read_bytes()
 		with patch.object(ancillary, "read", AsyncMock(return_value={"subagents": []})) as read:
 			for _ in range(2):
 				rows = self.runtime()["sessions"]
@@ -153,12 +153,28 @@ class AuthoritySubagents(unittest.TestCase):
 				self.assertIsNone(rows[1]["project"])
 				self.assertIsNone(rows[1]["provider"])
 			self.assertEqual([call.args[1].session_id for call in read.call_args_list], ["durable", "draft"] * 2)
-		self.assertEqual((self.home / "native.sqlite3").read_bytes(), before)
+		self.assertEqual((self.home / "state.db").read_bytes(), before)
+
+	def test_runtime_route_serves_authority_rows_and_drops_natively_deleted_ids(self):
+		# On Hermes 0.23.3 the retired legacy retirement module made every authority-backed /runtime poll a 503 native_runtime_unavailable; the route itself is exercised here, not only its reader.
+		with closing(NativeWriter(self.home / "state.db")) as db:
+			db.create_session("deleted", "desktop")
+			self.assertTrue(db.delete_session("deleted"))
+		with backend.native_store.NativeStore(self.home / "state.db") as reader:
+			self.assertTrue(reader.retired_session("deleted"))
+			self.assertFalse(reader.retired_session("durable"))
+		self.rows.append({"id": "deleted", "session_key": "deleted", "source": "desktop", "message_count": 0})
+		app = FastAPI()
+		app.include_router(backend.create_router(self.home / "flow.sqlite3", profile_reader=lambda: "exact-profile"))
+		with TestClient(app) as client, patch.object(ancillary, "read", AsyncMock(return_value={"subagents": []})):
+			response = client.get("/runtime?profile=exact-profile")
+		self.assertEqual(response.status_code, 200, response.text)
+		self.assertEqual([row["id"] for row in response.json()["sessions"]], ["durable"])
 
 	def test_authority_zero_message_stored_metadata_is_allowlisted_and_never_borrows_registry(self):
 		from hermes_cli import projects_db
 
-		with closing(SessionDB(self.home / "native.sqlite3")) as db:
+		with closing(NativeWriter(self.home / "state.db")) as db:
 			db.update_session_cwd("durable", "/repo/sub")
 			assert db._conn is not None
 			with db._conn:
@@ -167,7 +183,7 @@ class AuthoritySubagents(unittest.TestCase):
 		with closing(projects_db.connect(self.home / "projects.db")) as conn:
 			pid = projects_db.create_project(conn, name="Native project", folders=["/repo"], icon="tools", color="#abcdef")
 		self.rows[0].update(message_count=0, preview="private-prompt", model_config={"secret": "private-config"})
-		before = {path: path.read_bytes() for path in [self.home / "native.sqlite3", self.home / "projects.db"]}
+		before = {path: path.read_bytes() for path in [self.home / "state.db", self.home / "projects.db"]}
 		with patch.object(backend, "standalone_runtime", side_effect=AssertionError("no unrelated registry")), patch.object(projects_db, "connect", side_effect=AssertionError("no schema write")):
 			row = self.runtime()["sessions"][0]
 		self.assertEqual(row["message_count"], 0)
@@ -192,7 +208,7 @@ class AuthoritySubagents(unittest.TestCase):
 				elif mismatch == "authority":
 					authority.profile_id = foreign
 				elif mismatch == "store":
-					authority.db = SimpleNamespace(db_path=Path(foreign) / "native.sqlite3")
+					authority.persistence = SimpleNamespace(scope=profile_scope(home=Path(foreign)))
 				elif mismatch == "grant":
 					request.state.native_http_principal = {"profile_id": foreign}
 				else:
@@ -200,18 +216,18 @@ class AuthoritySubagents(unittest.TestCase):
 				with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(authority, actor)), patch("gateway.session_active_list.active_list", AsyncMock()) as read:
 					with self.assertRaises(backend.HTTPException) as exc:
 						asyncio.run(backend.native_runtime(request, "exact-profile"))
-					self.assertEqual(exc.exception.status_code, 403)
+					self.assertEqual((exc.exception.status_code, exc.exception.detail), (403, "permission_denied" if mismatch == "capabilities" else "profile_mismatch"))
 					read.assert_not_called()
 
 	def test_persisted_history_is_not_erased_by_authority_runtime_zero(self):
-		with closing(SessionDB(self.home / "native.sqlite3")) as db:
+		with closing(NativeWriter(self.home / "state.db")) as db:
 			db.append_message("durable", "user", "private-history")
 		self.rows[0]["message_count"] = 0
 		self.assertEqual(self.runtime()["sessions"][0]["message_count"], 1)
 
 	def test_active_listing_failure_does_not_return_partial_snapshot(self):
-		with patch("gateway.session_active_list.active_list", AsyncMock(side_effect=RuntimeStoreError("permission_denied"))), patch.object(ancillary, "read", AsyncMock()) as read:
-			with self.assertRaises(RuntimeStoreError):
+		with patch("gateway.session_active_list.active_list", AsyncMock(side_effect=AuthorityRefusal("permission_denied"))), patch.object(ancillary, "read", AsyncMock()) as read:
+			with self.assertRaises(AuthorityRefusal):
 				self.runtime()
 			read.assert_not_called()
 

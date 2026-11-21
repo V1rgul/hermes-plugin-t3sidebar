@@ -1,19 +1,20 @@
-"""Native archives: real scratch SessionDB fixtures, never live history writes."""
+"""Native archives: real scratch native store fixtures, never live history writes."""
 from contextlib import closing
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from hermes_state import SessionDB
-from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+from persistence.conversation.sessions import INTERNAL_LISTING_SOURCES
 from hermes_cli import projects_db
 
 from test_backend import backend
-from native_fixture import native_fixture
+from native_fixture import NativeWriter, native_fixture
+
+NativeStore = backend.native_store.NativeStore
 
 
 class NativeArchives(unittest.TestCase):
@@ -21,7 +22,7 @@ class NativeArchives(unittest.TestCase):
 		self.temp = tempfile.TemporaryDirectory(prefix="native-archives-")
 		self.addCleanup(self.temp.cleanup)
 		self.home = Path(self.temp.name)
-		self.db_path = self.home / "native.sqlite3"
+		self.db_path = self.home / "state.db"
 		self.profile = "exact-profile"
 
 	def client(self, **kwargs):
@@ -34,7 +35,7 @@ class NativeArchives(unittest.TestCase):
 	def open_db(self, profile, *, read_only):
 		self.assertEqual(profile, self.profile)
 		self.assertIs(read_only, True)
-		return SessionDB(self.db_path, read_only=read_only)
+		return NativeStore(self.db_path)
 
 	def test_compressed_archive_rich_metadata_and_restore_readback_are_readonly(self):
 		with closing(projects_db.connect(self.home / "projects.db")) as conn:
@@ -79,7 +80,7 @@ class NativeArchives(unittest.TestCase):
 		for path, content in before.items():
 			self.assertEqual(path.read_bytes(), content)
 		# Only fixture setup mutates native state, simulating the frontend's native RPC.
-		with closing(SessionDB(self.db_path)) as db:
+		with closing(NativeWriter(self.db_path)) as db:
 			self.assertTrue(db.set_session_archived("root", False, notify=False))
 		before_restore_reads = self.db_path.read_bytes()
 		with patch.object(backend, "open_session_db", side_effect=self.open_db):
@@ -206,9 +207,9 @@ class NativeArchives(unittest.TestCase):
 			self.assertEqual((home / "state.db").read_bytes(), before[name])
 
 	def test_native_query_owns_visibility_before_limit_and_no_backfill(self):
-		db = Mock()
+		db = MagicMock()
 		db.list_sessions_rich.return_value = []
 		with patch.object(backend, "open_session_db", return_value=db):
 			self.assertEqual(backend.native_sessions("profile", 7, 3, ("ignored",), archived_only=True), {"sessions": [], "offset": 7, "limit": 3, "has_more": False})
-		db.list_sessions_rich.assert_called_once_with(limit=3, offset=7, compact_rows=True, order_by_last_active=True, include_archived=False, archived_only=True, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
+		db.list_sessions_rich.assert_called_once_with(limit=3, offset=7, include_archived=False, archived_only=True, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
 		db.close.assert_called_once()

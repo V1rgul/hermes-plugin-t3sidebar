@@ -1,6 +1,6 @@
 """Card enrichment uses native scratch stores only; no prompts/configs leave the API."""
 import asyncio
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 import sqlite3
 from pathlib import Path
@@ -9,12 +9,20 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from hermes_state import SessionDB
 from hermes_cli import projects_db
 from gateway.session_contract import SessionActor
 
 from test_backend import backend
 from native_fixture import native_fixture
+
+NativeStore = backend.native_store.NativeStore
+
+
+@contextmanager
+def store_double(**reads):
+	"""A store double for card enrichment: ``reads`` stand in for its native verbs, and its own connection is an empty database, so the enrichment's direct reads find no tables, as on a store without them."""
+	with closing(sqlite3.connect(":memory:")) as connection:
+		yield SimpleNamespace(connection=connection, **reads)
 
 
 class CardMetadata(unittest.TestCase):
@@ -22,10 +30,10 @@ class CardMetadata(unittest.TestCase):
 		self.temp = tempfile.TemporaryDirectory(prefix="card-metadata-")
 		self.addCleanup(self.temp.cleanup)
 		self.root = Path(self.temp.name)
-		self.db_path = self.root / "native.sqlite3"
+		self.db_path = self.root / "state.db"
 
 	def sessions(self, *organized):
-		with patch.object(backend, "open_session_db", side_effect=lambda profile, *, read_only: SessionDB(self.db_path, read_only=read_only)):
+		with patch.object(backend, "open_session_db", side_effect=lambda profile, *, read_only: NativeStore(self.db_path)):
 			return backend.native_sessions("scratch-profile", 0, 500, organized)["sessions"]
 
 	def test_native_projects_longest_folder_multiple_folders_archived_and_boundary(self):
@@ -61,7 +69,7 @@ class CardMetadata(unittest.TestCase):
 					db.end_session(sid, "compression")
 		before = self.db_path.read_bytes()
 		# Segments are read through Hermes's public get_session, each once; the full rows never reach the response.
-		with patch.object(SessionDB, "get_session", autospec=True, side_effect=SessionDB.get_session) as reads:
+		with patch.object(NativeStore, "get_session", autospec=True, side_effect=NativeStore.get_session) as reads:
 			rows = self.sessions("middle")
 		self.assertEqual(sorted(call.args[1] for call in reads.call_args_list), ["middle", "root", "tip"])
 		self.assertEqual(len(rows), 1)
@@ -110,11 +118,11 @@ class CardMetadata(unittest.TestCase):
 				if sid in ("root", "sub-b"):
 					db.end_session(sid, "compression")
 		before = self.db_path.read_bytes()
-		with closing(SessionDB(self.db_path, read_only=True)) as db:
+		with closing(NativeStore(self.db_path)) as db:
 			queries = []
-			assert db._conn is not None
-			db._conn.set_trace_callback(queries.append)
-			rows = {row["id"]: row for row in backend.card_rows(db, db.list_sessions_rich(compact_rows=True))}
+			# Card enrichment's direct reads run on the reader's own connection.
+			db.connection.set_trace_callback(queries.append)
+			rows = {row["id"]: row for row in backend.card_rows(db, db.list_sessions_rich(limit=20))}
 		self.assertEqual(set(rows), {"tip", "branch", "other"})
 		self.assertEqual((rows["tip"]["input_tokens"], rows["tip"]["output_tokens"], rows["tip"]["total_tokens"]), (400, 40, 440))
 		self.assertEqual(rows["branch"]["total_tokens"], 1650)
@@ -132,7 +140,7 @@ class CardMetadata(unittest.TestCase):
 				("partial", None, None, 5, 5),
 				("partial-sub", "partial", '{"_delegate_from":"partial"}', None, 2),
 			])
-			rows = {row["id"]: row for row in backend.card_rows(SimpleNamespace(_conn=connection), [{"id": "known", "input_tokens": 5, "output_tokens": 5}, {"id": "partial", "input_tokens": 5, "output_tokens": 5}])}
+			rows = {row["id"]: row for row in backend.card_rows(SimpleNamespace(connection=connection), [{"id": "known", "input_tokens": 5, "output_tokens": 5}, {"id": "partial", "input_tokens": 5, "output_tokens": 5}])}
 		self.assertEqual(rows["known"]["total_tokens"], 15)
 		self.assertIsNone(rows["partial"]["input_tokens"])
 		self.assertEqual(rows["partial"]["output_tokens"], 7)
@@ -140,7 +148,7 @@ class CardMetadata(unittest.TestCase):
 		# Stores whose sessions table predates the marker column keep the conversation's own counts.
 		with closing(sqlite3.connect(":memory:")) as connection:
 			connection.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
-			rows = backend.card_rows(SimpleNamespace(_conn=connection), [{"id": "legacy", "input_tokens": 1, "output_tokens": 2}])
+			rows = backend.card_rows(SimpleNamespace(connection=connection), [{"id": "legacy", "input_tokens": 1, "output_tokens": 2}])
 		self.assertEqual(rows[0]["total_tokens"], 3)
 
 	def test_card_message_count_preserves_empty_evidence_without_inventing_unknown_history(self):
@@ -150,18 +158,19 @@ class CardMetadata(unittest.TestCase):
 		rows = self.sessions()
 		self.assertEqual(rows[0]["message_count"], 0)
 		self.assertEqual(self.db_path.read_bytes(), before)
-		projected = backend.card_rows(SimpleNamespace(), [
-			{"id": "populated", "message_count": 6, "system_prompt": "private"},
-			{"id": "unknown"},
-		])
+		with store_double() as db:
+			projected = backend.card_rows(db, [
+				{"id": "populated", "message_count": 6, "system_prompt": "private"},
+				{"id": "unknown"},
+			])
 		self.assertEqual(projected[0]["message_count"], 6)
 		self.assertNotIn("system_prompt", projected[0])
 		self.assertNotIn("message_count", projected[1])
 
 	def test_duplicate_segments_are_counted_once_and_unknown_counts_stay_null(self):
 		stored = {"root": {"input_tokens": 3, "output_tokens": 4}, "tip": {"input_tokens": 5, "output_tokens": 6, "model_config": '{"provider":"tip"}'}}
-		db = SimpleNamespace(get_session=stored.get)
-		rows = backend.card_rows(db, [{"id": "tip", "_lineage_ids": ["root", "tip", "root"]}, {"id": "missing", "model": "openai/not-evidence"}])
+		with store_double(get_session=stored.get) as db:
+			rows = backend.card_rows(db, [{"id": "tip", "_lineage_ids": ["root", "tip", "root"]}, {"id": "missing", "model": "openai/not-evidence"}])
 		self.assertEqual(rows[0]["total_tokens"], 18)
 		self.assertEqual(rows[0]["provider"], "tip")
 		for key in ("provider", "input_tokens", "output_tokens", "total_tokens"):
@@ -174,11 +183,11 @@ class CardMetadata(unittest.TestCase):
 			"other": {"input_tokens": 0, "output_tokens": 0},
 		}
 		fetch = Mock(side_effect=stored.get)
-		db = SimpleNamespace(get_session=fetch)
-		rows = backend.card_rows(db, [
-			{"id": "tip", "_lineage_ids": ["root", "tip", "root"], "model_config": {"provider": "must-not-use-root"}},
-			{"id": "other", "_lineage_ids": ["other", "absent"]},
-		])
+		with store_double(get_session=fetch) as db:
+			rows = backend.card_rows(db, [
+				{"id": "tip", "_lineage_ids": ["root", "tip", "root"], "model_config": {"provider": "must-not-use-root"}},
+				{"id": "other", "_lineage_ids": ["other", "absent"]},
+			])
 		# Each distinct segment is read once, a repeated one included.
 		self.assertEqual(sorted(call.args[0] for call in fetch.call_args_list), ["absent", "other", "root", "tip"])
 		self.assertIsNone(rows[0]["provider"])
@@ -222,15 +231,14 @@ class CardMetadata(unittest.TestCase):
 			for sid in ("one", "two", "three"):
 				db.create_session(sid, "cli")
 				db.update_token_counts(sid, input_tokens=3, model="fixture", billing_provider="openai-codex")
-		with closing(SessionDB(self.db_path, read_only=True)) as db:
+		with closing(NativeStore(self.db_path)) as db:
 			queries = []
-			assert db._conn is not None
-			db._conn.set_trace_callback(queries.append)
-			rows = backend.card_rows(db, db.list_sessions_rich(compact_rows=True))
+			db.connection.set_trace_callback(queries.append)
+			rows = backend.card_rows(db, db.list_sessions_rich(limit=20))
 			self.assertTrue(all(row["provider"] == "openai-codex" for row in rows))
 			self.assertEqual(sum("FROM session_model_usage" in sql for sql in queries), 1)
 		with closing(sqlite3.connect(":memory:")) as connection:
-			rows = backend.card_rows(SimpleNamespace(_conn=connection), [{"id": "legacy", "model": "openai/not-evidence"}])
+			rows = backend.card_rows(SimpleNamespace(connection=connection), [{"id": "legacy", "model": "openai/not-evidence"}])
 			self.assertIsNone(rows[0]["provider"])
 
 	def test_explicit_tip_providers_skip_billing_reads_including_compressed_cards(self):
@@ -245,12 +253,11 @@ class CardMetadata(unittest.TestCase):
 				db.record_auxiliary_usage(sid, "vision", model="fixture-vision", billing_provider="auxiliary")
 				if sid == "root":
 					db.end_session(sid, "compression")
-		with closing(SessionDB(self.db_path, read_only=True)) as db:
+		with closing(NativeStore(self.db_path)) as db:
 			queries = []
-			listed = db.list_sessions_rich(compact_rows=True)
+			listed = db.list_sessions_rich(limit=20)
 			# Native listing can read usage, so count only card enrichment's query; the aggregate on the projected root must not mask explicit tip config.
-			assert db._conn is not None
-			db._conn.set_trace_callback(queries.append)
+			db.connection.set_trace_callback(queries.append)
 			with patch.object(backend, "card_billing_providers", wraps=backend.card_billing_providers) as billing:
 				rows = {row["id"]: row for row in backend.card_rows(db, listed)}
 			billing.assert_not_called()
@@ -278,11 +285,10 @@ class CardMetadata(unittest.TestCase):
 				db.create_session(sid, "cli", model_config={"provider": provider})
 				if sid != "no-evidence":
 					db.update_token_counts(sid, input_tokens=2, output_tokens=3, model="fixture", billing_provider="route")
-		with closing(SessionDB(self.db_path, read_only=True)) as db:
-			listed = db.list_sessions_rich(compact_rows=True)
+		with closing(NativeStore(self.db_path)) as db:
+			listed = db.list_sessions_rich(limit=20)
 			queries = []
-			assert db._conn is not None
-			db._conn.set_trace_callback(queries.append)
+			db.connection.set_trace_callback(queries.append)
 			with patch.object(backend, "card_billing_providers", wraps=backend.card_billing_providers) as billing:
 				rows = {row["id"]: row for row in backend.card_rows(db, listed)}
 			ids = {"fallback-plain", "no-evidence", *(prefix + "-" + suffix
@@ -332,10 +338,11 @@ class CardMetadata(unittest.TestCase):
 		self.assertEqual(catalog.read_bytes(), b"not a sqlite database")
 
 	def test_zero_counts_are_known_and_negative_counts_are_unknown(self):
-		rows = backend.card_rows(SimpleNamespace(), [
-			{"id": "zero", "input_tokens": 0, "output_tokens": 0, "cwd": " "},
-			{"id": "bad", "input_tokens": -1, "output_tokens": True},
-		])
+		with store_double() as db:
+			rows = backend.card_rows(db, [
+				{"id": "zero", "input_tokens": 0, "output_tokens": 0, "cwd": " "},
+				{"id": "bad", "input_tokens": -1, "output_tokens": True},
+			])
 		self.assertEqual(rows[0]["total_tokens"], 0)
 		self.assertTrue(rows[0]["project"]["is_home"])
 		for field in ("input_tokens", "output_tokens", "total_tokens"):
@@ -349,7 +356,9 @@ class CardMetadata(unittest.TestCase):
 		token = set_hermes_home_override(str(self.root))
 		self.addCleanup(reset_hermes_home_override, token)
 		actor = SessionActor("owner", str(self.root), frozenset({"session:read"}), "http")
-		authority = SimpleNamespace(profile_id=str(self.root), db=SimpleNamespace(db_path=self.db_path))
+		from persistence_assembly import profile_scope
+
+		authority = SimpleNamespace(profile_id=str(self.root), persistence=SimpleNamespace(scope=profile_scope(home=self.root)))
 		async def active(*args):
 			return {"sessions": [{"id": "human", "source": "cli"}, {"id": "job", "source": "cron"}]}
 		with patch("hermes_cli.web_server_sessions._session_mutation_context", return_value=(authority, actor)), patch("gateway.session_active_list.active_list", active):

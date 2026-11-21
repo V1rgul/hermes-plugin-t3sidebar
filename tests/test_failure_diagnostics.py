@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from hermes_state_runtime import RuntimeStoreError
+from persistence import AuthorityRefusal
 
 from test_backend import backend
 # Only the module objects: importing their TestCase classes here would run those tests twice under discovery.
@@ -70,9 +70,9 @@ class SubagentDiagnostics(unittest.TestCase):
 	count = subagent_fixture.AuthoritySubagents.count
 
 	def test_failed_authority_projection_stays_unknown_and_names_its_class(self):
-		with self.assertLogs(backend.__name__, "DEBUG") as logs, patch.object(subagent_fixture.ancillary, "read", AsyncMock(side_effect=RuntimeStoreError(SECRET))):
+		with self.assertLogs(backend.__name__, "DEBUG") as logs, patch.object(subagent_fixture.ancillary, "read", AsyncMock(side_effect=AuthorityRefusal(SECRET))):
 			self.assertIsNone(self.count())
-		self.assertIn("Subagent projection unavailable (RuntimeStoreError)", [record.getMessage() for record in logs.records])
+		self.assertIn("Subagent projection unavailable (AuthorityRefusal)", [record.getMessage() for record in logs.records])
 		self.assertNotIn(SECRET, "\n".join(logs.output))
 
 

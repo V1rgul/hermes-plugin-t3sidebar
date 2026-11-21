@@ -385,7 +385,7 @@ class BackendTests(unittest.TestCase):
 		with patch("hermes_constants.get_hermes_home", return_value=Path(self.temp.name)):
 			self.assertEqual(backend.default_state_path(), self.path)
 
-	def test_session_store_opens_read_only_through_public_session_db(self):
+	def test_session_store_opens_read_only_through_public_storage_interface(self):
 		from fastapi import HTTPException
 
 		path = Path(self.temp.name) / "state.db"
@@ -397,7 +397,7 @@ class BackendTests(unittest.TestCase):
 			with closing(backend.open_session_db("default", read_only=True)) as db:
 				self.assertEqual(db.get_session("s1")["source"], "cli")
 				with self.assertRaises(sqlite3.OperationalError):
-					db._conn.execute("DELETE FROM sessions")
+					db.connection.execute("DELETE FROM sessions")
 		self.assertEqual(path.read_bytes(), before)
 		# A store Hermes never created, or a file it never initialized, is one generic 503.
 		for missing in (Path(self.temp.name) / "absent.db", Path(self.temp.name) / "empty.db"):
@@ -417,7 +417,7 @@ class BackendTests(unittest.TestCase):
 				imports.update(alias.name for alias in node.names)
 			elif isinstance(node, ast.ImportFrom):
 				imports.add(node.module)
-		self.assertEqual(imports, {"asyncio", "dataclasses", "importlib.util", "json", "logging", "math", "os", "pathlib", "re", "sqlite3", "sys", "threading", "time", "typing", "types", "uuid", "fastapi", "pydantic", "hermes_constants", "hermes_state", "hermes_state_mutation_retirement", "agent.voice_turn_route", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "hermes_cli.web_models", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.session_notifications", "tui_gateway.ws_legacy_fallback"})
+		self.assertEqual(imports, {"asyncio", "dataclasses", "importlib.util", "json", "logging", "math", "os", "pathlib", "re", "sqlite3", "sys", "threading", "time", "typing", "types", "uuid", "fastapi", "pydantic", "hermes_constants", "persistence_assembly", "agent.voice_turn_route", "hermes_cli.projects_db", "hermes_cli.web_server_sessions", "hermes_cli.web_routers.sessions", "hermes_cli.web_models", "gateway.session_active_list", "gateway.session_ancillary", "gateway.session_contract", "tui_gateway.session_notifications", "tui_gateway.ws_legacy_fallback"})
 		# Native reads remain read-only, and deletion and stored rename delegate to the sanctioned HTTP endpoints. Drafts live in the plugin's own store: no native row is written for them.
 		self.assertNotIn("import tui_gateway.server", source)
 		self.assertNotIn("_ensure_session_db_row", source)
@@ -440,9 +440,17 @@ class BackendTests(unittest.TestCase):
 		self.assertNotIn("read_only=False", source)
 		self.assertIn("read_only=True", source)
 		self.assertNotIn("ATTACH", source)
-		# The served profile's store is named in one place only and opened through the public read-only SessionDB.
+		# The served profile's store is named in one place only and opened through the plugin's read-only native reader.
 		self.assertEqual(source.count('"state.db"'), 1)
-		self.assertIn("SessionDB(db_path=path, read_only=True)", source)
+		self.assertIn("native_store.NativeStore(path)", source)
+		# That reader opens the store through the storage interface's reader, which never creates, migrates or repairs it, and its own SQLite connection read-only.
+		reader = (ROOT / "native_store.py").read_text()
+		reader_imports = {alias.name for node in ast.walk(ast.parse(reader)) if isinstance(node, ast.Import) for alias in node.names}
+		reader_imports |= {node.module for node in ast.walk(ast.parse(reader)) if isinstance(node, ast.ImportFrom)}
+		self.assertEqual(reader_imports, {"contextlib", "pathlib", "sqlite3", "persistence_assembly", "persistence.conversation.sessions"})
+		self.assertIn("open_persistence_reader(self.db_path)", reader)
+		self.assertNotIn("open_persistence(", reader)
+		self.assertIn('"?mode=ro"', reader)
 		# A native history sentinel is untouched by all supported operations.
 		history = Path(self.temp.name) / "sessions/example.jsonl"
 		history.parent.mkdir()

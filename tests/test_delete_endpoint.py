@@ -15,13 +15,14 @@ from unittest.mock import AsyncMock, patch
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
-from hermes_state import SessionDB
-import hermes_state_runtime as runtime
 import hermes_cli.web_server_sessions as native_sessions
 from gateway.session_contract import SessionActor
 from hermes_cli.web_server_dashboard import _plugin_route_secret_scope
+from persistence.workers.executions import WorkerKind
 from test_backend import backend
-from native_fixture import native_fixture
+from native_fixture import NativeWriter, native_fixture
+
+NativeStore = backend.native_store.NativeStore
 
 PREFIX = "/api/plugins/hermes-t3sidebar"
 BODY = {"request_id": "confirmed-delete", "expected_revision": 0, "expected_generation": 0}
@@ -54,7 +55,8 @@ class DeleteEndpoint(unittest.TestCase):
             state="absent", endpoint=None, reason_code=None, detail=None))
         self.owner_forward = self.start_patch("hermes_cli.web_server_sessions._mutate_via_gateway_owner",
                                              new=AsyncMock(wraps=native_sessions._mutate_via_gateway_owner))
-        self.emit = self.start_patch("hermes_state_common.emit_session_deleted")
+        # Hermes runs the deletion hooks after a committed delete; never load this profile's real lifecycle plugins from a scratch store.
+        self.emit = self.start_patch("session_retention.emit_session_deleted")
         self.app = FastAPI()
 
         @self.app.middleware("http")
@@ -94,7 +96,7 @@ class DeleteEndpoint(unittest.TestCase):
                                 json=BODY if body is None else body)
 
     def exists(self, sid, home=None):
-        with closing(SessionDB((home or self.home) / "state.db", read_only=True)) as db:
+        with closing(NativeStore((home or self.home) / "state.db")) as db:
             return db.get_session(sid) is not None
 
     def test_native_http_delete_cleanup_receipt_exact_retry_and_profile_collision(self):
@@ -144,7 +146,7 @@ class DeleteEndpoint(unittest.TestCase):
         self.emit.assert_not_called()
 
     def test_native_lineage_delete_takes_compression_and_delegates_not_branch(self):
-        with closing(SessionDB(self.home / "state.db")) as db:
+        with closing(NativeWriter(self.home / "state.db")) as db:
             db.end_session("target", "compression")
             db.create_session("tip", "desktop", parent_session_id="target")
             db.create_session("delegate", "cli", parent_session_id="tip", model_config={"_delegate_from": "tip"})
@@ -159,25 +161,25 @@ class DeleteEndpoint(unittest.TestCase):
     def test_busy_descendant_admission_worker_and_compression_are_native_refusals(self):
         for kind in ("queued", "started", "unknown", "worker", "compression", "lease"):
             sid, child = "busy-" + kind, "child-" + kind
-            with closing(SessionDB(self.home / "state.db")) as db:
+            with closing(NativeWriter(self.home / "state.db")) as db:
                 db.create_session(sid, "desktop")
                 db.create_session(child, "cli", parent_session_id=sid, model_config={"_delegate_from": sid})
-                epoch = runtime.begin_runtime_epoch(db, instance_id="scratch-owner")
+                epoch = db.store.runtime.begin_epoch(instance_id="scratch-owner")
                 if kind == "compression":
                     self.assertTrue(db.try_acquire_compression_lock(child, "fixture-holder"))
                 elif kind == "lease":
                     self.assertTrue(db.try_acquire_session_turn_lease(child, "fixture-holder"))
                 elif kind == "worker":
-                    runtime.register_worker_execution(db, epoch=epoch, execution_id="fixture-worker", session_id=child,
-                                                      generation=0, kind="child", adoption_secret="synthetic")
+                    db.store.worker_executions.register(epoch=epoch, execution_id="fixture-worker", session_id=child,
+                                                        generation=0, kind=WorkerKind("child"), adoption_secret="synthetic")
                 else:
-                    runtime.admit_session_input(db, epoch=epoch, principal_id="fixture", session_id=child,
-                                                request_id="input-" + kind, payload={"text": "synthetic"})
+                    db.store.admissions.admit(epoch=epoch, principal_id="fixture", session_id=child,
+                                              request_id="input-" + kind, payload={"text": "synthetic"})
                     if kind in ("started", "unknown"):
-                        runtime.claim_session_input(db, epoch=epoch, session_id=child)
+                        db.store.admissions.claim(epoch=epoch, session_id=child)
                     if kind == "unknown":
-                        epoch = runtime.begin_runtime_epoch(db, instance_id="scratch-replacement")
-                        runtime.recover_session_inputs(db, epoch=epoch)
+                        epoch = db.store.runtime.begin_epoch(instance_id="scratch-replacement")
+                        db.store.admissions.recover(epoch=epoch)
             response = self.post(sid)
             self.assertEqual(response.status_code, 409, response.text)
             self.assertIn(response.json()["detail"], {"session_busy", "unknown_execution"})
@@ -263,13 +265,13 @@ class DeleteEndpoint(unittest.TestCase):
                                 json={"title": "  Renamed   archive "} if body is None else body)
 
     def title(self, sid="target", home=None):
-        with closing(SessionDB((home or self.home) / "state.db", read_only=True)) as db:
+        with closing(NativeStore((home or self.home) / "state.db")) as db:
             row = db.get_session(sid)
             assert row is not None
             return row["title"]
 
     def test_stored_rename_of_archived_history_uses_native_http_and_exact_readback(self):
-        with closing(SessionDB(self.home / "state.db")) as db:
+        with closing(NativeWriter(self.home / "state.db")) as db:
             db.set_session_archived("target", True, notify=False)
         response = self.rename()
         self.assertEqual(response.status_code, 200, response.text)
@@ -277,7 +279,7 @@ class DeleteEndpoint(unittest.TestCase):
         # Core's sanitized title is what is stored and reported.
         self.assertEqual(response.json(), {"ok": True, "profile": self.profile, "session_id": "target", "title": "Renamed archive"})
         self.assertEqual(self.title("target"), "Renamed archive")
-        with closing(SessionDB(self.home / "state.db", read_only=True)) as db:
+        with closing(NativeStore(self.home / "state.db")) as db:
             row = db.get_session("target")
             assert row is not None
             self.assertTrue(row["archived"])
@@ -321,10 +323,10 @@ class DeleteEndpoint(unittest.TestCase):
 
     def test_authority_backed_deletion_uses_native_owner_not_offline_writer(self):
         from gateway.session_authority import LiveSession, SessionAuthority
-        with closing(SessionDB(self.home / "state.db")) as db:
-            epoch = runtime.begin_runtime_epoch(db, instance_id="scratch-owner")
+        with closing(NativeWriter(self.home / "state.db")) as db:
+            epoch = db.store.runtime.begin_epoch(instance_id="scratch-owner")
             authority = SessionAuthority(SimpleNamespace(_draining=False), profile_id=str(self.home),
-                                         instance_id="scratch-owner", db=db, epoch=epoch)
+                                         instance_id="scratch-owner", persistence=db.store, epoch=epoch)
             authority.sessions["target"] = LiveSession(None, "fixture-route")
             self.app.state.session_authority = authority
             with patch("hermes_cli.web_server_sessions._mutate_offline_store", side_effect=AssertionError("no second writer")):
@@ -349,19 +351,20 @@ class DeleteEndpoint(unittest.TestCase):
         from hermes_cli import projects_db
         with closing(projects_db.connect(self.home / "projects.db")) as catalog:
             project = projects_db.create_project(catalog, name="Chosen project", folders=["/chosen"], icon="tree", color="#123456")
-        with closing(SessionDB(self.home / "state.db")) as db:
+        with closing(NativeWriter(self.home / "state.db")) as db:
             db.update_session_cwd("target", "/chosen/sub", git_branch="feature", git_repo_root="/chosen")
             db.end_session("target", "compression")
             db.create_session("tip", "desktop", parent_session_id="target", cwd="/different-tip")
             db.set_session_title("target", "title-alias")
             # The legacy move's exact-row native write does not move the tip.
             db.update_session_cwd("target", "/chosen/sub", "feature", "/chosen", replace_git_meta=True)
-            projected = next(row for row in db.list_sessions_rich(limit=20, compact_rows=True)
+        with NativeStore(self.home / "state.db") as reader:
+            projected = next(row for row in reader.list_sessions_rich(limit=20)
                              if row.get("_lineage_root_id") == "target")
             self.assertEqual(projected["cwd"], "/different-tip")
         before = {path: path.read_bytes() for path in (self.home / "state.db", self.home / "projects.db")}
         # One exact read through Hermes's public get_session; only allowlisted fields reach the response.
-        with patch.object(SessionDB, "get_session", autospec=True, side_effect=SessionDB.get_session) as reads:
+        with patch.object(NativeStore, "get_session", autospec=True, side_effect=NativeStore.get_session) as reads:
             response = self.client.get(f"{PREFIX}/sessions/target/workspace?profile=exact-profile&profile=exact-profile")
             self.assertEqual([call.args[1] for call in reads.call_args_list], ["target"])
             self.assertEqual(response.status_code, 200, response.text)
@@ -385,7 +388,7 @@ class DeleteEndpoint(unittest.TestCase):
     def test_archived_pin_snooze_refused_without_metadata_writes_or_native_restore(self):
         metadata = self.home / "plugin-data/hermes-t3sidebar/state.sqlite3"
         url = f"{PREFIX}/sessions/target?profile=exact-profile"
-        with closing(SessionDB(self.home / "state.db")) as db:
+        with closing(NativeWriter(self.home / "state.db")) as db:
             db.set_session_archived("target", True, notify=False)
         for body in ({"action": "pin"}, {"action": "snooze", "wake_at": 4000000000}):
             response = self.client.post(url, json=body)
@@ -405,7 +408,7 @@ class DeleteEndpoint(unittest.TestCase):
                      {"action": "ack_done", "done_token": "turn"}):
             response = self.client.post(url, json=body)
             self.assertEqual(response.status_code, 200, response.text)
-            with closing(SessionDB(self.home / "state.db", read_only=True)) as db:
+            with closing(NativeStore(self.home / "state.db")) as db:
                 row = db.get_session("target")
                 assert row is not None
                 self.assertTrue(row["archived"])

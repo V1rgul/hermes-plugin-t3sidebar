@@ -9,10 +9,11 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
-from hermes_state import SessionDB
 
 from test_backend import backend
-from native_fixture import native_fixture
+from native_fixture import NativeWriter, native_fixture
+
+NativeStore = backend.native_store.NativeStore
 
 
 BODY = SimpleNamespace(request_id="confirmed-delete", expected_revision=0, expected_generation=0)
@@ -30,7 +31,7 @@ class DeleteVerificationTests(unittest.TestCase):
 		def open_db(profile, *, read_only=True):
 			assert profile == "default" and read_only is True
 			self.opened += 1
-			return SessionDB(self.db_path, read_only=True)
+			return NativeStore(self.db_path)
 		for name, value in (("open_session_db", open_db), ("native_control_guard", lambda *args: None)):
 			started = patch.object(backend, name, value)
 			started.start()
@@ -49,12 +50,12 @@ class DeleteVerificationTests(unittest.TestCase):
 	def test_any_returned_id_still_present_fails_verification(self):
 		for survivor in IDS:
 			with self.subTest(survivor=survivor):
-				with closing(SessionDB(self.db_path)) as db:
+				with closing(NativeWriter(self.db_path)) as db:
 					db.create_session(survivor, "cli")
 				with self.assertRaises(HTTPException) as raised:
 					self.delete(IDS)
 				self.assertEqual((raised.exception.status_code, raised.exception.detail), (503, "native_delete_verification_failed"))
-				with closing(SessionDB(self.db_path)) as db:
+				with closing(NativeWriter(self.db_path)) as db:
 					db.delete_session(survivor)
 
 

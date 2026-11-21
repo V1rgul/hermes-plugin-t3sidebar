@@ -7,11 +7,12 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from hermes_state import SessionDB
-import hermes_state_runtime as runtime
+from persistence.authority.runtime import Delete
 
 from test_backend import backend
-from native_fixture import native_fixture
+from native_fixture import NativeWriter, native_fixture
+
+NativeStore = backend.native_store.NativeStore
 
 
 class DeleteSnapshots(unittest.TestCase):
@@ -19,7 +20,7 @@ class DeleteSnapshots(unittest.TestCase):
 		self.temp = tempfile.TemporaryDirectory(prefix="t3-delete-snapshot-")
 		self.addCleanup(self.temp.cleanup)
 		self.path = Path(self.temp.name)
-		self.db_path = self.path / "native.sqlite3"
+		self.db_path = self.path / "state.db"
 		with closing(native_fixture(self.db_path)) as db:
 			db.create_session("empty", "desktop", system_prompt="PRIVATE TEST PROMPT")
 			db.create_session("empty-longer", "desktop")
@@ -34,7 +35,7 @@ class DeleteSnapshots(unittest.TestCase):
 	def open_native(self, profile, *, read_only):
 		self.assertEqual(profile, "exact-profile")
 		self.assertTrue(read_only)
-		return SessionDB(self.db_path, read_only=True)
+		return NativeStore(self.db_path)
 
 	def test_exact_snapshot_is_allowlisted_read_only_and_distinguishes_absent(self):
 		before = self.db_path.read_bytes()
@@ -52,17 +53,21 @@ class DeleteSnapshots(unittest.TestCase):
 				self.assertEqual(self.client.get("/sessions/empty/snapshot?" + query).status_code, 422)
 
 	def test_canonical_delete_receipt_fences_replay_and_exact_absent_readback(self):
-		with closing(SessionDB(self.db_path)) as db:
-			epoch = runtime.begin_runtime_epoch(db, instance_id="scratch-owner")
+		with closing(NativeWriter(self.db_path)) as db:
+			epoch = db.store.runtime.begin_epoch(instance_id="scratch-owner")
 			before = self.client.get("/sessions/empty/snapshot").json()
 			def delete():
-				return runtime.mutate_runtime_session(db, epoch=epoch, principal_id="scratch-human", session_id="empty", request_id="confirmed-delete", expected_revision=before["runtime_revision"], expected_generation=before["runtime_generation"], operation="delete", payload={})
-			# Never load this profile's real lifecycle plugins from a scratch DB.
-			with patch("hermes_state_common.emit_session_deleted") as emit:
-				receipt = delete()
-				replay = delete()
-			self.assertEqual(emit.call_count, 1)
-			self.assertEqual(receipt, replay)
+				# The scratch rows carry no owner stamp, so no owner rule (host data Hermes builds from its config) is read.
+				return db.store.runtime.mutate(epoch, principal_id="scratch-human", session_id="empty", request_id="confirmed-delete", expected_revision=before["runtime_revision"], expected_generation=before["runtime_generation"], command=Delete(), media_root=str(self.path / "media"), owner=None)
+			first = delete()
+			replay = delete()
+			# Only the first commit deleted anything: Hermes runs the deletion hooks for ``gone`` alone, so a replay cannot fire them twice.
+			self.assertFalse(first.replayed)
+			self.assertEqual(first.gone.session_ids, ("empty",))
+			self.assertTrue(replay.replayed)
+			self.assertIsNone(replay.gone)
+			receipt = first.result
+			self.assertEqual(receipt, replay.result)
 			self.assertEqual(receipt["session_id"], "empty")
 			self.assertEqual(receipt["operation"], "delete")
 			self.assertEqual(receipt["revision"], before["runtime_revision"] + 1)

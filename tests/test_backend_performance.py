@@ -1,7 +1,7 @@
 """Bounded contention regressions; synthetic registries and scratch SQLite only."""
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 from pathlib import Path
 import sqlite3
@@ -12,6 +12,46 @@ from unittest.mock import patch
 
 from test_backend import backend
 from native_fixture import native_fixture
+
+NativeStore = backend.native_store.NativeStore
+
+
+def closed(reader):
+	"""Whether a reader released both its storage-interface handle and its own SQLite connection."""
+	try:
+		reader.store.sessions
+	except RuntimeError:
+		pass
+	else:
+		return False
+	if reader._connection is not None:
+		try:
+			reader._connection.execute("SELECT 1")
+		except sqlite3.ProgrammingError:
+			return True
+		return False
+	return True
+
+
+@contextmanager
+def counted_listings(path, after_listing=None):
+	"""Serve the plugin's store reads from ``path`` and record every native rich listing as ``(request, id_query)``, request being the index of the reader the listing used. Each listing is one full native rich projection (one recursive lineage seed), the unit of work these tests bound. ``after_listing(calls)`` runs after each listing returns. Every reader opened must be closed when the block ends."""
+	native_list = NativeStore.list_sessions_rich
+	readers, calls = [], []
+	def open_db(profile, *, read_only):
+		assert profile == "exact-profile" and read_only is True
+		reader = NativeStore(path)
+		readers.append(reader)
+		return reader
+	def listing(reader, **options):
+		page = native_list(reader, **options)
+		calls.append((readers.index(reader), options.get("id_query")))
+		if after_listing is not None:
+			after_listing(calls)
+		return page
+	with patch.object(backend, "open_session_db", open_db), patch.object(NativeStore, "list_sessions_rich", autospec=True, side_effect=listing):
+		yield calls
+	assert readers and all(closed(reader) for reader in readers), "every native reader is closed"
 
 
 class MetadataReadPerformance(unittest.TestCase):
@@ -89,29 +129,19 @@ class MetadataReadPerformance(unittest.TestCase):
 
 class NativeAliasPerformance(unittest.TestCase):
 	def test_real_native_projection_of_loaded_aliases_has_one_rich_seed(self):
-		from hermes_state import SessionDB
 		with tempfile.TemporaryDirectory(prefix="flow-alias-performance-") as temp:
-			path = Path(temp) / "native.sqlite3"
+			path = Path(temp) / "state.db"
 			# Seed only synthetic compact session columns, avoiding lifecycle hooks.
 			with closing(native_fixture(path)) as db:
-				assert db._conn is not None
 				with db._conn:
 					for i in range(20):
 						db._conn.execute("INSERT INTO sessions(id, source, started_at, end_reason) VALUES (?, 'cli', ?, 'compression')", (f"root-{i}", i + 1))
 						db._conn.execute("INSERT INTO sessions(id, source, started_at, parent_session_id) VALUES (?, 'cli', ?, ?)", (f"tip-{i}", i + 100, f"root-{i}"))
-			statements = []
-			def open_db(profile, *, read_only):
-				self.assertEqual(profile, "exact-profile")
-				self.assertTrue(read_only)
-				db = SessionDB(path, read_only=read_only)
-				assert db._conn is not None
-				db._conn.set_trace_callback(statements.append)
-				return db
 			before = path.read_bytes()
-			with patch.object(backend, "open_session_db", open_db):
+			with counted_listings(path) as calls:
 				value = backend.native_sessions("exact-profile", 0, 500, tuple(f"tip-{i}" for i in range(20)))
 			self.assertEqual(len(value["sessions"]), 20)
-			self.assertEqual(sum("WITH RECURSIVE chain(root_id, cur_id)" in sql for sql in statements), 1)
+			self.assertEqual(calls, [(0, None)])
 			self.assertEqual(path.read_bytes(), before)
 
 
@@ -119,10 +149,9 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 	@staticmethod
 	def exact_backfill_reference(db, limit, organized_ids):
 		"""Pre-optimization exact-ID path (fixtures stay below the lookahead threshold)."""
-		from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+		from persistence.conversation.sessions import INTERNAL_LISTING_SOURCES
 
-		options = dict(compact_rows=True, order_by_last_active=True, include_archived=False,
-			include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
+		options = dict(include_archived=False, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
 		page = db.list_sessions_rich(limit=limit, offset=0, archived_only=False, **options)
 		rows = {row.get("_lineage_root_id") or row["id"]: row for row in page}
 		covered = {sid for row in page for sid in
@@ -147,14 +176,13 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 			"limit": limit, "has_more": len(page) == limit}
 
 	def test_short_and_full_pages_match_exact_backfill_with_native_visibility_and_aliases(self):
-		from hermes_state import SessionDB
-		from hermes_state_local import POLICY_PREFIX
-		from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+		from persistence.conversation.sessions import INTERNAL_LISTING_SOURCES
+		# The SQLite store's own key for a local session's launch-policy receipt (persistence/authority/bindings.py names its format); no public constant carries it.
+		from persistence.sqlite.conversation._store.local import POLICY_PREFIX
 
 		with tempfile.TemporaryDirectory(prefix="flow-short-organized-") as temp:
-			path = Path(temp) / "native.sqlite3"
+			path = Path(temp) / "state.db"
 			with closing(native_fixture(path)) as db:
-				assert db._conn is not None
 				with db._conn:
 					for sid, source, started, parent, reason, archived, hidden in [
 						("recent", "cli", 1000, None, None, 0, 0),
@@ -181,122 +209,116 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 			self.assertLess(len(organized), 32)
 			before = path.read_bytes()
 			for limit in (1, 3, 100, 500):
-				with self.subTest(limit=limit), closing(SessionDB(path, read_only=True)) as db:
+				with self.subTest(limit=limit), closing(NativeStore(path)) as db:
 					expected = self.exact_backfill_reference(db, limit, organized)
-					statements = []
-					def open_db(profile, *, read_only):
-						self.assertTrue(read_only)
-						reader = SessionDB(path, read_only=read_only)
-						assert reader._conn is not None
-						reader._conn.set_trace_callback(statements.append)
-						return reader
-					with patch.object(backend, "open_session_db", open_db):
+					with counted_listings(path) as calls:
 						actual = backend.native_sessions("exact-profile", 0, limit, organized)
 					self.assertEqual(actual, expected)
 					self.assertEqual({row["id"] for row in actual["sessions"]}, {"recent", "tip", "reset-tip"})
-					seeds = [sql for sql in statements if "WITH RECURSIVE chain(root_id, cur_id)" in sql]
 					if limit > 3:
-						self.assertEqual(len(seeds), 1, "an exhausted native page cannot recover any organized ID")
+						self.assertEqual(calls, [(0, None)], "an exhausted native page cannot recover any organized ID")
 					else:
-						self.assertGreater(len(seeds), 1, "full pages must keep exact-ID fallback")
+						self.assertTrue(any(query for _, query in calls), "full pages must keep exact-ID fallback")
 			self.assertEqual(path.read_bytes(), before)
 
 	def test_short_page_snapshot_is_request_local_during_concurrent_native_mutation(self):
-		from hermes_state import SessionDB
-
 		with tempfile.TemporaryDirectory(prefix="flow-short-snapshot-") as temp:
-			path = Path(temp) / "native.sqlite3"
+			path = Path(temp) / "state.db"
 			with closing(native_fixture(path)) as db:
-				assert db._conn is not None
 				with db._conn:
 					db._conn.execute("INSERT INTO sessions(id, source, started_at, end_reason, input_tokens, output_tokens) VALUES ('root', 'cli', 1, 'compression', 2, 3)")
 					db._conn.execute("INSERT INTO sessions(id, source, started_at, parent_session_id, input_tokens, output_tokens) VALUES ('tip', 'cli', 2, 'root', 5, 7)")
 					db._conn.execute("INSERT INTO sessions(id, source, started_at, archived) VALUES ('restored', 'cli', 3, 1)")
-			with closing(SessionDB(path, read_only=True)) as db:
-				expected = self.exact_backfill_reference(db, 100, ("restored", "new"))
-			native_list = SessionDB.list_sessions_rich
-			readers, statements = [], []
-			def open_db(profile, *, read_only):
-				reader = SessionDB(path, read_only=read_only)
-				assert reader._conn is not None
-				reader._conn.set_trace_callback(statements.append)
-				readers.append(reader)
-				return reader
-			def mutate_after_page(reader, **options):
-				page = native_list(reader, **options)
+			with closing(NativeStore(path)) as db:
+				before = self.exact_backfill_reference(db, 100, ("restored", "new"))
+			self.assertEqual(before["sessions"][0]["total_tokens"], 17)
+			def mutate_after_first_page(calls):
 				# A separate WAL writer commits after native admission but before organized backfill/segment enrichment; never touch a user store.
-				if len(readers) == 1 and "id_query" not in options:
+				if calls == [(0, None)]:
 					with closing(sqlite3.connect(path)) as writer, writer:
 						writer.execute("UPDATE sessions SET archived = 1 WHERE id = 'root'")
 						writer.execute("UPDATE sessions SET input_tokens = 500 WHERE id = 'tip'")
 						writer.execute("UPDATE sessions SET archived = 0 WHERE id = 'restored'")
 						writer.execute("INSERT INTO sessions(id, source, started_at) VALUES ('new', 'cli', 4)")
-				return page
-			with patch.object(backend, "open_session_db", open_db), patch.object(SessionDB, "list_sessions_rich", mutate_after_page):
+			with counted_listings(path, mutate_after_first_page) as calls:
 				first = backend.native_sessions("exact-profile", 0, 100, ("restored", "new"))
 				second = backend.native_sessions("exact-profile", 0, 100, ("root", "tip", "restored", "new"))
-			self.assertEqual(first, expected)
-			self.assertEqual(first["sessions"][0]["total_tokens"], 17)
+			with closing(NativeStore(path)) as db:
+				after = self.exact_backfill_reference(db, 100, ("restored", "new"))
+			self.assertEqual({row["id"] for row in after["sessions"]}, {"restored", "new"})
+			# One generation either way: the pre-mutation snapshot where the backend pins one read transaction, else the listing read again once the snapshot reports the write; never the old page with the new rows' counters or a lost organized row.
+			self.assertIn(first, (before, after))
+			first_listings = [query for request, query in calls if request == 0]
+			self.assertEqual(first_listings, [None] if first == before else [None, None])
 			self.assertEqual({row["id"] for row in second["sessions"]}, {"restored", "new"})
-			self.assertEqual(sum("WITH RECURSIVE chain(root_id, cur_id)" in sql for sql in statements), 2)
-			self.assertTrue(all(reader._conn is None for reader in readers))
+			self.assertEqual([query for request, query in calls if request == 1], [None])
+
+	def test_a_write_during_the_listing_makes_its_short_page_retry_with_exact_ids(self):
+		with tempfile.TemporaryDirectory(prefix="flow-snapshot-retry-") as temp:
+			path = Path(temp) / "state.db"
+			with closing(native_fixture(path)) as db:
+				db._conn.execute("INSERT INTO sessions(id, source, started_at) VALUES ('recent', 'cli', 1)")
+			# The read-only reader pins no read transaction, so its snapshot proves one generation only while no other connection committed.
+			with closing(NativeStore(path)) as reader:
+				with reader.read_snapshot() as check:
+					reader.list_sessions_rich(limit=10)
+					self.assertTrue(check())
+				with reader.read_snapshot() as check:
+					reader.list_sessions_rich(limit=10)
+					with closing(sqlite3.connect(path)) as writer, writer:
+						writer.execute("UPDATE sessions SET title = 'renamed' WHERE id = 'recent'")
+					self.assertFalse(check())
+			# Undisturbed, the short page's exhaustion stands in for the exact-ID search of an organized id it does not hold.
+			with counted_listings(path) as calls:
+				quiet = backend.native_sessions("exact-profile", 0, 100, ("absent",))
+			self.assertEqual(calls, [(0, None)])
+			self.assertEqual([row["id"] for row in quiet["sessions"]], ["recent"])
+			def write_after_first_page(calls):
+				if calls == [(0, None)]:
+					with closing(sqlite3.connect(path)) as writer, writer:
+						writer.execute("INSERT INTO sessions(id, source, started_at) VALUES ('new', 'cli', 2)")
+			# A commit between the page and the snapshot check voids that exhaustion: the listing is read again and the organized id searched exactly.
+			with counted_listings(path, write_after_first_page) as calls:
+				busy = backend.native_sessions("exact-profile", 0, 100, ("absent",))
+			self.assertEqual(calls, [(0, None), (0, None), (0, "absent")])
+			self.assertEqual({row["id"] for row in busy["sessions"]}, {"recent", "new"})
 
 	def test_empty_short_page_with_many_retained_archive_ids_has_one_rich_seed(self):
-		from hermes_state import SessionDB
-
 		with tempfile.TemporaryDirectory(prefix="flow-empty-organized-") as temp:
-			path = Path(temp) / "native.sqlite3"
+			path = Path(temp) / "state.db"
 			with closing(native_fixture(path)) as db:
-				assert db._conn is not None
 				with db._conn:
 					db._conn.executemany("INSERT INTO sessions(id, source, started_at, archived) VALUES (?, 'cli', 1, 1)",
 						[(f"archived-{i}",) for i in range(500)])
-			statements = []
-			def open_db(profile, *, read_only):
-				reader = SessionDB(path, read_only=read_only)
-				assert reader._conn is not None
-				reader._conn.set_trace_callback(statements.append)
-				return reader
 			before = path.read_bytes()
-			with patch.object(backend, "open_session_db", open_db):
+			with counted_listings(path) as calls:
 				value = backend.native_sessions("exact-profile", 0, 100, tuple(f"archived-{i}" for i in range(500)))
 			self.assertEqual(value, {"sessions": [], "offset": 0, "limit": 100, "has_more": False})
-			self.assertEqual(sum("WITH RECURSIVE chain(root_id, cur_id)" in sql for sql in statements), 1)
+			self.assertEqual(calls, [(0, None)])
 			self.assertEqual(path.read_bytes(), before)
 
 	def test_archived_organization_misses_use_bounded_native_page_not_per_id_queries(self):
-		from hermes_state import SessionDB
 		with tempfile.TemporaryDirectory(prefix="flow-organized-performance-") as temp:
-			path = Path(temp) / "native.sqlite3"
+			path = Path(temp) / "state.db"
 			with closing(native_fixture(path)) as db:
-				assert db._conn is not None
 				with db._conn:
 					for i in range(500):
 						for archived in (0, 1):
 							db._conn.execute("INSERT INTO sessions(id, source, started_at, archived) VALUES (?, 'cli', ?, ?)", (f"{'archive' if archived else 'regular'}-{i:04d}", i + 1, archived))
-			statements = []
-			def open_db(profile, *, read_only):
-				self.assertEqual(profile, "exact-profile")
-				self.assertTrue(read_only)
-				db = SessionDB(path, read_only=True)
-				assert db._conn is not None
-				db._conn.set_trace_callback(statements.append)
-				return db
 			before = path.read_bytes()
-			with patch.object(backend, "open_session_db", open_db):
+			with counted_listings(path) as calls:
 				value = backend.native_sessions("exact-profile", 0, 500, tuple(f"archive-{i:04d}" for i in range(500)))
 			self.assertEqual({row["id"] for row in value["sessions"]}, {f"regular-{i:04d}" for i in range(500)})
 			self.assertTrue(value["has_more"])
-			self.assertEqual(sum("WITH RECURSIVE chain(root_id, cur_id)" in sql for sql in statements), 2)
+			# The page and one bounded lookahead, no per-id search.
+			self.assertEqual(calls, [(0, None), (0, None)])
 			self.assertEqual(path.read_bytes(), before)
 
 
 	def test_lookahead_keeps_rich_archive_precedence_and_compression_aliases(self):
-		from hermes_state import SessionDB
 		with tempfile.TemporaryDirectory(prefix="flow-organized-lineage-") as temp:
-			path = Path(temp) / "native.sqlite3"
+			path = Path(temp) / "state.db"
 			with closing(native_fixture(path)) as db:
-				assert db._conn is not None
 				with db._conn:
 					for i in range(32):
 						root, tip = f"root-{i}", f"tip-{i}"
@@ -307,7 +329,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 					for source in ("cron", "tool", "kanban", "oneshot"):
 						db._conn.execute("INSERT INTO sessions(id, source, started_at) VALUES (?, ?, 500)", (source, source))
 			before = path.read_bytes()
-			with patch.object(backend, "open_session_db", side_effect=lambda profile, *, read_only: SessionDB(path, read_only=read_only)):
+			with patch.object(backend, "open_session_db", side_effect=lambda profile, *, read_only: NativeStore(path)):
 				value = backend.native_sessions("exact-profile", 0, 1, tuple(f"tip-{i}" for i in range(32)) + ("cron", "tool", "kanban", "oneshot"))
 			self.assertEqual({row["id"] for row in value["sessions"]}, {"recent"} | {f"tip-{i}" for i in range(0, 32, 2)})
 			self.assertTrue(all(not row["archived"] for row in value["sessions"]))
@@ -315,6 +337,7 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 
 	def test_full_lookahead_retains_exact_substring_pagination_beyond_it(self):
 		calls = []
+		test = self
 		class DB:
 			def list_sessions_rich(self, **options):
 				calls.append(options)
@@ -323,6 +346,10 @@ class OrganizedHistoryPerformance(unittest.TestCase):
 				if options["id_query"] == "old":
 					return [{"id": f"prefix-old-{i}"} for i in range(500)] if options["offset"] == 0 else [{"id": "old"}]
 				return []
+			@contextmanager
+			def read_snapshot(self):
+				# Full pages never stand in for exact-ID searches, so the listing never asks whether its reads saw one generation.
+				yield lambda: test.fail("a full page relied on its exhaustion")
 			def close(self):
 				pass
 		with patch.object(backend, "open_session_db", return_value=DB()), patch.object(backend, "card_rows", side_effect=lambda db, rows: list(rows)):

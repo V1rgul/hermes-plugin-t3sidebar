@@ -1,11 +1,11 @@
 #!/bin/sh
 # Real Hermes Webapp in a container, for testing the plugin against the actual Desktop renderer and gateway with invented data only.
 # Usage: tools/test-webapp/t3webapp.sh <setup|sync|seed|start|stop|login-url|browser|drive '<code>'|browser-reset|status|destroy|prune>
-# Settings (environment): T3WEBAPP_RUNTIME (podman when installed, else docker), T3WEBAPP_NAME (t3demo, or t3demo-<worktree> in a linked worktree), T3WEBAPP_DIR (~/t3sidebar-demo, or ~/t3sidebar-demo-worktrees/<worktree>), T3WEBAPP_PORT (19120, or the first free port from 19121 in a linked worktree), T3WEBAPP_CDP_PORT (the test browser's, T3WEBAPP_PORT + 1000), T3WEBAPP_IMAGE (docker.io/nousresearch/hermes-agent:v0.23.0).
+# Settings (environment): T3WEBAPP_RUNTIME (podman when installed, else docker), T3WEBAPP_NAME (t3demo, or t3demo-<worktree> in a linked worktree), T3WEBAPP_DIR (~/t3sidebar-demo, or ~/t3sidebar-demo-worktrees/<worktree>), T3WEBAPP_PORT (19120, or the first free port from 19121 in a linked worktree), T3WEBAPP_CDP_PORT (the test browser's, T3WEBAPP_PORT + 1000), T3WEBAPP_IMAGE (docker.io/nousresearch/hermes-agent:v0.23.3).
 set -eu
 
 RUNTIME=${T3WEBAPP_RUNTIME:-$(command -v podman >/dev/null 2>&1 && echo podman || echo docker)}
-IMAGE=${T3WEBAPP_IMAGE:-docker.io/nousresearch/hermes-agent:v0.23.0}
+IMAGE=${T3WEBAPP_IMAGE:-docker.io/nousresearch/hermes-agent:v0.23.3}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 PLUGIN=/opt/data/plugins/hermes-t3sidebar
@@ -254,6 +254,11 @@ setup)
 			echo "Recreating $NAME without a login; its data, test account included, is kept"
 			"$RUNTIME" rm -f "$NAME" >/dev/null
 			rm -f "$DIR/demo-login.env"
+			create
+		elif [ "$("$RUNTIME" container inspect -f '{{.Config.Image}}' "$NAME")" != "$IMAGE" ]; then
+			# The plugin requires a newer Hermes than the image the container was made from, and a container's image is fixed: recreate it on the same data, which the newer Hermes migrates at its first start.
+			echo "Recreating $NAME on $IMAGE; its data, test account included, is kept"
+			"$RUNTIME" rm -f "$NAME" >/dev/null
 			create
 		else
 			# Reuses the container and its data: only the plugin is refreshed and re-enabled.

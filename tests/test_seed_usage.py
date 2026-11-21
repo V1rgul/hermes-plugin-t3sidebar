@@ -1,6 +1,6 @@
 """tools/test-webapp/seed_usage.py on a scratch database: a re-seed replaces only the sessions the seed wrote.
 
-Hermes's SessionDB is replaced by a small recording stand-in over the same scratch file, so no Hermes store, home or plugin hook is reached.
+The seed's store adapter is replaced by a small recording stand-in over the same scratch file, so no Hermes store, home or plugin hook is reached.
 """
 
 from contextlib import closing
@@ -28,7 +28,7 @@ def unsynced(*args, **kwargs):
 
 
 class ScratchSessionDB:
-	"""The SessionDB calls the seed makes, applied to the scratch file it was opened on."""
+	"""The store calls the seed makes, applied to the scratch file it was opened on."""
 
 	opened: list[Path] = []
 	deleted: list[str] = []
@@ -36,6 +36,9 @@ class ScratchSessionDB:
 	def __init__(self, path):
 		ScratchSessionDB.opened.append(Path(path))
 		self.path = path
+
+	def close(self):
+		pass
 
 	def _write(self, sql, params):
 		with closing(unsynced(self.path)) as conn, conn:
@@ -71,7 +74,7 @@ class ReseedOwnership(unittest.TestCase):
 			# Hermes keeps session titles unique with this index.
 			conn.execute("CREATE UNIQUE INDEX idx_sessions_title_unique ON sessions(title) WHERE title IS NOT NULL")
 		ScratchSessionDB.opened, ScratchSessionDB.deleted = [], []
-		for patcher in (patch.object(seed, "DB_PATH", self.db), patch.object(seed, "OWNED", self.owned), patch.object(seed, "SessionDB", ScratchSessionDB),
+		for patcher in (patch.object(seed, "DB_PATH", self.db), patch.object(seed, "OWNED", self.owned), patch.object(seed, "SeedStore", ScratchSessionDB),
 				patch.object(seed, "sqlite3", SimpleNamespace(connect=unsynced)), patch("builtins.print")):
 			patcher.start()
 			self.addCleanup(patcher.stop)

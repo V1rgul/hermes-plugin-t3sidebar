@@ -1,4 +1,4 @@
-"""Native hook dispatch and isolated SessionDB fixtures, with no UI or network."""
+"""Native hook dispatch and isolated native store fixtures, with no UI or network."""
 
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
@@ -17,7 +17,7 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from native_fixture import native_fixture
+from native_fixture import NativeWriter, native_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +34,6 @@ class CompletionHookTests(unittest.TestCase):
 	def setUp(self):
 		try:
 			from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-			from hermes_state import SessionDB
 			from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
 		except ImportError as exc:
 			self.skipTest(f"Native Hermes test runtime unavailable: {exc}")
@@ -96,9 +95,9 @@ class CompletionHookTests(unittest.TestCase):
 		from tools.delegate_tool_resumable import AUTO_AT, _upsert
 		record = dict(owners=["human"], auto_promised=True, resume_mode=AUTO_AT, next_attempt_at=time.time() + 3600, unit_id=unit)
 		record.update(fields)
-		with closing(sqlite3.connect((home or self.home) / "state.db")) as connection:
-			_upsert(connection, name, record, state=state, pinned=False, expires_at=time.time() + 3600)
-			connection.commit()
+		with closing(NativeWriter((home or self.home) / "state.db")) as db:
+			ledger = db.store.coordination
+			self.assertTrue(_upsert(ledger, name, record, state=state, pinned=False, expires_at=time.time() + 3600, expected=ledger.get_subagent(subagent_id=name)))
 
 	def test_registered_hooks_are_native_observers_only(self):
 		self.assertEqual(set(self.manager._hooks), {"pre_llm_call", "on_session_end"})
@@ -196,7 +195,7 @@ class CompletionHookTests(unittest.TestCase):
 	def test_source_and_worker_platform_filters(self):
 		for index, source in enumerate(("cron", "kanban", "tool", "oneshot", "subagent", "internal", "unknown", "")):
 			sid = f"nonhuman-{index}"
-			self.db.create_session(sid, source)
+			self.stored_session(sid, source)
 			self.begin(sid, f"source-{index}")
 			self.end(sid, f"source-{index}")
 		for platform in ("cron", "subagent", "kanban", "internal"):
@@ -206,6 +205,13 @@ class CompletionHookTests(unittest.TestCase):
 		self.begin("child", "child-turn")
 		self.end("child", "child-turn")
 		self.assertEqual(self.markers(), {})
+
+	def stored_session(self, sid, source):
+		# Hermes no longer creates a row without a source, but older rows may carry one; plant it directly.
+		if source:
+			self.db.create_session(sid, source)
+		else:
+			self.db._conn.execute("INSERT INTO sessions(id, source, started_at) VALUES (?, '', ?)", (sid, time.time()))
 
 	def test_source_changed_after_begin_is_rejected(self):
 		self.begin()
@@ -661,7 +667,7 @@ class CompletionHookTests(unittest.TestCase):
 
 	def test_real_native_pre_turn_restores_without_history_or_recency_changes(self):
 		from agent.turn_context import _collect_pre_llm_call_context
-		from hermes_state import SessionDB
+		from persistence.sqlite.conversation.sessions import SQLiteSessionRepository
 		self.db.append_message("human", "user", "Existing scratch history")
 		self.db.append_message("human", "assistant", "Existing scratch reply")
 		self.db.set_session_pinned("human", True)
@@ -675,8 +681,8 @@ class CompletionHookTests(unittest.TestCase):
 			expected = "\n".join(connection.iterdump())
 			connection.rollback()
 		agent = SimpleNamespace(session_id="human", model="test", platform="cli")
-		# Full get_session would hydrate prompts; it is not part of this observer.
-		with patch.object(SessionDB, "get_session", side_effect=AssertionError("history read")):
+		# A full stored-row read would hydrate prompts; it is not part of this observer.
+		with patch.object(SQLiteSessionRepository, "get", side_effect=AssertionError("history read")):
 			with patch("hermes_cli.lifecycle.invoke_hook", self.manager.invoke_hook):
 				context = _collect_pre_llm_call_context(agent, effective_task_id="task", turn_id="resumed-turn", original_user_message="new real activity", messages=[], conversation_history=[])
 		self.assertEqual(context, "")
@@ -739,14 +745,14 @@ class CompletionHookTests(unittest.TestCase):
 		self.assertEqual(self.markers(), {})
 
 	def test_duplicate_begin_cannot_override_a_subsequent_manual_archive(self):
-		from hermes_state import SessionDB
+		from persistence.sqlite.conversation.sessions import SQLiteSessionRepository
 		self.archive()
-		setter = SessionDB.set_session_archived
+		setter = SQLiteSessionRepository.set_archived
 		calls = []
-		def counted(db, *args, **kwargs):
+		def counted(repository, *args, **kwargs):
 			calls.append((args, kwargs))
-			return setter(db, *args, **kwargs)
-		with patch.object(SessionDB, "set_session_archived", counted):
+			return setter(repository, *args, **kwargs)
+		with patch.object(SQLiteSessionRepository, "set_archived", counted):
 			self.begin()
 			self.begin()
 		self.assertEqual(calls, [(("human", False), {"notify": False})])
@@ -778,12 +784,13 @@ class CompletionHookTests(unittest.TestCase):
 		self.assertEqual(self.markers(), {})
 
 	def test_restore_failure_false_success_and_unverified_readback_skip_done(self):
-		from hermes_state import SessionDB
+		from persistence.conversation.sessions import ArchiveChange
+		from persistence.sqlite.conversation.sessions import SQLiteSessionRepository
 		for index, failure in enumerate((OSError("unwritable"), False, True)):
 			self.archive()
 			turn = f"restore-error-{index}"
-			mock_setter = (patch.object(SessionDB, "set_session_archived", side_effect=failure)
-				if isinstance(failure, Exception) else patch.object(SessionDB, "set_session_archived", return_value=failure))
+			mock_setter = (patch.object(SQLiteSessionRepository, "set_archived", side_effect=failure)
+				if isinstance(failure, Exception) else patch.object(SQLiteSessionRepository, "set_archived", return_value=ArchiveChange(changed=failure)))
 			with mock_setter:
 				self.assertEqual(self.begin(turn=turn), [])
 			self.assertEqual(self.end(turn=turn), [])
@@ -799,7 +806,7 @@ class CompletionHookTests(unittest.TestCase):
 		self.assertEqual(self.native_flags(), {"human": 1})
 		for index, source in enumerate(("cron", "subagent", "internal", "unknown", "")):
 			sid = f"archived-worker-{index}"
-			self.db.create_session(sid, source)
+			self.stored_session(sid, source)
 			self.archive(sid)
 			self.begin(sid, sid)
 			self.end(sid, sid)

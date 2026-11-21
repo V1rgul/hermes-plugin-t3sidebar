@@ -12,8 +12,7 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from gateway.session_contract import SessionActor
 from hermes_constants import get_hermes_home, set_hermes_home_override, reset_hermes_home_override
-from hermes_state import SessionDB
-from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+from persistence.conversation.sessions import INTERNAL_LISTING_SOURCES
 import hermes_cli.web_server_sessions as native_sessions
 import tui_gateway.server as native_server
 import tui_gateway.server_requests as server_requests
@@ -23,7 +22,9 @@ import tools.delegate_tool_registry as subagent_registry
 from tools.process_registry import ProcessSession, process_registry
 
 from test_backend import backend
-from native_fixture import native_fixture
+from native_fixture import NativeWriter, native_fixture
+
+NativeStore = backend.native_store.NativeStore
 
 NATIVE_PROFILE_HOME = native_server._profile_home
 
@@ -36,7 +37,7 @@ class StandaloneRuntime(unittest.TestCase):
 		self.homes = {name: self.root / name for name in ("exact-profile", "other-profile")}
 		for home in self.homes.values():
 			home.mkdir()
-			with closing(native_fixture(home / "native.sqlite3")) as db:
+			with closing(native_fixture(home / "state.db")) as db:
 				db.create_session("collision", "cli", system_prompt="private-system-prompt", model_config={"secret": "private-model-config"})
 				for source in INTERNAL_LISTING_SOURCES:
 					db.create_session(f"internal-{source}", source)
@@ -85,16 +86,16 @@ class StandaloneRuntime(unittest.TestCase):
 	def open_db(self, profile, *, read_only):
 		self.assertTrue(read_only)
 		self.lookups.append(profile)
-		return SessionDB(self.homes[profile] / "native.sqlite3", read_only=True)
+		return NativeStore(self.homes[profile] / "state.db")
 
 	@contextmanager
 	def session_db(self, session):
 		home = Path(session.get("profile_home") or self.homes["exact-profile"])
-		with closing(SessionDB(home / "native.sqlite3", read_only=True)) as db:
+		with closing(NativeStore(home / "state.db")) as db:
 			yield db
 
 	def test_native_scoped_helper_and_real_waiting_mapper_keep_colliding_owners_separate(self):
-		before = {home: (home / "native.sqlite3").read_bytes() for home in self.homes.values()}
+		before = {home: (home / "state.db").read_bytes() for home in self.homes.values()}
 		with patch.object(legacy, "_own_profile_read", wraps=legacy._own_profile_read) as scoped:
 			response = self.client.get("/runtime?profile=exact-profile")
 			self.assertEqual(response.status_code, 200, response.text)
@@ -116,11 +117,13 @@ class StandaloneRuntime(unittest.TestCase):
 			self.assertEqual([(r["id"], r["session_key"], r["status"]) for r in response.json()["sessions"]], [("runtime-b", "collision", "working")])
 		self.assertEqual(self.lookups, ["exact-profile", "other-profile"])
 		for home in self.homes.values():
-			self.assertEqual((home / "native.sqlite3").read_bytes(), before[home])
+			self.assertEqual((home / "state.db").read_bytes(), before[home])
 
 	def attach_subagents(self):
-		# Real native ownership helper and descendant predicate; only records are synthetic.
-		db = SessionDB(self.current / "native.sqlite3", read_only=True)
+		from persistence_assembly import open_persistence, profile_scope
+
+		# Real native ownership helper and descendant predicate; only records are synthetic. Hermes agents hold their store as a storage interface handle, which has no db_path.
+		db = open_persistence(profile_scope(home=self.current), eager=True)
 		self.addCleanup(db.close)
 		parent = self.registry["runtime-a"]["agent"]
 		parent._session_db = db
@@ -239,7 +242,7 @@ class StandaloneRuntime(unittest.TestCase):
 		self.child("nested", self.children["one"]["agent"], db)
 		self.child("completed", parent, db, status="completed")
 		self.child("cancelled", parent, db, status="cancelled")
-		before = (self.current / "native.sqlite3").read_bytes()
+		before = (self.current / "state.db").read_bytes()
 		with patch.object(ancillary, "subagent_records", wraps=ancillary.subagent_records) as read:
 			self.assertEqual((self.runtime_row()["status"], self.runtime_row()["running_subagents"]), ("idle", 2))
 			self.assertIs(read.call_args.args[0], parent)
@@ -252,13 +255,13 @@ class StandaloneRuntime(unittest.TestCase):
 			self.assertEqual(self.runtime_row()["running_subagents"], 0)
 			self.children.clear()
 			self.assertEqual(self.runtime_row()["running_subagents"], 0)
-		self.assertEqual((self.current / "native.sqlite3").read_bytes(), before)
+		self.assertEqual((self.current / "state.db").read_bytes(), before)
 
 	def test_reminted_runtime_uses_durable_owner_and_rejects_same_id_foreign_database(self):
 		parent, db = self.attach_subagents()
 		old_parent = SimpleNamespace(session_id="collision", _session_db=db, gateway_session_key="old-runtime")
 		self.child("owned", old_parent, db, runtime="old-runtime")
-		foreign_db = SimpleNamespace(db_path=self.homes["other-profile"] / "native.sqlite3")
+		foreign_db = SimpleNamespace(db_path=self.homes["other-profile"] / "state.db")
 		foreign_parent = SimpleNamespace(session_id="collision", _session_db=foreign_db)
 		self.child("foreign", foreign_parent, foreign_db, runtime="runtime-a")
 		# Runtime-only ownership must never be confused with the durable owner id.
@@ -295,7 +298,7 @@ class StandaloneRuntime(unittest.TestCase):
 		parent.gateway_session_key = "foreign-runtime"
 		self.assertIsNone(self.runtime_row()["running_subagents"])
 		parent.gateway_session_key = "runtime-a"
-		parent._session_db = SimpleNamespace(db_path=self.homes["other-profile"] / "native.sqlite3")
+		parent._session_db = SimpleNamespace(db_path=self.homes["other-profile"] / "state.db")
 		self.assertIsNone(self.runtime_row()["running_subagents"])
 		self.registry["runtime-a"]["agent"] = None
 		self.assertIsNone(self.runtime_row()["running_subagents"])
@@ -315,7 +318,7 @@ class StandaloneRuntime(unittest.TestCase):
 			"home": lambda: session.__setitem__("profile_home", str(self.homes["other-profile"])),
 			"durable": lambda: setattr(parent, "session_id", "changed"),
 			"route": lambda: setattr(parent, "gateway_session_key", "changed"),
-			"db_object": lambda: setattr(parent, "_session_db", SimpleNamespace(db_path=db.db_path)),
+			"db_object": lambda: setattr(parent, "_session_db", SimpleNamespace(db_path=self.current / "state.db")),
 		}
 		for name, change in changes.items():
 			with self.subTest(change=name):
@@ -358,7 +361,7 @@ class StandaloneRuntime(unittest.TestCase):
 
 	def test_internal_sources_are_filtered_before_subagent_projection(self):
 		self.attach_subagents()
-		with closing(SessionDB(self.current / "native.sqlite3")) as db:
+		with closing(NativeWriter(self.current / "state.db")) as db:
 			db.create_session("cron-job", "cron")
 		self.registry["runtime-cron"] = self.session("cron-job", self.current)
 		with patch.object(ancillary, "subagent_records", wraps=ancillary.subagent_records) as read:
@@ -367,7 +370,7 @@ class StandaloneRuntime(unittest.TestCase):
 
 	def test_watched_subagent_runs_are_not_sidebar_rows(self):
 		# Desktop's lazy watch session on a delegated child registers it as a runtime; native listings hide it by its delegate marker.
-		with closing(SessionDB(self.current / "native.sqlite3")) as db:
+		with closing(NativeWriter(self.current / "state.db")) as db:
 			db.create_session("delegate-child", "desktop", model_config={"_delegate_from": "collision"})
 			db.create_session("worker-child", "subagent", model_config={"_delegate_from": "collision"})
 		self.registry["runtime-delegate"] = {**self.session("delegate-child", self.current), "running": False}
@@ -390,40 +393,32 @@ class StandaloneRuntime(unittest.TestCase):
 		response = self.client.get("/runtime?profile=exact-profile")
 		self.assertEqual(response.status_code, 200, response.text)
 		self.assertEqual({(row["id"], row["status"]) for row in response.json()["sessions"]}, {("runtime-a", "waiting"), ("draft", "idle")})
-		with closing(SessionDB(self.current / "native.sqlite3", read_only=True)) as db:
+		with closing(NativeStore(self.current / "state.db")) as db:
 			self.assertIsNone(db.get_session("unpersisted-draft"))
 
 	def test_retired_runtime_ghosts_stay_excluded_but_absent_drafts_survive_polling(self):
-		import hermes_state_mutation_retirement as retirement
-		import hermes_state_runtime as runtime
-
-		with closing(SessionDB(self.current / "native.sqlite3")) as db:
+		with closing(NativeWriter(self.current / "state.db")) as db:
 			db.create_session("deleted", "desktop")
-			epoch = runtime.begin_runtime_epoch(db, instance_id="scratch-owner")
-			with patch("hermes_state_common.emit_session_deleted"):
-				receipt = runtime.mutate_runtime_session(db, epoch=epoch, principal_id="scratch-human",
-					session_id="deleted", request_id="delete-once", expected_revision=0,
-					expected_generation=0, operation="delete", payload={})
-			self.assertEqual(receipt["deleted_ids"], ["deleted"])
-			self.assertTrue(retirement.retired_session(db, "deleted"))
+			self.assertTrue(db.delete_session("deleted"))
+			self.assertTrue(db.store.runtime.retired_session("deleted"))
 			self.assertIsNone(db.get_session("deleted"))
 		self.registry["ghost"] = {**self.session("deleted", None), "source": "desktop", "history": [], "agent": None}
 		self.registry["draft"] = {**self.registry["ghost"], "session_key": "never-persisted"}
 		# A runtime ID can itself be the retired identity, independent of its key.
 		self.registry["deleted"] = {**self.registry["draft"], "session_key": "another-draft"}
-		before = (self.current / "native.sqlite3").read_bytes()
-		with patch.object(retirement, "retired_session", wraps=retirement.retired_session) as retired:
+		before = (self.current / "state.db").read_bytes()
+		with patch.object(NativeStore, "retired_session", autospec=True, side_effect=NativeStore.retired_session) as retired:
 			for _ in range(2):
 				response = self.client.get("/runtime")
 				self.assertEqual(response.status_code, 200, response.text)
 				self.assertEqual({row["id"] for row in response.json()["sessions"]}, {"runtime-a", "draft"})
 			self.assertTrue(retired.called)
-		self.assertEqual((self.current / "native.sqlite3").read_bytes(), before)
+		self.assertEqual((self.current / "state.db").read_bytes(), before)
 		# A same-ID tombstone in the OTHER home cannot retire this home's draft.
-		with closing(SessionDB(self.homes["other-profile"] / "native.sqlite3")) as db:
-			assert db._conn is not None
-			with db._conn:
-				retirement.retire_routes(db._conn, ["never-persisted"])
+		with closing(NativeWriter(self.homes["other-profile"] / "state.db")) as db:
+			db.create_session("never-persisted", "desktop")
+			self.assertTrue(db.delete_session("never-persisted"))
+			self.assertTrue(db.store.runtime.retired_session("never-persisted"))
 		self.assertEqual({row["id"] for row in self.client.get("/runtime").json()["sessions"]}, {"runtime-a", "draft"})
 
 	def test_zero_message_runtime_project_and_override_are_scoped_allowlisted_and_read_only(self):
@@ -439,7 +434,7 @@ class StandaloneRuntime(unittest.TestCase):
 			"running": False, "cwd": "/repo/nested/src", "explicit_cwd": True,
 			"model_override": {"model": "picked-model", "provider": " OpenAI-Codex ", "api_key": "private-key"},
 			"system_prompt": "private-system", "queued_prompt": "private-composer"}
-		before = {path: path.read_bytes() for path in [self.current / "native.sqlite3", self.current / "projects.db"]}
+		before = {path: path.read_bytes() for path in [self.current / "state.db", self.current / "projects.db"]}
 		with patch.object(projects_db, "connect", side_effect=AssertionError("no schema writes")), patch.object(native_server, "_session_default_route", side_effect=AssertionError("override must win")), patch.object(backend, "card_projects", wraps=backend.card_projects) as catalog, patch.object(native_server, "_live_session_identity", wraps=native_server._live_session_identity) as identity:
 			row = self.runtime_row()
 			catalog.assert_called_once()
@@ -455,7 +450,7 @@ class StandaloneRuntime(unittest.TestCase):
 		self.assertEqual(row["preview"], "")
 		for path, content in before.items():
 			self.assertEqual(path.read_bytes(), content)
-		with closing(SessionDB(self.current / "native.sqlite3", read_only=True)) as db:
+		with closing(NativeStore(self.current / "state.db")) as db:
 			self.assertIsNone(db.get_session("unsaved"))
 
 	def test_native_provider_precedence_and_default_route_evidence_before_first_message(self):
@@ -542,7 +537,7 @@ class StandaloneRuntime(unittest.TestCase):
 				self.assertFalse(row["project"]["is_home"])
 
 	def test_persisted_positive_history_survives_lazy_runtime_zero_and_unknown_is_not_empty(self):
-		with closing(SessionDB(self.current / "native.sqlite3")) as db:
+		with closing(NativeWriter(self.current / "state.db")) as db:
 			db.append_message("collision", "user", "private-stored-content")
 		self.registry["runtime-a"]["history"] = []
 		self.assertEqual(self.runtime_row()["message_count"], 1)
@@ -550,15 +545,13 @@ class StandaloneRuntime(unittest.TestCase):
 		self.registry["unknown"] = {"session_key": "unsaved", "source": "desktop", "agent": None}
 		self.assertIsNone(self.runtime_row()["message_count"])
 
-	def test_missing_retirement_helper_fails_unavailable_instead_of_resurrecting_unknown_ids(self):
-		import hermes_state_mutation_retirement as retirement
-
-		with patch.object(retirement, "retired_session", None):
+	def test_failed_retirement_read_fails_unavailable_instead_of_resurrecting_unknown_ids(self):
+		with patch.object(NativeStore, "retired_session", side_effect=RuntimeError("retirement unreadable")):
 			response = self.client.get("/runtime")
 		self.assertEqual(response.status_code, 503, response.text)
 
 	def test_wrong_opened_store_is_refused_before_retirement_or_catalog_reads(self):
-		with patch.object(backend, "open_session_db", side_effect=lambda *args, **kwargs: SessionDB(self.homes["other-profile"] / "native.sqlite3", read_only=True)), patch.object(backend, "runtime_retired") as retired, patch.object(backend, "card_projects") as projects:
+		with patch.object(backend, "open_session_db", side_effect=lambda *args, **kwargs: NativeStore(self.homes["other-profile"] / "state.db")), patch.object(backend, "runtime_retired") as retired, patch.object(backend, "card_projects") as projects:
 			response = self.client.get("/runtime")
 		self.assertEqual(response.status_code, 403, response.text)
 		retired.assert_not_called()
@@ -587,7 +580,7 @@ class StandaloneRuntime(unittest.TestCase):
 					return read
 				owner, name = {"mapper": (native_server, "_session_live_item"), "catalog": (backend, "card_projects"),
 					"provider": (native_server, "_live_session_identity"), "retirement": (backend, "runtime_retired"),
-					"stored": (SessionDB, "get_session")}[seam]
+					"stored": (NativeStore, "get_session")}[seam]
 				def run():
 					token = set_hermes_home_override(str(self.current))
 					try:

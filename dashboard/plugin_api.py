@@ -48,6 +48,7 @@ def _load_sibling(name, filename):
 usage_history = _load_sibling("hermes_t3sidebar_usage_history", "usage_history.py")
 usage_limits = _load_sibling("hermes_t3sidebar_shared_modules", "shared_modules.py").load_limits_module()
 banked_reset = _load_sibling("hermes_t3sidebar_banked_reset", "banked_reset.py")
+native_store = _load_sibling("hermes_t3sidebar_native_store", "native_store.py")
 session_drafts = _load_sibling("hermes_t3sidebar_session_drafts", "session_drafts.py")
 
 
@@ -59,17 +60,31 @@ def session_db_path() -> Path:
 
 
 def open_session_db(profile, *, read_only=True):
-	"""The served profile's session store through Hermes's public ``SessionDB``, read-only. ``profile`` is already asserted to be the served one by every caller; any failure to open is a generic 503."""
-	from hermes_state import SessionDB
-
+	"""The served profile's session store through Hermes's public storage interface, read-only. ``profile`` is already asserted to be the served one by every caller; any failure to open is a generic 503."""
 	path = session_db_path()
 	try:
 		# Hermes creates and migrates the store when the profile's gateway starts; an empty file was never initialized.
 		if path.stat().st_size == 0:
 			raise sqlite3.OperationalError("uninitialized session store")
-		return SessionDB(db_path=path, read_only=True)
+		return native_store.NativeStore(path)
 	except (OSError, sqlite3.Error) as exc:
 		raise HTTPException(503, "session_store_unavailable") from exc
+
+
+def authority_store_path(authority):
+	"""The state.db of the store an authority was built with, or None when its provider keeps no such file."""
+	from persistence_assembly import store_location
+
+	path = store_location(authority.persistence.scope)
+	return None if path is None else Path(path).resolve()
+
+
+def handle_store_path(handle):
+	"""The state.db a store handle reads, or None: a storage interface handle (what Hermes agents hold as ``_session_db``) names it by its scope and has no ``db_path``; the plugin's own reader names its file."""
+	from persistence_assembly import Persistence, store_location
+
+	path = store_location(handle.scope) if isinstance(handle, Persistence) else getattr(handle, "db_path", None)
+	return None if path is None else Path(path).resolve()
 
 
 def default_history_db_path(profile) -> Path:
@@ -457,9 +472,8 @@ def standalone_subagent_count(server, row, snapshot, db, home):
 				or Path(session.get("profile_home") or server._launch_home()).resolve() != home):
 				return None
 			owner_db = getattr(parent, "_session_db", None)
-			owner_path, expected_path = getattr(owner_db, "db_path", None), getattr(db, "db_path", None)
-			if (owner_path is None or expected_path is None
-				or Path(owner_path).resolve() != Path(expected_path).resolve()
+			owner_path, expected_path = handle_store_path(owner_db), handle_store_path(db)
+			if (owner_path is None or expected_path is None or owner_path != expected_path
 				or getattr(parent, "gateway_session_key", None) not in (None, row["id"])):
 				return None
 			return owner_db
@@ -507,9 +521,7 @@ def stored_rows(db, session_ids):
 
 def runtime_retired(db, row):
 	"""A missing row can be an unsaved draft; only native retirement proves deletion."""
-	from hermes_state_mutation_retirement import retired_session
-
-	return any(retired_session(db, sid) for sid in {row.get("session_key"), row.get("id")} if sid)
+	return any(db.retired_session(sid) for sid in {row.get("session_key"), row.get("id")} if sid)
 
 
 # Manual /compress holds a session busy without a native turn or plugin hook, and records no start time. Remember when this process first saw each compaction so its Working time is shown and continuous; keyed by home and runtime id, and owned by the session object observed.
@@ -754,10 +766,9 @@ def standalone_runtime(request, profile, actor):
 
 def authority_runtime_rows(db_path, rows):
 	"""Read only the admitted authority's store, never another runtime registry."""
-	from hermes_state import SessionDB
 	INTERNAL_LISTING_SOURCES = usage_history.internal_listing_sources()
 
-	with_db = SessionDB(db_path, read_only=True)
+	with_db = native_store.NativeStore(db_path)
 	try:
 		rows = [row for row in rows if row.get("source") not in {*INTERNAL_LISTING_SOURCES, "cron", "subagent"}
 			and not runtime_retired(with_db, row)]
@@ -801,10 +812,10 @@ async def native_runtime(request, profile):
 	from hermes_constants import get_hermes_home
 
 	home = get_hermes_home().resolve()
-	db_path = Path(authority.db.db_path).resolve()
+	db_path = authority_store_path(authority)
 	if (actor is None or not Path(actor.profile_id).is_absolute()
 		or Path(actor.profile_id).resolve() != home or authority.profile_id != str(home)
-		or db_path.parent != home):
+		or db_path is None or db_path.parent != home):
 		raise HTTPException(403, "profile_mismatch")
 	native = getattr(request.state, "native_http_principal", None)
 	if native is not None and native.get("profile_id") != str(home):
@@ -843,7 +854,7 @@ LIST_FIELDS = frozenset({"id", "source", "archived", "resolved_id", "title", "pr
 
 
 def card_projects(db):
-	"""Read this SessionDB's catalog once, without schema initialization or home lookup."""
+	"""Read this store's catalog once, without schema initialization or home lookup."""
 	db_path = getattr(db, "db_path", None)
 	if db_path is None:
 		return []
@@ -916,13 +927,10 @@ def card_provider(config):
 
 def card_billing_providers(db, session_ids):
 	"""Read main-loop route evidence, never auxiliary model usage."""
-	connection = getattr(db, "_conn", None)
-	if not isinstance(connection, sqlite3.Connection):
-		return {}
 	result = {}
 	try:
 		# One JSON parameter, as in card_subagent_usage, has no bound-variable limit to batch around.
-		rows = connection.execute("SELECT DISTINCT session_id, billing_provider FROM session_model_usage WHERE task = '' AND session_id IN (SELECT value FROM json_each(?))",
+		rows = db.connection.execute("SELECT DISTINCT session_id, billing_provider FROM session_model_usage WHERE task = '' AND session_id IN (SELECT value FROM json_each(?))",
 			(json.dumps(sorted(session_ids)),))
 		for sid, value in rows:
 			if provider := provider_name(value):
@@ -938,12 +946,11 @@ def card_subagent_usage(db, seed_ids):
 
 	Mirrors native cascade deletion (`_collect_delegate_child_ids`): a delegate's row names its spawning session in `parent_session_id` and carries the `_delegate_from` marker, which nested delegates and a subagent's own compression continuations (they inherit `model_config` verbatim) also carry, so following only marked children of a seed reaches every subagent segment without entering the conversation's branch/reset forks. One recursive read per batch walks the parent index instead of scanning each card's marker.
 	"""
-	connection = getattr(db, "_conn", None)
-	if not isinstance(connection, sqlite3.Connection) or not seed_ids:
+	if not seed_ids:
 		return {}
 	result = {}
 	try:
-		rows = connection.execute("""
+		rows = db.connection.execute("""
 			WITH RECURSIVE tree(seed, id) AS (
 				SELECT value, value FROM json_each(?)
 				UNION
@@ -1002,67 +1009,73 @@ def card_rows(db, rows):
 	return result
 
 
-def native_sessions(profile, offset, limit, organized_ids, archived_only=False):
-	INTERNAL_LISTING_SOURCES = usage_history.internal_listing_sources()
+def native_listing(db, offset, limit, organized_ids, archived_only, excluded, trust_exhaustion):
+	"""The native page plus organized conversations outside it, keyed by compression root, and whether a short page's exhaustion stood in for an exact-ID search; with ``trust_exhaustion`` false it never does. The caller proves that its reads saw one generation."""
+	page = db.list_sessions_rich(limit=limit, offset=offset, include_archived=False, archived_only=archived_only, include_hidden=False, exclude_sources=excluded)
+	rows = {row.get("_lineage_root_id") or row["id"]: row for row in page}
+	# Organization may be stored under any native compression/reset alias,
+	# not only the root used to deduplicate output. Cover newly backfilled
+	# aliases too, so multiple organized segments do not repeat rich queries.
+	covered = {sid for row in page for sid in
+		(row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])) if sid}
+	relied = False
+	if offset == 0 and not archived_only:
+		pending = set(organized_ids) - covered
+		# Native visibility/reset filtering happens before LIMIT and compression projection preserves row count, so a short initial page is complete.
+		lookahead_matches, exhausted = {}, trust_exhaustion and len(page) < limit
+		# Many retained archive/deleted IDs otherwise cause one full native
+		# rich search each. Inspect ONE additional native page, not an
+		# unbounded history scan or a raw-ID visibility approximation.
+		if len(page) == limit and len(pending) >= 32:
+			lookahead = db.list_sessions_rich(limit=500, offset=limit, include_archived=False, include_hidden=False, exclude_sources=excluded)
+			lookahead_matches = {sid: row for row in lookahead for sid in
+				(row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])) if sid in pending}
+			# A short page exhausts this same native filtered listing. Full
+			# pages retain exact-ID recovery beyond the bounded lookahead.
+			exhausted = trust_exhaustion and len(lookahead) < 500
+		for sid in organized_ids:
+			if sid in covered:
+				continue
+			# Preserve organized-ID insertion order for both lookup paths.
+			# id_query is a substring query. Page its matches until the exact
+			# alias is found; never silently lose a short/colliding stored ID.
+			match_offset = 0
+			while True:
+				if sid in lookahead_matches:
+					matches = [lookahead_matches[sid]]
+				elif exhausted:
+					relied = True
+					break
+				else:
+					matches = db.list_sessions_rich(limit=500, offset=match_offset, id_query=sid, include_archived=False, include_hidden=False, exclude_sources=excluded)
+				found = False
+				for row in matches:
+					ids = {row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])}
+					if sid in ids:
+						rows[row.get("_lineage_root_id") or row["id"]] = row
+						covered.update(value for value in ids if value)
+						found = True
+				if found or len(matches) < 500:
+					break
+				match_offset += 500
+	return page, rows, relied
 
-	# Read-only SessionDB disables maintenance and history writes. Native rich
-	# projection owns compression roots, project/branch inheritance and visibility.
+
+def native_sessions(profile, offset, limit, organized_ids, archived_only=False):
+	excluded = [*usage_history.internal_listing_sources(), "cron"]
+
+	# The read-only store never migrates or repairs. Native rich projection
+	# owns compression roots, project/branch inheritance and visibility.
 	db = open_session_db(profile, read_only=True)
 	try:
-		# Native read-only SessionDB routes every _read_ctx through this same connection (no pooled readers). Keep admission, lookahead and card enrichment in one request-local snapshot so a concurrent archive/reset cannot invalidate exhaustion halfway through the response.
-		# Adapters without a native connection retain the exact-ID fallback.
-		connection = getattr(db, "_conn", None)
-		snapshot = False
-		if organized_ids and offset == 0 and not archived_only and isinstance(connection, sqlite3.Connection):
-			connection.execute("BEGIN")
-			snapshot = True
-		page = db.list_sessions_rich(limit=limit, offset=offset, compact_rows=True, order_by_last_active=True, include_archived=False, archived_only=archived_only, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
-		rows = {row.get("_lineage_root_id") or row["id"]: row for row in page}
-		# Organization may be stored under any native compression/reset alias,
-		# not only the root used to deduplicate output. Cover newly backfilled
-		# aliases too, so multiple organized segments do not repeat rich queries.
-		covered = {sid for row in page for sid in
-			(row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])) if sid}
-		if offset == 0 and not archived_only:
-			pending = set(organized_ids) - covered
-			# Native visibility/reset filtering happens before LIMIT and compression projection preserves row count, so a short initial page is complete.
-			lookahead_matches, exhausted = {}, snapshot and len(page) < limit
-			# Many retained archive/deleted IDs otherwise cause one full native
-			# rich search each. Inspect ONE additional native page, not an
-			# unbounded history scan or a raw-ID visibility approximation.
-			if len(page) == limit and len(pending) >= 32:
-				lookahead = db.list_sessions_rich(limit=500, offset=limit, compact_rows=True, order_by_last_active=True, include_archived=False, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
-				lookahead_matches = {sid: row for row in lookahead for sid in
-					(row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])) if sid in pending}
-				# A short page exhausts this same native filtered listing. Full
-				# pages retain exact-ID recovery beyond the bounded lookahead.
-				exhausted = len(lookahead) < 500
-			for sid in organized_ids:
-				if sid in covered:
+		# A short page's exhaustion stands in for exact-ID searches only when admission, lookahead and backfill saw one generation, so a concurrent archive/reset cannot invalidate it halfway through the response. The snapshot proves that afterwards (with or without one read transaction); when it fails, the listing is read again with exact-ID recovery.
+		for trust_exhaustion in (True, False):
+			with db.read_snapshot() as check:
+				page, rows, relied = native_listing(db, offset, limit, organized_ids, archived_only, excluded, trust_exhaustion)
+				if relied and not check():
 					continue
-				# Preserve organized-ID insertion order for both lookup paths.
-				# id_query is a substring query. Page its matches until the exact
-				# alias is found; never silently lose a short/colliding stored ID.
-				match_offset = 0
-				while True:
-					if sid in lookahead_matches:
-						matches = [lookahead_matches[sid]]
-					elif exhausted:
-						break
-					else:
-						matches = db.list_sessions_rich(limit=500, offset=match_offset, id_query=sid, compact_rows=True, order_by_last_active=True, include_archived=False, include_hidden=False, exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron"])
-					found = False
-					for row in matches:
-						ids = {row["id"], row.get("_lineage_root_id"), *(row.get("_lineage_ids") or [])}
-						if sid in ids:
-							rows[row.get("_lineage_root_id") or row["id"]] = row
-							covered.update(value for value in ids if value)
-							found = True
-					if found or len(matches) < 500:
-						break
-					match_offset += 500
-		return {"sessions": card_rows(db, rows.values()),
-			"offset": offset, "limit": limit, "has_more": len(page) == limit}
+				return {"sessions": card_rows(db, rows.values()),
+					"offset": offset, "limit": limit, "has_more": len(page) == limit}
 	finally:
 		db.close()
 
@@ -1112,12 +1125,10 @@ def tokens_sum(rows):
 
 def session_stats(db, session_id):
 	"""The session menu's figures for a conversation's stored segments and its delegated subagents, and nothing else."""
-	connection = getattr(db, "_conn", None)
-	if not isinstance(connection, sqlite3.Connection):
-		raise HTTPException(503, "native_session_stats_unavailable")
+	connection = db.connection
 	if db.get_session(session_id) is None:
 		raise HTTPException(404, "session_not_found")
-	chain = list(dict.fromkeys(db.get_compression_lineage(session_id) or [session_id]))
+	chain = list(dict.fromkeys(db.compression_lineage(session_id) or [session_id]))
 	# A private cursor, so the native connection keeps its own row factory.
 	cursor = connection.cursor()
 	cursor.row_factory = sqlite3.Row
@@ -1139,7 +1150,7 @@ def session_stats(db, session_id):
 		FROM tree JOIN sessions s ON s.id = tree.id LEFT JOIN sessions parent ON parent.id = s.parent_session_id
 		WHERE tree.id NOT IN (SELECT value FROM json_each(?))
 	""", marks, marks)
-	# A subagent's compression continuation inherits the marker, still naming the original spawner rather than its compressed parent (the native fork rule, hermes_state_messages._is_explicit_fork_child_row). It is the same run: it extends that run instead of counting as another.
+	# A subagent's compression continuation inherits the marker, still naming the original spawner rather than its compressed parent (the native fork rule, persistence/sqlite/conversation/_store/messages.py _is_explicit_fork_child_row). It is the same run: it extends that run instead of counting as another.
 	rows = {row["id"]: row for row in subagents}
 	spans = {}
 	for row in subagents:
@@ -1213,9 +1224,10 @@ def native_control_guard(request, profile, unavailable):
 		raise HTTPException(403, "profile_mismatch")
 	if "session:control" not in actor.capabilities:
 		raise HTTPException(403, "permission_denied")
-	if authority is not None and (authority.profile_id != str(home)
-		or Path(authority.db.db_path).resolve().parent != home):
-		raise HTTPException(403, "profile_mismatch")
+	if authority is not None:
+		db_path = authority_store_path(authority)
+		if authority.profile_id != str(home) or db_path is None or db_path.parent != home:
+			raise HTTPException(403, "profile_mismatch")
 	return authority
 
 

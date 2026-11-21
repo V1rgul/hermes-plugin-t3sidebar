@@ -8,20 +8,21 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from hermes_state import SessionDB
 
 from test_backend import backend
 from native_fixture import native_fixture
+
+NativeStore = backend.native_store.NativeStore
 
 
 class SessionStats(unittest.TestCase):
 	def setUp(self):
 		self.temp = tempfile.TemporaryDirectory(prefix="session-stats-")
 		self.addCleanup(self.temp.cleanup)
-		self.db_path = Path(self.temp.name) / "native.sqlite3"
+		self.db_path = Path(self.temp.name) / "state.db"
 
 	def stats(self, session_id):
-		with patch.object(backend, "open_session_db", side_effect=lambda profile, *, read_only: SessionDB(self.db_path, read_only=read_only)):
+		with patch.object(backend, "open_session_db", side_effect=lambda profile, *, read_only: NativeStore(self.db_path)):
 			return backend.native_session_stats("scratch-profile", session_id)
 
 	def times(self, **spans):
@@ -101,7 +102,7 @@ class SessionStats(unittest.TestCase):
 		app = FastAPI()
 		app.include_router(backend.create_router(Path(self.temp.name) / "state.sqlite3"), prefix="/api")
 		with TestClient(app) as client, patch.object(backend, "served_profile", return_value="scratch-profile"), \
-			patch.object(backend, "open_session_db", side_effect=lambda profile, *, read_only: SessionDB(self.db_path, read_only=read_only)) as opened:
+			patch.object(backend, "open_session_db", side_effect=lambda profile, *, read_only: NativeStore(self.db_path)) as opened:
 			response = client.get("/api/sessions/present/stats?profile=scratch-profile")
 			self.assertEqual(response.status_code, 200, response.text)
 			self.assertEqual(response.headers["cache-control"], "no-store")

@@ -58,7 +58,7 @@ def native_snapshot(home, session_id, *, dispatched_before=None, resume_debt=Fal
 
 	resume_debt also reads whether a child of one of the lineage's async units still owes its promised automatic-resume report. The owing unit is the report's route (native gives up and resumes through it), so ownership is the same exact lineage match as the units themselves. A store without the table predates automatic resume and owes nothing; any other read failure raises, so it never proves completion.
 	"""
-	from hermes_state import SessionDB
+	from .native_store import NativeStore
 	from .usage_history import internal_listing_sources
 
 	INTERNAL_LISTING_SOURCES = internal_listing_sources()
@@ -71,15 +71,13 @@ def native_snapshot(home, session_id, *, dispatched_before=None, resume_debt=Fal
 		record = connection.execute("SELECT id, source FROM sessions WHERE id = ?", (session_id,)).fetchone()
 	if not record or record[0] != session_id or not _human(record[1]):
 		return None
-	db = SessionDB(db_path=path, read_only=True)
-	try:
+	with NativeStore(path) as db:
 		# id_query itself is substring search, so require an exact projected alias.
 		offset = 0
 		match = None
 		while True:
 			rows = db.list_sessions_rich(
-				id_query=session_id, limit=100, offset=offset, compact_rows=True,
-				order_by_last_active=True, include_archived=True, include_hidden=True,
+				id_query=session_id, limit=100, offset=offset, include_archived=True, include_hidden=True,
 				exclude_sources=[*INTERNAL_LISTING_SOURCES, "cron", "subagent", "internal"],
 			)
 			for row in rows:
@@ -96,10 +94,8 @@ def native_snapshot(home, session_id, *, dispatched_before=None, resume_debt=Fal
 		if match is None:
 			return None
 		root, aliases = match
-	finally:
-		db.close()
 
-	# A separate explicitly read-only connection avoids private SessionDB state.
+	# A separate explicitly read-only connection reads tables the storage interface does not project.
 	# Durable running also covers the native in-memory 'stalling' phase.
 	# Unknown states remain live conservatively; do not inspect task/result/event JSON.
 	ids = sorted(aliases)
@@ -161,20 +157,20 @@ def awaits_processes(owners):
 def restore_archived_activity(home, session_id, before):
 	"""Use native archival only for a proven, exact human compression lineage.
 
-	The public setter restores the lineage Hermes defines, which leaves independent forks archived on every supported core (0.23.0 and later), exactly as Desktop's own Unarchive does. The setter has no compare-and-set fence, so concurrent external lineage changes between preflight and commit remain a native API limitation; the result is verified afterwards.
+	The public setter restores the lineage Hermes defines, which leaves independent forks archived on every supported core (0.23.3 and later), exactly as Desktop's own Unarchive does. The setter has no compare-and-set fence, so concurrent external lineage changes between preflight and commit remain a native API limitation; the result is verified afterwards.
 	"""
-	from hermes_state import SessionDB
+	from persistence_assembly import open_persistence, profile_scope
 
 	current = native_snapshot(home, session_id)
 	if current is None or current.root != before.root or current.aliases != before.aliases:
 		return False
 	if not current.archived:
 		return True
-	path = home / "state.db"
 	# Never call recoverable-session helpers: they also clear native end stamps.
 	# Explicit False preserves messages, activity, read state, and pin/hidden flags.
-	with closing(SessionDB(db_path=path)) as db:
-		if not db.set_session_archived(current.root, False, notify=False):
+	# The handle shares the process's one writer for this profile's store.
+	with open_persistence(profile_scope(home=home)) as store:
+		if not store.sessions.set_archived(current.root, False, notify=False).changed:
 			return False
 	verified = native_snapshot(home, session_id)
 	return (verified is not None and verified.root == current.root

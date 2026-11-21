@@ -28,7 +28,7 @@ API_PROVIDER_FOR = {"openai-codex": "openai", "anthropic": "anthropic"}
 TOKEN_CLASSES = ("input", "output", "cache_read", "cache_write")
 # Input-side classes scale with the context sent; output-side classes with the reply generated.
 INPUT_SIDE = ("input", "cache_read", "cache_write")
-# Explicit fallback for hermes_state_sessions.INTERNAL_LISTING_SOURCES (Kanban workers, tool integrations, one-shot runs), used only when a Hermes build no longer exports it: that module is not a public plugin surface.
+# Explicit fallback for persistence.conversation.sessions.INTERNAL_LISTING_SOURCES (Kanban workers, tool integrations, one-shot runs), used only when a Hermes build no longer exports it.
 _FALLBACK_INTERNAL_SOURCES = ("kanban", "tool", "oneshot")
 # Machine-driven sessions: their user rows are prompts written by Hermes, not by a person.
 _NON_HUMAN_SOURCES = frozenset({"cron", "subagent"})
@@ -191,7 +191,7 @@ def _columns(conn, table):
 def internal_listing_sources():
 	"""Session sources Hermes hides from human listings, in Hermes's order: its own list when it exports one, so a source it adds is hidden too, else the explicit fallback."""
 	try:
-		from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+		from persistence.conversation.sessions import INTERNAL_LISTING_SOURCES
 		return tuple(str(source) for source in INTERNAL_LISTING_SOURCES)
 	except Exception:
 		return _FALLBACK_INTERNAL_SOURCES

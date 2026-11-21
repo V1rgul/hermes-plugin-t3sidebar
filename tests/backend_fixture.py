@@ -1,5 +1,5 @@
 """Loopback-only integration fixture; never used by the installed plugin."""
-# First Hermes import, as in `npm run test:backend`: it activates Hermes's managed dependency environment, without which hermes_state and fastapi do not import.
+# First Hermes import, as in `npm run test:backend`: it activates Hermes's managed dependency environment, without which Hermes's storage interface and fastapi do not import.
 import hermes_bootstrap  # noqa: F401
 import importlib.util
 from pathlib import Path
@@ -9,11 +9,13 @@ import tempfile
 from contextlib import closing
 
 from types import ModuleType
-from hermes_state import SessionDB
 from fastapi import FastAPI
 import uvicorn
 
 root = Path(__file__).resolve().parents[1]
+# hermes_bootstrap may relaunch this script through runpy, which does not put the script's own folder on the path.
+sys.path.insert(0, str(root / "tests"))
+from native_fixture import NativeWriter, native_fixture  # noqa: E402
 spec = importlib.util.spec_from_file_location("hermes_t3sidebar_integration_backend", root / "dashboard/plugin_api.py")
 assert spec is not None and spec.loader is not None
 module = importlib.util.module_from_spec(spec)
@@ -22,21 +24,18 @@ spec.loader.exec_module(module)
 
 with tempfile.TemporaryDirectory(prefix="hermes-t3sidebar-http-") as directory:
 	# Only this temporary native history is reachable by the native listing adapter.
-	db_path = Path(directory) / "native.sqlite3"
-	db = SessionDB(db_path)
-	try:
+	db_path = Path(directory) / "state.db"
+	with closing(native_fixture(db_path)) as db:
 		db.create_session("durable", "cli", cwd="/old-project")
 		db.update_session_cwd("durable", "/old-project", git_branch="retained")
 		for i in range(500):
 			db.create_session(f"recent-{i}", "cli", cwd="/recent")
 		db.create_session("external-archived", "cli", cwd="/archived-project")
 		db.set_session_archived("external-archived", True, notify=False)
-	finally:
-		db.close()
 	native = ModuleType("hermes_cli.web_server_sessions")
 	def open_db(profile, *, read_only):
 		assert profile == "default" and read_only is True
-		return SessionDB(db_path, read_only=True)
+		return module.native_store.NativeStore(db_path)
 	setattr(native, "_open_session_db_for_profile", open_db)
 	module.open_session_db = open_db
 	sys.modules[native.__name__] = native
@@ -57,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix="hermes-t3sidebar-http-") as directory:
 	def native_archive(params: dict):
 		# Test-only RPC transport adapter: native lineage mutation in this scratch DB.
 		assert params["profile"] == "default" and type(params["archived"]) is bool
-		with closing(SessionDB(db_path)) as writer:
+		with closing(NativeWriter(db_path)) as writer:
 			assert writer.set_session_archived(params["session_id"], params["archived"], notify=False)
 		return {"session_key": params["session_id"], "archived": params["archived"]}
 
